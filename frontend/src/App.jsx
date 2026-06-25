@@ -4902,11 +4902,11 @@ function AppShell() {
         )}
       </main>
 
-      <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} />
+      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} />}
 
       {showNewLead && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex justify-center items-center p-4">
-          <div className="bg-white rounded-[2rem] w-full max-w-3xl max-h-[90vh] overflow-y-auto p-8 shadow-2xl animate-in zoom-in-95 duration-200 custom-scrollbar">
+        <div className="new-lead-modal-overlay fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex justify-center items-center p-4">
+          <div className="new-lead-modal-panel bg-white rounded-[2rem] w-full max-w-3xl max-h-[90vh] overflow-y-auto p-8 shadow-2xl animate-in zoom-in-95 duration-200 custom-scrollbar">
              <div className="flex justify-between items-center mb-8 border-b-2 border-slate-100 pb-6">
                 <h2 className="text-3xl font-black text-slate-800 tracking-tight">Log New Case</h2>
                 <button type="button" onClick={() => setShowNewLead(false)} className="p-2.5 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors"><X className="w-6 h-6 text-slate-600"/></button>
@@ -5053,7 +5053,7 @@ function AppShell() {
                   </label>
                </div>
 
-               <button type="submit" disabled={isSubmittingLead} className={`w-full py-4 text-white rounded-2xl font-black text-lg shadow-xl transition-all mt-8 ${isSubmittingLead ? 'bg-indigo-400 cursor-not-allowed' : 'bg-slate-800 hover:bg-slate-700 shadow-slate-200 hover:-translate-y-1'}`}>
+               <button type="submit" disabled={isSubmittingLead} className={`create-task-button w-full py-4 text-white rounded-2xl font-black text-lg shadow-xl transition-all mt-8 ${isSubmittingLead ? 'bg-indigo-400 cursor-not-allowed' : 'bg-slate-800 hover:bg-slate-700 shadow-slate-200 hover:-translate-y-1'}`}>
                   {isSubmittingLead ? 'Uploading Files & Creating Task...' : 'Create Task'}
                </button>
              </form>
