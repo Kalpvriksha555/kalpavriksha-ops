@@ -437,3 +437,60 @@ svg {
     flex-wrap: wrap !important;
   }
 }
+@media (max-width: 768px) {
+  html,
+  body {
+    overflow-x: hidden;
+  }
+
+  .modal,
+  .modal-content,
+  .case-modal,
+  .task-modal,
+  .form-modal {
+    max-height: 92dvh !important;
+    overflow-y: auto !important;
+    padding-bottom: 130px !important;
+  }
+
+  button[type="submit"],
+  .create-task-button,
+  .submit-button {
+    min-height: 56px !important;
+    position: relative !important;
+    z-index: 9999 !important;
+    touch-action: manipulation;
+  }
+
+  .chat-widget,
+  .floating-chat,
+  .chat-button {
+    z-index: 800 !important;
+  }
+
+  .chat-panel,
+  .chat-window,
+  .chat-box {
+    position: fixed !important;
+    left: 12px !important;
+    right: 12px !important;
+    bottom: 90px !important;
+    width: calc(100vw - 24px) !important;
+    max-width: calc(100vw - 24px) !important;
+    height: 65dvh !important;
+    max-height: 65dvh !important;
+    z-index: 9999 !important;
+  }
+
+  .chat-panel input,
+  .chat-panel textarea,
+  .chat-window input,
+  .chat-window textarea,
+  .chat-box input,
+  .chat-box textarea {
+    min-height: 52px !important;
+    font-size: 16px !important;
+    line-height: 1.4 !important;
+    width: 100% !important;
+  }
+}
