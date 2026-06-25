@@ -437,112 +437,60 @@ svg {
     flex-wrap: wrap !important;
   }
 }
-
-
-/* Production mobile fix: Add Case modal + chat panel */
 @media (max-width: 768px) {
   html,
-  body,
-  #root {
-    width: 100% !important;
-    overflow-x: hidden !important;
+  body {
+    overflow-x: hidden;
   }
 
-  .new-lead-modal-overlay {
-    align-items: flex-start !important;
-    justify-content: center !important;
-    padding: 10px !important;
-    padding-top: calc(10px + env(safe-area-inset-top)) !important;
-    padding-bottom: calc(18px + env(safe-area-inset-bottom)) !important;
+  .modal,
+  .modal-content,
+  .case-modal,
+  .task-modal,
+  .form-modal {
+    max-height: 92dvh !important;
     overflow-y: auto !important;
-    z-index: 1000 !important;
+    padding-bottom: 130px !important;
   }
 
-  .new-lead-modal-panel {
-    width: calc(100vw - 20px) !important;
-    max-width: calc(100vw - 20px) !important;
-    max-height: calc(100dvh - 28px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
-    overflow-y: auto !important;
-    border-radius: 1.4rem !important;
-    padding: 1.25rem !important;
-    padding-bottom: calc(2rem + env(safe-area-inset-bottom)) !important;
-    -webkit-overflow-scrolling: touch !important;
-  }
-
-  .new-lead-modal-panel h2 {
-    font-size: 1.55rem !important;
-    line-height: 1.15 !important;
-  }
-
-  .new-lead-modal-panel input,
-  .new-lead-modal-panel select,
-  .new-lead-modal-panel textarea {
-    min-height: 48px !important;
-    font-size: 16px !important;
-  }
-
-  .new-lead-modal-panel label {
-    font-size: 0.74rem !important;
-  }
-
-  .new-lead-modal-panel .create-task-button,
-  .create-task-button {
-    min-height: 58px !important;
+  button[type="submit"],
+  .create-task-button,
+  .submit-button {
+    min-height: 56px !important;
     position: relative !important;
-    z-index: 1002 !important;
-    margin-top: 1.5rem !important;
-    margin-bottom: calc(1.25rem + env(safe-area-inset-bottom)) !important;
-    touch-action: manipulation !important;
+    z-index: 9999 !important;
+    touch-action: manipulation;
   }
 
-  /* Keep the floating chat below modal layers, and make the opened chat readable on phones. */
-  .kalpa-chat-shell {
-    z-index: 40 !important;
-    left: 0.75rem !important;
-    right: 0.75rem !important;
-    bottom: calc(0.75rem + env(safe-area-inset-bottom)) !important;
-    max-width: calc(100vw - 1.5rem) !important;
+  .chat-widget,
+  .floating-chat,
+  .chat-button {
+    z-index: 800 !important;
   }
 
-  .kalpa-chat-panel {
-    width: calc(100vw - 1.5rem) !important;
-    max-width: calc(100vw - 1.5rem) !important;
-    height: min(74dvh, 640px) !important;
-    max-height: calc(100dvh - 2rem - env(safe-area-inset-bottom)) !important;
-    border-radius: 1.25rem !important;
-    display: flex !important;
-    overflow: hidden !important;
+  .chat-panel,
+  .chat-window,
+  .chat-box {
+    position: fixed !important;
+    left: 12px !important;
+    right: 12px !important;
+    bottom: 90px !important;
+    width: calc(100vw - 24px) !important;
+    max-width: calc(100vw - 24px) !important;
+    height: 65dvh !important;
+    max-height: 65dvh !important;
+    z-index: 9999 !important;
   }
 
-  .kalpa-chat-sidebar {
-    flex: 0 0 32% !important;
-    width: 32% !important;
-    min-width: 105px !important;
-    max-width: 145px !important;
-  }
-
-  .kalpa-chat-main {
-    flex: 1 1 auto !important;
-    min-width: 0 !important;
-  }
-
-  .kalpa-chat-messages {
-    padding: 0.75rem !important;
-    min-height: 0 !important;
-  }
-
-  .kalpa-chat-inputbar {
-    padding: 0.75rem !important;
-    gap: 0.55rem !important;
-  }
-
-  .kalpa-chat-inputbar input,
-  .kalpa-chat-inputbar textarea,
-  .kalpa-chat-main input,
-  .kalpa-chat-main textarea {
-    min-height: 50px !important;
-    width: 100% !important;
+  .chat-panel input,
+  .chat-panel textarea,
+  .chat-window input,
+  .chat-window textarea,
+  .chat-box input,
+  .chat-box textarea {
+    min-height: 52px !important;
     font-size: 16px !important;
-    line-height: 1.35 !important;
+    line-height: 1.4 !important;
+    width: 100% !important;
   }
 }
