@@ -1,0 +1,20 @@
+{
+  "name": "kalpvriksha-designs-backend",
+  "version": "2.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "db:health": "node scripts/db-health.mjs"
+  },
+  "dependencies": {
+    "cors": "latest",
+    "dotenv": "latest",
+    "express": "latest",
+    "multer": "latest",
+    "nanoid": "latest",
+    "nodemailer": "^9.0.1",
+    "pg": "^8.13.1",
+    "qrcode": "latest"
+  }
+}

@@ -1,0 +1,7 @@
+Fixes included:
+1. Team Availability now excludes ADMIN users completely.
+2. Team Availability now shows only approved non-admin users.
+3. Removed 'Free since' wording for available users; it now shows 'Online • available now'.
+4. Offline users continue to show last seen with date and time.
+5. Backend meta.teamStatus also excludes ADMIN users.
+6. Gmail OTP error message has been clarified. The 535-5.7.8 error is caused by Gmail rejecting credentials, not database/frontend code. Use a Google App Password in SMTP_PASS/EMAIL_PASS and restart backend.

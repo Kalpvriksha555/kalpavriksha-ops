@@ -1,0 +1,17 @@
+Presence and Attendance Fix Summary
+
+Fixed:
+- Team Availability now uses a real activity timeout instead of trusting old isOnline=true values.
+- Users are only Available/Busy/Break when they have a fresh heartbeat/login activity.
+- Stale users are moved to Offline automatically in the UI.
+- Admins still appear in Available when they are truly online.
+- Admins do not show Free since.
+- Non-admin Available users show Free since.
+- Offline users show Last seen with date and time.
+- Team Attendance now lists all approved non-admin users, not only users with attendance logs.
+- Team Attendance shows Online for active users and Last seen date/time for offline users.
+- Backend JSON seed/state was cleaned so stale online users do not initially appear as available.
+
+Important:
+- Keep your working backend/.env file locally. It is excluded from this ZIP for safety because it contains your Gmail App Password.
+- After replacing files, restart frontend and backend.
