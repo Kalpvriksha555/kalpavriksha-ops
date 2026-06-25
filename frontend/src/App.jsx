@@ -3653,12 +3653,15 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
                     <div className="space-y-3">{chatEmojiGroups.map(group => <div key={group.label}><div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">{group.label}</div><div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(42px, 1fr))', gap: 8 }}>{group.emojis.map(emoji => <button key={`${group.label}-${emoji}`} type="button" onClick={() => addEmojiToMessage(emoji)} className="rounded-xl bg-slate-50 hover:bg-indigo-50 text-xl transition-colors flex items-center justify-center" style={{ height: 42, minWidth: 0 }}>{emoji}</button>)}</div></div>)}</div>
                   </div>
                 )}
-                <div className="flex items-end space-x-2">
-                  <label title="Attach file" className="p-2.5 text-slate-400 hover:text-indigo-600 bg-slate-50 hover:bg-indigo-50 rounded-xl transition-colors cursor-pointer"><Paperclip className="w-5 h-5" /><input type="file" className="hidden" accept="image/*,video/*,.pdf,.dwg,.dxf,.xls,.xlsx,.csv,.doc,.docx" onChange={handleChatFileUpload} /></label>
-                  <button type="button" title="Add emoji" onClick={() => setShowEmojiPicker(v => !v)} className={`p-2.5 rounded-xl transition-colors ${showEmojiPicker ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}><Smile className="w-5 h-5" /></button>
-                  <button type="button" title={isRecordingVoice ? 'Stop voice note' : 'Record voice note'} onClick={isRecordingVoice ? stopVoiceRecording : startVoiceRecording} className={`p-2.5 rounded-xl transition-colors ${isRecordingVoice ? 'bg-red-50 text-red-600 animate-pulse' : 'bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}>{isRecordingVoice ? <Square className="w-5 h-5" /> : <Mic className="w-5 h-5" />}</button>
-                  <textarea ref={composerRef} rows={1} value={msg} onChange={handleInputChange} onKeyDown={handleMessageKeyDown} placeholder={editingMessage ? 'Edit your message...' : activeChannel === 'global' ? 'Message team or @mention...' : `Message ${activeChannel}...`} className="flex-1 bg-slate-50 border border-slate-100 rounded-xl px-4 py-3 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all resize-none" style={{ minHeight: 48, maxHeight: 96, overflowY: 'auto' }} />
-                  <button type="button" disabled={!msg.trim()} onClick={handleSend} className={`p-3 rounded-xl shadow-md transition-colors ${msg.trim() ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-slate-100 text-slate-300 cursor-not-allowed'}`}><Send className="w-5 h-5" /></button>
+                <div className="kalpa-chat-composer flex flex-col gap-2">
+                  <textarea ref={composerRef} rows={2} value={msg} onChange={handleInputChange} onKeyDown={handleMessageKeyDown} placeholder={editingMessage ? 'Edit your message...' : activeChannel === 'global' ? 'Message team or @mention...' : `Message ${activeChannel}...`} className="kalpa-chat-textarea w-full bg-slate-50 border border-slate-100 rounded-xl px-4 py-3 text-base font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all resize-none" style={{ minHeight: 58, maxHeight: 132, overflowY: 'auto' }} />
+                  <div className="kalpa-chat-actions-row flex items-center gap-2">
+                    <label title="Attach file" className="kalpa-chat-tool-btn p-2.5 text-slate-400 hover:text-indigo-600 bg-slate-50 hover:bg-indigo-50 rounded-xl transition-colors cursor-pointer"><Paperclip className="w-5 h-5" /><input type="file" className="hidden" accept="image/*,video/*,.pdf,.dwg,.dxf,.xls,.xlsx,.csv,.doc,.docx" onChange={handleChatFileUpload} /></label>
+                    <button type="button" title="Add emoji" onClick={() => setShowEmojiPicker(v => !v)} className={`kalpa-chat-tool-btn p-2.5 rounded-xl transition-colors ${showEmojiPicker ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}><Smile className="w-5 h-5" /></button>
+                    <button type="button" title={isRecordingVoice ? 'Stop voice note' : 'Record voice note'} onClick={isRecordingVoice ? stopVoiceRecording : startVoiceRecording} className={`kalpa-chat-tool-btn p-2.5 rounded-xl transition-colors ${isRecordingVoice ? 'bg-red-50 text-red-600 animate-pulse' : 'bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}>{isRecordingVoice ? <Square className="w-5 h-5" /> : <Mic className="w-5 h-5" />}</button>
+                    <div className="flex-1" />
+                    <button type="button" disabled={!msg.trim()} onClick={handleSend} className={`kalpa-chat-send-btn p-3 rounded-xl shadow-md transition-colors ${msg.trim() ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-slate-100 text-slate-300 cursor-not-allowed'}`}><Send className="w-5 h-5" /></button>
+                  </div>
                 </div>
               </div>
             )}
@@ -4962,19 +4965,27 @@ function AppShell() {
                const nextProjects = mergeProjectsByFreshness((projects || []).filter(p => String(p.id) !== String(newP.id)), [newP]);
                persistAndBroadcastProjects(nextProjects);
                setProjects(nextProjects);
+               setSelectedBoardDate(formatDateKey(newP.createdAt));
+               setActiveTab('board');
+               try { window.localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(filterDeletedProjects(nextProjects)))); } catch(e) {}
                if (USE_BACKEND_STATE && backendStateReady && isDbReady) {
-                 fetch(`${API_BASE}/api/state`, {
-                   method: 'POST',
-                   headers: { 'Content-Type': 'application/json' },
-                   body: JSON.stringify({
-                     users: normalizeTeamUsers(users && users.length ? users : INITIAL_USERS),
-                     projects: sanitizeProjectsForCache(filterDeletedProjects(nextProjects)),
-                     deletedProjectIds: getDeletedProjectIds(),
-                     chatMessages: sanitizeChatsForCache(chatMessages || []),
-                     notifications: notifications || [],
-                     attendanceLogs: attendanceLogs || []
-                   })
-                 }).catch(err => console.warn('Immediate task save failed; background sync will retry:', err.message));
+                 try {
+                   const saveRes = await fetch(`${API_BASE}/api/state`, {
+                     method: 'POST',
+                     headers: { 'Content-Type': 'application/json' },
+                     body: JSON.stringify({
+                       users: normalizeTeamUsers(users && users.length ? users : INITIAL_USERS),
+                       projects: sanitizeProjectsForCache(filterDeletedProjects(nextProjects)),
+                       deletedProjectIds: getDeletedProjectIds(),
+                       chatMessages: sanitizeChatsForCache(chatMessages || []),
+                       notifications: notifications || [],
+                       attendanceLogs: attendanceLogs || []
+                     })
+                   });
+                   if (!saveRes.ok) throw new Error(`Backend save failed: ${saveRes.status}`);
+                 } catch (saveErr) {
+                   console.warn('Immediate task save failed; local task is kept and background sync will retry:', saveErr.message);
+                 }
                }
                if (firebaseUser && !isLocalMock) {
                    try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', newP.id), stripLargeLocalFilesForCloud(newP)); } catch(e){}
