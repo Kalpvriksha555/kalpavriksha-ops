@@ -4902,11 +4902,11 @@ function AppShell() {
         )}
       </main>
 
-      <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} />
+      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} />}
 
       {showNewLead && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex justify-center items-center p-4">
-          <div className="bg-white rounded-[2rem] w-full max-w-3xl max-h-[90vh] overflow-y-auto p-8 shadow-2xl animate-in zoom-in-95 duration-200 custom-scrollbar">
+        <div className="kalpa-lead-modal fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[80] flex justify-center items-center p-4">
+          <div className="kalpa-lead-modal-card bg-white rounded-[2rem] w-full max-w-3xl max-h-[90vh] overflow-y-auto p-8 shadow-2xl animate-in zoom-in-95 duration-200 custom-scrollbar">
              <div className="flex justify-between items-center mb-8 border-b-2 border-slate-100 pb-6">
                 <h2 className="text-3xl font-black text-slate-800 tracking-tight">Log New Case</h2>
                 <button type="button" onClick={() => setShowNewLead(false)} className="p-2.5 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors"><X className="w-6 h-6 text-slate-600"/></button>
@@ -4916,92 +4916,80 @@ function AppShell() {
                e.preventDefault();
                if (isSubmittingLead) return;
                setIsSubmittingLead(true);
-               const formEl = e.currentTarget;
                try {
-                 const fd = new FormData(formEl);
-                 const client = String(fd.get('client') || '').trim();
-                 const bankerName = ''; // banker/loan officer removed from simplified operational form
-                 const customerName = String(fd.get('customerName') || '').trim();
-                 const location = String(fd.get('location') || '').trim();
-                 const taskType = newTaskCategory === 'Other' ? String(fd.get('otherType') || '').trim() : newTaskCategory;
-                 if (!client || !customerName || !location || !taskType) {
-                   alert('Please fill Bank Name, Customer Name, Location, and Task Category.');
-                   return;
-                 }
+               const fd = new FormData(e.target);
+               
+               const client = fd.get('client');
+               const bankerName = ''; // banker/loan officer removed from simplified operational form
+               const customerName = fd.get('customerName');
+               const location = fd.get('location');
+               const taskType = newTaskCategory === 'Other' ? fd.get('otherType') : newTaskCategory;
+               const taskId = generateTraceableTaskId({ location, client, bankerName, customerName, projects });
+               const docs = [];
+               for (const file of leadFiles) {
+                  try {
+                    docs.push(await uploadProjectFile(file, taskId, 'source', currentUser.name));
+                  } catch (fileErr) {
+                    console.warn('Source file attach failed; creating task without this file:', fileErr);
+                    docs.push({ id: Date.now() + Math.random(), name: file.name, type: 'source', date: new Date().toLocaleDateString(), uploadedBy: currentUser.name, size: file.size || 0, mimeType: file.type || 'application/octet-stream', uploadFailed: true });
+                  }
+               }
 
-                 const now = Date.now();
-                 const taskId = generateTraceableTaskId({ location, client, bankerName, customerName, projects });
-                 const docs = [];
-                 for (const file of leadFiles) {
-                    try {
-                      docs.push(await uploadProjectFile(file, taskId, 'source', currentUser.name));
-                    } catch (fileErr) {
-                      console.warn('Source file could not be attached, creating task without this file:', fileErr);
-                      docs.push({ id: Date.now() + Math.random(), name: file.name, type: 'source', uploadedBy: currentUser.name, date: new Date().toLocaleDateString(), size: file.size || 0, mimeType: file.type || 'application/octet-stream', uploadFailed: true });
-                    }
-                 }
+               const assignedTo = fd.get('assignedTo');
+               const newP = {
+                 id: taskId,
+                 taskName: [taskType, customerName, location].filter(Boolean).join(' • '),
+                 client, 
+                 bankerName,
+                 customerName,
+                 location,
+                 type: taskType,
+                 description: fd.get('description') || '',
+                 priority: fd.get('priority'), assignedTo, assignedBy: assignedTo !== 'Unassigned' ? currentUser.name : '', assignedAt: assignedTo !== 'Unassigned' ? Date.now() : null, assignmentVersion: assignedTo !== 'Unassigned' ? Date.now() : null,
+                 dueDate: fd.get('dueDate') || null,
+                 estimateDetails: fd.get('estimateDetails') || '', estimate: fd.get('estimate') || 0,
+                 status: 'Lead Received', createdAt: Date.now(), updatedAt: Date.now(), syncVersion: Date.now(), createdBy: currentUser.name,
+                 ownership: { createdBy: currentUser.name, assignedBy: assignedTo !== 'Unassigned' ? currentUser.name : '', assignedTo },
+                 reassignmentHistory: assignedTo !== 'Unassigned' ? [{ from: 'Unassigned', to: assignedTo, by: currentUser.name, time: new Date().toLocaleString() }] : [],
+                 documents: docs, timeline: [{id: Date.now(), text: 'Case Created', time: new Date().toLocaleString()}],
+                 subTasks: [], notes: [], ledger: {}, reportSent: false
+               };
+               
+               if (docs.length > 0) {
+                   newP.timeline.push({ id: Date.now()+1, text: `${docs.length} Source File(s) Attached`, time: new Date().toLocaleString() });
+               }
 
-                 const assignedTo = fd.get('assignedTo') || 'Unassigned';
-                 const newP = normalizeProjectRecord({
-                   id: taskId,
-                   taskName: [taskType, customerName, location].filter(Boolean).join(' • '),
-                   client,
-                   bankerName,
-                   customerName,
-                   location,
-                   type: taskType,
-                   description: fd.get('description') || '',
-                   priority: fd.get('priority') || 'Normal', assignedTo, assignedBy: assignedTo !== 'Unassigned' ? currentUser.name : '', assignedAt: assignedTo !== 'Unassigned' ? now : null, assignmentVersion: assignedTo !== 'Unassigned' ? now : null,
-                   dueDate: fd.get('dueDate') || null,
-                   estimateDetails: fd.get('estimateDetails') || '', estimate: fd.get('estimate') || 0,
-                   status: 'Lead Received', createdAt: now, updatedAt: now, syncVersion: now, createdBy: currentUser.name,
-                   ownership: { createdBy: currentUser.name, assignedBy: assignedTo !== 'Unassigned' ? currentUser.name : '', assignedTo },
-                   reassignmentHistory: assignedTo !== 'Unassigned' ? [{ from: 'Unassigned', to: assignedTo, by: currentUser.name, time: new Date().toLocaleString() }] : [],
-                   documents: docs, timeline: [{id: now, text: 'Case Created', time: new Date().toLocaleString()}],
-                   subTasks: [], notes: [], ledger: {}, reportSent: false
-                 });
-                 if (docs.length > 0) {
-                   newP.timeline.push({ id: now + 1, text: `${docs.length} Source File(s) Attached`, time: new Date().toLocaleString() });
-                 }
-
-                 const nextProjects = mergeProjectsByFreshness(projects.filter(p => String(p.id) !== String(newP.id)), [newP]);
-                 setProjects(nextProjects);
-                 persistAndBroadcastProjects(nextProjects);
-
-                 if (USE_BACKEND_STATE && isDbReady) {
-                   try {
-                     const payload = {
-                       users: normalizeTeamUsers(users && users.length ? users : INITIAL_USERS),
-                       projects: sanitizeProjectsForCache(filterDeletedProjects(nextProjects)),
-                       deletedProjectIds: getDeletedProjectIds(),
-                       chatMessages: sanitizeChatsForCache(chatMessages || []),
-                       notifications: notifications || [],
-                       attendanceLogs: attendanceLogs || []
-                     };
-                     await fetch(`${API_BASE}/api/state`, {
-                       method: 'POST',
-                       headers: { 'Content-Type': 'application/json' },
-                       body: JSON.stringify(payload)
-                     });
-                   } catch (saveErr) {
-                     console.warn('Backend save failed, task is kept in local screen/cache and will retry automatically:', saveErr);
-                   }
-                 }
-
-                 if (firebaseUser && !isLocalMock) {
+               const nextProjects = mergeProjectsByFreshness((projects || []).filter(p => String(p.id) !== String(newP.id)), [newP]);
+               persistAndBroadcastProjects(nextProjects);
+               setProjects(nextProjects);
+               if (USE_BACKEND_STATE && backendStateReady && isDbReady) {
+                 fetch(`${API_BASE}/api/state`, {
+                   method: 'POST',
+                   headers: { 'Content-Type': 'application/json' },
+                   body: JSON.stringify({
+                     users: normalizeTeamUsers(users && users.length ? users : INITIAL_USERS),
+                     projects: sanitizeProjectsForCache(filterDeletedProjects(nextProjects)),
+                     deletedProjectIds: getDeletedProjectIds(),
+                     chatMessages: sanitizeChatsForCache(chatMessages || []),
+                     notifications: notifications || [],
+                     attendanceLogs: attendanceLogs || []
+                   })
+                 }).catch(err => console.warn('Immediate task save failed; background sync will retry:', err.message));
+               }
+               if (firebaseUser && !isLocalMock) {
                    try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', newP.id), stripLargeLocalFilesForCloud(newP)); } catch(e){}
-                 }
+               }
 
-                 if (newP.assignedTo !== 'Unassigned') {
+               if (newP.assignedTo !== 'Unassigned') {
                    const targetRole = activeUsers.find(u => u.name === newP.assignedTo)?.role || ROLES.DESIGNER;
                    addNotification(targetRole, newP.assignedTo, `New Task Assigned: ${newP.id}`, 'info');
-                 }
-                 setLeadFiles([]);
-                 setShowNewLead(false);
-                 setNewTaskCategory(TASK_CATEGORIES[0]);
+               }
+               setShowNewLead(false);
+               setLeadFiles([]);
+               setNewTaskCategory(TASK_CATEGORIES[0]);
                } catch (err) {
-                 console.error('Task creation failed:', err);
-                 alert(`Task could not be created: ${err?.message || 'Unknown error'}`);
+                 console.error('Create task failed:', err);
+                 alert(`Task could not be created: ${err?.message || 'Please try again.'}`);
                } finally {
                  setIsSubmittingLead(false);
                }
@@ -5090,7 +5078,7 @@ function AppShell() {
                   </label>
                </div>
 
-               <button type="submit" disabled={isSubmittingLead} className={`w-full py-4 text-white rounded-2xl font-black text-lg shadow-xl transition-all mt-8 ${isSubmittingLead ? 'bg-indigo-400 cursor-not-allowed' : 'bg-slate-800 hover:bg-slate-700 shadow-slate-200 hover:-translate-y-1'}`}>
+               <button type="submit" disabled={isSubmittingLead} className={`kalpa-create-task-button w-full py-4 text-white rounded-2xl font-black text-lg shadow-xl transition-all mt-8 ${isSubmittingLead ? 'bg-indigo-400 cursor-not-allowed' : 'bg-slate-800 hover:bg-slate-700 shadow-slate-200 hover:-translate-y-1'}`}>
                   {isSubmittingLead ? 'Uploading Files & Creating Task...' : 'Create Task'}
                </button>
              </form>
@@ -5102,21 +5090,6 @@ function AppShell() {
         .custom-scrollbar::-webkit-scrollbar { width: 6px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 20px; }
-        @media (max-width: 768px) {
-          .kalpa-chat-shell { left: 10px !important; right: 10px !important; bottom: 16px !important; align-items: flex-end !important; max-width: calc(100vw - 20px) !important; z-index: 60 !important; }
-          .kalpa-chat-panel { width: calc(100vw - 20px) !important; height: calc(100dvh - 112px) !important; max-width: calc(100vw - 20px) !important; max-height: calc(100dvh - 112px) !important; margin-bottom: 10px !important; border-radius: 24px !important; flex-direction: column !important; }
-          .kalpa-chat-sidebar { width: 100% !important; min-width: 0 !important; max-width: none !important; height: 138px !important; max-height: 138px !important; border-right: 0 !important; border-bottom: 1px solid #e2e8f0 !important; flex-shrink: 0 !important; }
-          .kalpa-chat-sidebar > div:first-child { padding: 12px 14px !important; }
-          .kalpa-chat-sidebar > div:nth-child(2) { display: flex !important; gap: 8px !important; overflow-x: auto !important; overflow-y: hidden !important; padding: 10px !important; }
-          .kalpa-chat-sidebar button { min-width: 150px !important; max-width: 180px !important; flex-shrink: 0 !important; }
-          .kalpa-chat-sidebar .pt-4 { display: none !important; }
-          .kalpa-chat-messages { padding: 12px !important; }
-          .kalpa-chat-bubble { max-width: calc(100vw - 118px) !important; font-size: 14px !important; }
-          .kalpa-chat-inputbar { padding: 10px !important; padding-bottom: max(12px, env(safe-area-inset-bottom)) !important; }
-          .kalpa-chat-inputbar .flex.items-end.space-x-2 { display: grid !important; grid-template-columns: 42px 42px 42px minmax(0, 1fr) 46px !important; column-gap: 6px !important; align-items: end !important; }
-          .kalpa-chat-inputbar textarea { min-width: 0 !important; width: 100% !important; min-height: 52px !important; max-height: 124px !important; font-size: 16px !important; line-height: 1.35 !important; padding: 12px 10px !important; }
-          .kalpa-chat-inputbar label, .kalpa-chat-inputbar button { min-width: 42px !important; min-height: 42px !important; display: flex !important; align-items: center !important; justify-content: center !important; }
-        }
       `}} />
     </div>
   );

@@ -494,3 +494,135 @@ svg {
     width: 100% !important;
   }
 }
+/* Mobile production fixes: prevent chat from covering forms and keep chat composer visible */
+@media (max-width: 768px) {
+  .kalpa-lead-modal {
+    align-items: flex-start !important;
+    padding: 0.75rem !important;
+    overflow-y: auto !important;
+    z-index: 80 !important;
+  }
+
+  .kalpa-lead-modal-card {
+    max-height: calc(100dvh - 1.5rem - env(safe-area-inset-bottom)) !important;
+    padding: 1.1rem !important;
+    border-radius: 1.5rem !important;
+    padding-bottom: 7rem !important;
+    overscroll-behavior: contain;
+  }
+
+  .kalpa-create-task-button {
+    position: sticky !important;
+    bottom: calc(0.65rem + env(safe-area-inset-bottom)) !important;
+    z-index: 120 !important;
+    min-height: 64px !important;
+    margin-top: 1.25rem !important;
+    margin-bottom: 0 !important;
+    touch-action: manipulation !important;
+    box-shadow: 0 16px 32px rgba(15, 23, 42, 0.24) !important;
+  }
+
+  .kalpa-chat-shell {
+    left: 0.5rem !important;
+    right: 0.5rem !important;
+    bottom: calc(0.75rem + env(safe-area-inset-bottom)) !important;
+    align-items: stretch !important;
+    max-width: none !important;
+    z-index: 60 !important;
+  }
+
+  .kalpa-chat-panel {
+    width: calc(100vw - 1rem) !important;
+    max-width: calc(100vw - 1rem) !important;
+    height: calc(100dvh - 6rem - env(safe-area-inset-bottom)) !important;
+    max-height: calc(100dvh - 6rem - env(safe-area-inset-bottom)) !important;
+    margin-bottom: 0.75rem !important;
+    border-radius: 1.25rem !important;
+    display: flex !important;
+    flex-direction: column !important;
+    overflow: hidden !important;
+  }
+
+  .kalpa-chat-sidebar {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    height: 132px !important;
+    flex: 0 0 132px !important;
+    border-right: 0 !important;
+    border-bottom: 1px solid #e2e8f0 !important;
+  }
+
+  .kalpa-chat-sidebar > div:first-child {
+    padding: 0.85rem 1rem !important;
+  }
+
+  .kalpa-chat-sidebar > div:last-child {
+    display: flex !important;
+    gap: 0.5rem !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    padding: 0.55rem !important;
+    white-space: nowrap !important;
+  }
+
+  .kalpa-chat-sidebar button {
+    min-width: 128px !important;
+    max-width: 160px !important;
+    flex: 0 0 auto !important;
+    padding: 0.65rem !important;
+  }
+
+  .kalpa-chat-sidebar .pt-4.pb-2,
+  .kalpa-chat-sidebar .text-\[10px\] {
+    display: none !important;
+  }
+
+  .kalpa-chat-panel > .flex-1 {
+    min-height: 0 !important;
+    flex: 1 1 auto !important;
+  }
+
+  .kalpa-chat-messages {
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    padding: 0.85rem !important;
+    padding-bottom: 0.85rem !important;
+    overflow-y: auto !important;
+  }
+
+  .kalpa-chat-inputbar {
+    position: sticky !important;
+    bottom: 0 !important;
+    background: #fff !important;
+    z-index: 70 !important;
+    padding: 0.65rem !important;
+    flex-shrink: 0 !important;
+  }
+
+  .kalpa-chat-inputbar .flex.items-end {
+    gap: 0.45rem !important;
+    align-items: center !important;
+  }
+
+  .kalpa-chat-inputbar label,
+  .kalpa-chat-inputbar button {
+    width: 44px !important;
+    height: 44px !important;
+    min-width: 44px !important;
+    padding: 0 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+
+  .kalpa-chat-inputbar textarea {
+    min-height: 46px !important;
+    max-height: 96px !important;
+    font-size: 16px !important;
+    line-height: 1.35 !important;
+    padding: 0.75rem !important;
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+  }
+}
