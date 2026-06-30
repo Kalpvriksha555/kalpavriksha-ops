@@ -4,7 +4,7 @@ import {
   MapPin, Plus, Search, User, Users, Wallet, ArrowRight, Upload, 
   List, MessageSquare, Bell, Paperclip, X, Image as ImageIcon, 
   File as FileIcon, Archive, Send, Flag, Shield, Hash, Video, Phone,
-  Calendar, Filter, Check, ArrowLeft, Download, ChevronRight, Lock, Eye, EyeOff, Map as MapIcon, AlertCircle, KanbanSquare, Link as LinkIcon, BarChart3, Building2, Smile, Star, Mic, Square, MoreVertical, Reply, Forward, Copy, Edit3, Trash2
+  Calendar, Filter, Check, ArrowLeft, Download, ChevronRight, Lock, Eye, EyeOff, Map as MapIcon, AlertCircle, KanbanSquare, Link as LinkIcon, BarChart3, Building2, Smile, Star, Mic, Square
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
@@ -350,6 +350,105 @@ const INITIAL_USERS = [
 ];
 
 
+const createEmployeeLifecycleProfile = (user = {}, existing = {}) => {
+  const now = Date.now();
+  const role = normalizeRole(user.role || existing.role || ROLES.DESIGNER);
+  const status = normalizeStatus(user.status || existing.status || 'APPROVED');
+  const isArchived = ['DELETED', 'REJECTED', 'ARCHIVED'].includes(status);
+  const isRestricted = status === 'RESTRICTED';
+  const lifecycleStatus = isArchived ? 'ARCHIVED' : (isRestricted ? 'RESTRICTED' : 'ACTIVE');
+  const base = { ...existing, ...user, role, status };
+  const profileCreatedAt = existing.profileCreatedAt || user.profileCreatedAt || now;
+  const profileUpdatedAt = now;
+  const workingRole = role === ROLES.ADMIN ? 'ADMIN' : (role === ROLES.MANAGER ? 'MANAGER' : 'DESIGNER');
+  const active = lifecycleStatus === 'ACTIVE';
+  const lifecycle = {
+    ...(existing.lifecycle || {}),
+    ...(user.lifecycle || {}),
+    status: lifecycleStatus,
+    active,
+    restricted: isRestricted,
+    archived: isArchived,
+    createdAt: existing.lifecycle?.createdAt || user.lifecycle?.createdAt || profileCreatedAt,
+    updatedAt: profileUpdatedAt,
+    archivedAt: isArchived ? (user.deletedAt || user.archivedAt || existing.lifecycle?.archivedAt || now) : null,
+    archivedBy: isArchived ? (user.deletedBy || user.archivedBy || existing.lifecycle?.archivedBy || '') : ''
+  };
+  const normalized = {
+    ...base,
+    profileCreatedAt,
+    profileUpdatedAt,
+    lifecycleStatus,
+    lifecycle,
+    attendanceProfile: {
+      createdAt: existing.attendanceProfile?.createdAt || user.attendanceProfile?.createdAt || profileCreatedAt,
+      active,
+      includeInAttendance: active && role !== ROLES.ADMIN,
+      lastPreparedAt: profileUpdatedAt,
+      ...(existing.attendanceProfile || {}),
+      ...(user.attendanceProfile || {})
+    },
+    availabilityProfile: {
+      createdAt: existing.availabilityProfile?.createdAt || user.availabilityProfile?.createdAt || profileCreatedAt,
+      active,
+      trackAvailability: active,
+      defaultAvailability: 'Unavailable',
+      ...(existing.availabilityProfile || {}),
+      ...(user.availabilityProfile || {})
+    },
+    chatProfile: {
+      createdAt: existing.chatProfile?.createdAt || user.chatProfile?.createdAt || profileCreatedAt,
+      active,
+      directMessages: active,
+      mentions: active,
+      ...(existing.chatProfile || {}),
+      ...(user.chatProfile || {})
+    },
+    performanceProfile: {
+      createdAt: existing.performanceProfile?.createdAt || user.performanceProfile?.createdAt || profileCreatedAt,
+      active: active && role !== ROLES.ADMIN,
+      completedTasks: existing.performanceProfile?.completedTasks || user.performanceProfile?.completedTasks || 0,
+      revisionsHandled: existing.performanceProfile?.revisionsHandled || user.performanceProfile?.revisionsHandled || 0,
+      ...(existing.performanceProfile || {}),
+      ...(user.performanceProfile || {})
+    },
+    analyticsProfile: {
+      createdAt: existing.analyticsProfile?.createdAt || user.analyticsProfile?.createdAt || profileCreatedAt,
+      active,
+      role: workingRole,
+      ...(existing.analyticsProfile || {}),
+      ...(user.analyticsProfile || {})
+    },
+    workloadProfile: {
+      createdAt: existing.workloadProfile?.createdAt || user.workloadProfile?.createdAt || profileCreatedAt,
+      active: active && role !== ROLES.ADMIN,
+      dailyLimit: existing.workloadProfile?.dailyLimit || user.workloadProfile?.dailyLimit || (role === ROLES.MANAGER || role === ROLES.DESIGNER ? 15 : 0),
+      activeTasks: existing.workloadProfile?.activeTasks || user.workloadProfile?.activeTasks || 0,
+      ...(existing.workloadProfile || {}),
+      ...(user.workloadProfile || {})
+    },
+    notificationPreferences: {
+      createdAt: existing.notificationPreferences?.createdAt || user.notificationPreferences?.createdAt || profileCreatedAt,
+      enabled: active,
+      task: active,
+      chat: active,
+      mention: active,
+      meeting: active,
+      ...(existing.notificationPreferences || {}),
+      ...(user.notificationPreferences || {})
+    }
+  };
+  if (!active) {
+    normalized.isOnline = false;
+    normalized.availability = 'Unavailable';
+    normalized.breakStartedAt = null;
+    normalized.lastLogoutAt = normalized.lastLogoutAt || now;
+    normalized.lastSeenAt = normalized.lastSeenAt || now;
+    normalized.availabilityUpdatedAt = normalized.availabilityUpdatedAt || now;
+  }
+  return normalized;
+};
+
 const normalizeTeamUser = (u = {}) => {
   const rawName = String(u.name || '').trim();
   const rawUsername = String(u.username || '').trim();
@@ -365,12 +464,13 @@ const normalizeTeamUser = (u = {}) => {
     lastSeenAt: u.lastSeenAt || u.lastLogoutAt || null
   };
   const online = isUserActuallyOnline(normalized);
-  return online ? normalized : {
+  const presenceSafe = online ? normalized : {
     ...normalized,
     isOnline: false,
     availability: 'Unavailable',
     breakStartedAt: null
   };
+  return createEmployeeLifecycleProfile(presenceSafe, u);
 };
 
 const normalizeTeamUsers = (list = []) => {
@@ -3105,31 +3205,58 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
   const [chatSearch, setChatSearch] = useState('');
   const [showLatestButton, setShowLatestButton] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
-  const [openMessageMenuId, setOpenMessageMenuId] = useState(null);
-  const [openReactionMenuId, setOpenReactionMenuId] = useState(null);
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
+  const [actionMenu, setActionMenu] = useState(null);
+  const [reactionMenu, setReactionMenu] = useState(null);
   const [replyTo, setReplyTo] = useState(null);
   const [editingMessage, setEditingMessage] = useState(null);
-  const [actionCopiedId, setActionCopiedId] = useState(null);
-  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const mediaRecorderRef = useRef(null);
   const voiceChunksRef = useRef([]);
   const chatEndRef = useRef(null);
   const chatScrollRef = useRef(null);
+  const composerRef = useRef(null);
   const localReadKey = `kalpa_chat_read_${currentUser?.id || identityKey(currentUser?.name || '')}`;
+  const hiddenKey = `kalpa_chat_hidden_${currentUser?.id || identityKey(currentUser?.name || '')}`;
   const [localReadState, setLocalReadState] = useState(() => {
     try { return JSON.parse(localStorage.getItem(localReadKey) || '{}'); } catch(e) { return {}; }
   });
+  const [hiddenMessageIds, setHiddenMessageIds] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(hiddenKey) || '[]'); } catch(e) { return []; }
+  });
   const readThroughRef = useRef(localReadState);
   const normalizeChannelKey = (channel) => channel === 'global' ? 'global' : identityKey(channel);
+
+  const chatUsers = getOperationalUsers(users || [], { includeAdmins: true }).filter(u => !samePerson(u.name, currentUser.name));
+  const liveCurrentUser = getOperationalUsers(users || [], { includeAdmins: true }).find(u => samePerson(u.name, currentUser.name)) || currentUser;
+  const currentUserOnline = isUserActuallyOnline(liveCurrentUser, presenceNow);
+  const activePeer = activeChannel === 'global' ? null : chatUsers.find(u => samePerson(u.name, activeChannel));
+  const activePeerOnline = activePeer ? isUserActuallyOnline(activePeer, presenceNow) : false;
+  const activeCallRoom = activePeer ? createSafeMeetingRoomName('KalpaVriksha_DM', safeAppId, ...[currentUser.name, activePeer.name].sort()) : '';
+  const activeCallUrl = activePeer ? buildJitsiUrl(activeCallRoom, currentUser.name, { audioOnly: callAudioOnly, shareScreen: callShareScreen }) : '';
+
+  const chatEmojiGroups = [
+    { label: 'Work', emojis: ['✅','📌','📎','👀','🚀','⏳','🔔','💬','📝','📁'] },
+    { label: 'Mood', emojis: ['😀','😊','😂','🙂','😎','👏','🙏','🤝','🙌','😅'] },
+    { label: 'Quick', emojis: ['👍','❤️','⭐','🔥','💯','🎉','✨','👌','🙄','😮'] },
+  ];
+  const reactionEmojis = ['👍','❤️','😂','😮','😢','👏','🎉','🔥','✅','👀'];
+
   useEffect(() => {
     try { const saved = JSON.parse(localStorage.getItem(localReadKey) || '{}'); readThroughRef.current = saved; setLocalReadState(saved); } catch(e) { readThroughRef.current = {}; setLocalReadState({}); }
   }, [localReadKey]);
-
-  // Read receipts in memory
   useEffect(() => {
-    if (isOpen && !chatSearch) {
-      chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-    }
+    try { const saved = JSON.parse(localStorage.getItem(hiddenKey) || '[]'); setHiddenMessageIds(Array.isArray(saved) ? saved : []); } catch(e) { setHiddenMessageIds([]); }
+  }, [hiddenKey]);
+  useEffect(() => {
+    const timer = setInterval(() => setPresenceNow(Date.now()), 30000);
+    return () => clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    const timer = setInterval(() => setCallNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    if (isOpen && !chatSearch) chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [isOpen, chatMessages.length, activeChannel, isCalling, chatSearch]);
   useEffect(() => {
     if (!isOpen || !chatScrollRef.current) return;
@@ -3139,10 +3266,6 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
     onScroll();
     return () => el.removeEventListener('scroll', onScroll);
   }, [isOpen, activeChannel, isCalling]);
-  useEffect(() => {
-    const timer = setInterval(() => setCallNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
 
   const markCurrentChannelReadNow = (channel = activeChannel) => {
     const key = normalizeChannelKey(channel);
@@ -3156,54 +3279,20 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
     if (typeof onMarkMessagesRead === 'function') onMarkMessagesRead(channel);
   };
 
-  const markAllChatsReadNow = () => {
-    const now = Date.now() + 1000;
-    setLocalReadState(prev => {
-      const next = { ...prev, global: now, __all__: now };
-      (users || []).forEach(u => { next[normalizeChannelKey(u.name)] = now; });
-      readThroughRef.current = next;
-      try { localStorage.setItem(localReadKey, JSON.stringify(next)); } catch(e) {}
-      return next;
-    });
-    if (typeof onMarkMessagesRead === 'function') onMarkMessagesRead('__all__');
-  };
-
-  useEffect(() => {
-    if (isOpen) {
-      // Mark only the chat currently being viewed.
-      // Do not clear all direct-message unread markers when the chatbox opens.
-      markCurrentChannelReadNow(activeChannel);
-    }
-  }, [isOpen, activeChannel, chatMessages.length]);
-
-  // Compute unreads from read receipts so counts clear immediately when the chat is opened.
   const isMessageInActiveChannel = (m) => {
     if (activeChannel === 'global') return m.recipient === 'global' || !m.recipient;
     return (samePerson(m.sender, activeChannel) && samePerson(m.recipient, currentUser.name)) || (samePerson(m.sender, currentUser.name) && samePerson(m.recipient, activeChannel));
   };
 
   useEffect(() => {
-    const timer = setInterval(() => setPresenceNow(Date.now()), 30000);
-    return () => clearInterval(timer);
-  }, []);
-  const chatUsers = getOperationalUsers(users || [], { includeAdmins: true }).filter(u => !samePerson(u.name, currentUser.name));
-  const liveCurrentUser = getOperationalUsers(users || [], { includeAdmins: true }).find(u => samePerson(u.name, currentUser.name)) || currentUser;
-  const currentUserOnline = isUserActuallyOnline(liveCurrentUser, presenceNow);
-  const activePeer = activeChannel === 'global' ? null : chatUsers.find(u => samePerson(u.name, activeChannel));
-  const activePeerOnline = activePeer ? isUserActuallyOnline(activePeer, presenceNow) : false;
-  const activeCallRoom = activePeer ? createSafeMeetingRoomName('KalpaVriksha_DM', safeAppId, ...[currentUser.name, activePeer.name].sort()) : '';
-  const activeCallUrl = activePeer ? buildJitsiUrl(activeCallRoom, currentUser.name, { audioOnly: callAudioOnly, shareScreen: callShareScreen }) : '';
-  const handleCopyCallLink = async () => {
-    if (!activeCallUrl) return;
-    const ok = await copyTextToClipboard(activeCallUrl);
-    setCallCopied(ok);
-    window.setTimeout(() => setCallCopied(false), 1800);
-  };
+    if (isOpen) markCurrentChannelReadNow(activeChannel);
+  }, [isOpen, activeChannel, chatMessages.length]);
 
-  const unreadMessages = chatMessages.filter(m => {
+  const unreadMessages = (chatMessages || []).filter(m => {
+    if (!m || m.deleted || hiddenMessageIds.includes(String(m.id))) return false;
     if (samePerson(m.sender, currentUser.name)) return false;
     const channelKey = (m.recipient === 'global' || !m.recipient) ? 'global' : identityKey(m.sender);
-    const cutoff = Math.max(Number(localReadState[channelKey] || 0), Number(readThroughRef.current?.[channelKey] || 0), Number(localReadState.__all__ || 0), Number(readThroughRef.current?.__all__ || 0));
+    const cutoff = Math.max(Number(localReadState[channelKey] || 0), Number(readThroughRef.current?.[channelKey] || 0));
     const sentAt = Number(m.sentAt || m.id || 0);
     if (sentAt && cutoff && sentAt <= cutoff) return false;
     if (hasReadBy(m, currentUser.name)) return false;
@@ -3211,110 +3300,76 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
     return true;
   });
   const unreadGlobalCount = (isOpen && activeChannel === 'global') ? 0 : unreadMessages.filter(m => m.recipient === 'global' || !m.recipient).length;
-  
-  // Total app unread count (for the main fab button)
-  const totalUnreadCount = isOpen ? 0 : unreadMessages.length;
-  
-  // Does a global message contain @me or @all?
-  const hasUnreadGlobalMention = unreadMessages.some(m => 
-    (m.recipient === 'global' || !m.recipient) && 
-    (m.text?.includes(`@${currentUser.name}`) || m.text?.includes('@all'))
-  );
 
-  // Auto-open chat if a high priority mention is received
+  const getDirectUnreadCountForUser = (userName) => {
+    const channelKey = identityKey(userName);
+    const cutoff = Math.max(Number(localReadState[channelKey] || 0), Number(readThroughRef.current?.[channelKey] || 0));
+    return (chatMessages || []).filter(m => {
+      if (!m || m.deleted || hiddenMessageIds.includes(String(m.id))) return false;
+      if (!samePerson(m.sender, userName) || !samePerson(m.recipient, currentUser.name)) return false;
+      const sentAt = Number(m.sentAt || m.id || 0);
+      if (sentAt && cutoff && sentAt <= cutoff) return false;
+      if (isOpen && samePerson(activeChannel, userName)) return false;
+      return true;
+    }).length;
+  };
+
+  const unreadDirectTotal = chatUsers.reduce((sum, u) => sum + getDirectUnreadCountForUser(u.name), 0);
+  const totalUnreadCount = isOpen ? unreadMessages.filter(m => !isMessageInActiveChannel(m)).length + unreadDirectTotal : Math.max(unreadMessages.length, unreadGlobalCount + unreadDirectTotal);
+  const hasUnreadGlobalMention = unreadMessages.some(m => (m.recipient === 'global' || !m.recipient) && (m.text?.includes(`@${currentUser.name}`) || m.text?.includes('@all')));
+
   useEffect(() => {
-     if (hasUnreadGlobalMention && !isOpen) {
-         const latestMention = unreadMessages.filter(m => (m.recipient === 'global' || !m.recipient) && (m.text?.includes(`@${currentUser.name}`) || m.text?.includes('@all'))).pop();
-         if (latestMention && latestMention.id > (currentUser.lastMentionRead || 0)) {
-            setIsOpen(true);
-            setActiveChannel('global');
-            currentUser.lastMentionRead = latestMention.id;
-         }
-     }
+    if (hasUnreadGlobalMention && !isOpen) {
+      const latestMention = unreadMessages.filter(m => (m.recipient === 'global' || !m.recipient) && (m.text?.includes(`@${currentUser.name}`) || m.text?.includes('@all'))).pop();
+      if (latestMention && latestMention.id > (currentUser.lastMentionRead || 0)) {
+        setIsOpen(true);
+        setActiveChannel('global');
+        currentUser.lastMentionRead = latestMention.id;
+      }
+    }
   }, [chatMessages, hasUnreadGlobalMention, isOpen]);
 
-  const chatEmojiGroups = [
-    { label: 'Work', emojis: ['✅','📌','📎','👀','🚀','⏳','🔔','💬'] },
-    { label: 'Mood', emojis: ['😀','😊','😂','🙂','😎','👏','🙏','🤝'] },
-    { label: 'Quick', emojis: ['👍','❤️','⭐','🔥','💯','🎉','✨','👌'] },
-  ];
-  const chatEmojiOptions = chatEmojiGroups.flatMap(group => group.emojis);
-  const reactionOptions = ['👍','❤️','😂','😮','🙏','✅','⭐','🔥'];
-  const reactionsKey = `kalpa_chat_reactions_${currentUser?.id || identityKey(currentUser?.name || '')}`;
-  const [chatReactions, setChatReactions] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(reactionsKey) || '{}'); } catch(e) { return {}; }
-  });
-  useEffect(() => {
-    try { setChatReactions(JSON.parse(localStorage.getItem(reactionsKey) || '{}')); } catch(e) { setChatReactions({}); }
-  }, [reactionsKey]);
-  const getMessageReactions = (message) => {
-    if (!message) return {};
-    const fromMessage = message.reactions && typeof message.reactions === 'object' ? message.reactions : null;
-    return fromMessage || chatReactions[String(message.id)] || {};
-  };
-
-  const persistMessageUpdate = (message, patch) => {
-    if (!message || typeof onUpdateMessage !== 'function') return;
-    onUpdateMessage({ ...message, ...patch });
-  };
-
-  const toggleMessageReaction = (message, emoji) => {
-    if (!message) return;
-    const id = String(message.id);
-    const who = currentUser?.name || 'Me';
-    const current = getMessageReactions(message);
-    const list = Array.isArray(current[emoji]) ? current[emoji] : [];
-    const hasReacted = list.some(n => samePerson(n, who));
-    const nextList = hasReacted ? list.filter(n => !samePerson(n, who)) : [...list, who];
-    const nextMessageReactions = { ...current };
-    if (nextList.length) nextMessageReactions[emoji] = nextList;
-    else delete nextMessageReactions[emoji];
-    persistMessageUpdate(message, { reactions: nextMessageReactions });
-    setChatReactions(prev => {
-      const next = { ...prev };
-      if (Object.keys(nextMessageReactions).length) next[id] = nextMessageReactions;
-      else delete next[id];
-      try { localStorage.setItem(reactionsKey, JSON.stringify(next)); } catch(e) {}
-      return next;
-    });
-    setOpenReactionMenuId(null);
-  };
-
   const addEmojiToMessage = (emoji) => {
-    // Keep picker open so user can click multiple emojis before sending.
     setMsg(prev => `${prev}${prev && !prev.endsWith(' ') ? ' ' : ''}${emoji} `);
+    composerRef.current?.focus?.();
+  };
+
+  const clearComposerContext = () => {
+    setReplyTo(null);
+    setEditingMessage(null);
+    setShowMentions(false);
+    setShowEmojiPicker(false);
   };
 
   const handleSend = () => {
     const text = msg.trim();
     if (!text) return;
     const now = Date.now();
-    const timeNow = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+    const nowText = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
     if (editingMessage) {
-      persistMessageUpdate(editingMessage, { text, edited: true, editedAt: now, editedTime: timeNow });
-      setEditingMessage(null);
+      const updated = { ...editingMessage, text, edited: true, editedAt: now, time: editingMessage.time || nowText };
+      if (typeof onUpdateMessage === 'function') onUpdateMessage(updated);
       setMsg('');
-      setShowEmojiPicker(false);
+      clearComposerContext();
       return;
     }
-    const senderRole = users.find(u => u.name === currentUser.name)?.role || '';
-    const newMsg = { 
-      id: now, 
-      text, 
-      sender: currentUser.name, 
-      senderRole, 
+    const senderRole = users.find(u => samePerson(u.name, currentUser.name))?.role || '';
+    const newMsg = {
+      id: now,
+      text,
+      sender: currentUser.name,
+      senderRole,
       recipient: activeChannel,
-      time: timeNow,
+      time: nowText,
       sentAt: now,
       replyTo: replyTo ? { id: replyTo.id, sender: replyTo.sender, text: replyTo.text || replyTo.fileName || 'Attachment' } : null,
-      readBy: [{ name: currentUser.name, time: timeNow }]
+      reactions: {},
+      readBy: [{ name: currentUser.name, time: nowText }]
     };
     onSendMessage(newMsg);
     setMsg('');
-    setReplyTo(null);
-    setShowMentions(false);
-    setShowEmojiPicker(false);
-    currentUser.lastChatRead = Date.now();
+    clearComposerContext();
+    currentUser.lastChatRead = now;
   };
 
   const handleInputChange = (e) => {
@@ -3322,35 +3377,43 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
     setMsg(val);
     if (activeChannel === 'global' && val.endsWith('@')) setShowMentions(true);
     else if (!val.includes('@')) setShowMentions(false);
-    // Keep emoji picker open while typing/clicking multiple emojis unless user closes it.
   };
 
   const insertMention = (name) => {
-    setMsg(msg.slice(0, -1) + `@${name} `);
+    setMsg(prev => prev.slice(0, -1) + `@${name} `);
     setShowMentions(false);
-    chatEndRef.current?.focus();
+    composerRef.current?.focus?.();
+  };
+
+  const createBaseMessage = (overrides = {}) => {
+    const now = Date.now();
+    const senderRole = users.find(u => samePerson(u.name, currentUser.name))?.role || '';
+    return {
+      id: now,
+      sender: currentUser.name,
+      senderRole,
+      recipient: activeChannel,
+      time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
+      sentAt: now,
+      readBy: [{ name: currentUser.name, time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) }],
+      reactions: {},
+      ...overrides
+    };
   };
 
   const handleChatFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const senderRole = users.find(u => u.name === currentUser.name)?.role || '';
-    const newMsg = { 
-      id: Date.now(), 
+    onSendMessage(createBaseMessage({
       text: `Shared attachment: ${file.name}`,
       fileName: file.name,
       fileUrl: URL.createObjectURL(file),
       fileType: file.type || '',
       localPreviewOnly: true,
-      fileSize: file.size || 0, 
-      sender: currentUser.name, 
-      senderRole, 
-      recipient: activeChannel,
-      time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
-      sentAt: Date.now(),
-      readBy: [{ name: currentUser.name, time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) }]
-    };
-    onSendMessage(newMsg);
+      fileSize: file.size || 0,
+      replyTo: replyTo ? { id: replyTo.id, sender: replyTo.sender, text: replyTo.text || replyTo.fileName || 'Attachment' } : null,
+    }));
+    setReplyTo(null);
     if (e?.target) e.target.value = '';
   };
 
@@ -3372,9 +3435,8 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
         stream.getTracks().forEach(track => track.stop());
         setIsRecordingVoice(false);
         if (!blob.size) return;
-        const senderRole = users.find(u => u.name === currentUser.name)?.role || '';
         const createdAt = Date.now();
-        const newMsg = {
+        onSendMessage(createBaseMessage({
           id: createdAt,
           text: 'Shared voice note',
           fileName: `voice-note-${createdAt}.webm`,
@@ -3382,14 +3444,8 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
           fileType: blob.type || 'audio/webm',
           localPreviewOnly: true,
           fileSize: blob.size,
-          sender: currentUser.name,
-          senderRole,
-          recipient: activeChannel,
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           sentAt: createdAt,
-          readBy: [{ name: currentUser.name, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }]
-        };
-        onSendMessage(newMsg);
+        }));
       };
       recorder.start();
       setIsRecordingVoice(true);
@@ -3417,22 +3473,22 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
     setCallShareScreen(shareScreen);
     setCallStartedAt(Date.now());
     setIsCalling(true);
-    const senderRole = users.find(u => u.name === currentUser.name)?.role || '';
     const room = createSafeMeetingRoomName('KalpaVriksha_DM', safeAppId, ...[currentUser.name, activePeer.name].sort());
     const url = buildJitsiUrl(room, currentUser.name, { audioOnly, shareScreen });
-    onSendMessage({ 
-      id: Date.now(), 
-      text: shareScreen ? `🖥️ Started screen sharing / help session` : (audioOnly ? `📞 Started an Audio Call` : `📹 Started a Video Call`), 
-      sender: currentUser.name, 
-      senderRole, 
+    onSendMessage(createBaseMessage({
+      text: shareScreen ? `🖥️ Started screen sharing / help session` : (audioOnly ? `📞 Started an Audio Call` : `📹 Started a Video Call`),
       recipient: activePeer.name,
       callType: shareScreen ? 'screen' : (audioOnly ? 'audio' : 'video'),
       roomUrl: url,
-      time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
-      sentAt: Date.now(),
-      readBy: [{ name: currentUser.name, time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) }]
-    });
+    }));
     window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
+  const handleCopyCallLink = async () => {
+    if (!activeCallUrl) return;
+    const ok = await copyTextToClipboard(activeCallUrl);
+    setCallCopied(ok);
+    window.setTimeout(() => setCallCopied(false), 1800);
   };
 
   const handleMessageKeyDown = (e) => {
@@ -3442,61 +3498,99 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
     }
   };
 
-  const closeMessageMenus = () => {
-    setOpenMessageMenuId(null);
-    setOpenReactionMenuId(null);
+  const updateMessage = (m) => {
+    if (typeof onUpdateMessage === 'function') onUpdateMessage(m);
   };
 
-  const copyMessageText = async (message) => {
-    const value = message?.text || message?.fileName || '';
-    if (!value) return;
-    const copied = await copyTextToClipboard(value);
-    if (copied) {
-      setActionCopiedId(message.id);
-      window.setTimeout(() => setActionCopiedId(null), 1400);
+  const openActionMenu = (event, m) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const x = Math.min(event.clientX || 0, window.innerWidth - 240);
+    const y = Math.min(event.clientY || 0, window.innerHeight - 320);
+    setReactionMenu(null);
+    setActionMenu({ id: m.id, x: Math.max(12, x), y: Math.max(12, y) });
+  };
+
+  const openReactionMenu = (event, m) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const x = Math.min(event.clientX || 0, window.innerWidth - 300);
+    const y = Math.min(event.clientY || 0, window.innerHeight - 120);
+    setActionMenu(null);
+    setReactionMenu({ id: m.id, x: Math.max(12, x), y: Math.max(12, y) });
+  };
+
+  const activeActionMessage = actionMenu ? (chatMessages || []).find(m => String(m.id) === String(actionMenu.id)) : null;
+  const activeReactionMessage = reactionMenu ? (chatMessages || []).find(m => String(m.id) === String(reactionMenu.id)) : null;
+
+  const replyToMessage = (m) => {
+    setReplyTo(m);
+    setEditingMessage(null);
+    setActionMenu(null);
+    composerRef.current?.focus?.();
+  };
+
+  const editMessage = (m) => {
+    if (!samePerson(m.sender, currentUser.name)) return;
+    setEditingMessage(m);
+    setReplyTo(null);
+    setMsg(m.text || '');
+    setActionMenu(null);
+    composerRef.current?.focus?.();
+  };
+
+  const forwardMessage = (m) => {
+    const body = m.text || m.fileName || 'Attachment';
+    setEditingMessage(null);
+    setReplyTo(null);
+    setMsg(`Forwarded from ${m.sender}: ${body}`);
+    setActionMenu(null);
+    composerRef.current?.focus?.();
+  };
+
+  const copyMessage = async (m) => {
+    await copyTextToClipboard(m.text || m.fileName || '');
+    setActionMenu(null);
+  };
+
+  const deleteForMe = (m) => {
+    const next = Array.from(new Set([...(hiddenMessageIds || []).map(String), String(m.id)]));
+    setHiddenMessageIds(next);
+    try { localStorage.setItem(hiddenKey, JSON.stringify(next)); } catch(e) {}
+    setActionMenu(null);
+  };
+
+  const deleteForEveryone = (m) => {
+    if (!(samePerson(m.sender, currentUser.name) || currentUser.role === ROLES.ADMIN)) return;
+    if (!window.confirm('Delete this message for everyone?')) return;
+    if (typeof onUpdateMessage === 'function') {
+      updateMessage({ ...m, deleted: true, text: 'This message was deleted.', fileUrl: '', fileName: '', fileType: '', roomUrl: '', deletedBy: currentUser.name, deletedAt: Date.now() });
+    } else if (typeof onDeleteMessage === 'function') {
+      onDeleteMessage(m.id);
     }
-    closeMessageMenus();
+    setActionMenu(null);
   };
 
-  const startReplyToMessage = (message) => {
-    setReplyTo({ id: message.id, sender: message.sender, text: message.text || message.fileName || 'Attachment' });
-    setEditingMessage(null);
-    closeMessageMenus();
-  };
-
-  const startEditMessage = (message) => {
-    if (!samePerson(message.sender, currentUser.name)) return;
-    setEditingMessage(message);
-    setReplyTo(null);
-    setMsg(message.text || '');
-    closeMessageMenus();
-  };
-
-  const forwardMessage = (message) => {
-    const body = message.text || message.fileName || 'Attachment';
-    setEditingMessage(null);
-    setReplyTo(null);
-    setMsg(`Forwarded from ${message.sender}: ${body}`);
-    closeMessageMenus();
-  };
-
-  const deleteMessageSafely = (message) => {
-    if (!message || (!samePerson(message.sender, currentUser.name) && currentUser.role !== ROLES.ADMIN)) return;
-    if (window.confirm('Delete this message for everyone?')) onDeleteMessage(message.id);
-    closeMessageMenus();
+  const toggleReaction = (m, emoji) => {
+    const reactions = { ...(m.reactions || {}) };
+    const names = Array.isArray(reactions[emoji]) ? [...reactions[emoji]] : [];
+    const already = names.some(n => samePerson(n, currentUser.name));
+    reactions[emoji] = already ? names.filter(n => !samePerson(n, currentUser.name)) : [...names, currentUser.name];
+    if (!reactions[emoji].length) delete reactions[emoji];
+    updateMessage({ ...m, reactions });
+    setReactionMenu(null);
   };
 
   const renderMessageText = (text) => {
-      if (!text) return null;
-      const parts = text.split(new RegExp(`(@${currentUser.name}|@all)`, 'gi'));
-      return parts.map((part, i) => {
-          const lower = part.toLowerCase();
-          if (lower === `@${currentUser.name.toLowerCase()}`) return <strong key={i} className="text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded-md font-extrabold">{part}</strong>;
-          if (lower === `@all`) return <strong key={i} className="text-red-700 bg-red-100 px-1.5 py-0.5 rounded-md font-extrabold">{part}</strong>;
-          return part;
-      });
+    if (!text) return null;
+    const parts = text.split(new RegExp(`(@${currentUser.name}|@all)`, 'gi'));
+    return parts.map((part, i) => {
+      const lower = part.toLowerCase();
+      if (lower === `@${currentUser.name.toLowerCase()}`) return <strong key={i} className="text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded-md font-extrabold">{part}</strong>;
+      if (lower === `@all`) return <strong key={i} className="text-red-700 bg-red-100 px-1.5 py-0.5 rounded-md font-extrabold">{part}</strong>;
+      return part;
+    });
   };
-
 
   const getReadableFileSize = (bytes) => {
     const size = Number(bytes || 0);
@@ -3508,6 +3602,7 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
 
   const getAttachmentLabel = (name = '', type = '') => {
     const lower = String(name).toLowerCase();
+    if (String(type).startsWith('audio/') || /\.(webm|mp3|wav|m4a|ogg)$/i.test(lower)) return 'Voice note';
     if (String(type).startsWith('image/') || /\.(jpg|jpeg|png|gif|webp)$/i.test(lower)) return 'Image';
     if (String(type).startsWith('video/') || /\.(mp4|mov|avi|mkv|webm)$/i.test(lower)) return 'Video';
     if (/\.pdf$/i.test(lower)) return 'PDF';
@@ -3519,36 +3614,33 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
 
   const renderAttachmentPreview = (m, isMine) => {
     if (!m.fileUrl) return null;
-    const name = m.fileName || 'attachment';
-    const lower = name.toLowerCase();
-    const isImg = String(m.fileType || '').startsWith('image/') || /\.(jpg|jpeg|png|gif|webp)$/i.test(lower);
-    const isVid = String(m.fileType || '').startsWith('video/') || /\.(mp4|mov|avi|mkv|webm)$/i.test(lower);
-    const isAudio = String(m.fileType || '').startsWith('audio/') || /\.(mp3|wav|ogg|m4a|webm)$/i.test(lower);
-    const size = getReadableFileSize(m.fileSize);
-    const label = getAttachmentLabel(name, m.fileType);
+    const fileName = m.fileName || 'Attachment';
+    const fileType = m.fileType || '';
+    const lower = String(fileName).toLowerCase();
+    const isImage = String(fileType).startsWith('image/') || /\.(jpg|jpeg|png|gif|webp)$/i.test(lower);
+    const isVideo = String(fileType).startsWith('video/') || /\.(mp4|mov|avi|mkv|webm)$/i.test(lower);
+    const isAudio = String(fileType).startsWith('audio/') || /\.(webm|mp3|wav|m4a|ogg)$/i.test(lower);
     return (
-      <div className={`kalpa-chat-attachment mt-3 rounded-2xl overflow-hidden border shadow-sm ${isMine ? 'border-indigo-300 bg-indigo-500/30' : 'border-slate-200 bg-white'}`} style={{ maxWidth: '100%' }}>
-        {isImg && <img src={m.fileUrl} alt={name} className="kalpa-chat-attachment-image w-full bg-white" style={{ width: '100%', maxWidth: '100%', maxHeight: '220px', objectFit: 'contain', display: 'block' }} />}
-        {isVid && !isAudio && <video src={m.fileUrl} controls className="w-full bg-black" style={{ width: '100%', maxWidth: '100%', maxHeight: '220px' }} />}
-        {isAudio && <div className={`p-3 ${isMine ? 'bg-indigo-500/20' : 'bg-slate-50'}`}><audio src={m.fileUrl} controls style={{ width: '100%' }} /></div>}
-        <a href={m.fileUrl} download={name} className={`flex items-center justify-between gap-3 p-3 text-xs font-black ${isMine ? 'text-white hover:bg-indigo-500/40' : 'text-slate-700 hover:bg-slate-50'}`}>
-          <span className="flex items-center gap-3 min-w-0">
-            <span className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${isMine ? 'bg-white/20' : 'bg-indigo-50 text-indigo-600'}`}>
-              {isAudio ? <Mic className="w-5 h-5" /> : isImg ? <ImageIcon className="w-5 h-5" /> : <Paperclip className="w-5 h-5" />}
-            </span>
-            <span className="min-w-0">
-              <span className="block truncate">{name}</span>
-              <span className={`block text-[10px] mt-0.5 ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>{label}{size ? ` • ${size}` : ''}{m.localPreviewOnly ? ' • Preview' : ''}</span>
-            </span>
-          </span>
-          <span className={`shrink-0 px-2 py-1 rounded-lg ${isMine ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'}`}>Download</span>
-        </a>
+      <div className={`mt-3 rounded-2xl border overflow-hidden ${isMine ? 'border-indigo-300 bg-indigo-500/20' : 'border-slate-100 bg-slate-50'}`}>
+        {isImage && <img src={m.fileUrl} alt={fileName} className="block max-h-56 w-full object-cover" />}
+        {isVideo && <video src={m.fileUrl} controls className="block max-h-56 w-full bg-black" />}
+        {isAudio && <div className="p-3"><audio src={m.fileUrl} controls className="w-full" /></div>}
+        <div className="p-3 flex items-center justify-between gap-3">
+          <div className="min-w-0 flex items-center gap-2">
+            <FileIcon className={`w-4 h-4 shrink-0 ${isMine ? 'text-white' : 'text-indigo-500'}`} />
+            <div className="min-w-0">
+              <p className={`text-xs font-black truncate ${isMine ? 'text-white' : 'text-slate-700'}`}>{fileName}</p>
+              <p className={`text-[10px] font-bold ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>{getAttachmentLabel(fileName, fileType)} {getReadableFileSize(m.fileSize) ? `• ${getReadableFileSize(m.fileSize)}` : ''}</p>
+            </div>
+          </div>
+          <a href={m.fileUrl} download={fileName} target="_blank" rel="noreferrer" className={`px-3 py-1.5 rounded-lg text-[11px] font-black shrink-0 ${isMine ? 'bg-white text-indigo-700' : 'bg-white text-indigo-700 border border-indigo-100'}`}>Open</a>
+        </div>
       </div>
     );
   };
 
-  // Filter messages for the current active view
-  const channelMessages = chatMessages.filter(m => {
+  const channelMessages = (chatMessages || []).filter(m => {
+    if (!m || hiddenMessageIds.includes(String(m.id))) return false;
     if (activeChannel === 'global') return m.recipient === 'global' || !m.recipient;
     return (samePerson(m.sender, currentUser.name) && samePerson(m.recipient, activeChannel)) || (samePerson(m.sender, activeChannel) && samePerson(m.recipient, currentUser.name));
   }).sort((a, b) => Number(a.sentAt || a.id || 0) - Number(b.sentAt || b.id || 0));
@@ -3562,247 +3654,163 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
       {isOpen && (
         <div
           className="kalpa-chat-panel bg-white rounded-3xl shadow-2xl border-2 border-slate-100 mb-4 overflow-hidden flex flex-row animate-in slide-in-from-bottom-5"
-          style={{
-            width: 'min(1080px, calc(100vw - 48px))',
-            height: 'min(620px, calc(100vh - 96px))',
-            maxWidth: 'calc(100vw - 48px)',
-            maxHeight: 'calc(100vh - 96px)',
-            contain: 'layout paint',
-          }}
+          style={{ width: 'min(1080px, calc(100vw - 48px))', height: 'min(620px, calc(100vh - 96px))', maxWidth: 'calc(100vw - 48px)', maxHeight: 'calc(100vh - 96px)' }}
         >
-          
-          {/* Sidebar */}
-          <div className="kalpa-chat-sidebar w-72 shrink-0 bg-slate-50 border-r border-slate-100 flex flex-col" style={{ width: 300, minWidth: 280, maxWidth: 320, display: 'flex' }}>
-             <div className="p-4 bg-indigo-600 border-b border-indigo-700">
-               <h3 className="text-white font-extrabold flex items-center"><MessageSquare className="w-4 h-4 mr-2" /> Team Chat <span title={currentUserOnline ? 'You are online' : 'You are offline'} className={`ml-2 w-2.5 h-2.5 rounded-full ${currentUserOnline ? 'bg-emerald-300' : 'bg-slate-300'}`}></span></h3><p className="text-indigo-100 text-[10px] font-bold mt-1 uppercase tracking-widest">Files • Mentions • Screen help</p>
-             </div>
-             <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
-                <button onClick={() => { setActiveChannel('global'); setIsCalling(false); currentUser.lastChatRead = Date.now(); markCurrentChannelReadNow('global'); }} className={`w-full text-left px-4 py-3 rounded-xl font-bold flex items-center justify-between transition-colors ${activeChannel === 'global' ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>
-                  <span className="flex items-center"><Hash className="w-4 h-4 mr-2"/> Global Chat</span>
-                  {unreadGlobalCount > 0 && <span className="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full">{unreadGlobalCount}</span>}
-                </button>
-                
-                <div className="pt-4 pb-2 px-4 text-xs font-black text-slate-400 uppercase tracking-widest flex items-center justify-between"><span>Direct Messages</span><span className="text-[10px] text-slate-300">{chatUsers.length}</span></div>
-                {chatUsers.length === 0 && <div className="mx-3 mb-2 px-3 py-2 rounded-xl bg-slate-100 text-[11px] font-bold text-slate-400">No team members found</div>}
-                {chatUsers.map(u => {
-                  const unreadDMCount = (isOpen && samePerson(activeChannel, u.name)) ? 0 : unreadMessages.filter(m => samePerson(m.sender, u.name) && samePerson(m.recipient, currentUser.name)).length;
-                  return (
-                    <button key={u.id} onClick={() => { setActiveChannel(u.name); setIsCalling(false); currentUser.lastChatRead = Date.now(); markCurrentChannelReadNow(u.name); }} className={`w-full text-left px-4 py-3 rounded-xl font-bold flex items-center justify-between transition-colors ${activeChannel === u.name ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>
-                      <div className="flex flex-col min-w-0 pr-2">
-                        <span className="truncate flex items-center gap-2"><span className={`w-2 h-2 rounded-full ${isUserActuallyOnline(u, presenceNow) ? (u.availability === 'Break' ? 'bg-amber-400' : 'bg-emerald-500') : 'bg-slate-300'}`}></span>{u.name}</span>
-                        <span className="text-[10px] text-slate-400 uppercase">{isUserActuallyOnline(u, presenceNow) ? (u.availability === 'Break' ? 'On break' : 'Available to chat') : `Offline${u.lastSeenAt || u.lastLogoutAt || u.lastHeartbeatAt ? ` • ${formatLastSeenDateTime(u.lastSeenAt || u.lastLogoutAt || u.lastHeartbeatAt)}` : ''}`} • {u.role}</span>
-                      </div>
-                      {unreadDMCount > 0 && (
-                        <span title="Unread personal message" className="inline-flex items-center justify-center gap-1 bg-amber-400 text-amber-950 text-[10px] px-2.5 py-1 rounded-full shadow-sm shadow-amber-200 ring-2 ring-amber-100 animate-pulse shrink-0">
-                          <Star className="w-3.5 h-3.5 fill-current" /> {unreadDMCount}
-                        </span>
-                      )}
-                    </button>
-                  )
-                })}
-             </div>
+          <div className="kalpa-chat-sidebar shrink-0 bg-slate-50 border-r border-slate-100 flex flex-col" style={{ width: 300, minWidth: 280, maxWidth: 320 }}>
+            <div className="p-4 bg-indigo-600 border-b border-indigo-700">
+              <h3 className="text-white font-extrabold flex items-center"><MessageSquare className="w-4 h-4 mr-2" /> Team Chat <span title={currentUserOnline ? 'You are online' : 'You are offline'} className={`ml-2 w-2.5 h-2.5 rounded-full ${currentUserOnline ? 'bg-emerald-300' : 'bg-slate-300'}`}></span></h3>
+              <p className="text-indigo-100 text-[10px] font-bold mt-1 uppercase tracking-widest">Global • Direct • Files • Voice</p>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+              <button type="button" onClick={() => { setActiveChannel('global'); setIsCalling(false); currentUser.lastChatRead = Date.now(); markCurrentChannelReadNow('global'); }} className={`w-full text-left px-4 py-3 rounded-xl font-bold flex items-center justify-between transition-colors ${activeChannel === 'global' ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>
+                <span className="flex items-center"><Hash className="w-4 h-4 mr-2"/> Global Chat</span>
+                {unreadGlobalCount > 0 && <span className="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full">{unreadGlobalCount}</span>}
+              </button>
+              <div className="pt-4 pb-2 px-4 text-xs font-black text-slate-400 uppercase tracking-widest flex items-center justify-between"><span>Direct Messages</span><span className="text-[10px] text-slate-300">{chatUsers.length}</span></div>
+              {chatUsers.length === 0 && <div className="mx-3 mb-2 px-3 py-2 rounded-xl bg-slate-100 text-[11px] font-bold text-slate-400">No team members found</div>}
+              {chatUsers.map(u => {
+                const unreadDMCount = getDirectUnreadCountForUser(u.name);
+                return (
+                  <button type="button" key={u.id} onClick={() => { setActiveChannel(u.name); setIsCalling(false); currentUser.lastChatRead = Date.now(); markCurrentChannelReadNow(u.name); }} className={`w-full text-left px-4 py-3 rounded-xl font-bold flex items-center justify-between transition-colors ${samePerson(activeChannel, u.name) ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>
+                    <div className="flex flex-col min-w-0 pr-2">
+                      <span className="truncate flex items-center gap-2"><span className={`w-2 h-2 rounded-full ${isUserActuallyOnline(u, presenceNow) ? (u.availability === 'Break' ? 'bg-amber-400' : 'bg-emerald-500') : 'bg-slate-300'}`}></span>{u.name}</span>
+                      <span className="text-[10px] text-slate-400 uppercase truncate">{isUserActuallyOnline(u, presenceNow) ? (u.availability === 'Break' ? 'On break' : 'Available to chat') : `Offline${u.lastSeenAt || u.lastLogoutAt || u.lastHeartbeatAt ? ` • ${formatLastSeenDateTime(u.lastSeenAt || u.lastLogoutAt || u.lastHeartbeatAt)}` : ''}`} • {u.role}</span>
+                    </div>
+                    {unreadDMCount > 0 && (
+                      <span title={`You have ${unreadDMCount} unread personal message${unreadDMCount > 1 ? 's' : ''} from ${u.name}`} className="flex items-center gap-1 bg-amber-400 text-amber-950 text-[10px] px-2 py-0.5 rounded-full shadow-sm animate-pulse shrink-0 border border-amber-300"><Star className="w-3 h-3 fill-current" /> {unreadDMCount}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
-          {/* Main Chat Area */}
-          <div className="kalpa-chat-main flex-1 min-w-0 flex flex-col relative w-full" style={{ minHeight: 0, overflow: 'hidden' }}>
-            <div className="bg-white p-4 flex justify-between items-center shadow-sm border-b border-slate-100 z-10">
-              <div className="flex items-center">
-                 {/* Mobile menu toggle back to global */}
-                 <button onClick={() => { setActiveChannel('global'); setIsCalling(false); markCurrentChannelReadNow('global'); }} className="sm:hidden mr-2 p-1 text-slate-400"><ArrowLeft className="w-5 h-5"/></button>
-                 <div>
-                   <h3 className="font-extrabold text-slate-800 flex items-center text-lg">
-                     {activeChannel === 'global' ? <><Hash className="w-5 h-5 mr-2 text-slate-400" /> Global Team Chat</> : <><span className={`w-2.5 h-2.5 rounded-full mr-2 ${activePeerOnline ? 'bg-emerald-500' : 'bg-slate-300'}`}></span><User className="w-5 h-5 mr-2 text-indigo-500" /> {activeChannel}</>}
-                   </h3>
-                   {activeChannel !== 'global' && <p className="text-[10px] font-bold text-slate-400 uppercase mt-0.5">{activePeerOnline ? 'Online now' : `Offline${activePeer?.lastSeenAt || activePeer?.lastLogoutAt || activePeer?.lastHeartbeatAt ? ` • Last seen ${formatLastSeenDateTime(activePeer.lastSeenAt || activePeer.lastLogoutAt || activePeer.lastHeartbeatAt)}` : ''}`}</p>}
-                   <select value={activeChannel} onChange={(e) => { setActiveChannel(e.target.value); setIsCalling(false); markCurrentChannelReadNow(e.target.value); }} className="sm:hidden mt-2 bg-slate-50 border border-slate-100 rounded-lg px-2 py-1 text-xs font-bold text-slate-600 focus:outline-none">
-                     <option value="global">Global Chat</option>
-                     {chatUsers.map(u => <option key={u.id} value={u.name}>{u.name}</option>)}
-                   </select>
-                 </div>
+          <div className="flex-1 flex flex-col min-w-0 relative bg-white">
+            <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-white shrink-0">
+              <div className="min-w-0">
+                <h3 className="font-extrabold text-slate-800 flex items-center truncate">
+                  {activeChannel === 'global' ? <><Hash className="w-5 h-5 mr-2 text-slate-400" /> Global Team Chat</> : <><span className={`w-2.5 h-2.5 rounded-full mr-2 ${activePeerOnline ? 'bg-emerald-500' : 'bg-slate-300'}`}></span><User className="w-5 h-5 mr-2 text-indigo-500" /> {activeChannel}</>}
+                </h3>
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">{activeChannel === 'global' ? 'Everyone can see these messages' : activePeerOnline ? 'Online now' : 'Direct private conversation'}</p>
               </div>
-              <div className="flex items-center space-x-2">
-                {activeChannel !== 'global' && !isCalling && (
-                  <>
-                    <button onClick={() => startCall(true)} title="Audio call" className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"><Phone className="w-5 h-5" /></button>
-                    <button onClick={() => startCall(false)} title="Video call" className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"><Video className="w-5 h-5" /></button>
-                    <button type="button" title="Share screen / help" onClick={() => startCall(false, true)} className="hidden sm:inline-flex items-center px-3 py-1.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 rounded-lg text-xs font-black border border-indigo-100"><Video className="w-4 h-4 mr-1.5" /> Share Screen</button>
-                  </>
-                )}
-                {isCalling && (
-                    <button onClick={() => { setIsCalling(false); setCallStartedAt(null); }} className="bg-red-50 text-red-600 px-3 py-1 text-xs font-bold rounded-lg border border-red-100 hover:bg-red-100">End Call</button>
-                )}
-                <button type="button" onClick={() => { markCurrentChannelReadNow(activeChannel); setIsOpen(false); currentUser.lastChatRead = Date.now(); }} className="text-slate-400 hover:text-slate-600 p-1.5 bg-slate-50 rounded-full transition-colors ml-2"><X className="w-5 h-5" /></button>
+              <div className="flex items-center gap-2">
+                {activeChannel !== 'global' && <>
+                  <button type="button" onClick={() => startCall(true)} className="p-2 rounded-xl bg-slate-50 hover:bg-indigo-50 text-slate-500 hover:text-indigo-600" title="Audio call"><Phone className="w-4 h-4" /></button>
+                  <button type="button" onClick={() => startCall(false)} className="p-2 rounded-xl bg-slate-50 hover:bg-indigo-50 text-slate-500 hover:text-indigo-600" title="Video call"><Video className="w-4 h-4" /></button>
+                  <button type="button" onClick={() => startCall(false, true)} className="px-3 py-2 rounded-xl bg-slate-50 hover:bg-indigo-50 text-xs font-black text-slate-500 hover:text-indigo-600">Share screen</button>
+                </>}
+                <button type="button" onClick={() => { setIsOpen(false); markCurrentChannelReadNow(activeChannel); currentUser.lastChatRead = Date.now(); }} className="text-slate-400 hover:text-slate-600 p-1.5 bg-slate-50 rounded-full transition-colors ml-2"><X className="w-5 h-5" /></button>
               </div>
             </div>
 
             {isCalling ? (
-              <div className="flex-1 bg-slate-900 w-full h-full relative flex items-center justify-center p-6 text-center text-white">
-                <div className="absolute top-3 left-3 right-3 z-10 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
-                  <div className="bg-slate-950/75 text-white px-3 py-2 rounded-xl text-xs font-black shadow pointer-events-auto">{callShareScreen ? 'Screen share session' : (callAudioOnly ? 'Audio call' : 'Video call')} {callStartedAt ? `• ${formatCallDuration(callStartedAt, callNow)}` : ''}</div>
-                  <div className="flex gap-2 pointer-events-auto"><button type="button" onClick={handleCopyCallLink} className="bg-white/90 text-slate-800 px-3 py-1.5 rounded-lg text-xs font-bold shadow">{callCopied ? 'Copied' : 'Copy Link'}</button><button type="button" onClick={() => window.open(activeCallUrl, '_blank', 'noopener,noreferrer')} className="bg-white/90 text-slate-800 px-3 py-1.5 rounded-lg text-xs font-bold shadow">Open Tab</button></div>
+              <div className="flex-1 bg-slate-900 flex flex-col min-h-0">
+                <div className="p-3 bg-slate-800 text-white flex items-center justify-between">
+                  <div><p className="text-sm font-black">{callShareScreen ? 'Screen share session' : (callAudioOnly ? 'Audio call' : 'Video meeting')} with {activeChannel}</p><p className="text-[10px] text-slate-300">{callStartedAt ? `${Math.floor((callNow - callStartedAt)/60000)}m ${Math.floor(((callNow - callStartedAt)%60000)/1000)}s` : 'Ready'}</p></div>
+                  <div className="flex gap-2"><button type="button" onClick={() => window.open(activeCallUrl, '_blank', 'noopener,noreferrer')} className="px-3 py-2 rounded-lg bg-white/10 text-xs font-black">Open tab</button><button type="button" onClick={handleCopyCallLink} className="px-3 py-2 rounded-lg bg-white/10 text-xs font-black">{callCopied ? 'Copied' : 'Copy link'}</button><button type="button" onClick={() => setIsCalling(false)} className="px-3 py-2 rounded-lg bg-red-500 text-xs font-black">End</button></div>
                 </div>
-                <div className="max-w-sm mt-10">
-                  <p className="text-lg font-black mb-2">Meeting opened in a new browser tab</p>
-                  <p className="text-xs font-semibold text-slate-300">This keeps screen sharing reliable. If the tab did not open, click Open Tab above.</p>
+                <div className="flex-1 flex items-center justify-center p-6 text-center text-white">
+                  <div className="max-w-sm">
+                    <p className="text-lg font-black mb-2">Meeting opened in a new browser tab</p>
+                    <p className="text-xs font-semibold text-slate-300">This keeps screen sharing reliable. If the tab did not open, click Open tab above.</p>
+                  </div>
                 </div>
               </div>
             ) : (
               <>
-              <div className="px-4 py-2 bg-white border-b border-slate-100 flex items-center gap-2">
-                <Search className="w-4 h-4 text-slate-300" />
-                <input value={chatSearch} onChange={(e) => setChatSearch(e.target.value)} placeholder="Search this chat..." className="flex-1 bg-transparent text-xs font-semibold text-slate-600 placeholder:text-slate-300 focus:outline-none" />
-                {chatSearch && <button type="button" onClick={() => setChatSearch('')} className="text-[10px] font-black text-slate-400 hover:text-slate-600">CLEAR</button>}
-              </div>
-              <div ref={chatScrollRef} className="kalpa-chat-messages flex-1 overflow-y-auto p-5 space-y-4 bg-slate-50/50 custom-scrollbar relative" style={{ minHeight: 0, overflowX: 'hidden' }}>
-                {displayMessages.length === 0 && <p className="text-center text-sm text-slate-400 mt-10 font-medium">Say hello to {activeChannel === 'global' ? 'the team' : activeChannel}!</p>}
-                {displayMessages.map((m, idx) => {
-                  const isMine = samePerson(m.sender, currentUser.name);
-                  const showName = idx === 0 || displayMessages[idx-1].sender !== m.sender;
-                  
-                  return (
-                  <div key={m.id} className={`flex flex-col ${isMine ? 'items-end' : 'items-start'}`}>
-                    {showName && !isMine && <span className={`text-[11px] font-black uppercase tracking-wider ml-1 mb-1 ${m.senderRole === ROLES.ADMIN ? 'text-indigo-600' : 'text-slate-500'}`}>{m.sender}</span>}
-                    <div className={`kalpa-chat-bubble px-4 py-2.5 rounded-2xl text-[15px] font-medium leading-relaxed shadow-sm relative group break-words
-                      ${isMine ? 'bg-indigo-600 text-white rounded-tr-sm' : 
-                        'bg-white border border-slate-200 text-slate-800 rounded-tl-sm'}`} style={{ maxWidth: m.fileUrl ? 'min(520px, 84%)' : '78%', minWidth: 0, overflow: 'visible', overflowWrap: 'anywhere' }}>
-                      {m.replyTo && (
-                        <div className={`mb-2 rounded-xl border-l-4 px-3 py-2 text-xs ${isMine ? 'bg-white/15 border-white/60 text-indigo-50' : 'bg-slate-50 border-indigo-300 text-slate-500'}`}>
-                          <div className="font-black uppercase tracking-wider">Replying to {m.replyTo.sender}</div>
-                          <div className="truncate">{m.replyTo.text}</div>
-                        </div>
-                      )}
-                      {renderMessageText(m.text)}
-                      {m.edited && <span className={`ml-2 text-[10px] font-bold ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>(edited)</span>}
-                      {m.roomUrl && (
-                        <div className={`mt-3 rounded-xl p-3 border ${isMine ? 'bg-indigo-500/30 border-indigo-300' : 'bg-indigo-50 border-indigo-100'}`}>
-                          <p className={`text-xs font-black mb-2 ${isMine ? 'text-white' : 'text-indigo-800'}`}>{m.callType === 'audio' ? 'Audio call invite' : m.callType === 'screen' ? 'Screen sharing invite' : 'Video call invite'}</p>
-                          <div className="flex flex-wrap gap-2">
-                            <button type="button" onClick={() => { setCallAudioOnly(m.callType === 'audio'); setActiveChannel(samePerson(m.sender, currentUser.name) ? m.recipient : m.sender); setIsCalling(true); }} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white text-indigo-700' : 'bg-indigo-600 text-white'}`}>Join</button>
-                            <button type="button" onClick={() => window.open(m.roomUrl, '_blank', 'noopener,noreferrer')} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white/80 text-slate-700' : 'bg-white text-indigo-700 border border-indigo-100'}`}>Open</button>
+                <div className="px-4 py-2 bg-white border-b border-slate-100 flex items-center gap-2 shrink-0">
+                  <Search className="w-4 h-4 text-slate-300" />
+                  <input value={chatSearch} onChange={(e) => setChatSearch(e.target.value)} placeholder="Search this chat..." className="flex-1 bg-transparent text-xs font-semibold text-slate-600 placeholder:text-slate-300 focus:outline-none" />
+                  {chatSearch && <button type="button" onClick={() => setChatSearch('')} className="text-[10px] font-black text-slate-400 hover:text-slate-600">CLEAR</button>}
+                </div>
+                <div ref={chatScrollRef} className="kalpa-chat-messages flex-1 overflow-y-auto p-5 space-y-4 bg-slate-50/50 custom-scrollbar relative" style={{ minHeight: 0, overflowX: 'hidden' }} onClick={() => { setActionMenu(null); setReactionMenu(null); }}>
+                  {displayMessages.length === 0 && <p className="text-center text-sm text-slate-400 mt-10 font-medium">Say hello to {activeChannel === 'global' ? 'the team' : activeChannel}!</p>}
+                  {displayMessages.map((m, idx) => {
+                    const isMine = samePerson(m.sender, currentUser.name);
+                    const showName = idx === 0 || !samePerson(displayMessages[idx-1].sender, m.sender);
+                    const reactions = Object.entries(m.reactions || {}).filter(([, names]) => Array.isArray(names) && names.length);
+                    return (
+                      <div key={m.id} className={`flex flex-col ${isMine ? 'items-end' : 'items-start'}`}>
+                        {showName && !isMine && <span className={`text-[11px] font-black uppercase tracking-wider ml-1 mb-1 ${m.senderRole === ROLES.ADMIN ? 'text-indigo-600' : 'text-slate-500'}`}>{m.sender}</span>}
+                        <div className="relative group flex items-start gap-2" onContextMenu={(e) => openActionMenu(e, m)}>
+                          {isMine && <button type="button" onClick={(e) => openActionMenu(e, m)} className="mt-2 w-8 h-8 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 shadow-sm flex items-center justify-center opacity-100" title="Message options">⋮</button>}
+                          <div className={`kalpa-chat-bubble px-4 py-2.5 rounded-2xl text-[15px] font-medium leading-relaxed shadow-sm relative break-words ${isMine ? 'bg-indigo-600 text-white rounded-tr-sm' : 'bg-white border border-slate-200 text-slate-800 rounded-tl-sm'}`} style={{ maxWidth: m.fileUrl ? 'min(520px, 84vw)' : 'min(620px, 78vw)', minWidth: 0, overflow: 'visible' }}>
+                            {m.replyTo && <div className={`mb-2 border-l-4 pl-2 py-1 rounded ${isMine ? 'border-white/70 bg-indigo-500/30' : 'border-indigo-300 bg-indigo-50'}`}><p className={`text-[10px] font-black ${isMine ? 'text-indigo-100' : 'text-indigo-600'}`}>Replying to {m.replyTo.sender}</p><p className={`text-xs truncate ${isMine ? 'text-white/90' : 'text-slate-500'}`}>{m.replyTo.text}</p></div>}
+                            <div className={m.deleted ? 'italic opacity-75' : ''}>{renderMessageText(m.text)} {m.edited && !m.deleted && <span className={`text-[10px] ml-1 ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>(edited)</span>}</div>
+                            {m.roomUrl && (
+                              <div className={`mt-3 rounded-xl p-3 border ${isMine ? 'bg-indigo-500/30 border-indigo-300' : 'bg-indigo-50 border-indigo-100'}`}>
+                                <p className={`text-xs font-black mb-2 ${isMine ? 'text-white' : 'text-indigo-800'}`}>{m.callType === 'audio' ? 'Audio call invite' : m.callType === 'screen' ? 'Screen sharing invite' : 'Video call invite'}</p>
+                                <div className="flex flex-wrap gap-2"><button type="button" onClick={() => { setCallAudioOnly(m.callType === 'audio'); setActiveChannel(samePerson(m.sender, currentUser.name) ? m.recipient : m.sender); setIsCalling(true); }} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white text-indigo-700' : 'bg-indigo-600 text-white'}`}>Join</button><button type="button" onClick={() => window.open(m.roomUrl, '_blank', 'noopener,noreferrer')} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white/80 text-slate-700' : 'bg-white text-indigo-700 border border-indigo-100'}`}>Open</button></div>
+                              </div>
+                            )}
+                            {!m.deleted && renderAttachmentPreview(m, isMine)}
                           </div>
+                          {!isMine && <button type="button" onClick={(e) => openActionMenu(e, m)} className="mt-2 w-8 h-8 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 shadow-sm flex items-center justify-center opacity-100" title="Message options">⋮</button>}
                         </div>
-                      )}
-                      {renderAttachmentPreview(m, isMine)}
-                      
-                      <div className={`absolute ${isMine ? 'left-2' : 'right-2'} -bottom-5 flex items-center gap-1 bg-white border border-slate-100 rounded-full px-1.5 py-1 shadow-lg z-20`}>
-                        {reactionOptions.slice(0, 4).map(emoji => (
-                          <button key={`${m.id}-${emoji}`} type="button" onClick={(e) => { e.stopPropagation(); toggleMessageReaction(m, emoji); }} className="w-6 h-6 rounded-full hover:bg-indigo-50 text-sm flex items-center justify-center transition-transform hover:scale-125">{emoji}</button>
-                        ))}
-                        <button type="button" title="More reactions" onClick={(e) => { e.stopPropagation(); setOpenReactionMenuId(openReactionMenuId === m.id ? null : m.id); setOpenMessageMenuId(null); }} className="w-6 h-6 rounded-full hover:bg-slate-100 text-slate-500 text-xs font-black flex items-center justify-center">+</button>
+                        {reactions.length > 0 && <div className={`flex flex-wrap gap-1 mt-1 ${isMine ? 'justify-end' : 'justify-start'}`}>{reactions.map(([emoji, names]) => <button key={`${m.id}-${emoji}`} type="button" onClick={(e) => openReactionMenu(e, m)} title={(names || []).join(', ')} className="bg-white border border-slate-200 rounded-full px-2 py-0.5 text-xs shadow-sm hover:border-indigo-200"><span>{emoji}</span> <span className="font-black text-slate-500">{names.length}</span></button>)}</div>}
+                        <span className="text-[9px] font-bold text-slate-300 mt-1 mx-1 flex items-center gap-1">{m.time}{isMine && <span title={(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser.name)).length ? `Read by ${(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser.name)).map(r => `${readEntryName(r)} at ${r.time || ''}`).join(', ')}` : 'Sent'} className={(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser.name)).length ? 'text-blue-500' : 'text-slate-300'}>{(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser.name)).length ? '✓✓' : '✓'}</span>}</span>
                       </div>
-
-                      {openReactionMenuId === m.id && (
-                        <div className={`absolute ${isMine ? 'left-2' : 'right-2'} bottom-8 bg-white border border-slate-100 rounded-2xl shadow-2xl p-2 z-30`} style={{ width: 220 }}>
-                          <div className="grid grid-cols-8 gap-1">
-                            {reactionOptions.map(emoji => (
-                              <button key={`${m.id}-more-${emoji}`} type="button" onClick={(e) => { e.stopPropagation(); toggleMessageReaction(m, emoji); }} className="w-6 h-6 rounded-lg hover:bg-indigo-50 text-base flex items-center justify-center">{emoji}</button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      <button type="button" title="Message actions" onClick={(e) => { e.stopPropagation(); setOpenMessageMenuId(openMessageMenuId === m.id ? null : m.id); setOpenReactionMenuId(null); }} className={`absolute ${isMine ? '-left-9' : '-right-9'} top-2 p-1.5 text-slate-500 hover:text-indigo-600 bg-white shadow-sm rounded-full border border-slate-100 z-20`}>
-                        <MoreVertical size={14} />
-                      </button>
-
-                      {openMessageMenuId === m.id && (
-                        <div className={`absolute ${isMine ? 'left-0' : 'right-0'} top-9 bg-white border border-slate-100 rounded-2xl shadow-2xl overflow-hidden z-40 text-slate-700`} style={{ width: 190 }}>
-                          <button type="button" onClick={() => startReplyToMessage(m)} className="w-full flex items-center gap-2 px-3 py-2 text-xs font-black hover:bg-slate-50 text-left"><Reply className="w-4 h-4" /> Reply</button>
-                          <button type="button" onClick={() => forwardMessage(m)} className="w-full flex items-center gap-2 px-3 py-2 text-xs font-black hover:bg-slate-50 text-left"><Forward className="w-4 h-4" /> Forward</button>
-                          <button type="button" onClick={() => copyMessageText(m)} className="w-full flex items-center gap-2 px-3 py-2 text-xs font-black hover:bg-slate-50 text-left"><Copy className="w-4 h-4" /> {actionCopiedId === m.id ? 'Copied' : 'Copy'}</button>
-                          {isMine && <button type="button" onClick={() => startEditMessage(m)} className="w-full flex items-center gap-2 px-3 py-2 text-xs font-black hover:bg-slate-50 text-left"><Edit3 className="w-4 h-4" /> Edit</button>}
-                          {(isMine || currentUser.role === ROLES.ADMIN) && <button type="button" onClick={() => deleteMessageSafely(m)} className="w-full flex items-center gap-2 px-3 py-2 text-xs font-black hover:bg-red-50 text-red-600 text-left"><Trash2 className="w-4 h-4" /> Delete</button>}
-                        </div>
-                      )}
-                    </div>
-                    {Object.keys(getMessageReactions(m)).length > 0 && (
-                      <div className={`mt-5 flex flex-wrap gap-1 ${isMine ? 'justify-end' : 'justify-start'}`} style={{ maxWidth: '78%' }}>
-                        {Object.entries(getMessageReactions(m)).map(([emoji, names]) => (
-                          <button key={`${m.id}-${emoji}-count`} type="button" title={(names || []).join(', ')} onClick={() => toggleMessageReaction(m, emoji)} className={`px-2 py-0.5 rounded-full border text-[11px] font-black shadow-sm ${Array.isArray(names) && names.some(n => samePerson(n, currentUser.name)) ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'bg-white border-slate-100 text-slate-500'}`}>
-                            {emoji} {Array.isArray(names) ? names.length : 0}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    <span className="text-[9px] font-bold text-slate-300 mt-1 mx-1 flex items-center gap-1">
-                      {m.time}
-                      {isMine && (
-                        <span title={(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser.name)).length ? `Read by ${(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser.name)).map(r => `${readEntryName(r)} at ${r.time || ''}`).join(', ')}` : 'Sent'} className={(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser.name)).length ? 'text-blue-500' : 'text-slate-300'}>
-                          {(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser.name)).length ? '✓✓' : '✓'}
-                        </span>
-                      )}
-                    </span>
-                  </div>
-                )})}
-                <div ref={chatEndRef} />
-                {showLatestButton && !chatSearch && <button type="button" onClick={() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })} className="sticky bottom-2 left-1/2 -translate-x-1/2 bg-slate-800 text-white text-[11px] font-black px-4 py-2 rounded-full shadow-lg">Jump to latest</button>}
-              </div>
+                    );
+                  })}
+                  <div ref={chatEndRef} />
+                  {showLatestButton && !chatSearch && <button type="button" onClick={() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })} className="sticky bottom-2 left-1/2 -translate-x-1/2 bg-slate-800 text-white text-[11px] font-black px-4 py-2 rounded-full shadow-lg">Jump to latest</button>}
+                </div>
               </>
             )}
-            
+
             {!isCalling && showMentions && activeChannel === 'global' && (
               <div className="bg-white border-t-2 border-slate-100 max-h-40 overflow-y-auto absolute bottom-[70px] w-full shadow-lg z-20">
-                <button type="button" onClick={() => insertMention('all')} className="w-full text-left px-5 py-3 hover:bg-slate-50 text-sm font-bold text-slate-700 border-b border-slate-50 transition-colors bg-red-50">
-                  <span className="text-red-600 mr-1 font-black">@all</span> <span className="text-xs text-red-400 font-semibold ml-2">(Notify Everyone)</span>
-                </button>
-                {chatUsers.map(u => (
-                  <button type="button" key={u.id} onClick={() => insertMention(u.name)} className="w-full text-left px-5 py-3 hover:bg-slate-50 text-sm font-bold text-slate-700 border-b border-slate-50 transition-colors">
-                    <span className="text-indigo-600 mr-1">@</span>{u.name} <span className="text-xs text-slate-400 font-semibold ml-2">({u.role})</span>
-                  </button>
-                ))}
+                <button type="button" onClick={() => insertMention('all')} className="w-full text-left px-5 py-3 hover:bg-slate-50 text-sm font-bold text-slate-700 border-b border-slate-50 transition-colors bg-red-50"><span className="text-red-600 mr-1 font-black">@all</span> <span className="text-xs text-red-400 font-semibold ml-2">(Notify Everyone)</span></button>
+                {chatUsers.map(u => <button type="button" key={u.id} onClick={() => insertMention(u.name)} className="w-full text-left px-5 py-3 hover:bg-slate-50 text-sm font-bold text-slate-700 border-b border-slate-50 transition-colors"><span className="text-indigo-600 mr-1">@</span>{u.name} <span className="text-xs text-slate-400 font-semibold ml-2">({u.role})</span></button>)}
               </div>
             )}
 
             {!isCalling && (
-              <div className="kalpa-chat-inputbar p-3 bg-white border-t-2 border-slate-100 flex items-end space-x-2 z-10 relative" style={{ flexShrink: 0 }}>
-                {(replyTo || editingMessage) && (
-                  <div className="absolute left-3 right-3 bottom-[72px] bg-white border border-slate-100 rounded-2xl shadow-xl px-4 py-3 z-20 flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-[10px] font-black uppercase tracking-widest text-indigo-500">{editingMessage ? 'Editing message' : `Replying to ${replyTo?.sender}`}</p>
-                      <p className="text-xs font-bold text-slate-500 truncate">{editingMessage ? editingMessage.text : replyTo?.text}</p>
-                    </div>
-                    <button type="button" onClick={() => { setReplyTo(null); setEditingMessage(null); setMsg(''); }} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button>
-                  </div>
-                )}
+              <div className="kalpa-chat-inputbar p-3 bg-white border-t-2 border-slate-100 flex flex-col gap-2 z-10 relative shrink-0">
+                {(replyTo || editingMessage) && <div className="flex items-center justify-between gap-3 bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-2"><div className="min-w-0"><p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">{editingMessage ? 'Editing message' : `Replying to ${replyTo?.sender}`}</p><p className="text-xs font-bold text-slate-600 truncate">{editingMessage?.text || replyTo?.text || replyTo?.fileName}</p></div><button type="button" onClick={clearComposerContext} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button></div>}
                 {showEmojiPicker && (
-                  <div className="absolute bottom-[72px] left-3 right-3 bg-white border border-slate-100 rounded-2xl shadow-2xl p-3 z-30" style={{ maxHeight: 260, overflowY: 'auto' }}>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Emoji picker</span>
-                      <button type="button" onClick={() => setShowEmojiPicker(false)} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button>
-                    </div>
-                    <div className="space-y-3">
-                      {chatEmojiGroups.map(group => (
-                        <div key={group.label}>
-                          <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">{group.label}</div>
-                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(42px, 1fr))', gap: 8 }}>
-                            {group.emojis.map(emoji => (
-                              <button key={`${group.label}-${emoji}`} type="button" onClick={() => addEmojiToMessage(emoji)} className="rounded-xl bg-slate-50 hover:bg-indigo-50 text-xl transition-colors flex items-center justify-center" style={{ height: 42, minWidth: 0 }}>{emoji}</button>
-                            ))}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
+                  <div className="absolute bottom-[76px] left-3 right-3 bg-white border border-slate-100 rounded-2xl shadow-2xl p-3 z-30" style={{ maxHeight: 300, overflowY: 'auto' }}>
+                    <div className="flex items-center justify-between mb-2"><span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Emoji picker • tap multiple emojis before sending</span><button type="button" onClick={() => setShowEmojiPicker(false)} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button></div>
+                    <div className="space-y-3">{chatEmojiGroups.map(group => <div key={group.label}><div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">{group.label}</div><div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(42px, 1fr))', gap: 8 }}>{group.emojis.map(emoji => <button key={`${group.label}-${emoji}`} type="button" onClick={() => addEmojiToMessage(emoji)} className="rounded-xl bg-slate-50 hover:bg-indigo-50 text-xl transition-colors flex items-center justify-center" style={{ height: 42, minWidth: 0 }}>{emoji}</button>)}</div></div>)}</div>
                   </div>
                 )}
-                <label title="Attach file" className="p-2.5 text-slate-400 hover:text-indigo-600 bg-slate-50 hover:bg-indigo-50 rounded-xl transition-colors cursor-pointer">
-                  <Paperclip className="w-5 h-5" />
-                  <input type="file" className="hidden" accept="image/*,video/*,.pdf,.dwg,.dxf,.xls,.xlsx,.csv,.doc,.docx" onChange={handleChatFileUpload} />
-                </label>
-                <button type="button" title="Add emoji" onClick={() => setShowEmojiPicker(v => !v)} className={`p-2.5 rounded-xl transition-colors ${showEmojiPicker ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}><Smile className="w-5 h-5" /></button>
-                <button type="button" title={isRecordingVoice ? 'Stop voice note' : 'Record voice note'} onClick={isRecordingVoice ? stopVoiceRecording : startVoiceRecording} className={`p-2.5 rounded-xl transition-colors ${isRecordingVoice ? 'bg-red-50 text-red-600 animate-pulse' : 'bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}>{isRecordingVoice ? <Square className="w-5 h-5" /> : <Mic className="w-5 h-5" />}</button>
-                <textarea rows={1} value={msg} onChange={handleInputChange} onKeyDown={handleMessageKeyDown} placeholder={editingMessage ? "Edit your message..." : (activeChannel === 'global' ? "Message team or @mention..." : `Message ${activeChannel}...`)} className="flex-1 bg-slate-50 border border-slate-100 rounded-xl px-4 py-3 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all resize-none" style={{ minHeight: 48, maxHeight: 96, overflowY: 'auto' }} />
-                <button type="button" disabled={!msg.trim()} title={editingMessage ? 'Save edit' : 'Send message'} onClick={handleSend} className={`p-3 rounded-xl shadow-md transition-colors ${msg.trim() ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-slate-100 text-slate-300 cursor-not-allowed'}`}><Send className="w-5 h-5" /></button>
+                <div className="kalpa-chat-composer flex flex-col gap-2">
+                  <textarea ref={composerRef} rows={2} value={msg} onChange={handleInputChange} onKeyDown={handleMessageKeyDown} placeholder={editingMessage ? 'Edit your message...' : activeChannel === 'global' ? 'Message team or @mention...' : `Message ${activeChannel}...`} className="kalpa-chat-textarea w-full bg-slate-50 border border-slate-100 rounded-xl px-4 py-3 text-base font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all resize-none" style={{ minHeight: 58, maxHeight: 132, overflowY: 'auto' }} />
+                  <div className="kalpa-chat-actions-row flex items-center gap-2">
+                    <label title="Attach file" className="kalpa-chat-tool-btn p-2.5 text-slate-400 hover:text-indigo-600 bg-slate-50 hover:bg-indigo-50 rounded-xl transition-colors cursor-pointer"><Paperclip className="w-5 h-5" /><input type="file" className="hidden" accept="image/*,video/*,.pdf,.dwg,.dxf,.xls,.xlsx,.csv,.doc,.docx" onChange={handleChatFileUpload} /></label>
+                    <button type="button" title="Add emoji" onClick={() => setShowEmojiPicker(v => !v)} className={`kalpa-chat-tool-btn p-2.5 rounded-xl transition-colors ${showEmojiPicker ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}><Smile className="w-5 h-5" /></button>
+                    <button type="button" title={isRecordingVoice ? 'Stop voice note' : 'Record voice note'} onClick={isRecordingVoice ? stopVoiceRecording : startVoiceRecording} className={`kalpa-chat-tool-btn p-2.5 rounded-xl transition-colors ${isRecordingVoice ? 'bg-red-50 text-red-600 animate-pulse' : 'bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}>{isRecordingVoice ? <Square className="w-5 h-5" /> : <Mic className="w-5 h-5" />}</button>
+                    <div className="flex-1" />
+                    <button type="button" disabled={!msg.trim()} onClick={handleSend} className={`kalpa-chat-send-btn p-3 rounded-xl shadow-md transition-colors ${msg.trim() ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-slate-100 text-slate-300 cursor-not-allowed'}`}><Send className="w-5 h-5" /></button>
+                  </div>
+                </div>
               </div>
             )}
           </div>
         </div>
       )}
-      
+
+      {actionMenu && activeActionMessage && (
+        <div className="fixed z-[99999] bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden w-56" style={{ left: actionMenu.x, top: actionMenu.y }} onClick={(e) => e.stopPropagation()}>
+          <button type="button" onClick={() => replyToMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">↩ Reply</button>
+          <button type="button" onClick={(e) => openReactionMenu(e, activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">😊 React</button>
+          <button type="button" onClick={() => forwardMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">↗ Forward</button>
+          <button type="button" onClick={() => copyMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">⧉ Copy</button>
+          {samePerson(activeActionMessage.sender, currentUser.name) && !activeActionMessage.deleted && <button type="button" onClick={() => editMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">✎ Edit</button>}
+          <button type="button" onClick={() => deleteForMe(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">Hide for me</button>
+          {(samePerson(activeActionMessage.sender, currentUser.name) || currentUser.role === ROLES.ADMIN) && <button type="button" onClick={() => deleteForEveryone(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-black text-red-600 hover:bg-red-50">Delete for everyone</button>}
+        </div>
+      )}
+
+      {reactionMenu && activeReactionMessage && (
+        <div className="fixed z-[99999] bg-white border border-slate-200 rounded-2xl shadow-2xl p-2" style={{ left: reactionMenu.x, top: reactionMenu.y }} onClick={(e) => e.stopPropagation()}>
+          <div className="grid grid-cols-5 gap-1">{reactionEmojis.map(emoji => <button type="button" key={emoji} onClick={() => toggleReaction(activeReactionMessage, emoji)} className="w-10 h-10 rounded-xl text-xl hover:bg-indigo-50 flex items-center justify-center">{emoji}</button>)}</div>
+        </div>
+      )}
+
       <button type="button" onClick={() => { const nextOpen = !isOpen; setIsOpen(nextOpen); if (nextOpen) markCurrentChannelReadNow(activeChannel); }} className="bg-slate-800 hover:bg-slate-700 text-white p-4 rounded-2xl shadow-xl shadow-slate-300 transition-all hover:scale-105 relative">
         <MessageSquare className="w-7 h-7" />
-        {totalUnreadCount > 0 && !isOpen && (
-          <span className="absolute -top-2 -right-2 bg-red-500 text-white text-[11px] font-black px-2.5 py-1 rounded-full border-2 border-white shadow-sm animate-pulse">{totalUnreadCount}</span>
-        )}
+        {totalUnreadCount > 0 && !isOpen && <span className="absolute -top-2 -right-2 bg-red-500 text-white text-[11px] font-black px-2.5 py-1 rounded-full border-2 border-white shadow-sm animate-pulse">{totalUnreadCount}</span>}
       </button>
     </div>
   );
@@ -4449,25 +4457,19 @@ function AppShell() {
     }
   };
 
+
   const handleUpdateMessage = async (updatedMsg) => {
-    if (!updatedMsg || updatedMsg.id === undefined || updatedMsg.id === null) return;
-    const safeMsg = sanitizeChatMessageForCache(updatedMsg);
+    if (!updatedMsg || !updatedMsg.id) return;
+    const normalizedMsg = sanitizeChatMessageForCache({ ...updatedMsg });
     setChatMessages(prev => {
-      const next = (prev || []).map(m => String(m.id) === String(safeMsg.id) ? { ...m, ...safeMsg } : m).sort((a,b) => Number(a.id || 0) - Number(b.id || 0));
+      const next = (prev || []).map(m => String(m.id) === String(normalizedMsg.id) ? normalizedMsg : m).sort((a,b) => Number(a.id || 0) - Number(b.id || 0));
       if (isLocalMock) localStorage.setItem('kalpa_chats', JSON.stringify(sanitizeChatsForCache(next)));
       return next;
     });
-    if (firebaseUser) {
-      try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'chats', safeMsg.id.toString()), safeMsg); } catch(e){}
-    }
+    try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'chats', normalizedMsg.id.toString()), normalizedMsg); } catch(e){}
   };
 
   const handleDeleteMessage = async (msgId) => {
-    setChatMessages(prev => {
-      const next = (prev || []).filter(m => String(m.id) !== String(msgId));
-      if (isLocalMock) localStorage.setItem('kalpa_chats', JSON.stringify(sanitizeChatsForCache(next)));
-      return next;
-    });
     if (!firebaseUser) return;
     try { await deleteDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'chats', msgId.toString())); } catch(e){}
   };
@@ -4483,11 +4485,13 @@ function AppShell() {
   };
 
   const handleUpdateUser = async (u) => {
-    const normalizedUser = normalizeTeamUser(u);
+    let normalizedUser = normalizeTeamUser(u);
     setUsers(prev => {
       const source = normalizeTeamUsers(prev && prev.length ? prev : INITIAL_USERS);
-      const exists = source.some(x => x.id === normalizedUser.id);
-      const next = exists ? source.map(x => x.id === normalizedUser.id ? normalizeTeamUser({ ...x, ...normalizedUser }) : x) : [...source, normalizedUser];
+      const existing = source.find(x => String(x.id) === String(normalizedUser.id) || (normalizedUser.username && x.username === normalizedUser.username)) || {};
+      normalizedUser = normalizeTeamUser(createEmployeeLifecycleProfile(normalizedUser, existing));
+      const exists = source.some(x => String(x.id) === String(normalizedUser.id) || (normalizedUser.username && x.username === normalizedUser.username));
+      const next = exists ? source.map(x => (String(x.id) === String(normalizedUser.id) || (normalizedUser.username && x.username === normalizedUser.username)) ? normalizeTeamUser(createEmployeeLifecycleProfile({ ...x, ...normalizedUser }, x)) : x) : [...source, normalizedUser];
       saveLocal('kalpa_users', next);
       return next;
     });
@@ -5024,11 +5028,11 @@ function AppShell() {
         )}
       </main>
 
-      <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} />
+      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} />}
 
       {showNewLead && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex justify-center items-center p-4">
-          <div className="bg-white rounded-[2rem] w-full max-w-3xl max-h-[90vh] overflow-y-auto p-8 shadow-2xl animate-in zoom-in-95 duration-200 custom-scrollbar">
+        <div className="kalpa-lead-modal fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[80] flex justify-center items-center p-4">
+          <div className="kalpa-lead-modal-card bg-white rounded-[2rem] w-full max-w-3xl max-h-[90vh] overflow-y-auto p-8 shadow-2xl animate-in zoom-in-95 duration-200 custom-scrollbar">
              <div className="flex justify-between items-center mb-8 border-b-2 border-slate-100 pb-6">
                 <h2 className="text-3xl font-black text-slate-800 tracking-tight">Log New Case</h2>
                 <button type="button" onClick={() => setShowNewLead(false)} className="p-2.5 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors"><X className="w-6 h-6 text-slate-600"/></button>
@@ -5036,7 +5040,9 @@ function AppShell() {
              
              <form onSubmit={async (e) => {
                e.preventDefault();
+               if (isSubmittingLead) return;
                setIsSubmittingLead(true);
+               try {
                const fd = new FormData(e.target);
                
                const client = fd.get('client');
@@ -5047,7 +5053,12 @@ function AppShell() {
                const taskId = generateTraceableTaskId({ location, client, bankerName, customerName, projects });
                const docs = [];
                for (const file of leadFiles) {
-                  docs.push(await uploadProjectFile(file, taskId, 'source', currentUser.name));
+                  try {
+                    docs.push(await uploadProjectFile(file, taskId, 'source', currentUser.name));
+                  } catch (fileErr) {
+                    console.warn('Source file attach failed; creating task without this file:', fileErr);
+                    docs.push({ id: Date.now() + Math.random(), name: file.name, type: 'source', date: new Date().toLocaleDateString(), uploadedBy: currentUser.name, size: file.size || 0, mimeType: file.type || 'application/octet-stream', uploadFailed: true });
+                  }
                }
 
                const assignedTo = fd.get('assignedTo');
@@ -5074,11 +5085,31 @@ function AppShell() {
                    newP.timeline.push({ id: Date.now()+1, text: `${docs.length} Source File(s) Attached`, time: new Date().toLocaleString() });
                }
 
-               setProjects(prev => {
-                   const next = mergeProjectsByFreshness(prev.filter(p => String(p.id) !== String(newP.id)), [newP]);
-                   persistAndBroadcastProjects(next);
-                   return next;
-               });
+               const nextProjects = mergeProjectsByFreshness((projects || []).filter(p => String(p.id) !== String(newP.id)), [newP]);
+               persistAndBroadcastProjects(nextProjects);
+               setProjects(nextProjects);
+               setSelectedBoardDate(formatDateKey(newP.createdAt));
+               setActiveTab('board');
+               try { window.localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(filterDeletedProjects(nextProjects)))); } catch(e) {}
+               if (USE_BACKEND_STATE && backendStateReady && isDbReady) {
+                 try {
+                   const saveRes = await fetch(`${API_BASE}/api/state`, {
+                     method: 'POST',
+                     headers: { 'Content-Type': 'application/json' },
+                     body: JSON.stringify({
+                       users: normalizeTeamUsers(users && users.length ? users : INITIAL_USERS),
+                       projects: sanitizeProjectsForCache(filterDeletedProjects(nextProjects)),
+                       deletedProjectIds: getDeletedProjectIds(),
+                       chatMessages: sanitizeChatsForCache(chatMessages || []),
+                       notifications: notifications || [],
+                       attendanceLogs: attendanceLogs || []
+                     })
+                   });
+                   if (!saveRes.ok) throw new Error(`Backend save failed: ${saveRes.status}`);
+                 } catch (saveErr) {
+                   console.warn('Immediate task save failed; local task is kept and background sync will retry:', saveErr.message);
+                 }
+               }
                if (firebaseUser && !isLocalMock) {
                    try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', newP.id), stripLargeLocalFilesForCloud(newP)); } catch(e){}
                }
@@ -5087,9 +5118,15 @@ function AppShell() {
                    const targetRole = activeUsers.find(u => u.name === newP.assignedTo)?.role || ROLES.DESIGNER;
                    addNotification(targetRole, newP.assignedTo, `New Task Assigned: ${newP.id}`, 'info');
                }
-               setIsSubmittingLead(false);
                setShowNewLead(false);
+               setLeadFiles([]);
                setNewTaskCategory(TASK_CATEGORIES[0]);
+               } catch (err) {
+                 console.error('Create task failed:', err);
+                 alert(`Task could not be created: ${err?.message || 'Please try again.'}`);
+               } finally {
+                 setIsSubmittingLead(false);
+               }
              }} className="space-y-6">
                
                <div className="grid grid-cols-1 sm:grid-cols-4 gap-5">
@@ -5175,7 +5212,7 @@ function AppShell() {
                   </label>
                </div>
 
-               <button type="submit" disabled={isSubmittingLead} className={`w-full py-4 text-white rounded-2xl font-black text-lg shadow-xl transition-all mt-8 ${isSubmittingLead ? 'bg-indigo-400 cursor-not-allowed' : 'bg-slate-800 hover:bg-slate-700 shadow-slate-200 hover:-translate-y-1'}`}>
+               <button type="submit" disabled={isSubmittingLead} className={`kalpa-create-task-button w-full py-4 text-white rounded-2xl font-black text-lg shadow-xl transition-all mt-8 ${isSubmittingLead ? 'bg-indigo-400 cursor-not-allowed' : 'bg-slate-800 hover:bg-slate-700 shadow-slate-200 hover:-translate-y-1'}`}>
                   {isSubmittingLead ? 'Uploading Files & Creating Task...' : 'Create Task'}
                </button>
              </form>

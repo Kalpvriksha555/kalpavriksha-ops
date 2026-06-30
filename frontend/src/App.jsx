@@ -350,6 +350,105 @@ const INITIAL_USERS = [
 ];
 
 
+const createEmployeeLifecycleProfile = (user = {}, existing = {}) => {
+  const now = Date.now();
+  const role = normalizeRole(user.role || existing.role || ROLES.DESIGNER);
+  const status = normalizeStatus(user.status || existing.status || 'APPROVED');
+  const isArchived = ['DELETED', 'REJECTED', 'ARCHIVED'].includes(status);
+  const isRestricted = status === 'RESTRICTED';
+  const lifecycleStatus = isArchived ? 'ARCHIVED' : (isRestricted ? 'RESTRICTED' : 'ACTIVE');
+  const base = { ...existing, ...user, role, status };
+  const profileCreatedAt = existing.profileCreatedAt || user.profileCreatedAt || now;
+  const profileUpdatedAt = now;
+  const workingRole = role === ROLES.ADMIN ? 'ADMIN' : (role === ROLES.MANAGER ? 'MANAGER' : 'DESIGNER');
+  const active = lifecycleStatus === 'ACTIVE';
+  const lifecycle = {
+    ...(existing.lifecycle || {}),
+    ...(user.lifecycle || {}),
+    status: lifecycleStatus,
+    active,
+    restricted: isRestricted,
+    archived: isArchived,
+    createdAt: existing.lifecycle?.createdAt || user.lifecycle?.createdAt || profileCreatedAt,
+    updatedAt: profileUpdatedAt,
+    archivedAt: isArchived ? (user.deletedAt || user.archivedAt || existing.lifecycle?.archivedAt || now) : null,
+    archivedBy: isArchived ? (user.deletedBy || user.archivedBy || existing.lifecycle?.archivedBy || '') : ''
+  };
+  const normalized = {
+    ...base,
+    profileCreatedAt,
+    profileUpdatedAt,
+    lifecycleStatus,
+    lifecycle,
+    attendanceProfile: {
+      createdAt: existing.attendanceProfile?.createdAt || user.attendanceProfile?.createdAt || profileCreatedAt,
+      active,
+      includeInAttendance: active && role !== ROLES.ADMIN,
+      lastPreparedAt: profileUpdatedAt,
+      ...(existing.attendanceProfile || {}),
+      ...(user.attendanceProfile || {})
+    },
+    availabilityProfile: {
+      createdAt: existing.availabilityProfile?.createdAt || user.availabilityProfile?.createdAt || profileCreatedAt,
+      active,
+      trackAvailability: active,
+      defaultAvailability: 'Unavailable',
+      ...(existing.availabilityProfile || {}),
+      ...(user.availabilityProfile || {})
+    },
+    chatProfile: {
+      createdAt: existing.chatProfile?.createdAt || user.chatProfile?.createdAt || profileCreatedAt,
+      active,
+      directMessages: active,
+      mentions: active,
+      ...(existing.chatProfile || {}),
+      ...(user.chatProfile || {})
+    },
+    performanceProfile: {
+      createdAt: existing.performanceProfile?.createdAt || user.performanceProfile?.createdAt || profileCreatedAt,
+      active: active && role !== ROLES.ADMIN,
+      completedTasks: existing.performanceProfile?.completedTasks || user.performanceProfile?.completedTasks || 0,
+      revisionsHandled: existing.performanceProfile?.revisionsHandled || user.performanceProfile?.revisionsHandled || 0,
+      ...(existing.performanceProfile || {}),
+      ...(user.performanceProfile || {})
+    },
+    analyticsProfile: {
+      createdAt: existing.analyticsProfile?.createdAt || user.analyticsProfile?.createdAt || profileCreatedAt,
+      active,
+      role: workingRole,
+      ...(existing.analyticsProfile || {}),
+      ...(user.analyticsProfile || {})
+    },
+    workloadProfile: {
+      createdAt: existing.workloadProfile?.createdAt || user.workloadProfile?.createdAt || profileCreatedAt,
+      active: active && role !== ROLES.ADMIN,
+      dailyLimit: existing.workloadProfile?.dailyLimit || user.workloadProfile?.dailyLimit || (role === ROLES.MANAGER || role === ROLES.DESIGNER ? 15 : 0),
+      activeTasks: existing.workloadProfile?.activeTasks || user.workloadProfile?.activeTasks || 0,
+      ...(existing.workloadProfile || {}),
+      ...(user.workloadProfile || {})
+    },
+    notificationPreferences: {
+      createdAt: existing.notificationPreferences?.createdAt || user.notificationPreferences?.createdAt || profileCreatedAt,
+      enabled: active,
+      task: active,
+      chat: active,
+      mention: active,
+      meeting: active,
+      ...(existing.notificationPreferences || {}),
+      ...(user.notificationPreferences || {})
+    }
+  };
+  if (!active) {
+    normalized.isOnline = false;
+    normalized.availability = 'Unavailable';
+    normalized.breakStartedAt = null;
+    normalized.lastLogoutAt = normalized.lastLogoutAt || now;
+    normalized.lastSeenAt = normalized.lastSeenAt || now;
+    normalized.availabilityUpdatedAt = normalized.availabilityUpdatedAt || now;
+  }
+  return normalized;
+};
+
 const normalizeTeamUser = (u = {}) => {
   const rawName = String(u.name || '').trim();
   const rawUsername = String(u.username || '').trim();
@@ -365,12 +464,13 @@ const normalizeTeamUser = (u = {}) => {
     lastSeenAt: u.lastSeenAt || u.lastLogoutAt || null
   };
   const online = isUserActuallyOnline(normalized);
-  return online ? normalized : {
+  const presenceSafe = online ? normalized : {
     ...normalized,
     isOnline: false,
     availability: 'Unavailable',
     breakStartedAt: null
   };
+  return createEmployeeLifecycleProfile(presenceSafe, u);
 };
 
 const normalizeTeamUsers = (list = []) => {
@@ -4385,11 +4485,13 @@ function AppShell() {
   };
 
   const handleUpdateUser = async (u) => {
-    const normalizedUser = normalizeTeamUser(u);
+    let normalizedUser = normalizeTeamUser(u);
     setUsers(prev => {
       const source = normalizeTeamUsers(prev && prev.length ? prev : INITIAL_USERS);
-      const exists = source.some(x => x.id === normalizedUser.id);
-      const next = exists ? source.map(x => x.id === normalizedUser.id ? normalizeTeamUser({ ...x, ...normalizedUser }) : x) : [...source, normalizedUser];
+      const existing = source.find(x => String(x.id) === String(normalizedUser.id) || (normalizedUser.username && x.username === normalizedUser.username)) || {};
+      normalizedUser = normalizeTeamUser(createEmployeeLifecycleProfile(normalizedUser, existing));
+      const exists = source.some(x => String(x.id) === String(normalizedUser.id) || (normalizedUser.username && x.username === normalizedUser.username));
+      const next = exists ? source.map(x => (String(x.id) === String(normalizedUser.id) || (normalizedUser.username && x.username === normalizedUser.username)) ? normalizeTeamUser(createEmployeeLifecycleProfile({ ...x, ...normalizedUser }, x)) : x) : [...source, normalizedUser];
       saveLocal('kalpa_users', next);
       return next;
     });

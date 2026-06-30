@@ -175,20 +175,59 @@ const normalizeRole = (role = '') => {
   return role || '';
 };
 const normalizeStatus = (status = 'APPROVED') => String(status || 'APPROVED').trim().toUpperCase() || 'APPROVED';
-const systemUserPattern = /operations\s*manager|^faraz$/i;
+const systemUserPattern = /operations\s*manager/i;
 const teamIdentityKey = (u = {}) => String(u.username || u.name || u.id || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const validTeamRole = (role = '') => ['Admin','Manager','Designer'].includes(normalizeRole(role));
+function employeeLifecycleProfile(user = {}, existing = {}) {
+  const nowMs = Date.now();
+  const role = normalizeRole(user.role || existing.role || 'Designer');
+  const status = normalizeStatus(user.status || existing.status || 'APPROVED');
+  const isArchived = ['DELETED', 'REJECTED', 'ARCHIVED'].includes(status);
+  const isRestricted = status === 'RESTRICTED';
+  const lifecycleStatus = isArchived ? 'ARCHIVED' : (isRestricted ? 'RESTRICTED' : 'ACTIVE');
+  const active = lifecycleStatus === 'ACTIVE';
+  const profileCreatedAt = existing.profileCreatedAt || user.profileCreatedAt || nowMs;
+  const base = { ...existing, ...user, role, status, profileCreatedAt, profileUpdatedAt: nowMs, lifecycleStatus };
+  base.lifecycle = {
+    ...(existing.lifecycle || {}),
+    ...(user.lifecycle || {}),
+    status: lifecycleStatus,
+    active,
+    restricted: isRestricted,
+    archived: isArchived,
+    createdAt: existing.lifecycle?.createdAt || user.lifecycle?.createdAt || profileCreatedAt,
+    updatedAt: nowMs,
+    archivedAt: isArchived ? (user.deletedAt || user.archivedAt || existing.lifecycle?.archivedAt || nowMs) : null,
+    archivedBy: isArchived ? (user.deletedBy || user.archivedBy || existing.lifecycle?.archivedBy || '') : ''
+  };
+  base.attendanceProfile = { createdAt: profileCreatedAt, active, includeInAttendance: active && role !== 'Admin', lastPreparedAt: nowMs, ...(existing.attendanceProfile || {}), ...(user.attendanceProfile || {}) };
+  base.availabilityProfile = { createdAt: profileCreatedAt, active, trackAvailability: active, defaultAvailability: 'Unavailable', ...(existing.availabilityProfile || {}), ...(user.availabilityProfile || {}) };
+  base.chatProfile = { createdAt: profileCreatedAt, active, directMessages: active, mentions: active, ...(existing.chatProfile || {}), ...(user.chatProfile || {}) };
+  base.performanceProfile = { createdAt: profileCreatedAt, active: active && role !== 'Admin', completedTasks: 0, revisionsHandled: 0, ...(existing.performanceProfile || {}), ...(user.performanceProfile || {}) };
+  base.analyticsProfile = { createdAt: profileCreatedAt, active, role: role.toUpperCase(), ...(existing.analyticsProfile || {}), ...(user.analyticsProfile || {}) };
+  base.workloadProfile = { createdAt: profileCreatedAt, active: active && role !== 'Admin', dailyLimit: role === 'Admin' ? 0 : 15, activeTasks: 0, ...(existing.workloadProfile || {}), ...(user.workloadProfile || {}) };
+  base.notificationPreferences = { createdAt: profileCreatedAt, enabled: active, task: active, chat: active, mention: active, meeting: active, ...(existing.notificationPreferences || {}), ...(user.notificationPreferences || {}) };
+  if (!active) {
+    base.isOnline = false;
+    base.availability = 'Unavailable';
+    base.breakStartedAt = null;
+    base.lastLogoutAt ||= nowMs;
+    base.lastSeenAt ||= nowMs;
+    base.availabilityUpdatedAt ||= nowMs;
+  }
+  return base;
+}
 function cleanTeamUsers(users = []) {
   const map = new Map();
   (users || []).forEach(raw => {
     if (!raw) return;
-    const u = { ...raw, role: normalizeRole(raw.role), status: normalizeStatus(raw.status || 'APPROVED') };
+    const u = employeeLifecycleProfile({ ...raw, role: normalizeRole(raw.role), status: normalizeStatus(raw.status || 'APPROVED') }, map.get(teamIdentityKey(raw)) || {});
     if (!validTeamRole(u.role)) return;
     if (systemUserPattern.test(String(u.name || '')) || systemUserPattern.test(String(u.username || ''))) return;
-    if (u.status === 'DELETED' || u.status === 'REJECTED') return;
+    if (u.status === 'DELETED' || u.status === 'REJECTED' || u.status === 'ARCHIVED') return;
     const key = teamIdentityKey(u);
     if (!key) return;
-    map.set(key, { ...(map.get(key) || {}), ...u });
+    map.set(key, employeeLifecycleProfile({ ...(map.get(key) || {}), ...u }, map.get(key) || {}));
   });
   return [...map.values()];
 }
