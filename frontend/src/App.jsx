@@ -1963,8 +1963,9 @@ const CommandCentreView = ({ projects = [], users = [], onSelectProject, current
   const [dateKey, setDateKey] = useState(formatDateKey());
   const [availabilityFilter, setAvailabilityFilter] = useState('Available');
   const metrics = getTodayMetrics(projects, dateKey);
-  const activeBoard = metrics.activeToday.sort((a,b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const activeBoard = metrics.activeToday.slice().sort((a,b) => (b.createdAt || 0) - (a.createdAt || 0));
   const people = getOperationalUsers(users || [], { includeAdmins: true });
+  const workingTeam = people.filter(u => u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER);
   const activeTasksFor = (userName) => projects.filter(p => normalizePersonName(p.assignedTo) === normalizePersonName(userName) && p.status !== 'Completed');
   const nowMs = Date.now();
   const availablePeople = people.filter(u => isUserActuallyOnline(u, nowMs) && (u.role === ROLES.ADMIN || (u.availability !== 'Break' && activeTasksFor(u.name).length === 0))); // admins shown available but no free-since
@@ -1976,21 +1977,79 @@ const CommandCentreView = ({ projects = [], users = [], onSelectProject, current
   const breaks = breakPeople.length;
   const availabilityGroups = { Available: availablePeople, Busy: busyPeople, Break: breakPeople, Offline: offlinePeople };
   const selectedAvailabilityPeople = availabilityGroups[availabilityFilter] || [];
+  const completionRate = metrics.received ? Math.round((metrics.completed / metrics.received) * 100) : 0;
+  const pendingNow = activeBoard.filter(p => p.status !== 'Completed').length;
+  const delayedCount = activeBoard.filter(p => getSlaInfo(p).label === 'Delayed').length;
+  const nearSlaCount = activeBoard.filter(p => getSlaInfo(p).label === 'Near SLA').length;
+  const activeCapacity = workingTeam.reduce((sum, u) => sum + activeTasksFor(u.name).length, 0);
+  const capacityLimit = workingTeam.reduce((sum, u) => sum + Number(u.dailyLimit || u.taskLimit || 10), 0) || Math.max(workingTeam.length * 10, 1);
+  const capacityPct = Math.min(100, Math.round((activeCapacity / capacityLimit) * 100));
+  const statusFlow = [
+    ['Received', metrics.received, 'bg-blue-500'],
+    ['Carried', metrics.carriedCount, 'bg-orange-500'],
+    ['Drafting', metrics.drafting, 'bg-indigo-500'],
+    ['Review', metrics.review, 'bg-purple-500'],
+    ['Completed', metrics.completed, 'bg-emerald-500'],
+    ['Revisions', metrics.revisions.length, 'bg-red-500']
+  ];
+  const maxFlow = Math.max(...statusFlow.map(([, value]) => Number(value) || 0), 1);
+  const workloadCards = workingTeam.map(u => {
+    const active = activeTasksFor(u.name);
+    const completedToday = projects.filter(p => normalizePersonName(p.assignedTo) === normalizePersonName(u.name) && p.status === 'Completed' && formatDateKey(p.completedAt || p.createdAt) === dateKey).length;
+    const revisions = projects.filter(p => normalizePersonName(p.assignedTo) === normalizePersonName(u.name) && (p.subTasks || []).some(st => st.status !== 'Done')).length;
+    const limit = Number(u.dailyLimit || u.taskLimit || 10) || 10;
+    const loadPct = Math.min(100, Math.round((active.length / limit) * 100));
+    return { ...u, active, completedToday, revisions, limit, loadPct };
+  }).sort((a,b) => b.active.length - a.active.length || b.completedToday - a.completedToday || a.name.localeCompare(b.name));
+  const topPerformers = workloadCards.slice().sort((a,b) => b.completedToday - a.completedToday || a.active.length - b.active.length).slice(0, 4);
   const stats = [
     ['Cases Received', metrics.received, 'bg-blue-50 text-blue-700 border-blue-100'],
-    ['Carried Forward', metrics.carriedCount, 'bg-orange-50 text-orange-700 border-orange-100'],
-    ['Drafting', metrics.drafting, 'bg-indigo-50 text-indigo-700 border-indigo-100'],
-    ['Review', metrics.review, 'bg-purple-50 text-purple-700 border-purple-100'],
-    ['Completed', metrics.completed, 'bg-emerald-50 text-emerald-700 border-emerald-100'],
-    ['Urgent Revisions', metrics.revisions.length, 'bg-red-50 text-red-700 border-red-100']
+    ['Active Pending', pendingNow, 'bg-orange-50 text-orange-700 border-orange-100'],
+    ['Completion Rate', `${completionRate}%`, 'bg-emerald-50 text-emerald-700 border-emerald-100'],
+    ['Delayed SLA', delayedCount, 'bg-red-50 text-red-700 border-red-100'],
+    ['Near SLA', nearSlaCount, 'bg-amber-50 text-amber-700 border-amber-100'],
+    ['Urgent Revisions', metrics.revisions.length, 'bg-purple-50 text-purple-700 border-purple-100']
   ];
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
       <div className="flex flex-col sm:flex-row justify-between sm:items-end gap-4">
-        <div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Command Centre</h1><p className="text-slate-500 font-medium mt-2">Fresh daily operations with pending work carried forward automatically.</p></div>
+        <div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Command Centre</h1><p className="text-slate-500 font-medium mt-2">Live operations snapshot with workload, SLA, productivity, and carried-forward work.</p></div>
         <input type="date" value={dateKey} onChange={e => setDateKey(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none" />
       </div>
+
       <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">{stats.map(([label, value, cls]) => <div key={label} className={`${cls} border-2 rounded-3xl p-5 shadow-sm`}><p className="text-[10px] font-black uppercase tracking-widest opacity-80">{label}</p><p className="text-3xl font-black mt-2">{value}</p></div>)}</div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        <div className="xl:col-span-2 bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
+          <div className="flex items-start justify-between gap-4 mb-5">
+            <div><h2 className="font-black text-slate-800 text-xl flex items-center"><BarChart3 className="w-5 h-5 mr-2 text-indigo-500" /> Operations Flow</h2><p className="text-xs font-bold text-slate-400 mt-1">Pending vs completed trend for the selected day.</p></div>
+            <Badge colorClass={completionRate >= 70 ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : completionRate >= 40 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}>{completionRate}% Done</Badge>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+            {statusFlow.map(([label, value, color]) => (
+              <div key={label} className="bg-slate-50 border border-slate-100 rounded-2xl p-4">
+                <div className="h-28 flex items-end justify-center">
+                  <div className={`${color} rounded-t-xl w-full max-w-[42px] transition-all`} style={{ height: `${Math.max(8, (Number(value || 0) / maxFlow) * 100)}%` }}></div>
+                </div>
+                <p className="text-center text-2xl font-black text-slate-800 mt-3">{value}</p>
+                <p className="text-center text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
+          <h3 className="font-black text-slate-800 mb-1">Active Workload</h3><p className="text-xs font-bold text-slate-400 mb-4">Current assigned load across managers/designers.</p>
+          <div className="flex items-end justify-between mb-3"><p className="text-4xl font-black text-slate-800">{activeCapacity}</p><p className="text-xs font-black text-slate-400 uppercase tracking-widest">of {capacityLimit} capacity</p></div>
+          <div className="h-4 bg-slate-100 rounded-full overflow-hidden mb-4"><div className="h-full bg-indigo-500 rounded-full transition-all" style={{ width: `${capacityPct}%` }}></div></div>
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <div className="bg-blue-50 border border-blue-100 rounded-2xl p-3"><p className="font-black text-blue-700">{free}</p><p className="text-[9px] font-black uppercase text-blue-500">Available</p></div>
+            <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-3"><p className="font-black text-emerald-700">{busy}</p><p className="text-[9px] font-black uppercase text-emerald-500">Busy</p></div>
+            <div className="bg-amber-50 border border-amber-100 rounded-2xl p-3"><p className="font-black text-amber-700">{breaks}</p><p className="text-[9px] font-black uppercase text-amber-500">Break</p></div>
+          </div>
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
           <div className="p-5 border-b-2 border-slate-100"><h2 className="font-black text-slate-800 text-xl">Daily Operations Board</h2><p className="text-xs font-bold text-slate-400 mt-1">Includes today's tasks plus older pending tasks carried forward.</p></div>
@@ -2003,7 +2062,7 @@ const CommandCentreView = ({ projects = [], users = [], onSelectProject, current
           <div className="bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
             <h3 className="font-black text-slate-800 mb-1">Team Availability</h3><p className="text-xs font-bold text-slate-400 mb-4">Click Available, Busy, Break, or Offline to see the members in that status.</p>
             <div className="grid grid-cols-4 gap-2 mb-4">
-              {[['Available', free, 'bg-blue-50 text-blue-700 border-blue-100'], ['Busy', busy, 'bg-emerald-50 text-emerald-700 border-emerald-100'], ['Break', breaks, 'bg-amber-50 text-amber-700 border-amber-100'], ['Offline', offlinePeople.length, 'bg-slate-50 text-slate-600 border-slate-100']].map(([label, count, cls]) => (
+              {[["Available", free, "bg-blue-50 text-blue-700 border-blue-100"], ["Busy", busy, "bg-emerald-50 text-emerald-700 border-emerald-100"], ["Break", breaks, "bg-amber-50 text-amber-700 border-amber-100"], ["Offline", offlinePeople.length, "bg-slate-50 text-slate-600 border-slate-100"]].map(([label, count, cls]) => (
                 <button key={label} type="button" onClick={() => setAvailabilityFilter(label)} className={`${cls} border-2 p-3 rounded-2xl text-center font-black transition-all ${availabilityFilter === label ? 'ring-2 ring-slate-300 scale-[1.02]' : 'hover:scale-[1.01]'}`}>
                   {count}<p className="text-[10px] uppercase tracking-widest">{label}</p>
                 </button>
@@ -2035,32 +2094,56 @@ const CommandCentreView = ({ projects = [], users = [], onSelectProject, current
           <div className="bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm"><h3 className="font-black text-slate-800 mb-4">Urgent Revision Queue</h3>{metrics.revisions.slice(0,5).map(p => <button key={p.id} onClick={() => onSelectProject(p)} className="w-full text-left bg-red-50 border border-red-100 p-3 rounded-xl mb-2"><p className="font-black text-red-700 text-xs">{p.id}</p><p className="text-[10px] font-bold text-red-500">{p.subTasks?.length || 0} revision items</p></button>)}{metrics.revisions.length === 0 && <p className="text-sm text-slate-400 font-bold">No urgent revisions.</p>}</div>
         </div>
       </div>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
-          <h3 className="font-black text-slate-800 mb-4 flex items-center"><Clock className="w-5 h-5 mr-2 text-indigo-500" /> SLA Tracking</h3>
-          <div className="space-y-3 max-h-72 overflow-y-auto custom-scrollbar">
-            {activeBoard.slice().sort((a,b) => getSlaInfo(b).ageHours - getSlaInfo(a).ageHours).slice(0,8).map(p => { const sla = getSlaInfo(p); return (
-              <button key={p.id} type="button" onClick={() => onSelectProject(p)} className="w-full text-left border border-slate-100 hover:border-indigo-100 hover:bg-slate-50 rounded-2xl p-4 transition-all">
-                <div className="flex justify-between items-start gap-3">
-                  <div><p className="font-black text-slate-800">{p.id}</p><p className="text-xs font-bold text-slate-400 mt-1">Draft: {sla.drafting} • Review: {sla.review} • Total: {sla.total}</p></div>
-                  <Badge colorClass={sla.colorClass}>{sla.label}</Badge>
-                </div>
-              </button>
-            )})}
-            {activeBoard.length === 0 && <p className="text-sm text-slate-400 font-bold text-center py-8">No SLA items for this date.</p>}
+
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        <div className="xl:col-span-2 bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
+          <div className="flex items-center justify-between gap-3 mb-4"><h3 className="font-black text-slate-800 flex items-center"><Users className="w-5 h-5 mr-2 text-indigo-500" /> Designer Performance Cards</h3><span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Active workload</span></div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-96 overflow-y-auto custom-scrollbar pr-1">
+            {workloadCards.map(member => (
+              <div key={member.id} className="border border-slate-100 bg-slate-50 rounded-2xl p-4">
+                <div className="flex items-start justify-between gap-3 mb-3"><div><p className="font-black text-slate-800">{member.name}</p><p className="text-[11px] font-bold text-slate-400">{member.role} • {member.active.length}/{member.limit} active</p></div><Badge colorClass={member.loadPct >= 90 ? 'bg-red-50 text-red-700 border-red-100' : member.loadPct >= 60 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-emerald-50 text-emerald-700 border-emerald-100'}>{member.loadPct}%</Badge></div>
+                <div className="h-2 bg-white rounded-full overflow-hidden mb-3"><div className="h-full bg-indigo-500 rounded-full" style={{ width: `${member.loadPct}%` }}></div></div>
+                <div className="grid grid-cols-3 gap-2 text-center"><div className="bg-white rounded-xl p-2"><p className="font-black text-slate-800">{member.active.length}</p><p className="text-[9px] font-black uppercase text-slate-400">Active</p></div><div className="bg-white rounded-xl p-2"><p className="font-black text-emerald-600">{member.completedToday}</p><p className="text-[9px] font-black uppercase text-slate-400">Done</p></div><div className="bg-white rounded-xl p-2"><p className="font-black text-red-500">{member.revisions}</p><p className="text-[9px] font-black uppercase text-slate-400">Revisions</p></div></div>
+              </div>
+            ))}
+            {workloadCards.length === 0 && <p className="text-sm text-slate-400 font-bold text-center py-8">No designer or manager workload available.</p>}
           </div>
         </div>
-        <div className="bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
-          <h3 className="font-black text-slate-800 mb-4 flex items-center"><Bell className="w-5 h-5 mr-2 text-indigo-500" /> Latest Activity</h3>
-          <div className="space-y-3 max-h-72 overflow-y-auto custom-scrollbar">
-            {projects.slice().sort((a,b) => (b.updatedAt || b.completedAt || b.submittedAt || b.createdAt || 0) - (a.updatedAt || a.completedAt || a.submittedAt || a.createdAt || 0)).slice(0,8).map(p => (
-              <button key={p.id} type="button" onClick={() => onSelectProject(p)} className="w-full text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 rounded-2xl p-4 transition-all">
-                <p className="font-black text-slate-800">{p.id} • {p.status}</p>
-                <p className="text-xs font-bold text-slate-500 mt-1">{getCustomerDisplayName(p)} • {p.location} • {p.assignedTo || 'Unassigned'}</p>
-              </button>
-            ))}
-            {projects.length === 0 && <p className="text-sm text-slate-400 font-bold text-center py-8">No recent activity yet.</p>}
+        <div className="space-y-6">
+          <div className="bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
+            <h3 className="font-black text-slate-800 mb-4 flex items-center"><Star className="w-5 h-5 mr-2 text-amber-500" /> Top Today</h3>
+            <div className="space-y-3">
+              {topPerformers.map((member, idx) => <div key={member.id} className="flex items-center justify-between bg-slate-50 border border-slate-100 rounded-2xl p-3"><div><p className="font-black text-slate-800 text-sm">{idx + 1}. {member.name}</p><p className="text-[11px] font-bold text-slate-400">{member.completedToday} completed • {member.active.length} active</p></div><Badge colorClass="bg-amber-50 text-amber-700 border-amber-100">{member.role}</Badge></div>)}
+              {topPerformers.length === 0 && <p className="text-sm text-slate-400 font-bold">No completion data yet.</p>}
+            </div>
           </div>
+          <div className="bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
+            <h3 className="font-black text-slate-800 mb-4 flex items-center"><Clock className="w-5 h-5 mr-2 text-indigo-500" /> SLA Tracking</h3>
+            <div className="space-y-3 max-h-72 overflow-y-auto custom-scrollbar">
+              {activeBoard.slice().sort((a,b) => getSlaInfo(b).ageHours - getSlaInfo(a).ageHours).slice(0,8).map(p => { const sla = getSlaInfo(p); return (
+                <button key={p.id} type="button" onClick={() => onSelectProject(p)} className="w-full text-left border border-slate-100 hover:border-indigo-100 hover:bg-slate-50 rounded-2xl p-4 transition-all">
+                  <div className="flex justify-between items-start gap-3">
+                    <div><p className="font-black text-slate-800">{p.id}</p><p className="text-xs font-bold text-slate-400 mt-1">Draft: {sla.drafting} • Review: {sla.review} • Total: {sla.total}</p></div>
+                    <Badge colorClass={sla.colorClass}>{sla.label}</Badge>
+                  </div>
+                </button>
+              )})}
+              {activeBoard.length === 0 && <p className="text-sm text-slate-400 font-bold text-center py-8">No SLA items for this date.</p>}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
+        <h3 className="font-black text-slate-800 mb-4 flex items-center"><Bell className="w-5 h-5 mr-2 text-indigo-500" /> Latest Activity</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-72 overflow-y-auto custom-scrollbar">
+          {projects.slice().sort((a,b) => (b.updatedAt || b.completedAt || b.submittedAt || b.createdAt || 0) - (a.updatedAt || a.completedAt || a.submittedAt || a.createdAt || 0)).slice(0,10).map(p => (
+            <button key={p.id} type="button" onClick={() => onSelectProject(p)} className="w-full text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 rounded-2xl p-4 transition-all">
+              <p className="font-black text-slate-800">{p.id} • {p.status}</p>
+              <p className="text-xs font-bold text-slate-500 mt-1">{getCustomerDisplayName(p)} • {p.location} • {p.assignedTo || 'Unassigned'}</p>
+            </button>
+          ))}
+          {projects.length === 0 && <p className="text-sm text-slate-400 font-bold text-center py-8">No recent activity yet.</p>}
         </div>
       </div>
     </div>
@@ -3895,6 +3978,54 @@ const ActiveToasts = ({ notifications = [], currentUser }) => {
   );
 };
 
+const NOTIFICATION_CATEGORIES = ['All', 'Tasks', 'Urgent', 'Mentions', 'Chat', 'System'];
+
+const getNotificationCategory = (notif = {}) => {
+  const type = String(notif.type || '').toLowerCase();
+  const title = String(notif.title || '').toLowerCase();
+  if (type === 'urgent' || title.includes('urgent') || title.includes('revision')) return 'Urgent';
+  if (type === 'mention' || title.includes('mentioned') || title.includes('@')) return 'Mentions';
+  if (['chat', 'message'].includes(type) || title.includes('chat') || title.includes('message')) return 'Chat';
+  if (title.includes('task') || title.includes('case') || title.includes('assigned') || title.includes('completed')) return 'Tasks';
+  return 'System';
+};
+
+const getNotificationPriority = (notif = {}) => {
+  const category = getNotificationCategory(notif);
+  const type = String(notif.type || '').toLowerCase();
+  if (category === 'Urgent') return 'Critical';
+  if (type === 'success') return 'Normal';
+  if (category === 'Tasks') return 'High';
+  if (category === 'Mentions') return 'Normal';
+  return 'Info';
+};
+
+const getNotificationIcon = (notif = {}) => {
+  const category = getNotificationCategory(notif);
+  if (category === 'Urgent') return <Flag className="w-5 h-5 text-red-500 mr-3 mt-0.5 shrink-0"/>;
+  if (category === 'Mentions') return <div className="w-5 h-5 rounded-full bg-purple-100 text-purple-700 flex items-center justify-center font-bold text-xs mr-3 mt-0.5 shrink-0">@</div>;
+  if (category === 'Chat') return <MessageSquare className="w-5 h-5 text-indigo-500 mr-3 mt-0.5 shrink-0"/>;
+  if (String(notif.type || '').toLowerCase() === 'success') return <CheckCircle className="w-5 h-5 text-emerald-500 mr-3 mt-0.5 shrink-0"/>;
+  if (category === 'Tasks') return <Briefcase className="w-5 h-5 text-blue-500 mr-3 mt-0.5 shrink-0"/>;
+  return <Bell className="w-5 h-5 text-slate-400 mr-3 mt-0.5 shrink-0"/>;
+};
+
+const buildActivityTimeline = (projects = [], chatMessages = [], notifications = []) => {
+  const taskEvents = (projects || []).flatMap(p => [
+    p.createdAt ? { id: `created-${p.id}`, at: p.createdAt, label: `${p.id || p.caseId || 'Task'} created${p.assignedTo ? ` for ${p.assignedTo}` : ''}`, type: 'Task' } : null,
+    p.completedAt ? { id: `completed-${p.id}`, at: p.completedAt, label: `${p.id || p.caseId || 'Task'} completed${p.assignedTo ? ` by ${p.assignedTo}` : ''}`, type: 'Completed' } : null,
+    p.updatedAt ? { id: `updated-${p.id}`, at: p.updatedAt, label: `${p.id || p.caseId || 'Task'} updated`, type: 'Task' } : null
+  ].filter(Boolean));
+  const chatEvents = (chatMessages || []).slice(-30).map(m => ({
+    id: `chat-${m.id}`, at: m.id || Date.now(), label: `${m.sender || m.by || 'Team'} sent ${m.recipient && m.recipient !== 'global' ? 'a direct message' : 'a team message'}`, type: 'Chat'
+  }));
+  const notifEvents = (notifications || []).slice(0, 30).map(n => ({ id: `notif-${n.id}`, at: n.id || Date.now(), label: n.title || 'Notification', type: getNotificationCategory(n) }));
+  return [...taskEvents, ...chatEvents, ...notifEvents]
+    .filter(x => x && x.at)
+    .sort((a,b) => Number(b.at || 0) - Number(a.at || 0))
+    .slice(0, 12);
+};
+
 
 class AppErrorBoundary extends React.Component {
   constructor(props) {
@@ -3960,6 +4091,11 @@ function AppShell() {
     return () => clearInterval(timer);
   }, []);
   const [showNotifs, setShowNotifs] = useState(false);
+  const [notifFilter, setNotifFilter] = useState('All');
+  const [notifSearch, setNotifSearch] = useState('');
+  const [desktopNotificationsEnabled, setDesktopNotificationsEnabled] = useState(() => {
+    try { return localStorage.getItem('kalpa_desktop_notifications') === 'true'; } catch(e) { return false; }
+  });
   const [showProfilePanel, setShowProfilePanel] = useState(false);
   const [showNewLead, setShowNewLead] = useState(false);
   const [newTaskCategory, setNewTaskCategory] = useState(TASK_CATEGORIES[0]);
@@ -4376,14 +4512,32 @@ function AppShell() {
       localStorage.setItem(key, JSON.stringify(safeData));
   };
 
-  const addNotification = async (targetRole, targetUser, title, type = 'info') => {
+  const addNotification = async (targetRole, targetUser, title, type = 'info', extra = {}) => {
     if (!firebaseUser) return;
-    const newNotif = { id: Date.now(), targetRole, targetUser, title, type, readBy: [], time: new Date().toLocaleTimeString() };
+    const newNotif = {
+      id: Date.now(),
+      targetRole,
+      targetUser,
+      title,
+      type,
+      category: extra.category || getNotificationCategory({ title, type }),
+      priority: extra.priority || getNotificationPriority({ title, type }),
+      readBy: [],
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      createdAt: Date.now(),
+      source: extra.source || 'app'
+    };
     setNotifications(prev => {
       const next = [newNotif, ...prev].sort((a,b) => (b.id || 0) - (a.id || 0));
       if (isLocalMock) localStorage.setItem('kalpa_notifs', JSON.stringify(next));
       return next;
     });
+    const belongsToCurrentUser = currentUser && ((!targetUser && targetRole === currentUser.role) || samePerson(targetUser, currentUser.name));
+    try {
+      if (belongsToCurrentUser && desktopNotificationsEnabled && typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+        new Notification('Kalpvriksha Designs Ops', { body: title, tag: String(newNotif.id) });
+      }
+    } catch(e) {}
     try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'notifications', newNotif.id.toString()), newNotif); } catch(e){}
   };
 
@@ -4530,14 +4684,53 @@ function AppShell() {
     try { await deleteDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'chats', msgId.toString())); } catch(e){}
   };
 
+  const markNotificationRead = async (notifId) => {
+    if (!currentUser || !firebaseUser) return;
+    const changed = [];
+    setNotifications(prev => {
+      const next = (prev || []).map(n => {
+        if (String(n.id) !== String(notifId) || (n.readBy || []).includes(currentUser.name)) return n;
+        const updated = { ...n, readBy: [...(n.readBy || []), currentUser.name] };
+        changed.push(updated);
+        return updated;
+      });
+      if (isLocalMock) localStorage.setItem('kalpa_notifs', JSON.stringify(next));
+      return next;
+    });
+    changed.forEach(n => setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'notifications', n.id.toString()), n).catch(e=>{}));
+  };
+
   const markNotifsAsRead = async () => {
     if (!currentUser || !firebaseUser) return;
-    myNotifs.forEach(n => {
-      if (!n.readBy?.includes(currentUser.name)) {
-        const updated = { ...n, readBy: [...(n.readBy||[]), currentUser.name] };
-        setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'notifications', n.id.toString()), updated).catch(e=>{});
-      }
+    const changed = [];
+    setNotifications(prev => {
+      const next = (prev || []).map(n => {
+        const belongsToMe = (!n.targetUser && n.targetRole === currentUser.role) || n.targetUser === currentUser.name;
+        if (!belongsToMe || (n.readBy || []).includes(currentUser.name)) return n;
+        const updated = { ...n, readBy: [...(n.readBy || []), currentUser.name] };
+        changed.push(updated);
+        return updated;
+      });
+      if (isLocalMock) localStorage.setItem('kalpa_notifs', JSON.stringify(next));
+      return next;
     });
+    changed.forEach(n => setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'notifications', n.id.toString()), n).catch(e=>{}));
+  };
+
+  const requestDesktopNotifications = async () => {
+    try {
+      if (typeof window === 'undefined' || !('Notification' in window)) {
+        alert('Desktop notifications are not supported in this browser.');
+        return;
+      }
+      const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
+      const enabled = permission === 'granted';
+      setDesktopNotificationsEnabled(enabled);
+      localStorage.setItem('kalpa_desktop_notifications', enabled ? 'true' : 'false');
+      if (enabled) new Notification('Kalpvriksha Designs Ops', { body: 'Desktop notifications enabled.' });
+    } catch(e) {
+      console.warn('Desktop notification permission failed', e);
+    }
   };
 
   const handleUpdateUser = async (u) => {
@@ -4721,8 +4914,22 @@ function AppShell() {
 
   const canManage = currentUser.role === ROLES.ADMIN || currentUser.role === ROLES.MANAGER;
   if (currentUser.role === ROLES.DESIGNER && activeTab === 'board') setTimeout(() => setActiveTab('command'), 0);
-  const myNotifs = notifications.filter(n => (!n.targetUser && n.targetRole === currentUser.role) || n.targetUser === currentUser.name).sort((a,b) => (b.id || 0) - (a.id || 0));
+  const myNotifs = notifications
+    .filter(n => (!n.targetUser && n.targetRole === currentUser.role) || n.targetUser === currentUser.name)
+    .map(n => ({ ...n, category: n.category || getNotificationCategory(n), priority: n.priority || getNotificationPriority(n) }))
+    .sort((a,b) => (b.id || 0) - (a.id || 0));
   const unreadNotifs = myNotifs.filter(n => !(n.readBy||[]).includes(currentUser.name)).length;
+  const notificationCounts = NOTIFICATION_CATEGORIES.reduce((acc, label) => {
+    acc[label] = label === 'All' ? myNotifs.length : myNotifs.filter(n => n.category === label).length;
+    return acc;
+  }, {});
+  const filteredNotifs = myNotifs.filter(n => {
+    if (notifFilter !== 'All' && n.category !== notifFilter) return false;
+    const q = notifSearch.trim().toLowerCase();
+    if (!q) return true;
+    return [n.title, n.type, n.category, n.priority, n.time].filter(Boolean).join(' ').toLowerCase().includes(q);
+  });
+  const activityTimeline = buildActivityTimeline(projects, chatMessages, myNotifs);
 
   const displayedProjects = projects
     .filter(p => {
@@ -4786,38 +4993,75 @@ function AppShell() {
           <div className="flex items-center space-x-6">
             
             <div className="relative">
-              <button type="button" onClick={() => { setShowNotifs(!showNotifs); if(!showNotifs) markNotifsAsRead(); }} className="p-2.5 relative text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors">
+              <button type="button" onClick={() => setShowNotifs(!showNotifs)} className="p-2.5 relative text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors">
                 <Bell className="w-6 h-6" />
                 {unreadNotifs > 0 && <span className="absolute top-2 right-2 w-3 h-3 bg-red-500 rounded-full border-2 border-white shadow-sm animate-pulse"></span>}
               </button>
               
               {showNotifs && (
-                <div className="absolute right-0 mt-3 w-80 bg-white rounded-3xl shadow-2xl border-2 border-slate-100 overflow-hidden z-50 animate-in fade-in slide-in-from-top-4">
+                <div className="absolute right-0 mt-3 w-[380px] max-w-[calc(100vw-2rem)] bg-white rounded-3xl shadow-2xl border-2 border-slate-100 overflow-hidden z-50 animate-in fade-in slide-in-from-top-4">
                   <div className="p-4 bg-slate-50 border-b border-slate-100">
-                    <div className="font-extrabold text-sm text-slate-800 uppercase tracking-widest flex justify-between items-center">
-                      Notification Centre
-                      {unreadNotifs === 0 && <Check className="w-4 h-4 text-emerald-500" />}
+                    <div className="font-extrabold text-sm text-slate-800 uppercase tracking-widest flex justify-between items-center gap-3">
+                      <span>Notification Centre</span>
+                      <div className="flex items-center gap-2">
+                        {unreadNotifs > 0 && <button type="button" onClick={markNotifsAsRead} className="text-[10px] font-black text-indigo-600 hover:text-indigo-800 bg-white border border-indigo-100 px-2 py-1 rounded-lg">Mark all read</button>}
+                        <button type="button" onClick={() => setShowNotifs(false)} className="text-slate-400 hover:text-red-500"><X className="w-4 h-4" /></button>
+                      </div>
                     </div>
-                    <div className="flex gap-2 mt-3 text-[10px] font-black uppercase tracking-widest">
-                      <span className="px-2 py-1 rounded-lg bg-blue-50 text-blue-700">Tasks</span>
-                      <span className="px-2 py-1 rounded-lg bg-red-50 text-red-700">Urgent</span>
-                      <span className="px-2 py-1 rounded-lg bg-purple-50 text-purple-700">Mentions</span>
+                    <div className="mt-3 relative">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                      <input value={notifSearch} onChange={e => setNotifSearch(e.target.value)} placeholder="Search notifications..." className="w-full bg-white border border-slate-200 rounded-xl pl-9 pr-3 py-2 text-xs font-bold outline-none focus:border-indigo-400" />
+                    </div>
+                    <div className="flex gap-2 mt-3 overflow-x-auto pb-1 custom-scrollbar">
+                      {NOTIFICATION_CATEGORIES.map(label => (
+                        <button key={label} type="button" onClick={() => setNotifFilter(label)} className={`px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border whitespace-nowrap ${notifFilter === label ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}>
+                          {label} {notificationCounts[label] ? <span className="opacity-80">({notificationCounts[label]})</span> : ''}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="mt-3 grid grid-cols-4 gap-2 text-center">
+                      {[['Unread', unreadNotifs], ['Critical', myNotifs.filter(n => n.priority === 'Critical').length], ['High', myNotifs.filter(n => n.priority === 'High').length], ['Total', myNotifs.length]].map(([label, count]) => (
+                        <div key={label} className="bg-white border border-slate-100 rounded-xl py-2">
+                          <p className="text-sm font-black text-slate-800">{count}</p>
+                          <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">{label}</p>
+                        </div>
+                      ))}
                     </div>
                   </div>
-                  <div className="max-h-72 overflow-y-auto p-2 space-y-1 custom-scrollbar">
-                    {myNotifs.length === 0 && <p className="text-xs text-slate-400 font-bold text-center py-6">All caught up!</p>}
-                    {myNotifs.map(n => (
-                      <div key={n.id} className={`p-3.5 rounded-2xl flex items-start transition-colors ${!(n.readBy||[]).includes(currentUser.name) ? 'bg-indigo-50/50 border border-indigo-100' : 'bg-white hover:bg-slate-50 border border-transparent'}`}>
-                        {n.type === 'success' && <CheckCircle className="w-5 h-5 text-emerald-500 mr-3 mt-0.5 shrink-0"/>}
-                        {n.type === 'mention' && <div className="w-5 h-5 rounded-full bg-purple-100 text-purple-700 flex items-center justify-center font-bold text-xs mr-3 mt-0.5 shrink-0">@</div>}
-                        {n.type === 'urgent' && <Flag className="w-5 h-5 text-red-500 mr-3 mt-0.5 shrink-0"/>}
-                        {n.type === 'info' && <Briefcase className="w-5 h-5 text-blue-500 mr-3 mt-0.5 shrink-0"/>}
-                        <div>
-                          <p className={`text-sm text-slate-800 ${!(n.readBy||[]).includes(currentUser.name) ? 'font-extrabold' : 'font-semibold'}`}>{n.title}</p>
-                          <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase tracking-wider">{n.time}</p>
+                  <div className="max-h-80 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+                    {filteredNotifs.length === 0 && <p className="text-xs text-slate-400 font-bold text-center py-6">No notifications found.</p>}
+                    {filteredNotifs.map(n => {
+                      const unread = !(n.readBy || []).includes(currentUser.name);
+                      return (
+                        <div key={n.id} className={`p-3.5 rounded-2xl flex items-start transition-colors group ${unread ? 'bg-indigo-50/50 border border-indigo-100' : 'bg-white hover:bg-slate-50 border border-transparent'}`}>
+                          {getNotificationIcon(n)}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full ${n.priority === 'Critical' ? 'bg-red-100 text-red-700' : n.priority === 'High' ? 'bg-amber-100 text-amber-700' : n.priority === 'Normal' ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'}`}>{n.priority}</span>
+                              <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">{n.category}</span>
+                            </div>
+                            <p className={`text-sm text-slate-800 ${unread ? 'font-extrabold' : 'font-semibold'}`}>{n.title}</p>
+                            <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase tracking-wider">{n.time}</p>
+                          </div>
+                          {unread && <button type="button" onClick={() => markNotificationRead(n.id)} className="opacity-0 group-hover:opacity-100 text-[10px] font-black text-indigo-600 hover:text-indigo-800 ml-2">Read</button>}
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
+                  </div>
+                  <div className="border-t border-slate-100 bg-slate-50 p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Activity Timeline</p>
+                      <button type="button" onClick={requestDesktopNotifications} className={`text-[10px] font-black px-2 py-1 rounded-lg border ${desktopNotificationsEnabled ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}>Desktop {desktopNotificationsEnabled ? 'On' : 'Off'}</button>
+                    </div>
+                    <div className="space-y-2 max-h-36 overflow-y-auto custom-scrollbar">
+                      {activityTimeline.length === 0 && <p className="text-xs text-slate-400 font-bold text-center py-3">No recent activity.</p>}
+                      {activityTimeline.map(item => (
+                        <div key={item.id} className="flex items-start gap-2 text-xs">
+                          <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1.5 shrink-0"></span>
+                          <div className="min-w-0"><p className="font-bold text-slate-700 truncate">{item.label}</p><p className="text-[10px] text-slate-400 font-black uppercase">{item.type}</p></div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 </div>
               )}
