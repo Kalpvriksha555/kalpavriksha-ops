@@ -4163,6 +4163,13 @@ function AppShell() {
   
   const [showLocalBanner, setShowLocalBanner] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
+  const [darkMode, setDarkMode] = useState(() => {
+    try { return localStorage.getItem('kalpa_ui_dark_mode') === 'true'; } catch(e) { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('kalpa_ui_dark_mode', darkMode ? 'true' : 'false'); } catch(e) {}
+    try { document.documentElement.classList.toggle('kd-dark-root', !!darkMode); } catch(e) {}
+  }, [darkMode]);
   
   const activeUsers = normalizeTeamUsers(users && users.length > 0 ? users : INITIAL_USERS);
 
@@ -4933,7 +4940,7 @@ function AppShell() {
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
   return (
-    <div className="min-h-screen bg-slate-50/50 font-sans text-slate-900 pb-20 antialiased selection:bg-indigo-100 selection:text-indigo-900">
+    <div className={`min-h-screen bg-slate-50/50 font-sans text-slate-900 pb-20 antialiased selection:bg-indigo-100 selection:text-indigo-900 transition-colors duration-300 ${darkMode ? 'kd-dark' : ''}`}>
       <ActiveToasts notifications={notifications} currentUser={currentUser} />
       
       {showLocalBanner && (
@@ -4971,6 +4978,9 @@ function AppShell() {
             </div>
           </div>
           <div className="flex items-center gap-2 sm:gap-4 lg:gap-6">
+            <button type="button" onClick={() => setDarkMode(v => !v)} title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'} className="p-2 sm:p-2.5 rounded-xl bg-slate-50 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 border border-slate-100 transition-all duration-200 active:scale-95">
+              <span className="text-lg leading-none">{darkMode ? '☀️' : '🌙'}</span>
+            </button>
             
             <div className="relative">
               <button type="button" onClick={() => { setShowNotifs(!showNotifs); if(!showNotifs) markNotifsAsRead(); }} className="p-2 sm:p-2.5 relative text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all duration-200 active:scale-95">
@@ -5481,6 +5491,22 @@ function AppShell() {
         .custom-scrollbar::-webkit-scrollbar { width: 6px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 20px; }
+        .kalpa-empty-state { border-style: dashed; }
+        .kalpa-soft-enter { animation: kalpaSoftEnter .22s ease-out both; }
+        @keyframes kalpaSoftEnter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+        @media (prefers-reduced-motion: reduce) {
+          * { scroll-behavior: auto !important; animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+        }
+        .kd-dark { background: #0f172a !important; color: #e2e8f0 !important; }
+        .kd-dark .bg-white, .kd-dark .bg-white\/95, .kd-dark .bg-white\/90 { background-color: rgba(15,23,42,.96) !important; }
+        .kd-dark .bg-slate-50, .kd-dark .bg-slate-50\/50, .kd-dark .bg-slate-100 { background-color: #111827 !important; }
+        .kd-dark .text-slate-900, .kd-dark .text-slate-800, .kd-dark .text-slate-700 { color: #e5e7eb !important; }
+        .kd-dark .text-slate-600, .kd-dark .text-slate-500, .kd-dark .text-slate-400 { color: #94a3b8 !important; }
+        .kd-dark .border-slate-100, .kd-dark .border-slate-200, .kd-dark .border-slate-50 { border-color: rgba(148,163,184,.22) !important; }
+        .kd-dark input, .kd-dark textarea, .kd-dark select { background-color: #111827 !important; color: #e5e7eb !important; border-color: rgba(148,163,184,.28) !important; }
+        .kd-dark input::placeholder, .kd-dark textarea::placeholder { color: #64748b !important; }
+        .kd-dark .shadow-sm, .kd-dark .shadow-md, .kd-dark .shadow-xl, .kd-dark .shadow-2xl { box-shadow: 0 12px 30px rgba(0,0,0,.28) !important; }
+        .kd-dark .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #475569; }
       `}} />
     </div>
   );
