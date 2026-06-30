@@ -409,10 +409,10 @@ const buildJitsiUrl = (roomName, displayName, options = {}) => {
     'config.enableClosePage=false',
     'config.enableWelcomePage=false',
     'config.readOnlyName=true',
-    'config.startWithAudioMuted=false',
     options.audioOnly ? 'config.startAudioOnly=true' : '',
-    options.muteAudio ? 'config.startWithAudioMuted=true' : '',
-    options.muteVideo ? 'config.startWithVideoMuted=true' : ''
+    (options.muteAudio || options.shareScreen) ? 'config.startWithAudioMuted=true' : '',
+    (options.muteVideo || options.shareScreen || options.audioOnly) ? 'config.startWithVideoMuted=true' : '',
+    options.shareScreen ? 'config.startScreenSharing=true' : ''
   ].filter(Boolean).join('&');
   return `${base}?${params.toString()}#${config}`;
 };
@@ -2343,7 +2343,13 @@ const TeamMeetingRoom = ({ currentUser }) => {
     audioOnly: meetingMode === 'audio',
     muteVideo: meetingMode === 'audio'
   });
+  const screenShareUrl = buildJitsiUrl(roomName, currentUser?.name, {
+    shareScreen: true,
+    muteAudio: true,
+    muteVideo: true
+  });
   const openMeeting = () => window.open(meetingUrl, '_blank', 'noopener,noreferrer');
+  const openScreenShare = () => window.open(screenShareUrl, '_blank', 'noopener,noreferrer');
   const handleCopy = async () => {
     const ok = await copyTextToClipboard(meetingUrl);
     setCopied(ok);
@@ -2394,14 +2400,17 @@ const TeamMeetingRoom = ({ currentUser }) => {
             {copied ? 'Link Copied' : 'Copy Link'}
           </button>
           <button type="button" onClick={openMeeting} className="px-5 py-2 bg-indigo-600 text-white rounded-xl font-bold shadow-md hover:bg-indigo-700 transition-colors flex items-center w-fit">
-            <Video className="w-4 h-4 mr-2" /> Open / Share Screen
+            <Video className="w-4 h-4 mr-2" /> Open Meeting
+          </button>
+          <button type="button" onClick={openScreenShare} className="px-5 py-2 bg-slate-900 text-white rounded-xl font-bold shadow-md hover:bg-slate-800 transition-colors flex items-center w-fit">
+            <Video className="w-4 h-4 mr-2" /> Share Screen
           </button>
         </div>
       </div>
       <div className="bg-white border border-indigo-100 rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3 shadow-sm">
         <div>
           <p className="text-sm font-extrabold text-slate-800">Team meeting room is always the same for everyone.</p>
-          <p className="text-xs font-semibold text-slate-500 mt-1">Use the Jitsi toolbar inside the meeting to start screen sharing. For best reliability, use Chrome or Edge and allow camera/mic permissions.</p>
+          <p className="text-xs font-semibold text-slate-500 mt-1">Meetings now open in a full browser tab for reliable camera, mic and screen sharing. If screen sharing does not start automatically, click the Jitsi Share Screen button in the bottom toolbar.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {meetingStartedAt && <span className="text-[10px] font-black uppercase tracking-widest bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1.5 rounded-full">Live • {formatCallDuration(meetingStartedAt, meetingNow)}</span>}
@@ -2424,13 +2433,18 @@ const TeamMeetingRoom = ({ currentUser }) => {
           </ul>
         </div>
       </div>
-      <div className="w-full h-[75vh] min-h-[600px] bg-slate-900 rounded-3xl overflow-hidden shadow-xl border-4 border-slate-800 relative">
-        <iframe
-           title="Kalpvriksha Team Meeting"
-           allow="camera; microphone; display-capture; fullscreen; clipboard-read; clipboard-write; autoplay"
-           src={meetingUrl}
-           style={{ width: '100%', height: '100%', border: '0px' }}
-        ></iframe>
+      <div className="w-full min-h-[360px] bg-slate-900 rounded-3xl overflow-hidden shadow-xl border-4 border-slate-800 relative flex items-center justify-center p-6 text-center">
+        <div className="max-w-xl">
+          <div className="w-16 h-16 rounded-2xl bg-white/10 text-white flex items-center justify-center mx-auto mb-4">
+            <Video className="w-8 h-8" />
+          </div>
+          <h2 className="text-2xl font-black text-white">Open meeting in a new tab</h2>
+          <p className="text-sm font-semibold text-slate-300 mt-3">Embedded meetings can hide or block screen sharing in some browsers. Use the buttons below for the full Jitsi toolbar.</p>
+          <div className="flex flex-wrap justify-center gap-3 mt-6">
+            <button type="button" onClick={openMeeting} className="px-5 py-3 rounded-xl bg-indigo-600 text-white text-sm font-black hover:bg-indigo-700 shadow-md">Open Meeting</button>
+            <button type="button" onClick={openScreenShare} className="px-5 py-3 rounded-xl bg-white text-slate-900 text-sm font-black hover:bg-slate-100 shadow-md">Share Screen</button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -3084,6 +3098,7 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
   const [showMentions, setShowMentions] = useState(false);
   const [isCalling, setIsCalling] = useState(false);
   const [callAudioOnly, setCallAudioOnly] = useState(false);
+  const [callShareScreen, setCallShareScreen] = useState(false);
   const [callStartedAt, setCallStartedAt] = useState(null);
   const [callNow, setCallNow] = useState(Date.now());
   const [callCopied, setCallCopied] = useState(false);
@@ -3117,7 +3132,7 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
   const activePeer = activeChannel === 'global' ? null : chatUsers.find(u => samePerson(u.name, activeChannel));
   const activePeerOnline = activePeer ? isUserActuallyOnline(activePeer, presenceNow) : false;
   const activeCallRoom = activePeer ? createSafeMeetingRoomName('KalpaVriksha_DM', safeAppId, ...[currentUser.name, activePeer.name].sort()) : '';
-  const activeCallUrl = activePeer ? buildJitsiUrl(activeCallRoom, currentUser.name, { audioOnly: callAudioOnly }) : '';
+  const activeCallUrl = activePeer ? buildJitsiUrl(activeCallRoom, currentUser.name, { audioOnly: callAudioOnly, shareScreen: callShareScreen }) : '';
 
   const chatEmojiGroups = [
     { label: 'Work', emojis: ['✅','📌','📎','👀','🚀','⏳','🔔','💬','📝','📁'] },
@@ -3355,17 +3370,18 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
   const startCall = (audioOnly = false, shareScreen = false) => {
     if (!activePeer) return;
     setCallAudioOnly(audioOnly);
+    setCallShareScreen(shareScreen);
     setCallStartedAt(Date.now());
     setIsCalling(true);
     const room = createSafeMeetingRoomName('KalpaVriksha_DM', safeAppId, ...[currentUser.name, activePeer.name].sort());
-    const url = buildJitsiUrl(room, currentUser.name, { audioOnly });
+    const url = buildJitsiUrl(room, currentUser.name, { audioOnly, shareScreen });
     onSendMessage(createBaseMessage({
       text: shareScreen ? `🖥️ Started screen sharing / help session` : (audioOnly ? `📞 Started an Audio Call` : `📹 Started a Video Call`),
       recipient: activePeer.name,
       callType: shareScreen ? 'screen' : (audioOnly ? 'audio' : 'video'),
       roomUrl: url,
     }));
-    if (shareScreen) window.open(url, '_blank', 'noopener,noreferrer');
+    window.open(url, '_blank', 'noopener,noreferrer');
   };
 
   const handleCopyCallLink = async () => {
@@ -3590,10 +3606,15 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
             {isCalling ? (
               <div className="flex-1 bg-slate-900 flex flex-col min-h-0">
                 <div className="p-3 bg-slate-800 text-white flex items-center justify-between">
-                  <div><p className="text-sm font-black">{callAudioOnly ? 'Audio call' : 'Video meeting'} with {activeChannel}</p><p className="text-[10px] text-slate-300">{callStartedAt ? `${Math.floor((callNow - callStartedAt)/60000)}m ${Math.floor(((callNow - callStartedAt)%60000)/1000)}s` : 'Ready'}</p></div>
-                  <div className="flex gap-2"><button type="button" onClick={handleCopyCallLink} className="px-3 py-2 rounded-lg bg-white/10 text-xs font-black">{callCopied ? 'Copied' : 'Copy link'}</button><button type="button" onClick={() => setIsCalling(false)} className="px-3 py-2 rounded-lg bg-red-500 text-xs font-black">End</button></div>
+                  <div><p className="text-sm font-black">{callShareScreen ? 'Screen share session' : (callAudioOnly ? 'Audio call' : 'Video meeting')} with {activeChannel}</p><p className="text-[10px] text-slate-300">{callStartedAt ? `${Math.floor((callNow - callStartedAt)/60000)}m ${Math.floor(((callNow - callStartedAt)%60000)/1000)}s` : 'Ready'}</p></div>
+                  <div className="flex gap-2"><button type="button" onClick={() => window.open(activeCallUrl, '_blank', 'noopener,noreferrer')} className="px-3 py-2 rounded-lg bg-white/10 text-xs font-black">Open tab</button><button type="button" onClick={handleCopyCallLink} className="px-3 py-2 rounded-lg bg-white/10 text-xs font-black">{callCopied ? 'Copied' : 'Copy link'}</button><button type="button" onClick={() => setIsCalling(false)} className="px-3 py-2 rounded-lg bg-red-500 text-xs font-black">End</button></div>
                 </div>
-                <iframe title="Kalpvriksha meeting" allow="camera; microphone; display-capture; fullscreen; clipboard-read; clipboard-write; autoplay" src={activeCallUrl} style={{ width: '100%', height: '100%', border: '0px' }}></iframe>
+                <div className="flex-1 flex items-center justify-center p-6 text-center text-white">
+                  <div className="max-w-sm">
+                    <p className="text-lg font-black mb-2">Meeting opened in a new browser tab</p>
+                    <p className="text-xs font-semibold text-slate-300">This keeps screen sharing reliable. If the tab did not open, click Open tab above.</p>
+                  </div>
+                </div>
               </div>
             ) : (
               <>
