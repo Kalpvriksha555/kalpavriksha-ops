@@ -3356,11 +3356,15 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
   const composerRef = useRef(null);
   const localReadKey = `kalpa_chat_read_${currentUser?.id || identityKey(currentUser?.name || '')}`;
   const hiddenKey = `kalpa_chat_hidden_${currentUser?.id || identityKey(currentUser?.name || '')}`;
+  const pinnedKey = `kalpa_chat_pinned_${currentUser?.id || identityKey(currentUser?.name || '')}`;
   const [localReadState, setLocalReadState] = useState(() => {
     try { return JSON.parse(localStorage.getItem(localReadKey) || '{}'); } catch(e) { return {}; }
   });
   const [hiddenMessageIds, setHiddenMessageIds] = useState(() => {
     try { return JSON.parse(localStorage.getItem(hiddenKey) || '[]'); } catch(e) { return []; }
+  });
+  const [pinnedMessageIds, setPinnedMessageIds] = useState(() => {
+    try { const saved = JSON.parse(localStorage.getItem(pinnedKey) || '[]'); return Array.isArray(saved) ? saved.map(String) : []; } catch(e) { return []; }
   });
   const readThroughRef = useRef(localReadState);
   const normalizeChannelKey = (channel) => channel === 'global' ? 'global' : identityKey(channel);
@@ -3374,11 +3378,13 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
   const activeCallUrl = activePeer ? buildJitsiUrl(activeCallRoom, currentUser.name, { audioOnly: callAudioOnly, shareScreen: callShareScreen }) : '';
 
   const chatEmojiGroups = [
-    { label: 'Work', emojis: ['✅','📌','📎','👀','🚀','⏳','🔔','💬','📝','📁'] },
-    { label: 'Mood', emojis: ['😀','😊','😂','🙂','😎','👏','🙏','🤝','🙌','😅'] },
-    { label: 'Quick', emojis: ['👍','❤️','⭐','🔥','💯','🎉','✨','👌','🙄','😮'] },
+    { label: 'Quick reactions', emojis: ['👍','❤️','😂','😮','😢','👏','🎉','🔥','✅','👀','🙏','🤝','🙌','💯','⭐','✨'] },
+    { label: 'Smileys', emojis: ['😀','😃','😄','😁','😊','🙂','😉','😎','🤩','😅','🤣','😂','🥹','😍','😘','😇','🤔','🫡','🤫','😐','🙄','😮','😯','😴','😢','😭','😡','😤','🤯'] },
+    { label: 'Work', emojis: ['📌','📎','📝','📁','📂','📄','📊','📈','📉','🗂️','🧾','🖊️','🧮','🏗️','🏠','📐','📏','🧱','💼','📅','⏰','⏳','🔔','💬','📞','🎥'] },
+    { label: 'Status', emojis: ['✅','☑️','✔️','❌','⚠️','🚨','🔴','🟠','🟡','🟢','🔵','🟣','⬆️','⬇️','➡️','🔁','🔄','📍','🎯','🚀','🏁','🔒','🔓'] },
+    { label: 'Celebration', emojis: ['🎉','🥳','🏆','🥇','🙌','👏','💪','🔥','⭐','✨','💯','🌟','🎊','🍰','☕','🌈'] },
   ];
-  const reactionEmojis = ['👍','❤️','😂','😮','😢','👏','🎉','🔥','✅','👀'];
+  const reactionEmojis = ['👍','❤️','😂','😮','😢','👏','🎉','🔥','✅','👀','🙏','🤝','🙌','💯','⭐','✨','⚠️','🚀'];
 
   useEffect(() => {
     try { const saved = JSON.parse(localStorage.getItem(localReadKey) || '{}'); readThroughRef.current = saved; setLocalReadState(saved); } catch(e) { readThroughRef.current = {}; setLocalReadState({}); }
@@ -3386,6 +3392,9 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
   useEffect(() => {
     try { const saved = JSON.parse(localStorage.getItem(hiddenKey) || '[]'); setHiddenMessageIds(Array.isArray(saved) ? saved : []); } catch(e) { setHiddenMessageIds([]); }
   }, [hiddenKey]);
+  useEffect(() => {
+    try { const saved = JSON.parse(localStorage.getItem(pinnedKey) || '[]'); setPinnedMessageIds(Array.isArray(saved) ? saved.map(String) : []); } catch(e) { setPinnedMessageIds([]); }
+  }, [pinnedKey]);
   useEffect(() => {
     const timer = setInterval(() => setPresenceNow(Date.now()), 30000);
     return () => clearInterval(timer);
@@ -3405,6 +3414,29 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
     onScroll();
     return () => el.removeEventListener('scroll', onScroll);
   }, [isOpen, activeChannel, isCalling]);
+
+  const savePinnedMessageIds = (nextIds = []) => {
+    const clean = [...new Set((nextIds || []).map(String).filter(Boolean))].slice(-20);
+    setPinnedMessageIds(clean);
+    try { localStorage.setItem(pinnedKey, JSON.stringify(clean)); } catch(e) {}
+  };
+
+  const isPinnedMessage = (m) => pinnedMessageIds.includes(String(m?.id || ''));
+
+  const togglePinMessage = (m) => {
+    if (!m?.id) return;
+    const id = String(m.id);
+    const next = isPinnedMessage(m) ? pinnedMessageIds.filter(x => x !== id) : [...pinnedMessageIds, id];
+    savePinnedMessageIds(next);
+    setActionMenu(null);
+  };
+
+  const jumpToPinnedMessage = (id) => {
+    const safeId = String(id || '').replace(/"/g, '\"');
+    const container = chatScrollRef.current;
+    const target = container?.querySelector?.(`[data-message-id="${safeId}"]`);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
 
   const markCurrentChannelReadNow = (channel = activeChannel) => {
     const key = normalizeChannelKey(channel);
@@ -3787,6 +3819,7 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
   const displayMessages = searchKey
     ? channelMessages.filter(m => `${m.text || ''} ${m.fileName || ''} ${m.sender || ''}`.toLowerCase().includes(searchKey))
     : channelMessages;
+  const pinnedMessages = channelMessages.filter(m => isPinnedMessage(m) && !m.deleted).slice(-5);
 
   return (
     <div className="kalpa-chat-shell fixed bottom-6 right-6 z-50 flex flex-col items-end" style={{ maxWidth: 'calc(100vw - 24px)' }}>
@@ -3862,18 +3895,28 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
                   <input value={chatSearch} onChange={(e) => setChatSearch(e.target.value)} placeholder="Search this chat..." className="flex-1 bg-transparent text-xs font-semibold text-slate-600 placeholder:text-slate-300 focus:outline-none" />
                   {chatSearch && <button type="button" onClick={() => setChatSearch('')} className="text-[10px] font-black text-slate-400 hover:text-slate-600">CLEAR</button>}
                 </div>
+                {pinnedMessages.length > 0 && (
+                  <div className="px-4 py-3 bg-amber-50 border-b border-amber-100 shrink-0">
+                    <div className="flex items-center justify-between mb-2"><p className="text-[10px] font-black uppercase tracking-widest text-amber-700">Pinned messages</p><span className="text-[10px] font-black text-amber-600">{pinnedMessages.length}</span></div>
+                    <div className="flex gap-2 overflow-x-auto pb-1 custom-scrollbar">
+                      {pinnedMessages.map(pm => <button key={`pin-${pm.id}`} type="button" onClick={() => jumpToPinnedMessage(pm.id)} className="shrink-0 max-w-[220px] text-left bg-white border border-amber-100 rounded-xl px-3 py-2 shadow-sm hover:border-amber-300"><p className="text-[10px] font-black text-amber-700 truncate">{pm.sender}</p><p className="text-xs font-bold text-slate-600 truncate">{pm.text || pm.fileName || 'Pinned attachment'}</p></button>)}
+                    </div>
+                  </div>
+                )}
                 <div ref={chatScrollRef} className="kalpa-chat-messages flex-1 overflow-y-auto p-5 space-y-4 bg-slate-50/50 custom-scrollbar relative" style={{ minHeight: 0, overflowX: 'hidden' }} onClick={() => { setActionMenu(null); setReactionMenu(null); }}>
                   {displayMessages.length === 0 && <p className="text-center text-sm text-slate-400 mt-10 font-medium">Say hello to {activeChannel === 'global' ? 'the team' : activeChannel}!</p>}
                   {displayMessages.map((m, idx) => {
                     const isMine = samePerson(m.sender, currentUser.name);
                     const showName = idx === 0 || !samePerson(displayMessages[idx-1].sender, m.sender);
                     const reactions = Object.entries(m.reactions || {}).filter(([, names]) => Array.isArray(names) && names.length);
+                    const pinned = isPinnedMessage(m);
                     return (
-                      <div key={m.id} className={`flex flex-col ${isMine ? 'items-end' : 'items-start'}`}>
+                      <div key={m.id} data-message-id={String(m.id)} className={`flex flex-col ${isMine ? 'items-end' : 'items-start'} ${pinned ? 'scroll-mt-24' : ''}`}>
                         {showName && !isMine && <span className={`text-[11px] font-black uppercase tracking-wider ml-1 mb-1 ${m.senderRole === ROLES.ADMIN ? 'text-indigo-600' : 'text-slate-500'}`}>{m.sender}</span>}
                         <div className="relative group flex items-start gap-2" onContextMenu={(e) => openActionMenu(e, m)}>
                           {isMine && <button type="button" onClick={(e) => openActionMenu(e, m)} className="mt-2 w-8 h-8 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 shadow-sm flex items-center justify-center opacity-100" title="Message options">⋮</button>}
-                          <div className={`kalpa-chat-bubble px-4 py-2.5 rounded-2xl text-[15px] font-medium leading-relaxed shadow-sm relative break-words ${isMine ? 'bg-indigo-600 text-white rounded-tr-sm' : 'bg-white border border-slate-200 text-slate-800 rounded-tl-sm'}`} style={{ maxWidth: m.fileUrl ? 'min(520px, 84vw)' : 'min(620px, 78vw)', minWidth: 0, overflow: 'visible' }}>
+                          <div className={`kalpa-chat-bubble px-4 py-2.5 rounded-2xl text-[15px] font-medium leading-relaxed shadow-sm relative break-words ${pinned ? 'ring-2 ring-amber-300' : ''} ${isMine ? 'bg-indigo-600 text-white rounded-tr-sm' : 'bg-white border border-slate-200 text-slate-800 rounded-tl-sm'}`} style={{ maxWidth: m.fileUrl ? 'min(520px, 84vw)' : 'min(620px, 78vw)', minWidth: 0, overflow: 'visible' }}>
+                            {pinned && <span className={`absolute -top-2 ${isMine ? 'right-3 bg-amber-200 text-amber-900' : 'left-3 bg-amber-100 text-amber-700'} text-[9px] font-black px-2 py-0.5 rounded-full border border-amber-200`}>PINNED</span>}
                             {m.replyTo && <div className={`mb-2 border-l-4 pl-2 py-1 rounded ${isMine ? 'border-white/70 bg-indigo-500/30' : 'border-indigo-300 bg-indigo-50'}`}><p className={`text-[10px] font-black ${isMine ? 'text-indigo-100' : 'text-indigo-600'}`}>Replying to {m.replyTo.sender}</p><p className={`text-xs truncate ${isMine ? 'text-white/90' : 'text-slate-500'}`}>{m.replyTo.text}</p></div>}
                             <div className={m.deleted ? 'italic opacity-75' : ''}>{renderMessageText(m.text)} {m.edited && !m.deleted && <span className={`text-[10px] ml-1 ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>(edited)</span>}</div>
                             {m.roomUrl && (
@@ -3908,9 +3951,41 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
               <div className="kalpa-chat-inputbar p-3 bg-white border-t-2 border-slate-100 flex flex-col gap-2 z-10 relative shrink-0">
                 {(replyTo || editingMessage) && <div className="flex items-center justify-between gap-3 bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-2"><div className="min-w-0"><p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">{editingMessage ? 'Editing message' : `Replying to ${replyTo?.sender}`}</p><p className="text-xs font-bold text-slate-600 truncate">{editingMessage?.text || replyTo?.text || replyTo?.fileName}</p></div><button type="button" onClick={clearComposerContext} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button></div>}
                 {showEmojiPicker && (
-                  <div className="absolute bottom-[76px] left-3 right-3 bg-white border border-slate-100 rounded-2xl shadow-2xl p-3 z-30" style={{ maxHeight: 300, overflowY: 'auto' }}>
-                    <div className="flex items-center justify-between mb-2"><span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Emoji picker • tap multiple emojis before sending</span><button type="button" onClick={() => setShowEmojiPicker(false)} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button></div>
-                    <div className="space-y-3">{chatEmojiGroups.map(group => <div key={group.label}><div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">{group.label}</div><div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(42px, 1fr))', gap: 8 }}>{group.emojis.map(emoji => <button key={`${group.label}-${emoji}`} type="button" onClick={() => addEmojiToMessage(emoji)} className="rounded-xl bg-slate-50 hover:bg-indigo-50 text-xl transition-colors flex items-center justify-center" style={{ height: 42, minWidth: 0 }}>{emoji}</button>)}</div></div>)}</div>
+                  <div
+                    className="fixed bg-white border border-slate-100 rounded-2xl shadow-2xl p-3 z-[99998] overflow-hidden"
+                    style={{
+                      right: 'max(16px, env(safe-area-inset-right))',
+                      bottom: 'clamp(118px, 18vh, 210px)',
+                      width: 'min(520px, calc(100vw - 32px))',
+                      maxHeight: 'calc(100vh - 150px)'
+                    }}
+                  >
+                    <div className="flex items-center justify-between mb-2 gap-3">
+                      <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 truncate">Emoji picker • scroll to see all emojis</span>
+                      <button type="button" onClick={() => setShowEmojiPicker(false)} className="text-slate-400 hover:text-slate-600 shrink-0"><X className="w-4 h-4" /></button>
+                    </div>
+                    <div
+                      className="custom-scrollbar pr-1"
+                      style={{
+                        maxHeight: 'calc(100vh - 205px)',
+                        minHeight: 180,
+                        overflowY: 'auto',
+                        overflowX: 'hidden',
+                        overscrollBehavior: 'contain',
+                        WebkitOverflowScrolling: 'touch'
+                      }}
+                    >
+                      {chatEmojiGroups.map(group => (
+                        <div key={group.label} className="mb-4 last:mb-1">
+                          <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2 sticky top-0 bg-white/95 backdrop-blur-sm py-1 z-10">{group.label}</div>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(42px, 1fr))', gap: 8 }}>
+                            {group.emojis.map(emoji => (
+                              <button key={`${group.label}-${emoji}`} type="button" onClick={() => addEmojiToMessage(emoji)} className="rounded-xl bg-slate-50 hover:bg-indigo-50 hover:scale-105 text-xl transition-all flex items-center justify-center border border-transparent hover:border-indigo-100" style={{ height: 42, minWidth: 0 }}>{emoji}</button>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
                 <div className="kalpa-chat-composer flex flex-col gap-2">
@@ -3932,6 +4007,7 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
       {actionMenu && activeActionMessage && (
         <div className="fixed z-[99999] bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden w-56" style={{ left: actionMenu.x, top: actionMenu.y }} onClick={(e) => e.stopPropagation()}>
           <button type="button" onClick={() => replyToMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">↩ Reply</button>
+          <button type="button" onClick={() => togglePinMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">{isPinnedMessage(activeActionMessage) ? '★ Unpin' : '☆ Pin'}</button>
           <button type="button" onClick={(e) => openReactionMenu(e, activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">😊 React</button>
           <button type="button" onClick={() => forwardMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">↗ Forward</button>
           <button type="button" onClick={() => copyMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">⧉ Copy</button>
@@ -3942,8 +4018,8 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
       )}
 
       {reactionMenu && activeReactionMessage && (
-        <div className="fixed z-[99999] bg-white border border-slate-200 rounded-2xl shadow-2xl p-2" style={{ left: reactionMenu.x, top: reactionMenu.y }} onClick={(e) => e.stopPropagation()}>
-          <div className="grid grid-cols-5 gap-1">{reactionEmojis.map(emoji => <button type="button" key={emoji} onClick={() => toggleReaction(activeReactionMessage, emoji)} className="w-10 h-10 rounded-xl text-xl hover:bg-indigo-50 flex items-center justify-center">{emoji}</button>)}</div>
+        <div className="fixed z-[99999] bg-white border border-slate-200 rounded-2xl shadow-2xl p-2 overflow-hidden" style={{ left: Math.min(reactionMenu.x, Math.max(12, window.innerWidth - 360)), top: reactionMenu.y, maxWidth: 'min(360px, calc(100vw - 24px))' }} onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center gap-1 overflow-x-auto pb-1" style={{ overscrollBehaviorX: 'contain' }}>{reactionEmojis.map(emoji => { const selected = Array.isArray((activeReactionMessage.reactions || {})[emoji]) && (activeReactionMessage.reactions || {})[emoji].some(n => samePerson(n, currentUser.name)); return <button type="button" key={emoji} onClick={() => toggleReaction(activeReactionMessage, emoji)} className={`w-10 h-10 shrink-0 rounded-xl text-xl flex items-center justify-center transition-all ${selected ? 'bg-indigo-100 ring-2 ring-indigo-200 scale-105' : 'hover:bg-indigo-50 hover:scale-105'}`}>{emoji}</button>; })}</div>
         </div>
       )}
 
@@ -3976,54 +4052,6 @@ const ActiveToasts = ({ notifications = [], currentUser }) => {
       ))}
     </div>
   );
-};
-
-const NOTIFICATION_CATEGORIES = ['All', 'Tasks', 'Urgent', 'Mentions', 'Chat', 'System'];
-
-const getNotificationCategory = (notif = {}) => {
-  const type = String(notif.type || '').toLowerCase();
-  const title = String(notif.title || '').toLowerCase();
-  if (type === 'urgent' || title.includes('urgent') || title.includes('revision')) return 'Urgent';
-  if (type === 'mention' || title.includes('mentioned') || title.includes('@')) return 'Mentions';
-  if (['chat', 'message'].includes(type) || title.includes('chat') || title.includes('message')) return 'Chat';
-  if (title.includes('task') || title.includes('case') || title.includes('assigned') || title.includes('completed')) return 'Tasks';
-  return 'System';
-};
-
-const getNotificationPriority = (notif = {}) => {
-  const category = getNotificationCategory(notif);
-  const type = String(notif.type || '').toLowerCase();
-  if (category === 'Urgent') return 'Critical';
-  if (type === 'success') return 'Normal';
-  if (category === 'Tasks') return 'High';
-  if (category === 'Mentions') return 'Normal';
-  return 'Info';
-};
-
-const getNotificationIcon = (notif = {}) => {
-  const category = getNotificationCategory(notif);
-  if (category === 'Urgent') return <Flag className="w-5 h-5 text-red-500 mr-3 mt-0.5 shrink-0"/>;
-  if (category === 'Mentions') return <div className="w-5 h-5 rounded-full bg-purple-100 text-purple-700 flex items-center justify-center font-bold text-xs mr-3 mt-0.5 shrink-0">@</div>;
-  if (category === 'Chat') return <MessageSquare className="w-5 h-5 text-indigo-500 mr-3 mt-0.5 shrink-0"/>;
-  if (String(notif.type || '').toLowerCase() === 'success') return <CheckCircle className="w-5 h-5 text-emerald-500 mr-3 mt-0.5 shrink-0"/>;
-  if (category === 'Tasks') return <Briefcase className="w-5 h-5 text-blue-500 mr-3 mt-0.5 shrink-0"/>;
-  return <Bell className="w-5 h-5 text-slate-400 mr-3 mt-0.5 shrink-0"/>;
-};
-
-const buildActivityTimeline = (projects = [], chatMessages = [], notifications = []) => {
-  const taskEvents = (projects || []).flatMap(p => [
-    p.createdAt ? { id: `created-${p.id}`, at: p.createdAt, label: `${p.id || p.caseId || 'Task'} created${p.assignedTo ? ` for ${p.assignedTo}` : ''}`, type: 'Task' } : null,
-    p.completedAt ? { id: `completed-${p.id}`, at: p.completedAt, label: `${p.id || p.caseId || 'Task'} completed${p.assignedTo ? ` by ${p.assignedTo}` : ''}`, type: 'Completed' } : null,
-    p.updatedAt ? { id: `updated-${p.id}`, at: p.updatedAt, label: `${p.id || p.caseId || 'Task'} updated`, type: 'Task' } : null
-  ].filter(Boolean));
-  const chatEvents = (chatMessages || []).slice(-30).map(m => ({
-    id: `chat-${m.id}`, at: m.id || Date.now(), label: `${m.sender || m.by || 'Team'} sent ${m.recipient && m.recipient !== 'global' ? 'a direct message' : 'a team message'}`, type: 'Chat'
-  }));
-  const notifEvents = (notifications || []).slice(0, 30).map(n => ({ id: `notif-${n.id}`, at: n.id || Date.now(), label: n.title || 'Notification', type: getNotificationCategory(n) }));
-  return [...taskEvents, ...chatEvents, ...notifEvents]
-    .filter(x => x && x.at)
-    .sort((a,b) => Number(b.at || 0) - Number(a.at || 0))
-    .slice(0, 12);
 };
 
 
@@ -4091,11 +4119,6 @@ function AppShell() {
     return () => clearInterval(timer);
   }, []);
   const [showNotifs, setShowNotifs] = useState(false);
-  const [notifFilter, setNotifFilter] = useState('All');
-  const [notifSearch, setNotifSearch] = useState('');
-  const [desktopNotificationsEnabled, setDesktopNotificationsEnabled] = useState(() => {
-    try { return localStorage.getItem('kalpa_desktop_notifications') === 'true'; } catch(e) { return false; }
-  });
   const [showProfilePanel, setShowProfilePanel] = useState(false);
   const [showNewLead, setShowNewLead] = useState(false);
   const [newTaskCategory, setNewTaskCategory] = useState(TASK_CATEGORIES[0]);
@@ -4512,32 +4535,14 @@ function AppShell() {
       localStorage.setItem(key, JSON.stringify(safeData));
   };
 
-  const addNotification = async (targetRole, targetUser, title, type = 'info', extra = {}) => {
+  const addNotification = async (targetRole, targetUser, title, type = 'info') => {
     if (!firebaseUser) return;
-    const newNotif = {
-      id: Date.now(),
-      targetRole,
-      targetUser,
-      title,
-      type,
-      category: extra.category || getNotificationCategory({ title, type }),
-      priority: extra.priority || getNotificationPriority({ title, type }),
-      readBy: [],
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      createdAt: Date.now(),
-      source: extra.source || 'app'
-    };
+    const newNotif = { id: Date.now(), targetRole, targetUser, title, type, readBy: [], time: new Date().toLocaleTimeString() };
     setNotifications(prev => {
       const next = [newNotif, ...prev].sort((a,b) => (b.id || 0) - (a.id || 0));
       if (isLocalMock) localStorage.setItem('kalpa_notifs', JSON.stringify(next));
       return next;
     });
-    const belongsToCurrentUser = currentUser && ((!targetUser && targetRole === currentUser.role) || samePerson(targetUser, currentUser.name));
-    try {
-      if (belongsToCurrentUser && desktopNotificationsEnabled && typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
-        new Notification('Kalpvriksha Designs Ops', { body: title, tag: String(newNotif.id) });
-      }
-    } catch(e) {}
     try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'notifications', newNotif.id.toString()), newNotif); } catch(e){}
   };
 
@@ -4684,53 +4689,14 @@ function AppShell() {
     try { await deleteDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'chats', msgId.toString())); } catch(e){}
   };
 
-  const markNotificationRead = async (notifId) => {
-    if (!currentUser || !firebaseUser) return;
-    const changed = [];
-    setNotifications(prev => {
-      const next = (prev || []).map(n => {
-        if (String(n.id) !== String(notifId) || (n.readBy || []).includes(currentUser.name)) return n;
-        const updated = { ...n, readBy: [...(n.readBy || []), currentUser.name] };
-        changed.push(updated);
-        return updated;
-      });
-      if (isLocalMock) localStorage.setItem('kalpa_notifs', JSON.stringify(next));
-      return next;
-    });
-    changed.forEach(n => setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'notifications', n.id.toString()), n).catch(e=>{}));
-  };
-
   const markNotifsAsRead = async () => {
     if (!currentUser || !firebaseUser) return;
-    const changed = [];
-    setNotifications(prev => {
-      const next = (prev || []).map(n => {
-        const belongsToMe = (!n.targetUser && n.targetRole === currentUser.role) || n.targetUser === currentUser.name;
-        if (!belongsToMe || (n.readBy || []).includes(currentUser.name)) return n;
-        const updated = { ...n, readBy: [...(n.readBy || []), currentUser.name] };
-        changed.push(updated);
-        return updated;
-      });
-      if (isLocalMock) localStorage.setItem('kalpa_notifs', JSON.stringify(next));
-      return next;
-    });
-    changed.forEach(n => setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'notifications', n.id.toString()), n).catch(e=>{}));
-  };
-
-  const requestDesktopNotifications = async () => {
-    try {
-      if (typeof window === 'undefined' || !('Notification' in window)) {
-        alert('Desktop notifications are not supported in this browser.');
-        return;
+    myNotifs.forEach(n => {
+      if (!n.readBy?.includes(currentUser.name)) {
+        const updated = { ...n, readBy: [...(n.readBy||[]), currentUser.name] };
+        setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'notifications', n.id.toString()), updated).catch(e=>{});
       }
-      const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
-      const enabled = permission === 'granted';
-      setDesktopNotificationsEnabled(enabled);
-      localStorage.setItem('kalpa_desktop_notifications', enabled ? 'true' : 'false');
-      if (enabled) new Notification('Kalpvriksha Designs Ops', { body: 'Desktop notifications enabled.' });
-    } catch(e) {
-      console.warn('Desktop notification permission failed', e);
-    }
+    });
   };
 
   const handleUpdateUser = async (u) => {
@@ -4914,22 +4880,8 @@ function AppShell() {
 
   const canManage = currentUser.role === ROLES.ADMIN || currentUser.role === ROLES.MANAGER;
   if (currentUser.role === ROLES.DESIGNER && activeTab === 'board') setTimeout(() => setActiveTab('command'), 0);
-  const myNotifs = notifications
-    .filter(n => (!n.targetUser && n.targetRole === currentUser.role) || n.targetUser === currentUser.name)
-    .map(n => ({ ...n, category: n.category || getNotificationCategory(n), priority: n.priority || getNotificationPriority(n) }))
-    .sort((a,b) => (b.id || 0) - (a.id || 0));
+  const myNotifs = notifications.filter(n => (!n.targetUser && n.targetRole === currentUser.role) || n.targetUser === currentUser.name).sort((a,b) => (b.id || 0) - (a.id || 0));
   const unreadNotifs = myNotifs.filter(n => !(n.readBy||[]).includes(currentUser.name)).length;
-  const notificationCounts = NOTIFICATION_CATEGORIES.reduce((acc, label) => {
-    acc[label] = label === 'All' ? myNotifs.length : myNotifs.filter(n => n.category === label).length;
-    return acc;
-  }, {});
-  const filteredNotifs = myNotifs.filter(n => {
-    if (notifFilter !== 'All' && n.category !== notifFilter) return false;
-    const q = notifSearch.trim().toLowerCase();
-    if (!q) return true;
-    return [n.title, n.type, n.category, n.priority, n.time].filter(Boolean).join(' ').toLowerCase().includes(q);
-  });
-  const activityTimeline = buildActivityTimeline(projects, chatMessages, myNotifs);
 
   const displayedProjects = projects
     .filter(p => {
@@ -4993,75 +4945,38 @@ function AppShell() {
           <div className="flex items-center space-x-6">
             
             <div className="relative">
-              <button type="button" onClick={() => setShowNotifs(!showNotifs)} className="p-2.5 relative text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors">
+              <button type="button" onClick={() => { setShowNotifs(!showNotifs); if(!showNotifs) markNotifsAsRead(); }} className="p-2.5 relative text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors">
                 <Bell className="w-6 h-6" />
                 {unreadNotifs > 0 && <span className="absolute top-2 right-2 w-3 h-3 bg-red-500 rounded-full border-2 border-white shadow-sm animate-pulse"></span>}
               </button>
               
               {showNotifs && (
-                <div className="absolute right-0 mt-3 w-[380px] max-w-[calc(100vw-2rem)] bg-white rounded-3xl shadow-2xl border-2 border-slate-100 overflow-hidden z-50 animate-in fade-in slide-in-from-top-4">
+                <div className="absolute right-0 mt-3 w-80 bg-white rounded-3xl shadow-2xl border-2 border-slate-100 overflow-hidden z-50 animate-in fade-in slide-in-from-top-4">
                   <div className="p-4 bg-slate-50 border-b border-slate-100">
-                    <div className="font-extrabold text-sm text-slate-800 uppercase tracking-widest flex justify-between items-center gap-3">
-                      <span>Notification Centre</span>
-                      <div className="flex items-center gap-2">
-                        {unreadNotifs > 0 && <button type="button" onClick={markNotifsAsRead} className="text-[10px] font-black text-indigo-600 hover:text-indigo-800 bg-white border border-indigo-100 px-2 py-1 rounded-lg">Mark all read</button>}
-                        <button type="button" onClick={() => setShowNotifs(false)} className="text-slate-400 hover:text-red-500"><X className="w-4 h-4" /></button>
+                    <div className="font-extrabold text-sm text-slate-800 uppercase tracking-widest flex justify-between items-center">
+                      Notification Centre
+                      {unreadNotifs === 0 && <Check className="w-4 h-4 text-emerald-500" />}
+                    </div>
+                    <div className="flex gap-2 mt-3 text-[10px] font-black uppercase tracking-widest">
+                      <span className="px-2 py-1 rounded-lg bg-blue-50 text-blue-700">Tasks</span>
+                      <span className="px-2 py-1 rounded-lg bg-red-50 text-red-700">Urgent</span>
+                      <span className="px-2 py-1 rounded-lg bg-purple-50 text-purple-700">Mentions</span>
+                    </div>
+                  </div>
+                  <div className="max-h-72 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+                    {myNotifs.length === 0 && <p className="text-xs text-slate-400 font-bold text-center py-6">All caught up!</p>}
+                    {myNotifs.map(n => (
+                      <div key={n.id} className={`p-3.5 rounded-2xl flex items-start transition-colors ${!(n.readBy||[]).includes(currentUser.name) ? 'bg-indigo-50/50 border border-indigo-100' : 'bg-white hover:bg-slate-50 border border-transparent'}`}>
+                        {n.type === 'success' && <CheckCircle className="w-5 h-5 text-emerald-500 mr-3 mt-0.5 shrink-0"/>}
+                        {n.type === 'mention' && <div className="w-5 h-5 rounded-full bg-purple-100 text-purple-700 flex items-center justify-center font-bold text-xs mr-3 mt-0.5 shrink-0">@</div>}
+                        {n.type === 'urgent' && <Flag className="w-5 h-5 text-red-500 mr-3 mt-0.5 shrink-0"/>}
+                        {n.type === 'info' && <Briefcase className="w-5 h-5 text-blue-500 mr-3 mt-0.5 shrink-0"/>}
+                        <div>
+                          <p className={`text-sm text-slate-800 ${!(n.readBy||[]).includes(currentUser.name) ? 'font-extrabold' : 'font-semibold'}`}>{n.title}</p>
+                          <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase tracking-wider">{n.time}</p>
+                        </div>
                       </div>
-                    </div>
-                    <div className="mt-3 relative">
-                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                      <input value={notifSearch} onChange={e => setNotifSearch(e.target.value)} placeholder="Search notifications..." className="w-full bg-white border border-slate-200 rounded-xl pl-9 pr-3 py-2 text-xs font-bold outline-none focus:border-indigo-400" />
-                    </div>
-                    <div className="flex gap-2 mt-3 overflow-x-auto pb-1 custom-scrollbar">
-                      {NOTIFICATION_CATEGORIES.map(label => (
-                        <button key={label} type="button" onClick={() => setNotifFilter(label)} className={`px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border whitespace-nowrap ${notifFilter === label ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}>
-                          {label} {notificationCounts[label] ? <span className="opacity-80">({notificationCounts[label]})</span> : ''}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="mt-3 grid grid-cols-4 gap-2 text-center">
-                      {[['Unread', unreadNotifs], ['Critical', myNotifs.filter(n => n.priority === 'Critical').length], ['High', myNotifs.filter(n => n.priority === 'High').length], ['Total', myNotifs.length]].map(([label, count]) => (
-                        <div key={label} className="bg-white border border-slate-100 rounded-xl py-2">
-                          <p className="text-sm font-black text-slate-800">{count}</p>
-                          <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">{label}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="max-h-80 overflow-y-auto p-2 space-y-1 custom-scrollbar">
-                    {filteredNotifs.length === 0 && <p className="text-xs text-slate-400 font-bold text-center py-6">No notifications found.</p>}
-                    {filteredNotifs.map(n => {
-                      const unread = !(n.readBy || []).includes(currentUser.name);
-                      return (
-                        <div key={n.id} className={`p-3.5 rounded-2xl flex items-start transition-colors group ${unread ? 'bg-indigo-50/50 border border-indigo-100' : 'bg-white hover:bg-slate-50 border border-transparent'}`}>
-                          {getNotificationIcon(n)}
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full ${n.priority === 'Critical' ? 'bg-red-100 text-red-700' : n.priority === 'High' ? 'bg-amber-100 text-amber-700' : n.priority === 'Normal' ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'}`}>{n.priority}</span>
-                              <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">{n.category}</span>
-                            </div>
-                            <p className={`text-sm text-slate-800 ${unread ? 'font-extrabold' : 'font-semibold'}`}>{n.title}</p>
-                            <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase tracking-wider">{n.time}</p>
-                          </div>
-                          {unread && <button type="button" onClick={() => markNotificationRead(n.id)} className="opacity-0 group-hover:opacity-100 text-[10px] font-black text-indigo-600 hover:text-indigo-800 ml-2">Read</button>}
-                        </div>
-                      );
-                    })}
-                  </div>
-                  <div className="border-t border-slate-100 bg-slate-50 p-3">
-                    <div className="flex items-center justify-between mb-2">
-                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Activity Timeline</p>
-                      <button type="button" onClick={requestDesktopNotifications} className={`text-[10px] font-black px-2 py-1 rounded-lg border ${desktopNotificationsEnabled ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}>Desktop {desktopNotificationsEnabled ? 'On' : 'Off'}</button>
-                    </div>
-                    <div className="space-y-2 max-h-36 overflow-y-auto custom-scrollbar">
-                      {activityTimeline.length === 0 && <p className="text-xs text-slate-400 font-bold text-center py-3">No recent activity.</p>}
-                      {activityTimeline.map(item => (
-                        <div key={item.id} className="flex items-start gap-2 text-xs">
-                          <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1.5 shrink-0"></span>
-                          <div className="min-w-0"><p className="font-bold text-slate-700 truncate">{item.label}</p><p className="text-[10px] text-slate-400 font-black uppercase">{item.type}</p></div>
-                        </div>
-                      ))}
-                    </div>
+                    ))}
                   </div>
                 </div>
               )}
