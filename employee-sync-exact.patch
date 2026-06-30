@@ -1,0 +1,11 @@
+--- frontend/src/App.jsx	2026-07-01 00:28:00.000000000 +0000
++++ /mnt/data/employee_phase3_exact/frontend/src/App.jsx	2026-06-30 20:02:53.455979793 +0000
+@@ -265,7 +265,7 @@
+   MANAGER: 'Manager',
+   DESIGNER: 'Designer'
+ };
+-const TEAM_ALIASES_TO_BLOCK = ['faraz'];
++const TEAM_ALIASES_TO_BLOCK = []; // no hardcoded staff aliases blocked; deleted/restricted users are filtered by status
+ const isSystemPlaceholderUser = (u = {}) => {
+   const nameKey = String(u.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+   const usernameKey = String(u.username || '').toLowerCase().replace(/[^a-z0-9]/g, '');
