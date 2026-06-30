@@ -265,7 +265,7 @@ const ROLES = {
   MANAGER: 'Manager',
   DESIGNER: 'Designer'
 };
-const TEAM_ALIASES_TO_BLOCK = ['faraz'];
+const TEAM_ALIASES_TO_BLOCK = []; // no hardcoded staff aliases blocked; deleted/restricted users are filtered by status
 const isSystemPlaceholderUser = (u = {}) => {
   const nameKey = String(u.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const usernameKey = String(u.username || '').toLowerCase().replace(/[^a-z0-9]/g, '');

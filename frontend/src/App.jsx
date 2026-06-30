@@ -265,7 +265,7 @@ const ROLES = {
   MANAGER: 'Manager',
   DESIGNER: 'Designer'
 };
-const TEAM_ALIASES_TO_BLOCK = ['faraz'];
+const TEAM_ALIASES_TO_BLOCK = []; // no hardcoded staff aliases blocked; deleted/restricted users are filtered by status
 const isSystemPlaceholderUser = (u = {}) => {
   const nameKey = String(u.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const usernameKey = String(u.username || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -4365,38 +4365,13 @@ function AppShell() {
 
   const handleUpdateUser = async (u) => {
     const normalizedUser = normalizeTeamUser(u);
-    const source = normalizeTeamUsers(users && users.length ? users : INITIAL_USERS);
-    const exists = source.some(x => String(x.id) === String(normalizedUser.id));
-    const next = exists
-      ? source.map(x => String(x.id) === String(normalizedUser.id) ? normalizeTeamUser({ ...x, ...normalizedUser }) : x)
-      : [...source, normalizedUser];
-
-    // Keep user creation, role changes, restrictions, password resets and deletion
-    // synchronized immediately across all team screens instead of waiting for
-    // the delayed full-state autosave. This is intentionally limited to users.
-    setUsers(next);
-    saveLocal('kalpa_users', next);
-
-    if (USE_BACKEND_STATE) {
-      try {
-        await fetch(`${API_BASE}/api/state`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            users: next,
-            projects: sanitizeProjectsForCache(filterDeletedProjects(projects || [])),
-            deletedProjectIds: getDeletedProjectIds(),
-            chatMessages: sanitizeChatsForCache(chatMessages || []),
-            notifications: notifications || [],
-            attendanceLogs: attendanceLogs || [],
-            payments: payments || []
-          })
-        });
-      } catch (e) {
-        console.warn('Immediate user sync failed:', e.message);
-      }
-    }
-
+    setUsers(prev => {
+      const source = normalizeTeamUsers(prev && prev.length ? prev : INITIAL_USERS);
+      const exists = source.some(x => x.id === normalizedUser.id);
+      const next = exists ? source.map(x => x.id === normalizedUser.id ? normalizeTeamUser({ ...x, ...normalizedUser }) : x) : [...source, normalizedUser];
+      saveLocal('kalpa_users', next);
+      return next;
+    });
     if (!firebaseUser) return;
     try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'users', normalizedUser.id.toString()), normalizedUser); } catch(e){}
   };
