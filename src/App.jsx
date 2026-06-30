@@ -284,6 +284,35 @@ const getOperationalUsers = (users = [], { includeAdmins = true } = {}) => (user
     return (roleOrder[a.role] ?? 9) - (roleOrder[b.role] ?? 9) || String(a.name).localeCompare(String(b.name));
   });
 
+const isArchivedLifecycleUser = (u = {}) => ['DELETED', 'REJECTED', 'ARCHIVED'].includes(normalizeStatus(u.status));
+const getManagedTeamUsers = (users = [], { includeAdmins = true } = {}) => (users || [])
+  .map(normalizeTeamUser)
+  .filter(u => hasValidTeamRole(u) && !isSystemPlaceholderUser(u) && !isArchivedLifecycleUser(u) && (includeAdmins || u.role !== ROLES.ADMIN))
+  .sort((a, b) => {
+    const roleOrder = { [ROLES.ADMIN]: 0, [ROLES.MANAGER]: 1, [ROLES.DESIGNER]: 2 };
+    return (roleOrder[a.role] ?? 9) - (roleOrder[b.role] ?? 9) || String(a.name).localeCompare(String(b.name));
+  });
+
+const makeEmployeeLifecycleEvent = (type, by = '', details = {}) => ({
+  id: `emp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+  type,
+  by,
+  at: Date.now(),
+  details
+});
+
+const detectEmployeeLifecycleEventType = (existing = {}, next = {}) => {
+  if (!existing || !existing.id) return 'EMPLOYEE_CREATED';
+  const oldStatus = normalizeStatus(existing.status);
+  const newStatus = normalizeStatus(next.status);
+  if (!isArchivedLifecycleUser(existing) && isArchivedLifecycleUser(next)) return 'EMPLOYEE_ARCHIVED';
+  if (oldStatus !== 'RESTRICTED' && newStatus === 'RESTRICTED') return 'LOGIN_RESTRICTED';
+  if (oldStatus === 'RESTRICTED' && newStatus === 'APPROVED') return 'LOGIN_RESTORED';
+  if (normalizeRole(existing.role) !== normalizeRole(next.role)) return 'ROLE_CHANGED';
+  if (existing.password !== next.password) return 'PASSWORD_RESET';
+  return 'EMPLOYEE_UPDATED';
+};
+
 const fileToBase64 = (file) => new Promise((resolve, reject) => {
   const reader = new FileReader();
   reader.readAsDataURL(file);
@@ -357,11 +386,16 @@ const createEmployeeLifecycleProfile = (user = {}, existing = {}) => {
   const isArchived = ['DELETED', 'REJECTED', 'ARCHIVED'].includes(status);
   const isRestricted = status === 'RESTRICTED';
   const lifecycleStatus = isArchived ? 'ARCHIVED' : (isRestricted ? 'RESTRICTED' : 'ACTIVE');
+  const active = lifecycleStatus === 'ACTIVE';
   const base = { ...existing, ...user, role, status };
   const profileCreatedAt = existing.profileCreatedAt || user.profileCreatedAt || now;
   const profileUpdatedAt = now;
   const workingRole = role === ROLES.ADMIN ? 'ADMIN' : (role === ROLES.MANAGER ? 'MANAGER' : 'DESIGNER');
-  const active = lifecycleStatus === 'ACTIVE';
+  const previousEvents = Array.isArray(existing.lifecycleEvents) ? existing.lifecycleEvents : [];
+  const incomingEvents = Array.isArray(user.lifecycleEvents) ? user.lifecycleEvents : [];
+  const lifecycleEvents = [...previousEvents, ...incomingEvents].filter((event, index, arr) =>
+    event && event.id && arr.findIndex(e => e && e.id === event.id) === index
+  ).slice(-100);
   const lifecycle = {
     ...(existing.lifecycle || {}),
     ...(user.lifecycle || {}),
@@ -374,69 +408,84 @@ const createEmployeeLifecycleProfile = (user = {}, existing = {}) => {
     archivedAt: isArchived ? (user.deletedAt || user.archivedAt || existing.lifecycle?.archivedAt || now) : null,
     archivedBy: isArchived ? (user.deletedBy || user.archivedBy || existing.lifecycle?.archivedBy || '') : ''
   };
+  const attendanceProfile = {
+    ...(existing.attendanceProfile || {}),
+    ...(user.attendanceProfile || {}),
+    createdAt: existing.attendanceProfile?.createdAt || user.attendanceProfile?.createdAt || profileCreatedAt,
+    active,
+    includeInAttendance: active && role !== ROLES.ADMIN,
+    lastPreparedAt: profileUpdatedAt
+  };
+  const availabilityProfile = {
+    ...(existing.availabilityProfile || {}),
+    ...(user.availabilityProfile || {}),
+    createdAt: existing.availabilityProfile?.createdAt || user.availabilityProfile?.createdAt || profileCreatedAt,
+    active,
+    trackAvailability: active,
+    defaultAvailability: 'Unavailable'
+  };
+  const chatProfile = {
+    ...(existing.chatProfile || {}),
+    ...(user.chatProfile || {}),
+    createdAt: existing.chatProfile?.createdAt || user.chatProfile?.createdAt || profileCreatedAt,
+    active,
+    directMessages: active,
+    mentions: active
+  };
+  const performanceProfile = {
+    ...(existing.performanceProfile || {}),
+    ...(user.performanceProfile || {}),
+    createdAt: existing.performanceProfile?.createdAt || user.performanceProfile?.createdAt || profileCreatedAt,
+    active: active && role !== ROLES.ADMIN,
+    completedTasks: existing.performanceProfile?.completedTasks || user.performanceProfile?.completedTasks || 0,
+    revisionsHandled: existing.performanceProfile?.revisionsHandled || user.performanceProfile?.revisionsHandled || 0,
+    averageCompletionMinutes: existing.performanceProfile?.averageCompletionMinutes || user.performanceProfile?.averageCompletionMinutes || 0
+  };
+  const analyticsProfile = {
+    ...(existing.analyticsProfile || {}),
+    ...(user.analyticsProfile || {}),
+    createdAt: existing.analyticsProfile?.createdAt || user.analyticsProfile?.createdAt || profileCreatedAt,
+    active,
+    role: workingRole,
+    daily: existing.analyticsProfile?.daily || user.analyticsProfile?.daily || {},
+    weekly: existing.analyticsProfile?.weekly || user.analyticsProfile?.weekly || {},
+    monthly: existing.analyticsProfile?.monthly || user.analyticsProfile?.monthly || {}
+  };
+  const workloadProfile = {
+    ...(existing.workloadProfile || {}),
+    ...(user.workloadProfile || {}),
+    createdAt: existing.workloadProfile?.createdAt || user.workloadProfile?.createdAt || profileCreatedAt,
+    active: active && role !== ROLES.ADMIN,
+    dailyLimit: existing.workloadProfile?.dailyLimit || user.workloadProfile?.dailyLimit || (role === ROLES.MANAGER || role === ROLES.DESIGNER ? 15 : 0),
+    activeTasks: existing.workloadProfile?.activeTasks || user.workloadProfile?.activeTasks || 0,
+    pendingTasks: existing.workloadProfile?.pendingTasks || user.workloadProfile?.pendingTasks || 0
+  };
+  const notificationPreferences = {
+    ...(existing.notificationPreferences || {}),
+    ...(user.notificationPreferences || {}),
+    createdAt: existing.notificationPreferences?.createdAt || user.notificationPreferences?.createdAt || profileCreatedAt,
+    enabled: active,
+    task: active,
+    chat: active,
+    mention: active,
+    meeting: active,
+    desktop: active,
+    digest: active
+  };
   const normalized = {
     ...base,
     profileCreatedAt,
     profileUpdatedAt,
     lifecycleStatus,
     lifecycle,
-    attendanceProfile: {
-      createdAt: existing.attendanceProfile?.createdAt || user.attendanceProfile?.createdAt || profileCreatedAt,
-      active,
-      includeInAttendance: active && role !== ROLES.ADMIN,
-      lastPreparedAt: profileUpdatedAt,
-      ...(existing.attendanceProfile || {}),
-      ...(user.attendanceProfile || {})
-    },
-    availabilityProfile: {
-      createdAt: existing.availabilityProfile?.createdAt || user.availabilityProfile?.createdAt || profileCreatedAt,
-      active,
-      trackAvailability: active,
-      defaultAvailability: 'Unavailable',
-      ...(existing.availabilityProfile || {}),
-      ...(user.availabilityProfile || {})
-    },
-    chatProfile: {
-      createdAt: existing.chatProfile?.createdAt || user.chatProfile?.createdAt || profileCreatedAt,
-      active,
-      directMessages: active,
-      mentions: active,
-      ...(existing.chatProfile || {}),
-      ...(user.chatProfile || {})
-    },
-    performanceProfile: {
-      createdAt: existing.performanceProfile?.createdAt || user.performanceProfile?.createdAt || profileCreatedAt,
-      active: active && role !== ROLES.ADMIN,
-      completedTasks: existing.performanceProfile?.completedTasks || user.performanceProfile?.completedTasks || 0,
-      revisionsHandled: existing.performanceProfile?.revisionsHandled || user.performanceProfile?.revisionsHandled || 0,
-      ...(existing.performanceProfile || {}),
-      ...(user.performanceProfile || {})
-    },
-    analyticsProfile: {
-      createdAt: existing.analyticsProfile?.createdAt || user.analyticsProfile?.createdAt || profileCreatedAt,
-      active,
-      role: workingRole,
-      ...(existing.analyticsProfile || {}),
-      ...(user.analyticsProfile || {})
-    },
-    workloadProfile: {
-      createdAt: existing.workloadProfile?.createdAt || user.workloadProfile?.createdAt || profileCreatedAt,
-      active: active && role !== ROLES.ADMIN,
-      dailyLimit: existing.workloadProfile?.dailyLimit || user.workloadProfile?.dailyLimit || (role === ROLES.MANAGER || role === ROLES.DESIGNER ? 15 : 0),
-      activeTasks: existing.workloadProfile?.activeTasks || user.workloadProfile?.activeTasks || 0,
-      ...(existing.workloadProfile || {}),
-      ...(user.workloadProfile || {})
-    },
-    notificationPreferences: {
-      createdAt: existing.notificationPreferences?.createdAt || user.notificationPreferences?.createdAt || profileCreatedAt,
-      enabled: active,
-      task: active,
-      chat: active,
-      mention: active,
-      meeting: active,
-      ...(existing.notificationPreferences || {}),
-      ...(user.notificationPreferences || {})
-    }
+    lifecycleEvents,
+    attendanceProfile,
+    availabilityProfile,
+    chatProfile,
+    performanceProfile,
+    analyticsProfile,
+    workloadProfile,
+    notificationPreferences
   };
   if (!active) {
     normalized.isOnline = false;
@@ -448,7 +497,6 @@ const createEmployeeLifecycleProfile = (user = {}, existing = {}) => {
   }
   return normalized;
 };
-
 const normalizeTeamUser = (u = {}) => {
   const rawName = String(u.name || '').trim();
   const rawUsername = String(u.username || '').trim();
@@ -1574,7 +1622,15 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser }) => 
   const handleAddUser = (e) => {
     e.preventDefault();
     if (!newUser.name || !newUser.username || !newUser.password) return;
-    const u = { ...newUser, id: Date.now(), status: 'APPROVED' };
+    const createdAt = Date.now();
+    const createdBy = currentUser?.name || 'Admin';
+    const u = createEmployeeLifecycleProfile({
+      ...newUser,
+      id: createdAt,
+      status: 'APPROVED',
+      createdBy,
+      lifecycleEvents: [makeEmployeeLifecycleEvent('EMPLOYEE_CREATED', createdBy, { role: newUser.role })]
+    });
     onUpdateUser(u);
     setNewUser({ name: '', username: '', password: '', role: ROLES.DESIGNER });
     setShowAddForm(false);
@@ -1718,7 +1774,7 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser }) => 
         )}
 
         <div className="space-y-4">
-          {getOperationalUsers(users, { includeAdmins: true }).filter(u => !['REJECTED','DELETED'].includes(String(u.status || '').toUpperCase())).map(u => (
+          {getManagedTeamUsers(users, { includeAdmins: true }).map(u => (
             <div key={u.id} className={`flex flex-col sm:flex-row sm:items-center justify-between p-5 rounded-2xl border gap-4 transition-all hover:border-indigo-200 hover:shadow-sm ${String(u.status || 'APPROVED').toUpperCase() === 'RESTRICTED' ? 'bg-red-50 border-red-100' : 'bg-slate-50 border-slate-100'}`}>
               <div className="flex-1">
                 <p className="font-extrabold text-slate-800 text-lg flex items-center">
@@ -1755,7 +1811,7 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser }) => 
                 )}
                 {isAdmin && u.role !== ROLES.ADMIN && (
                    <button type="button" onClick={() => {
-                      if (window.confirm(`Delete login for ${u.name}? They will no longer be able to login.`)) onUpdateUser({ ...u, status: 'DELETED', deletedAt: Date.now(), deletedBy: currentUser.name });
+                      if (window.confirm(`Archive login for ${u.name}? They will be hidden from active operations but old reports and task history will remain.`)) onUpdateUser({ ...u, status: 'ARCHIVED', archivedAt: Date.now(), archivedBy: currentUser.name });
                    }} className="px-4 py-2.5 bg-slate-900 text-white hover:bg-slate-700 text-sm font-bold rounded-xl transition-all shadow-sm flex items-center">
                       Delete Login
                    </button>
@@ -4486,12 +4542,26 @@ function AppShell() {
 
   const handleUpdateUser = async (u) => {
     let normalizedUser = normalizeTeamUser(u);
+    const changedBy = currentUser?.name || normalizedUser.name || 'System';
     setUsers(prev => {
       const source = normalizeTeamUsers(prev && prev.length ? prev : INITIAL_USERS);
       const existing = source.find(x => String(x.id) === String(normalizedUser.id) || (normalizedUser.username && x.username === normalizedUser.username)) || {};
-      normalizedUser = normalizeTeamUser(createEmployeeLifecycleProfile(normalizedUser, existing));
+      const eventType = detectEmployeeLifecycleEventType(existing, normalizedUser);
+      const eventDetails = {
+        previousRole: existing.role || '',
+        nextRole: normalizedUser.role || '',
+        previousStatus: existing.status || '',
+        nextStatus: normalizedUser.status || ''
+      };
+      const lifecycleEvents = [
+        ...(Array.isArray(normalizedUser.lifecycleEvents) ? normalizedUser.lifecycleEvents : []),
+        ...(eventType !== 'EMPLOYEE_UPDATED' ? [makeEmployeeLifecycleEvent(eventType, changedBy, eventDetails)] : [])
+      ];
+      normalizedUser = normalizeTeamUser(createEmployeeLifecycleProfile({ ...normalizedUser, lifecycleEvents }, existing));
       const exists = source.some(x => String(x.id) === String(normalizedUser.id) || (normalizedUser.username && x.username === normalizedUser.username));
-      const next = exists ? source.map(x => (String(x.id) === String(normalizedUser.id) || (normalizedUser.username && x.username === normalizedUser.username)) ? normalizeTeamUser(createEmployeeLifecycleProfile({ ...x, ...normalizedUser }, x)) : x) : [...source, normalizedUser];
+      const next = exists
+        ? source.map(x => (String(x.id) === String(normalizedUser.id) || (normalizedUser.username && x.username === normalizedUser.username)) ? normalizeTeamUser(createEmployeeLifecycleProfile({ ...x, ...normalizedUser }, x)) : x)
+        : [...source, normalizedUser];
       saveLocal('kalpa_users', next);
       return next;
     });
