@@ -695,7 +695,7 @@ const getFileIcon = (filename) => {
 };
 
 const Badge = ({ children, colorClass }) => (
-  <span className={`px-2.5 py-1 rounded-full text-xs font-medium border ${colorClass}`}>
+  <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium border transition-all duration-200 ${colorClass}`}>
     {children}
   </span>
 );
@@ -1291,7 +1291,7 @@ const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser }) => {
   ];
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-300">
+    <div className="space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div>
         <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">My Profile</h1>
         <p className="text-slate-500 font-medium mt-2">Manage your photo, internal details, and password.</p>
@@ -1504,7 +1504,7 @@ const CalculatorView = () => {
   ];
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-300">
+    <div className="space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div>
         <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Calculator & Conversion Tools</h1>
         <p className="text-slate-500 font-medium mt-2">Area calculator, land measurement converter, Hindi digit guide, and quick estimate tools for everyone.</p>
@@ -1909,7 +1909,7 @@ const AttendanceView = ({ attendanceLogs = [], users = [] }) => {
   };
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-300">
+    <div className="space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div className="flex flex-col sm:flex-row justify-between sm:items-end gap-4">
         <div>
            <h2 className="text-3xl font-extrabold text-slate-800 tracking-tight flex items-center"><Users className="w-8 h-8 mr-3 text-indigo-500"/> Team Attendance</h2>
@@ -2046,7 +2046,7 @@ const CommandCentreView = ({ projects = [], users = [], onSelectProject, current
     ['Urgent Revisions', metrics.revisions.length, 'bg-purple-50 text-purple-700 border-purple-100']
   ];
   return (
-    <div className="space-y-6 animate-in fade-in duration-300">
+    <div className="space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div className="flex flex-col sm:flex-row justify-between sm:items-end gap-4">
         <div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Command Centre</h1><p className="text-slate-500 font-medium mt-2">Live operations snapshot with workload, SLA, productivity, and carried-forward work.</p></div>
         <input type="date" value={dateKey} onChange={e => setDateKey(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none" />
@@ -2191,7 +2191,7 @@ const ProductivityDashboard = ({ users = [], projects = [] }) => {
   const monthKey = todayKey.slice(0,7);
   const team = (users || []).filter(u => (u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER) && u.status === 'APPROVED');
   return (
-    <div className="space-y-6 animate-in fade-in duration-300">
+    <div className="space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Productivity Dashboard</h1><p className="text-slate-500 font-medium mt-2">Designer and manager performance, visible to the whole team.</p></div>
       <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden"><div className="overflow-x-auto"><table className="w-full text-left text-sm whitespace-nowrap"><thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100"><tr><th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Member</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Today</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Week</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Month</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Active</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Avg SLA</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Revision %</th></tr></thead><tbody className="divide-y divide-slate-100">{team.map(u => { const userTasks = projects.filter(p => p.assignedTo === u.name); const completed = userTasks.filter(p => p.status === 'Completed'); const today = completed.filter(p => formatDateKey(p.completedAt || p.createdAt) === todayKey).length; const week = completed.filter(p => (p.completedAt || 0) >= weekStart).length; const month = completed.filter(p => formatDateKey(p.completedAt || p.createdAt).slice(0,7) === monthKey).length; const active = userTasks.filter(p => p.status !== 'Completed').length; const revs = userTasks.filter(p => (p.subTasks || []).length > 0).length; const revPct = userTasks.length ? Math.round((revs / userTasks.length) * 100) : 0; const avgMins = completed.length ? Math.round(completed.reduce((sum,p) => sum + Math.max(0, ((p.completedAt || p.submittedAt || p.createdAt || Date.now()) - (p.createdAt || Date.now()))/60000), 0) / completed.length) : 0; return <tr key={u.id} className="hover:bg-slate-50"><td className="px-6 py-5"><p className="font-black text-slate-800">{u.name}</p><p className="text-xs font-bold text-slate-400">{u.role}</p></td><td className="px-6 py-5 text-center font-black text-emerald-600">{today}</td><td className="px-6 py-5 text-center font-black text-indigo-600">{week}</td><td className="px-6 py-5 text-center font-black text-slate-800">{month}</td><td className="px-6 py-5 text-center"><span className="bg-orange-50 text-orange-700 px-3 py-1 rounded-lg font-black text-xs">{active}</span></td><td className="px-6 py-5 text-center font-bold text-slate-600">{avgMins ? formatDuration(0, avgMins * 60000) : '-'}</td><td className="px-6 py-5 text-center font-bold text-red-500">{revPct}%</td></tr> })}</tbody></table></div></div>
     </div>
@@ -2206,7 +2206,7 @@ const DailyClosingReport = ({ projects = [] }) => {
   ];
   const handleExport = () => exportToCSV(['Metric','Value'], rows, `Daily_Closing_${dateKey}.csv`);
   return (
-    <div className="space-y-6 animate-in fade-in duration-300">
+    <div className="space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div className="flex flex-col sm:flex-row justify-between sm:items-end gap-4"><div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Daily Closing Report</h1><p className="text-slate-500 font-medium mt-2">End-of-day summary with pending work carried forward.</p></div><div className="flex gap-3"><input type="date" value={dateKey} onChange={e => setDateKey(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none" /><button onClick={handleExport} className="bg-emerald-100 text-emerald-700 font-bold px-4 py-2.5 rounded-xl"><Download className="w-4 h-4 inline mr-2"/>Export</button></div></div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">{rows.map(([label,value]) => <div key={label} className="bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm"><p className="text-xs text-slate-400 font-black uppercase tracking-widest">{label}</p><p className="text-3xl font-black text-slate-800 mt-2">{value}</p></div>)}</div>
       <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden"><div className="p-5 border-b-2 border-slate-100"><h2 className="font-black text-slate-800 text-xl">Pending Carry Forward List</h2></div><div className="divide-y divide-slate-100">{metrics.carried.map(p => <div key={p.id} className="p-5 flex justify-between items-center"><div><p className="font-black text-slate-800">{p.id}</p><p className="text-xs font-bold text-slate-400">{getCustomerDisplayName(p)} • {p.location} • {p.assignedTo}</p></div><Badge colorClass={getStatusColor(p.status)}>{p.status}</Badge></div>)}{metrics.carried.length === 0 && <div className="p-10 text-center text-slate-400 font-bold">No previous pending tasks to carry forward.</div>}</div></div>
@@ -2280,7 +2280,7 @@ const LedgerView = ({ projects, onSelectProject }) => {
   };
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-300">
+    <div className="space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div className="flex flex-col xl:flex-row justify-between xl:items-end gap-4">
         <div>
            <h2 className="text-3xl font-extrabold text-slate-800 tracking-tight">Financial Ledger</h2>
@@ -2539,7 +2539,7 @@ const HistoryArchiveView = ({ projects, onSelectProject }) => {
   });
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-300">
+    <div className="space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-5">
          <div>
              <h2 className="text-3xl font-extrabold text-slate-800 flex items-center tracking-tight"><Archive className="w-8 h-8 mr-3 text-indigo-500"/> Task History Catalog</h2>
@@ -2652,7 +2652,7 @@ const TeamMeetingRoom = ({ currentUser }) => {
     try { localStorage.setItem('kalpa_team_meeting_notes', value); } catch(err) {}
   };
   return (
-    <div className="space-y-6 animate-in fade-in duration-300">
+    <div className="space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div>
           <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight flex items-center"><Video className="w-8 h-8 mr-3 text-indigo-500"/> Team Virtual Office</h1>
@@ -2987,7 +2987,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
   const completedDocsCount = getCompletedDocuments(project).length;
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-300">
+    <div className="space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-5 bg-white p-5 rounded-3xl border-2 border-slate-100 shadow-sm">
         <div className="flex items-center space-x-5">
           <button type="button" onClick={onBack} className="p-3 bg-slate-50 hover:bg-slate-100 rounded-xl transition-colors flex-shrink-0 border border-slate-200">
@@ -4933,13 +4933,13 @@ function AppShell() {
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
   return (
-    <div className="min-h-screen bg-slate-50/50 font-sans text-slate-900 pb-20 antialiased">
+    <div className="min-h-screen bg-slate-50/50 font-sans text-slate-900 pb-20 antialiased selection:bg-indigo-100 selection:text-indigo-900">
       <ActiveToasts notifications={notifications} currentUser={currentUser} />
       
       {showLocalBanner && (
-          <div className="bg-amber-100 border-b border-amber-200 text-amber-800 p-2.5 text-center text-xs font-bold flex justify-center items-center shadow-sm z-50 relative">
+          <div className="bg-amber-100 border-b border-amber-200 text-amber-800 p-2.5 text-center text-xs font-bold flex flex-wrap justify-center items-center gap-2 shadow-sm z-50 relative">
               <span>⚠️ Local Mode: Data is saved locally. Cloud features disconnected.</span>
-              <button type="button" onClick={() => setShowLocalBanner(false)} className="ml-4 p-1 hover:bg-amber-200 rounded-md"><X className="w-4 h-4" /></button>
+              <button type="button" onClick={() => setShowLocalBanner(false)} className="sm:ml-2 p-1 hover:bg-amber-200 rounded-md transition-colors"><X className="w-4 h-4" /></button>
           </div>
       )}
 
@@ -4955,13 +4955,13 @@ function AppShell() {
         </div>
       )}
 
-      <nav className="bg-white border-b-2 border-slate-100 sticky top-0 z-40 shadow-sm">
-        <div className="max-w-[1400px] mx-auto px-3 sm:px-6 lg:px-8 flex justify-between h-[72px]">
+      <nav className="bg-white/95 backdrop-blur border-b-2 border-slate-100 sticky top-0 z-40 shadow-sm">
+        <div className="max-w-[1400px] mx-auto px-3 sm:px-6 lg:px-8 flex justify-between h-16 sm:h-[72px]">
           <div className="flex items-center">
-            <div className="bg-gradient-to-br from-indigo-500 to-purple-600 w-10 h-10 rounded-xl flex items-center justify-center mr-4 shadow-md">
+            <div className="bg-gradient-to-br from-indigo-500 to-purple-600 w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center mr-2.5 sm:mr-4 shadow-md shrink-0 transition-transform duration-200 hover:scale-105">
               <LayoutDashboard className="text-white w-5 h-5" />
             </div>
-            <span className="font-extrabold text-lg sm:text-2xl text-slate-800 tracking-tight truncate">Kalpvriksha Designs <span className="text-indigo-600">Ops</span></span>
+            <span className="font-extrabold text-base sm:text-2xl text-slate-800 tracking-tight truncate max-w-[170px] sm:max-w-none">Kalpvriksha Designs <span className="text-indigo-600">Ops</span></span>
           </div>
           <div className="hidden lg:flex flex-1 max-w-xl mx-8">
             <div className="relative w-full">
@@ -4970,10 +4970,10 @@ function AppShell() {
               {globalSearch && <button type="button" onClick={() => setGlobalSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-red-500"><X className="w-4 h-4" /></button>}
             </div>
           </div>
-          <div className="flex items-center space-x-6">
+          <div className="flex items-center gap-2 sm:gap-4 lg:gap-6">
             
             <div className="relative">
-              <button type="button" onClick={() => { setShowNotifs(!showNotifs); if(!showNotifs) markNotifsAsRead(); }} className="p-2.5 relative text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors">
+              <button type="button" onClick={() => { setShowNotifs(!showNotifs); if(!showNotifs) markNotifsAsRead(); }} className="p-2 sm:p-2.5 relative text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all duration-200 active:scale-95">
                 <Bell className="w-6 h-6" />
                 {unreadNotifs > 0 && <span className="absolute top-2 right-2 w-3 h-3 bg-red-500 rounded-full border-2 border-white shadow-sm animate-pulse"></span>}
               </button>
@@ -5024,7 +5024,7 @@ function AppShell() {
                 <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">{currentUser.role} • {currentUser.emailRegistered ? 'Email Registered' : (currentUser.mobileRegistered ? 'Mobile Registered' : 'Recovery Unregistered')}</p>
               </div>
             </button>
-            <button type="button" onClick={handleLogout} className="p-2.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors" title="Log out">
+            <button type="button" onClick={handleLogout} className="p-2 sm:p-2.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all duration-200 active:scale-95" title="Log out">
               <LogOut className="w-5 h-5" />
             </button>
           </div>
@@ -5042,17 +5042,17 @@ function AppShell() {
         </div>
       )}
 
-      <main className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="lg:hidden mb-5">
+      <main className="max-w-[1400px] mx-auto px-3 sm:px-6 lg:px-8 py-5 sm:py-8 animate-in fade-in duration-300">
+        <div className="lg:hidden mb-4 sm:mb-5 animate-in fade-in slide-in-from-top-2 duration-200">
           <div className="relative">
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
-            <input value={globalSearch} onChange={e => setGlobalSearch(e.target.value)} placeholder="Search cases..." className="w-full bg-white border-2 border-slate-100 rounded-2xl pl-12 pr-10 py-3 text-sm font-bold outline-none focus:border-indigo-400" />
+            <input value={globalSearch} onChange={e => setGlobalSearch(e.target.value)} placeholder="Search cases..." className="w-full bg-white border-2 border-slate-100 rounded-2xl pl-12 pr-10 py-3 text-sm font-bold outline-none focus:border-indigo-400 focus:ring-4 focus:ring-indigo-50 transition-all" />
             {globalSearch && <button type="button" onClick={() => setGlobalSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-red-500"><X className="w-4 h-4" /></button>}
           </div>
         </div>
         
         {globalSearch.trim() && !selectedProject && (
-          <div className="bg-white border-2 border-indigo-100 rounded-3xl p-5 mb-6 shadow-sm">
+          <div className="bg-white border-2 border-indigo-100 rounded-3xl p-4 sm:p-5 mb-6 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200">
             <div className="flex justify-between items-center mb-4">
               <div><h2 className="font-black text-slate-800">Search Results</h2><p className="text-xs font-bold text-slate-400">Showing matching cases for: {globalSearch}</p></div>
               <button type="button" onClick={() => setGlobalSearch('')} className="text-xs font-black bg-slate-100 text-slate-600 px-3 py-2 rounded-xl">Clear</button>
@@ -5071,25 +5071,25 @@ function AppShell() {
         )}
 
         {!selectedProject && (
-          <div className="flex flex-wrap gap-2 mb-8 bg-white p-1.5 rounded-2xl shadow-sm border-2 border-slate-100 w-fit">
-            <button type="button" onClick={() => setActiveTab('command')} className={`px-5 py-2.5 text-sm font-bold rounded-xl transition-all ${activeTab === 'command' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Command Centre</button>
+          <div className="flex gap-2 mb-6 sm:mb-8 bg-white p-1.5 rounded-2xl shadow-sm border-2 border-slate-100 w-full sm:w-fit max-w-full overflow-x-auto sm:flex-wrap custom-scrollbar">
+            <button type="button" onClick={() => setActiveTab('command')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'command' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Command Centre</button>
             {currentUser.role === ROLES.DESIGNER && (
-              <button type="button" onClick={() => setActiveTab('my_tasks')} className={`px-5 py-2.5 text-sm font-bold rounded-xl transition-all flex items-center ${activeTab === 'my_tasks' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}><User className="w-4 h-4 mr-1.5" /> My Tasks</button>
+              <button type="button" onClick={() => setActiveTab('my_tasks')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 flex items-center ${activeTab === 'my_tasks' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}><User className="w-4 h-4 mr-1.5" /> My Tasks</button>
             )}
-            {currentUser.role !== ROLES.DESIGNER && <button type="button" onClick={() => setActiveTab('board')} className={`px-5 py-2.5 text-sm font-bold rounded-xl transition-all ${activeTab === 'board' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Operations</button>}
+            {currentUser.role !== ROLES.DESIGNER && <button type="button" onClick={() => setActiveTab('board')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'board' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Operations</button>}
             {currentUser.role === ROLES.MANAGER && (
-              <button type="button" onClick={() => setActiveTab('my_tasks')} className={`px-5 py-2.5 text-sm font-bold rounded-xl transition-all flex items-center ${activeTab === 'my_tasks' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}><User className="w-4 h-4 mr-1.5" /> My Tasks</button>
+              <button type="button" onClick={() => setActiveTab('my_tasks')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 flex items-center ${activeTab === 'my_tasks' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}><User className="w-4 h-4 mr-1.5" /> My Tasks</button>
             )}
-            <button type="button" onClick={() => setActiveTab('productivity')} className={`px-5 py-2.5 text-sm font-bold rounded-xl transition-all ${activeTab === 'productivity' ? 'bg-emerald-100 text-emerald-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Performance</button>
-            {currentUser.role === ROLES.ADMIN && <button type="button" onClick={() => setActiveTab('closing')} className={`px-5 py-2.5 text-sm font-bold rounded-xl transition-all ${activeTab === 'closing' ? 'bg-slate-800 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Daily Closing</button>}
+            <button type="button" onClick={() => setActiveTab('productivity')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'productivity' ? 'bg-emerald-100 text-emerald-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Performance</button>
+            {currentUser.role === ROLES.ADMIN && <button type="button" onClick={() => setActiveTab('closing')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'closing' ? 'bg-slate-800 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Daily Closing</button>}
             {currentUser.role === ROLES.ADMIN && (
-              <button type="button" onClick={() => setActiveTab('ledger')} className={`px-5 py-2.5 text-sm font-bold rounded-xl transition-all ${activeTab === 'ledger' ? 'bg-amber-100 text-amber-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Finance</button>
+              <button type="button" onClick={() => setActiveTab('ledger')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'ledger' ? 'bg-amber-100 text-amber-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Finance</button>
             )}
-            <button type="button" onClick={() => setActiveTab('team')} className={`px-5 py-2.5 text-sm font-bold rounded-xl transition-all ${activeTab === 'team' ? 'bg-emerald-100 text-emerald-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Team</button>
-            <button type="button" onClick={() => setActiveTab('attendance')} className={`px-5 py-2.5 text-sm font-bold rounded-xl transition-all ${activeTab === 'attendance' ? 'bg-indigo-100 text-indigo-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Attendance</button>
-            <button type="button" onClick={() => setActiveTab('calculator')} className={`px-5 py-2.5 text-sm font-bold rounded-xl transition-all ${activeTab === 'calculator' ? 'bg-blue-100 text-blue-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Tools</button>
-            <button type="button" onClick={() => setActiveTab('archive')} className={`px-5 py-2.5 text-sm font-bold rounded-xl transition-all ${activeTab === 'archive' ? 'bg-slate-800 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Archive</button>
-            <button type="button" onClick={() => setActiveTab('meeting')} className={`px-5 py-2.5 text-sm font-bold rounded-xl transition-all flex items-center ${activeTab === 'meeting' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}><Video className="w-4 h-4 mr-1.5" /> Team Meeting</button>
+            <button type="button" onClick={() => setActiveTab('team')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'team' ? 'bg-emerald-100 text-emerald-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Team</button>
+            <button type="button" onClick={() => setActiveTab('attendance')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'attendance' ? 'bg-indigo-100 text-indigo-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Attendance</button>
+            <button type="button" onClick={() => setActiveTab('calculator')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'calculator' ? 'bg-blue-100 text-blue-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Tools</button>
+            <button type="button" onClick={() => setActiveTab('archive')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'archive' ? 'bg-slate-800 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Archive</button>
+            <button type="button" onClick={() => setActiveTab('meeting')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 flex items-center ${activeTab === 'meeting' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}><Video className="w-4 h-4 mr-1.5" /> Team Meeting</button>
           </div>
         )}
 
@@ -5116,7 +5116,7 @@ function AppShell() {
         ) : activeTab === 'meeting' ? (
           <TeamMeetingRoom currentUser={currentUser} />
         ) : (
-          <div className="space-y-6 animate-in fade-in duration-300">
+          <div className="space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
             <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-6">
               <div>
                 <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">{activeTab === 'my_tasks' ? 'My Tasks' : (canManage ? 'Active Operations' : 'My Workspace')}</h1>
@@ -5142,17 +5142,17 @@ function AppShell() {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-5 sm:gap-8">
               <div className="lg:col-span-3 w-full">
                 
                 {boardViewMode === 'kanban' ? (
-                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6">
                       {['Lead Received', 'Drafting', 'Completed'].map(statusCol => (
-                         <div key={statusCol} className="bg-slate-100/50 rounded-3xl p-4 border-2 border-slate-100/50 min-h-[500px]">
+                         <div key={statusCol} className="bg-slate-100/50 rounded-3xl p-3 sm:p-4 border-2 border-slate-100/50 min-h-[420px] sm:min-h-[500px] transition-colors duration-200">
                             <h3 className="font-black text-slate-500 uppercase tracking-widest text-xs mb-4 px-2">{statusCol} <span className="ml-2 bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full">{displayedProjects.filter(p => p.status === statusCol).length}</span></h3>
                             <div className="space-y-4">
                                {displayedProjects.filter(p => p.status === statusCol).map(p => (
-                                  <div key={p.id} onClick={() => setSelectedProject(p)} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 hover:border-indigo-300 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 cursor-pointer group">
+                                  <div key={p.id} onClick={() => setSelectedProject(p)} className="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-200 hover:border-indigo-300 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 cursor-pointer group active:scale-[0.99]">
                                      <div className="flex justify-between items-start mb-2">
                                         <p className="font-extrabold text-slate-800 group-hover:text-indigo-600 transition-colors">{p.id}</p>
                                         {p.priority === 'Urgent' && <Flag className="w-4 h-4 text-red-500 animate-pulse"/>}
@@ -5170,7 +5170,7 @@ function AppShell() {
                       ))}
                    </div>
                 ) : (
-                  <div className="bg-white rounded-3xl shadow-sm border-2 border-slate-100 overflow-hidden">
+                  <div className="bg-white rounded-3xl shadow-sm border-2 border-slate-100 overflow-hidden transition-shadow duration-200 hover:shadow-md">
                     <div className="overflow-x-auto">
                       <table className="w-full text-left text-sm whitespace-nowrap">
                         <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
