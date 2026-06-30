@@ -700,6 +700,41 @@ const Badge = ({ children, colorClass }) => (
   </span>
 );
 
+const PageLoadingScreen = ({ title = 'Connecting to Secure Cloud...', subtitle = 'Preparing Kalpvriksha Designs Ops' }) => (
+  <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-indigo-50 flex items-center justify-center p-6">
+    <div className="bg-white/90 backdrop-blur rounded-[2rem] border-2 border-slate-100 shadow-2xl px-8 py-10 w-full max-w-md text-center animate-in fade-in zoom-in-95 duration-300">
+      <div className="relative mx-auto mb-6 w-20 h-20">
+        <div className="absolute inset-0 rounded-3xl bg-indigo-100 animate-pulse"></div>
+        <div className="absolute inset-2 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg">
+          <LayoutDashboard className="text-white w-9 h-9" />
+        </div>
+      </div>
+      <p className="text-slate-800 font-black tracking-tight text-lg">{title}</p>
+      <p className="text-slate-400 font-bold text-xs uppercase tracking-widest mt-2">{subtitle}</p>
+      <div className="mt-6 h-2 bg-slate-100 rounded-full overflow-hidden">
+        <div className="h-full w-1/2 bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full animate-pulse"></div>
+      </div>
+    </div>
+  </div>
+);
+
+const EmptyState = ({ icon: Icon = FileText, title = 'Nothing to show yet', description = 'New activity will appear here automatically.', action = null, compact = false }) => (
+  <div className={`w-full rounded-3xl border-2 border-dashed border-slate-200 bg-slate-50/70 ${compact ? 'p-5' : 'p-8'} text-center animate-in fade-in duration-200`}>
+    <div className={`${compact ? 'w-11 h-11' : 'w-14 h-14'} rounded-2xl bg-white border border-slate-100 shadow-sm mx-auto mb-3 flex items-center justify-center`}>
+      <Icon className={`${compact ? 'w-5 h-5' : 'w-6 h-6'} text-slate-400`} />
+    </div>
+    <p className="text-sm font-black text-slate-700">{title}</p>
+    {description && <p className="text-xs font-bold text-slate-400 mt-1 max-w-md mx-auto">{description}</p>}
+    {action && <div className="mt-4">{action}</div>}
+  </div>
+);
+
+const MiniEmptyState = ({ children }) => (
+  <div className="rounded-2xl bg-slate-50 border border-slate-100 px-4 py-3 text-xs font-bold text-slate-400 text-center animate-in fade-in duration-200">
+    {children}
+  </div>
+);
+
 const exportToCSV = (headers, rows, filename) => {
   const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
   const encodedUri = encodeURI(csvContent);
@@ -2069,7 +2104,7 @@ const CommandCentreView = ({ projects = [], users = [], onSelectProject, current
               ))}
             </div>
             <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar">
-              {selectedAvailabilityPeople.length === 0 && <p className="text-sm text-slate-400 font-bold text-center py-4">No team members in {availabilityFilter}.</p>}
+              {selectedAvailabilityPeople.length === 0 && <MiniEmptyState>No team members in {availabilityFilter}.</MiniEmptyState>}
               {selectedAvailabilityPeople.map(member => {
                 const tasks = activeTasksFor(member.name);
                 const since = availabilityFilter === 'Break' ? (member.breakStartedAt || member.availabilityUpdatedAt || Date.now()) : (member.availabilityUpdatedAt || member.lastSeenAt || member.lastLoginAt || Date.now());
@@ -3839,7 +3874,7 @@ const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onD
                 {unreadGlobalCount > 0 && <span className="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full">{unreadGlobalCount}</span>}
               </button>
               <div className="pt-4 pb-2 px-4 text-xs font-black text-slate-400 uppercase tracking-widest flex items-center justify-between"><span>Direct Messages</span><span className="text-[10px] text-slate-300">{chatUsers.length}</span></div>
-              {chatUsers.length === 0 && <div className="mx-3 mb-2 px-3 py-2 rounded-xl bg-slate-100 text-[11px] font-bold text-slate-400">No team members found</div>}
+              {chatUsers.length === 0 && <div className="mx-3 mb-2"><MiniEmptyState>No team members found</MiniEmptyState></div>}
               {chatUsers.map(u => {
                 const unreadDMCount = getDirectUnreadCountForUser(u.name);
                 return (
@@ -4864,14 +4899,7 @@ function AppShell() {
   }
 
   if (!firebaseUser || !isDbReady) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-        <div className="flex flex-col items-center">
-          <div className="w-16 h-16 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mb-6 shadow-lg"></div>
-          <p className="text-slate-600 font-extrabold tracking-widest uppercase text-sm">Connecting to Secure Cloud...</p>
-        </div>
-      </div>
-    );
+    return <PageLoadingScreen />;
   }
 
   if (!currentUser) {
@@ -4905,7 +4933,7 @@ function AppShell() {
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
   return (
-    <div className="min-h-screen bg-slate-50/50 font-sans text-slate-900 pb-20">
+    <div className="min-h-screen bg-slate-50/50 font-sans text-slate-900 pb-20 antialiased">
       <ActiveToasts notifications={notifications} currentUser={currentUser} />
       
       {showLocalBanner && (
@@ -4928,12 +4956,12 @@ function AppShell() {
       )}
 
       <nav className="bg-white border-b-2 border-slate-100 sticky top-0 z-40 shadow-sm">
-        <div className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 flex justify-between h-[72px]">
+        <div className="max-w-[1400px] mx-auto px-3 sm:px-6 lg:px-8 flex justify-between h-[72px]">
           <div className="flex items-center">
             <div className="bg-gradient-to-br from-indigo-500 to-purple-600 w-10 h-10 rounded-xl flex items-center justify-center mr-4 shadow-md">
               <LayoutDashboard className="text-white w-5 h-5" />
             </div>
-            <span className="font-extrabold text-2xl text-slate-800 tracking-tight">Kalpvriksha Designs <span className="text-indigo-600">Ops</span></span>
+            <span className="font-extrabold text-lg sm:text-2xl text-slate-800 tracking-tight truncate">Kalpvriksha Designs <span className="text-indigo-600">Ops</span></span>
           </div>
           <div className="hidden lg:flex flex-1 max-w-xl mx-8">
             <div className="relative w-full">
@@ -5037,7 +5065,7 @@ function AppShell() {
                   <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase">{p.type} • {p.assignedTo || 'Unassigned'} • {p.status}</p>
                 </button>
               ))}
-              {displayedProjects.length === 0 && <p className="text-sm text-slate-400 font-bold col-span-full py-6 text-center">No matching cases found.</p>}
+              {displayedProjects.length === 0 && <div className="col-span-full"><EmptyState icon={Search} title="No matching cases found" description="Try a customer name, bank, branch, location, task ID, or designer name." compact /></div>}
             </div>
           </div>
         )}
@@ -5124,7 +5152,7 @@ function AppShell() {
                             <h3 className="font-black text-slate-500 uppercase tracking-widest text-xs mb-4 px-2">{statusCol} <span className="ml-2 bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full">{displayedProjects.filter(p => p.status === statusCol).length}</span></h3>
                             <div className="space-y-4">
                                {displayedProjects.filter(p => p.status === statusCol).map(p => (
-                                  <div key={p.id} onClick={() => setSelectedProject(p)} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 hover:border-indigo-300 hover:shadow-md transition-all cursor-pointer group">
+                                  <div key={p.id} onClick={() => setSelectedProject(p)} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 hover:border-indigo-300 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 cursor-pointer group">
                                      <div className="flex justify-between items-start mb-2">
                                         <p className="font-extrabold text-slate-800 group-hover:text-indigo-600 transition-colors">{p.id}</p>
                                         {p.priority === 'Urgent' && <Flag className="w-4 h-4 text-red-500 animate-pulse"/>}
