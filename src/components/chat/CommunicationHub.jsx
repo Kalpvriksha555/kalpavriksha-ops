@@ -769,10 +769,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
 
 const ActiveToasts = ({ notifications = [], currentUser }) => {
   if (!currentUser) return null;
-  const visible = (notifications || [])
-    .filter(n => ((!n.targetUser && n.targetRole === currentUser.role) || n.targetUser === currentUser.name))
-    .filter(n => !(n.readBy || []).includes(currentUser.name))
-    .slice(0, 2);
+  const visible = getVisibleNotifications(notifications, currentUser, { unreadOnly: true, limit: 2 });
 
   if (visible.length === 0) return null;
 

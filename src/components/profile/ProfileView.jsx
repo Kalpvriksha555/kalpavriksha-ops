@@ -2,8 +2,18 @@ import React, { useState } from 'react';
 import { User, Upload, Lock, CheckCircle } from 'lucide-react';
 
 const ROLES = { ADMIN: 'Admin', MANAGER: 'Manager', DESIGNER: 'Designer' };
+const API_BASE = import.meta.env.VITE_API_BASE || import.meta.env.VITE_API_URL || 'http://localhost:8080';
+const mediaUrl = (value = '', version = '') => {
+  let url = String(value || '').trim();
+  if (!url) return '';
+  if (/^(blob:|data:|https?:\/\/)/i.test(url)) return url;
+  if (url.startsWith('/uploads/')) url = url.replace('/uploads/', '/api/profile/photo/');
+  if (url.startsWith('uploads/')) url = url.replace('uploads/', '/api/profile/photo/');
+  const full = url.startsWith('/') ? `${API_BASE}${url}` : `${API_BASE}/${url.replace(/^\/+/, '')}`;
+  return version ? `${full}${full.includes('?') ? '&' : '?'}v=${encodeURIComponent(version)}` : full;
+};
 
-export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser }) => {
+export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToBase64, sendRealOtp, verifyRealOtp }) => {
   const [draft, setDraft] = useState({
     phone: currentUser.phone || '',
     email: currentUser.email || '',
@@ -16,6 +26,8 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser }) => {
     profilePhoto: currentUser.profilePhoto || ''
   });
   const [saved, setSaved] = useState(false);
+  const [photoMessage, setPhotoMessage] = useState('');
+  const [photoUploading, setPhotoUploading] = useState(false);
   const [passwordForm, setPasswordForm] = useState({ current: '', next: '', confirm: '' });
   const [passwordMessage, setPasswordMessage] = useState('');
   const [mobileOtp, setMobileOtp] = useState('');
@@ -24,12 +36,50 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser }) => {
   const [emailOtp, setEmailOtp] = useState('');
   const [emailChallengeId, setEmailChallengeId] = useState('');
   const [emailMessage, setEmailMessage] = useState('');
+  const [emailSending, setEmailSending] = useState(false);
+  const [emailVerifying, setEmailVerifying] = useState(false);
 
   const handlePhoto = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const base64 = await fileToBase64(file);
-    setDraft(prev => ({ ...prev, profilePhoto: base64 }));
+    setPhotoMessage('');
+    if (!String(file.type || '').startsWith('image/')) {
+      setPhotoMessage('Please select an image file only.');
+      e.target.value = '';
+      return;
+    }
+
+    let preview = '';
+    try {
+      preview = typeof fileToBase64 === 'function' ? await fileToBase64(file) : URL.createObjectURL(file);
+      setDraft(prev => ({ ...prev, profilePhoto: preview }));
+    } catch (_err) {
+      // Preview is helpful but upload should still continue even if preview fails.
+    }
+
+    const form = new FormData();
+    form.append('photo', file);
+    form.append('userId', String(currentUser.id || ''));
+    form.append('username', String(currentUser.username || ''));
+
+    setPhotoUploading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/profile/photo`, { method: 'POST', body: form });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Profile photo upload failed.');
+      const profilePhoto = data.profilePhoto || data.url || preview;
+      const updated = { ...currentUser, profilePhoto, profilePhotoUpdatedAt: Date.now(), profileUpdatedAt: Date.now() };
+      setDraft(prev => ({ ...prev, profilePhoto }));
+      setCurrentUser(updated);
+      onUpdateUser(updated);
+      setPhotoMessage('Photo uploaded successfully.');
+    } catch (err) {
+      setPhotoMessage(err.message || 'Unable to upload photo. Please try again.');
+      if (!currentUser.profilePhoto) setDraft(prev => ({ ...prev, profilePhoto: '' }));
+    } finally {
+      setPhotoUploading(false);
+      e.target.value = '';
+    }
   };
 
   const handleSave = () => {
@@ -103,18 +153,27 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser }) => {
   const sendEmailRegistrationOtp = async () => {
     setEmailMessage('');
     const clean = String(draft.email || '').trim().toLowerCase();
-    if (!clean.includes('@')) {
+    if (!clean || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean)) {
       setEmailMessage('Enter a valid email address before sending OTP.');
       return;
     }
+    if (typeof sendRealOtp !== 'function') {
+      setEmailMessage('Email OTP service is not available in this build.');
+      return;
+    }
+    setEmailSending(true);
     try {
       const otpResponse = await sendRealOtp({ username: currentUser.username, email: clean, channel: 'email', purpose: 'email_registration' });
+      if (!otpResponse?.challengeId) throw new Error('Email OTP session was not created. Please try again.');
       setEmailChallengeId(otpResponse.challengeId || '');
       setEmailOtp('');
-      setEmailMessage(`OTP sent to ${clean.replace(/(.{2}).+(@.+)/, '$1***$2')}.`);
+      const localHint = otpResponse.devOtp ? ` Testing OTP: ${otpResponse.devOtp}` : '';
+      setEmailMessage(`OTP sent to ${clean.replace(/(.{2}).+(@.+)/, '$1***$2')}.${localHint}`);
     } catch (err) {
       setEmailChallengeId('');
       setEmailMessage(err.message || 'Unable to send email OTP. Please check Email OTP settings.');
+    } finally {
+      setEmailSending(false);
     }
   };
 
@@ -123,17 +182,31 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser }) => {
       setEmailMessage('Please send email OTP first.');
       return;
     }
-    try {
-      await verifyRealOtp({ challengeId: emailChallengeId, otp: emailOtp, purpose: 'email_registration' });
-    } catch (err) {
-      setEmailMessage(err.message || 'Invalid OTP. Please try again.');
+    const cleanOtp = String(emailOtp || '').trim();
+    if (!cleanOtp) {
+      setEmailMessage('Enter the email OTP first.');
       return;
     }
-    const updated = { ...currentUser, ...draft, emailRegistered: true, emailRegisteredAt: Date.now(), profileUpdatedAt: Date.now() };
+    if (typeof verifyRealOtp !== 'function') {
+      setEmailMessage('Email OTP verification service is not available in this build.');
+      return;
+    }
+    setEmailVerifying(true);
+    try {
+      await verifyRealOtp({ challengeId: emailChallengeId, otp: cleanOtp, purpose: 'email_registration' });
+    } catch (err) {
+      setEmailMessage(err.message || 'Invalid OTP. Please try again.');
+      setEmailVerifying(false);
+      return;
+    }
+    const clean = String(draft.email || '').trim().toLowerCase();
+    const updated = { ...currentUser, ...draft, email: clean, emailRegistered: true, emailRegisteredAt: Date.now(), profileUpdatedAt: Date.now() };
+    setDraft(prev => ({ ...prev, email: clean }));
     setCurrentUser(updated);
     onUpdateUser(updated);
     setEmailChallengeId('');
     setEmailOtp('');
+    setEmailVerifying(false);
     setEmailMessage('Email registered successfully for OTP login/recovery.');
   };
 
@@ -153,12 +226,13 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser }) => {
         <div className="flex flex-col md:flex-row gap-8">
           <div className="md:w-72 text-center">
             <div className="w-36 h-36 rounded-3xl bg-slate-100 border-2 border-slate-200 mx-auto overflow-hidden flex items-center justify-center shadow-sm">
-              {draft.profilePhoto ? <img src={draft.profilePhoto} alt="Profile" className="w-full h-full object-cover" /> : <User className="w-16 h-16 text-slate-300" />}
+              {draft.profilePhoto ? <img src={mediaUrl(draft.profilePhoto, currentUser.profilePhotoUpdatedAt || currentUser.profileUpdatedAt || '')} alt="Profile" className="w-full h-full object-cover" /> : <User className="w-16 h-16 text-slate-300" />}
             </div>
             <label className="mt-4 inline-flex items-center justify-center bg-indigo-50 text-indigo-700 px-4 py-2 rounded-xl font-black text-sm cursor-pointer hover:bg-indigo-100 border border-indigo-100">
-              <Upload className="w-4 h-4 mr-2" /> Add Photo
-              <input type="file" accept="image/*" onChange={handlePhoto} className="hidden" />
+              <Upload className="w-4 h-4 mr-2" /> {photoUploading ? 'Uploading...' : 'Add Photo'}
+              <input type="file" accept="image/*" onChange={handlePhoto} disabled={photoUploading} className="hidden" />
             </label>
+            {photoMessage && <p className={`text-xs font-black mt-3 ${photoMessage.includes('success') ? 'text-emerald-600' : 'text-red-600'}`}>{photoMessage}</p>}
             <p className="text-xs text-slate-400 font-bold mt-3">{currentUser.name}<br/>{currentUser.role}</p>
             <div className={`mt-3 inline-flex px-3 py-1.5 rounded-full text-[11px] font-black border ${currentUser.mobileRegistered ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-amber-50 text-amber-700 border-amber-100'}`}>
               Mobile: {currentUser.mobileRegistered ? 'Registered' : 'Unregistered'}
@@ -196,12 +270,12 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser }) => {
           <span className={`px-4 py-2 rounded-xl text-xs font-black border ${currentUser.emailRegistered ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-amber-50 text-amber-700 border-amber-100'}`}>{currentUser.emailRegistered ? 'Registered' : 'Unregistered'}</span>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <input value={draft.email} onChange={e => { setDraft(prev => ({ ...prev, email: e.target.value })); setEmailMessage(''); }} placeholder="Email address" className="border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
-          <button type="button" onClick={sendEmailRegistrationOtp} className="bg-indigo-50 text-indigo-700 px-5 py-3 rounded-xl font-black hover:bg-indigo-100 border border-indigo-100">Send Email OTP</button>
+          <input value={draft.email} onChange={e => { setDraft(prev => ({ ...prev, email: e.target.value })); setEmailMessage(''); setEmailChallengeId(''); setEmailOtp(''); }} placeholder="Email address" className="border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
+          <button type="button" onClick={sendEmailRegistrationOtp} disabled={emailSending} className="bg-indigo-50 text-indigo-700 px-5 py-3 rounded-xl font-black hover:bg-indigo-100 border border-indigo-100 disabled:opacity-60 disabled:cursor-not-allowed">{emailSending ? 'Sending...' : 'Send Email OTP'}</button>
           <input value={emailOtp} onChange={e => setEmailOtp(e.target.value)} placeholder="Enter email OTP" className="border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
         </div>
         <div className="flex flex-wrap items-center gap-3 mt-4">
-          <button type="button" onClick={verifyEmailRegistrationOtp} className="bg-emerald-600 text-white px-5 py-3 rounded-xl font-black hover:bg-emerald-700 shadow-lg shadow-emerald-100">Verify & Register Email</button>
+          <button type="button" onClick={verifyEmailRegistrationOtp} disabled={emailVerifying || !emailChallengeId} className="bg-emerald-600 text-white px-5 py-3 rounded-xl font-black hover:bg-emerald-700 shadow-lg shadow-emerald-100 disabled:opacity-60 disabled:cursor-not-allowed">{emailVerifying ? 'Verifying...' : 'Verify & Register Email'}</button>
           {emailMessage && <span className={`text-sm font-black px-4 py-2 rounded-xl border ${emailMessage.includes('success') || emailMessage.includes('OTP sent') ? 'bg-emerald-50 border-emerald-100 text-emerald-700' : 'bg-red-50 border-red-100 text-red-600'}`}>{emailMessage}</span>}
         </div>
       </div>

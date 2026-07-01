@@ -626,3 +626,154 @@ svg {
     min-width: 0 !important;
   }
 }
+
+/* Deep chat polish: stable desktop/mobile layout, smooth attachment previews, compact controls. */
+.kalpa-chat-panel {
+  isolation: isolate !important;
+}
+.kalpa-chat-messages {
+  scroll-behavior: smooth !important;
+  -webkit-overflow-scrolling: touch !important;
+}
+.kalpa-chat-bubble {
+  overflow-wrap: anywhere !important;
+  word-break: break-word !important;
+}
+.kalpa-chat-attachment audio {
+  width: 100% !important;
+  min-width: 220px !important;
+}
+.kalpa-chat-attachment object {
+  max-width: 100% !important;
+}
+.kalpa-chat-quick-emojis {
+  max-width: 100% !important;
+  scrollbar-width: thin !important;
+}
+.kalpa-chat-actions-row {
+  min-width: 0 !important;
+}
+.kalpa-chat-textarea {
+  overscroll-behavior: contain !important;
+}
+@media (min-width: 769px) {
+  .kalpa-chat-panel {
+    width: min(1080px, calc(100vw - 48px)) !important;
+    height: min(680px, calc(100vh - 96px)) !important;
+  }
+  .kalpa-chat-bubble {
+    max-width: min(640px, 82%) !important;
+  }
+}
+@media (max-width: 768px) {
+  .kalpa-chat-shell {
+    left: 0.5rem !important;
+    right: 0.5rem !important;
+    bottom: calc(0.65rem + env(safe-area-inset-bottom)) !important;
+    align-items: stretch !important;
+    max-width: none !important;
+    z-index: 80 !important;
+  }
+  .kalpa-chat-shell > button {
+    align-self: flex-end !important;
+    width: 58px !important;
+    height: 58px !important;
+  }
+  .kalpa-chat-panel {
+    width: calc(100vw - 1rem) !important;
+    max-width: calc(100vw - 1rem) !important;
+    height: calc(100dvh - 5.75rem - env(safe-area-inset-bottom)) !important;
+    max-height: calc(100dvh - 5.75rem - env(safe-area-inset-bottom)) !important;
+    margin-bottom: 0.65rem !important;
+    border-radius: 1.35rem !important;
+    flex-direction: column !important;
+  }
+  .kalpa-chat-sidebar {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    height: 124px !important;
+    flex: 0 0 124px !important;
+    border-right: 0 !important;
+    border-bottom: 1px solid #e2e8f0 !important;
+  }
+  .kalpa-chat-sidebar > div:first-child {
+    padding: 0.75rem 0.9rem !important;
+  }
+  .kalpa-chat-sidebar > div:last-child {
+    display: flex !important;
+    gap: 0.5rem !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    padding: 0.5rem !important;
+    white-space: nowrap !important;
+    -webkit-overflow-scrolling: touch !important;
+  }
+  .kalpa-chat-sidebar button {
+    min-width: 136px !important;
+    max-width: 170px !important;
+    flex: 0 0 auto !important;
+    padding: 0.62rem !important;
+  }
+  .kalpa-chat-panel > .flex-1 {
+    min-height: 0 !important;
+    flex: 1 1 auto !important;
+  }
+  .kalpa-chat-messages {
+    padding: 0.85rem !important;
+    min-height: 0 !important;
+  }
+  .kalpa-chat-bubble {
+    max-width: 94% !important;
+    font-size: 0.92rem !important;
+  }
+  .kalpa-chat-attachment-image,
+  .kalpa-chat-attachment video {
+    max-height: 210px !important;
+  }
+  .kalpa-chat-inputbar {
+    padding: 0.62rem !important;
+    gap: 0.45rem !important;
+  }
+  .kalpa-chat-composer {
+    gap: 0.4rem !important;
+  }
+  .kalpa-chat-actions-row {
+    gap: 0.4rem !important;
+  }
+  .kalpa-chat-tool-btn,
+  .kalpa-chat-send-btn {
+    width: 42px !important;
+    height: 42px !important;
+    min-width: 42px !important;
+    padding: 0 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+  .kalpa-chat-textarea {
+    min-height: 46px !important;
+    max-height: 92px !important;
+    font-size: 16px !important;
+    line-height: 1.35 !important;
+    padding: 0.72rem !important;
+  }
+}
+@media (max-width: 420px) {
+  .kalpa-chat-panel {
+    height: calc(100dvh - 5.25rem - env(safe-area-inset-bottom)) !important;
+  }
+  .kalpa-chat-sidebar {
+    height: 116px !important;
+    flex-basis: 116px !important;
+  }
+  .kalpa-chat-sidebar button {
+    min-width: 124px !important;
+    max-width: 148px !important;
+  }
+  .kalpa-chat-quick-emojis button {
+    width: 34px !important;
+    height: 30px !important;
+    min-width: 34px !important;
+  }
+}

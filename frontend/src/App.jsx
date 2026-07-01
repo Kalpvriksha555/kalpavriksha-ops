@@ -16,7 +16,7 @@ import {
   MapPin, Plus, Search, User, Users, Wallet, ArrowRight, Upload, 
   List, MessageSquare, Bell, Paperclip, X, Image as ImageIcon, 
   File as FileIcon, Archive, Send, Flag, Shield, Hash, Video, Phone,
-  Calendar, Filter, Check, ArrowLeft, Download, ChevronRight, Lock, Eye, EyeOff, Map as MapIcon, AlertCircle, KanbanSquare, Link as LinkIcon, BarChart3, Building2, Smile, Star, Mic, Square
+  Calendar, Filter, Check, ArrowLeft, Download, ChevronRight, Lock, Eye, EyeOff, Map as MapIcon, AlertCircle, KanbanSquare, Link as LinkIcon, BarChart3, Building2, Smile, Star, Mic, Square, Trash2
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
@@ -191,7 +191,7 @@ const broadcastProjectsSync = (projects) => {
   try { localStorage.setItem('kalpa_projects_sync_ping', JSON.stringify({ ts: now, source: OPS_TAB_ID })); } catch(e) {}
 };
 
-const OTP_API_BASE = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_URL) ? import.meta.env.VITE_API_URL : 'http://localhost:8080';
+const OTP_API_BASE = (typeof import.meta !== 'undefined' && import.meta.env) ? (import.meta.env.VITE_API_BASE || import.meta.env.VITE_API_URL || 'http://localhost:8080') : 'http://localhost:8080';
 const buildOtpError = (error) => {
   if (error?.name === 'TypeError' || String(error?.message || '').toLowerCase().includes('failed to fetch')) {
     return 'OTP backend is not reachable. Start the backend first with: npm run dev:all, or run backend on port 8080.';
@@ -321,6 +321,24 @@ const fileToBase64 = (file) => new Promise((resolve, reject) => {
 
 const cleanFileName = (name = 'file') => String(name).replace(/[^a-zA-Z0-9._-]/g, '_');
 
+const absoluteApiUrl = (url = '', version = '') => {
+  let value = String(url || '').trim();
+  if (!value) return '';
+  if (/^(blob:|data:|https?:)/i.test(value)) return value;
+  if (value.startsWith('/uploads/')) value = value.replace('/uploads/', '/api/profile/photo/');
+  if (value.startsWith('uploads/')) value = value.replace('uploads/', '/api/profile/photo/');
+  const full = value.startsWith('/') ? `${API_BASE}${value}` : `${API_BASE}/${value.replace(/^\/+/, '')}`;
+  return version ? `${full}${full.includes('?') ? '&' : '?'}v=${encodeURIComponent(version)}` : full;
+};
+
+const getProjectFileDownloadUrl = (doc = {}) => {
+  if (!doc) return '';
+  if (doc.downloadUrl) return absoluteApiUrl(doc.downloadUrl);
+  if (doc.id && !String(doc.id).includes('.')) return `${API_BASE}/api/files/${encodeURIComponent(doc.id)}/download`;
+  if (doc.url) return absoluteApiUrl(doc.url);
+  return '';
+};
+
 const uploadProjectFile = async (file, projectId, type, uploadedBy) => {
   const baseDoc = {
     id: Date.now() + Math.random(),
@@ -332,10 +350,74 @@ const uploadProjectFile = async (file, projectId, type, uploadedBy) => {
     mimeType: file.type || 'application/octet-stream'
   };
 
-  // Important: keep the upload experience instant and reliable.
-  // The selected file is converted in the browser first, so it appears immediately
-  // in Completed Work even if Firebase Storage rules/network fail.
-  return { ...baseDoc, url: URL.createObjectURL(file), localOnly: true };
+  const form = new FormData();
+  form.append('file', file);
+  form.append('projectId', projectId || '');
+  form.append('type', type || 'source');
+  form.append('by', uploadedBy || 'Team');
+
+  try {
+    const res = await fetch(`${API_BASE}/api/files/upload`, { method: 'POST', body: form });
+    if (!res.ok) throw new Error(await res.text());
+    const payload = await res.json();
+    return {
+      ...baseDoc,
+      ...payload.file,
+      type,
+      folder: type,
+      uploadedBy,
+      date: new Date().toLocaleDateString(),
+      url: payload.file?.downloadUrl || payload.file?.url || '',
+      downloadUrl: payload.file?.downloadUrl || ''
+    };
+  } catch (error) {
+    console.error('Backend file upload failed:', error);
+    throw error;
+  }
+};
+
+const downloadProjectFile = async (doc = {}) => {
+  const url = getProjectFileDownloadUrl(doc);
+  if (!url) {
+    alert('This file does not have a valid download link. Please re-upload it once.');
+    return;
+  }
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`Download failed (${res.status})`);
+    const blob = await res.blob();
+    if (!blob || blob.size === 0) throw new Error('Downloaded file is empty');
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objectUrl;
+    a.download = doc.name || 'download';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      URL.revokeObjectURL(objectUrl);
+      a.remove();
+    }, 1500);
+  } catch (error) {
+    console.error('File download failed:', error);
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
+};
+
+const deleteProjectFileFromServer = async (doc = {}) => {
+  if (!doc?.id) return;
+  try {
+    await fetch(`${API_BASE}/api/files/${encodeURIComponent(doc.id)}`, { method: 'DELETE' });
+  } catch (error) {
+    // The UI state is still updated below. This endpoint is best-effort so old/local files do not block removal.
+    console.warn('Server file delete failed:', error);
+  }
+};
+
+const canDeleteProjectFile = (doc = {}, user = {}) => {
+  const role = normalizeRole(user?.role);
+  if (role === 'ADMIN' || role === 'MANAGER') return true;
+  return String(doc?.uploadedBy || '').trim().toLowerCase() === String(user?.name || '').trim().toLowerCase();
 };
 
 const stripLargeLocalFilesForCloud = (project) => sanitizeProjectForCache(project);
@@ -640,6 +722,119 @@ const getBreakMinutesFromLog = (log = {}, now = Date.now()) => {
   return stored + openBreak;
 };
 
+
+const normalizeWorkStatus = (status = '') => String(status || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+const WORK_DONE_STATUSES = new Set(['COMPLETED', 'CLOSED', 'CANCELLED', 'CANCELED', 'ARCHIVED', 'DELETED']);
+const isActiveWorkStatus = (status = '') => !WORK_DONE_STATUSES.has(normalizeWorkStatus(status));
+
+const getTaskBusySince = (project = {}) => (
+  toMs(project.draftingStartedAt)
+  || toMs(project.workStartedAt)
+  || toMs(project.busySinceAt)
+  || toMs(project.assignedAt)
+  || toMs(project.startedAt)
+  || toMs(project.createdAt)
+  || 0
+);
+
+const getTaskFinishedAt = (project = {}) => Math.max(
+  toMs(project.completedAt),
+  toMs(project.draftingCompletedAt),
+  toMs(project.submittedAt),
+  toMs(project.closedAt),
+  toMs(project.reviewedAt),
+  toMs(project.finishedAt),
+  toMs(project.updatedAt)
+);
+
+const getUserActiveTasks = (projects = [], userName = '') => (projects || []).filter(project => samePerson(project.assignedTo, userName) && isActiveWorkStatus(project.status));
+
+const getUserLastCompletedAt = (projects = [], userName = '') => {
+  const completed = (projects || [])
+    .filter(project => samePerson(project.assignedTo, userName) && !isActiveWorkStatus(project.status) && getTaskFinishedAt(project))
+    .map(project => getTaskFinishedAt(project))
+    .sort((a, b) => b - a);
+  return completed.length ? completed[0] : 0;
+};
+
+const getUserFreeSince = (projects = [], userName = '', presenceTimes = {}, user = null) => {
+  // Admins are visible as Available, but they are not measured as free/idle workers.
+  // "Free since" is only for managers/designers after actual task completion.
+  if (normalizeRole(user?.role) === ROLES.ADMIN) return 0;
+  const active = getUserActiveTasks(projects, userName);
+  if (active.length > 0) return 0;
+  const key = normalizePersonName(userName);
+  return (
+    toMs(presenceTimes?.[key]?.freeSince)
+    || getUserLastCompletedAt(projects, userName)
+    || toMs(user?.freeSinceAt)
+    || toMs(user?.availableSinceAt)
+    || toMs(user?.availabilityUpdatedAt)
+    || 0
+  );
+};
+
+const getUserBusySince = (projects = [], userName = '', presenceTimes = {}) => {
+  const active = getUserActiveTasks(projects, userName)
+    .map(project => ({ project, since: getTaskBusySince(project) }))
+    .filter(item => item.since)
+    .sort((a, b) => b.since - a.since);
+  if (active.length) return active[0].since;
+  const key = normalizePersonName(userName);
+  return toMs(presenceTimes?.[key]?.busySince) || 0;
+};
+
+const getSafeAttendanceDeltaMinutes = (fromMs, toMsValue = Date.now(), maxGapMinutes = 10) => {
+  const from = Number(fromMs) || 0;
+  const to = Number(toMsValue) || Date.now();
+  if (!from || to <= from) return 0;
+  const elapsed = (to - from) / 60000;
+  // If laptop sleeps / tab is killed, avoid adding a fake huge active stretch.
+  return elapsed > maxGapMinutes ? 0 : elapsed;
+};
+
+const getAttendanceBaseLoginMs = (log = {}, user = null) => (
+  toMs(log.loginAt)
+  || toMs(log.firstLoginAt)
+  || toMs(user?.lastLoginAt)
+  || 0
+);
+
+const getTotalLoggedInMinutesFromLog = (log = {}, user = null, now = Date.now()) => {
+  const saved = Number(log.totalLoggedInMinutes) || 0;
+  const loginMs = getAttendanceBaseLoginMs(log, user);
+  const isOnline = user && isUserActuallyOnline(user, now);
+
+  if (isOnline) {
+    const lastTick = toMs(log.lastTick) || toMs(log.logoutAt) || loginMs || toMs(user?.lastHeartbeatAt) || toMs(user?.lastSeenAt);
+    return Math.max(0, Math.floor(saved + getSafeAttendanceDeltaMinutes(lastTick, now, 10)));
+  }
+
+  if (saved > 0) return Math.max(0, Math.floor(saved));
+  if (!loginMs) return Math.max(0, Math.floor((Number(log.activeMinutes) || 0) + getBreakMinutesFromLog(log, now)));
+  const endMs = toMs(log.logoutAt) || toMs(user?.lastLogoutAt) || toMs(user?.lastSeenAt) || toMs(log.lastTick) || now;
+  return Math.max(0, Math.floor((endMs - loginMs) / 60000));
+};
+
+const getActiveMinutesFromLog = (log = {}, user = null, now = Date.now()) => {
+  const saved = Number(log.activeMinutes) || 0;
+  const isOnline = user && isUserActuallyOnline(user, now);
+  const isOnBreak = log.status === 'On Break' || user?.availability === 'Break' || !!log.currentBreakStartedAt;
+  if (!isOnline || isOnBreak) return Math.max(0, Math.floor(saved));
+  const lastTick = toMs(log.lastTick) || toMs(log.logoutAt) || getAttendanceBaseLoginMs(log, user);
+  return Math.max(0, Math.floor(saved + getSafeAttendanceDeltaMinutes(lastTick, now, 10)));
+};
+
+const buildAttendanceAccrual = (log = {}, now = Date.now(), isOnBreak = false) => {
+  const delta = getSafeAttendanceDeltaMinutes(log.lastTick || log.logoutAt || log.loginAt, now, 10);
+  return {
+    totalLoggedInMinutes: (Number(log.totalLoggedInMinutes) || 0) + delta,
+    activeMinutes: (Number(log.activeMinutes) || 0) + (!isOnBreak ? delta : 0),
+    totalBreakMinutes: (Number(log.totalBreakMinutes) || 0) + (isOnBreak ? delta : 0),
+    lastTick: now
+  };
+};
+
 const getProjectDateKey = (project) => formatDateKey(project.createdAt || project.completedAt || Date.now());
 
 const getDraftElapsed = (project, now = Date.now()) => {
@@ -685,6 +880,18 @@ const generateTraceableTaskId = ({ location = '', client = '', bankerName = '', 
 const getCustomerDisplayName = (project = {}) => project.customerName || 'Customer not added';
 const getBankDisplayName = (project = {}) => project.client || project.bankName || 'Bank not added';
 const getCompletedFileBadge = (project = {}) => getLatestCompletedFileName(project) || '';
+
+
+const getTaskDescription = (project = {}) => {
+  const raw = project.description ?? project.taskDescription ?? project.instructions ?? project.specialInstructions ?? project.otherDescription ?? '';
+  return String(raw || '').trim();
+};
+
+
+const getEstimateDetails = (project = {}) => {
+  const raw = project.estimateDetails ?? project.propertyEstimateValue ?? project.estimateInstruction ?? project.estimateNote ?? '';
+  return String(raw || '').trim();
+};
 
 const makeTaskDisplayName = (project = {}) => {
   return [project.type, getCustomerDisplayName(project), project.location].filter(Boolean).join(' • ');
@@ -1235,18 +1442,34 @@ const AttendanceView = ({ attendanceLogs = [], users = [] }) => {
       activeMinutes: log?.activeMinutes || 0,
       totalBreakMinutes: log?.totalBreakMinutes || 0,
       currentBreakStartedAt: log?.currentBreakStartedAt || null,
-      breakEvents: Array.isArray(log?.breakEvents) ? log.breakEvents : []
+      breakEvents: Array.isArray(log?.breakEvents) ? log.breakEvents : [],
+      totalLoggedInMinutes: log?.totalLoggedInMinutes || 0,
+      loginAt: log?.loginAt || null,
+      logoutAt: log?.logoutAt || null
     };
   }).sort((a, b) => String(a.name).localeCompare(String(b.name)));
 
+  const attendanceSummary = attendanceRows.reduce((acc, log) => {
+    const user = getAttendanceUser(log, users);
+    const logged = getTotalLoggedInMinutesFromLog(log, user);
+    const active = getActiveMinutesFromLog(log, user);
+    const breaks = getBreakMinutesFromLog(log);
+    acc.totalLogged += logged;
+    acc.totalActive += active;
+    acc.totalBreak += breaks;
+    if (log.loginTime && log.loginTime !== '-') acc.present += 1;
+    if (isUserActuallyOnline(user)) acc.online += 1;
+    return acc;
+  }, { present: 0, online: 0, totalLogged: 0, totalActive: 0, totalBreak: 0 });
+
   const handleExport = () => {
-    const headers = ["Name", "Role", "Date", "First Login", "Online/Last Seen", "Active Hours", "Break Time"];
+    const headers = ["Name", "Role", "Date", "First Login", "Online/Last Seen", "Total Logged-in Time", "Active Hours", "Break Time"];
     const rows = attendanceRows.map(log => {
       const user = getAttendanceUser(log, users);
       const isOnline = isUserActuallyOnline(user);
       const lastSeen = formatLastSeenDateTime(user?.lastSeenAt || user?.lastLogoutAt || user?.lastHeartbeatAt);
       return [
-        log.name, log.role, log.date, log.loginTime, isOnline ? "Online" : `Last seen ${lastSeen}`, ((log.activeMinutes || 0) / 60).toFixed(1) + " hrs", formatMinutes(getBreakMinutesFromLog(log))
+        log.name, log.role, log.date, log.loginTime, isOnline ? "Online" : `Last seen ${lastSeen}`, formatMinutes(getTotalLoggedInMinutesFromLog(log, user)), ((log.activeMinutes || 0) / 60).toFixed(1) + " hrs", formatMinutes(getBreakMinutesFromLog(log))
       ];
     });
     exportToCSV(headers, rows, `Attendance_${filterDate}.csv`);
@@ -1266,6 +1489,14 @@ const AttendanceView = ({ attendanceLogs = [], users = [] }) => {
         </div>
       </div>
 
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
+        <div className="bg-white rounded-2xl border-2 border-slate-100 p-4 shadow-sm"><p className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Present</p><p className="text-2xl font-black text-slate-800 mt-1">{attendanceSummary.present}/{attendanceRows.length}</p></div>
+        <div className="bg-white rounded-2xl border-2 border-emerald-100 p-4 shadow-sm"><p className="text-[11px] font-black text-emerald-500 uppercase tracking-widest">Online Now</p><p className="text-2xl font-black text-emerald-700 mt-1">{attendanceSummary.online}</p></div>
+        <div className="bg-white rounded-2xl border-2 border-slate-100 p-4 shadow-sm"><p className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Logged-in Time</p><p className="text-2xl font-black text-slate-800 mt-1">{formatMinutes(attendanceSummary.totalLogged)}</p></div>
+        <div className="bg-white rounded-2xl border-2 border-indigo-100 p-4 shadow-sm"><p className="text-[11px] font-black text-indigo-500 uppercase tracking-widest">Active Time</p><p className="text-2xl font-black text-indigo-700 mt-1">{formatMinutes(attendanceSummary.totalActive)}</p></div>
+        <div className="bg-white rounded-2xl border-2 border-amber-100 p-4 shadow-sm"><p className="text-[11px] font-black text-amber-500 uppercase tracking-widest">Break Time</p><p className="text-2xl font-black text-amber-700 mt-1">{formatMinutes(attendanceSummary.totalBreak)}</p></div>
+      </div>
+
       <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm whitespace-nowrap">
@@ -1274,30 +1505,33 @@ const AttendanceView = ({ attendanceLogs = [], users = [] }) => {
                 <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Team Member</th>
                 <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">First Login</th>
                 <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Online / Logout</th>
+                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Total Logged-in</th>
                 <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Active Duration</th>
                 <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Break Time</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {attendanceRows.map(log => {
-                const safeMinutes = log.activeMinutes || 0;
-                const hours = Math.floor(safeMinutes / 60);
-                const mins = Math.floor(safeMinutes % 60);
                 const user = getAttendanceUser(log, users);
                 const isOnline = isUserActuallyOnline(user);
+                const safeMinutes = getActiveMinutesFromLog(log, user);
+                const hours = Math.floor(safeMinutes / 60);
+                const mins = Math.floor(safeMinutes % 60);
                 const breakMinutes = getBreakMinutesFromLog(log);
+                const totalLoggedInMinutes = getTotalLoggedInMinutesFromLog(log, user);
                 const breakEvents = Array.isArray(log.breakEvents) ? log.breakEvents : [];
                 return (
                   <tr key={log.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-6 py-5"><p className="font-bold text-slate-800 text-base">{log.name}</p><p className="text-xs font-semibold text-slate-400 mt-0.5">{log.role}</p></td>
                     <td className="px-6 py-5 font-bold text-emerald-600">{log.loginTime}</td>
                     <td className="px-6 py-5 font-bold text-slate-600">{isOnline ? <span className="inline-flex items-center gap-2 text-emerald-600"><span className="w-2 h-2 rounded-full bg-emerald-500"></span>Online</span> : <span className="text-slate-500">Last seen {formatLastSeenDateTime(user?.lastSeenAt || user?.lastLogoutAt || user?.lastHeartbeatAt)}</span>}</td>
+                    <td className="px-6 py-5 text-right"><span className="bg-slate-50 text-slate-700 px-3 py-1.5 rounded-lg font-black">{formatMinutes(totalLoggedInMinutes)}</span></td>
                     <td className="px-6 py-5 text-right"><span className="bg-indigo-50 text-indigo-700 px-3 py-1.5 rounded-lg font-black">{hours}h {mins}m</span></td>
                     <td className="px-6 py-5 text-right"><span className="bg-amber-50 text-amber-700 px-3 py-1.5 rounded-lg font-black">{formatMinutes(breakMinutes)}</span>{breakEvents.length > 0 && <p className="text-[10px] text-slate-400 font-bold mt-1">{breakEvents.length} break{breakEvents.length > 1 ? 's' : ''} taken</p>}</td>
                   </tr>
                 )
               })}
-              {attendanceRows.length === 0 && (<tr><td colSpan={5} className="px-6 py-16 text-center text-slate-400 font-bold">No approved non-admin team members found.</td></tr>)}
+              {attendanceRows.length === 0 && (<tr><td colSpan={6} className="px-6 py-16 text-center text-slate-400 font-bold">No approved non-admin team members found.</td></tr>)}
             </tbody>
           </table>
         </div>
@@ -1341,12 +1575,63 @@ const AttendanceView = ({ attendanceLogs = [], users = [] }) => {
 const CommandCentreView = ({ projects = [], users = [], onSelectProject, currentUser }) => {
   const [dateKey, setDateKey] = useState(formatDateKey());
   const [availabilityFilter, setAvailabilityFilter] = useState('Available');
+  const [availabilityNow, setAvailabilityNow] = useState(Date.now());
+  const [presenceTimes, setPresenceTimes] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('kalpa_presence_times') || '{}'); } catch (e) { return {}; }
+  });
+  useEffect(() => { const timer = setInterval(() => setAvailabilityNow(Date.now()), 30000); return () => clearInterval(timer); }, []);
   const metrics = getTodayMetrics(projects, dateKey);
   const activeBoard = metrics.activeToday.slice().sort((a,b) => (b.createdAt || 0) - (a.createdAt || 0));
   const people = getOperationalUsers(users || [], { includeAdmins: true });
   const workingTeam = people.filter(u => u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER);
-  const activeTasksFor = (userName) => projects.filter(p => normalizePersonName(p.assignedTo) === normalizePersonName(userName) && p.status !== 'Completed');
-  const nowMs = Date.now();
+  const activeTasksFor = (userName) => getUserActiveTasks(projects, userName);
+
+  useEffect(() => {
+    const now = Date.now();
+    let previous = {};
+    try { previous = JSON.parse(localStorage.getItem('kalpa_presence_task_state') || '{}'); } catch (e) { previous = {}; }
+    let existingTimes = {};
+    try { existingTimes = JSON.parse(localStorage.getItem('kalpa_presence_times') || '{}'); } catch (e) { existingTimes = {}; }
+    const nextState = {};
+    const nextTimes = { ...existingTimes };
+
+    people.forEach(member => {
+      if (member.role === ROLES.ADMIN) return;
+      const key = normalizePersonName(member.name);
+      const active = getUserActiveTasks(projects, member.name);
+      const activeIds = active.map(task => String(task.id || task.caseId || '')).filter(Boolean).sort();
+      const activeCount = activeIds.length;
+      const previousCount = Number(previous?.[key]?.activeCount || 0);
+      const previousIds = Array.isArray(previous?.[key]?.activeIds) ? previous[key].activeIds.join('|') : '';
+      const nextIds = activeIds.join('|');
+      const completedAt = getUserLastCompletedAt(projects, member.name);
+      const busySince = getUserBusySince(projects, member.name);
+
+      nextState[key] = { activeCount, activeIds, updatedAt: now };
+      nextTimes[key] = nextTimes[key] || {};
+
+      if (activeCount > 0) {
+        const newTaskStarted = previousCount === 0 || previousIds !== nextIds;
+        nextTimes[key].busySince = newTaskStarted ? (busySince || now) : (nextTimes[key].busySince || busySince || now);
+        nextTimes[key].freeSince = null;
+      } else {
+        nextTimes[key].busySince = null;
+        if (previousCount > 0) {
+          nextTimes[key].freeSince = completedAt || now;
+        } else if (!nextTimes[key].freeSince && completedAt) {
+          nextTimes[key].freeSince = completedAt;
+        }
+      }
+    });
+
+    try {
+      localStorage.setItem('kalpa_presence_task_state', JSON.stringify(nextState));
+      localStorage.setItem('kalpa_presence_times', JSON.stringify(nextTimes));
+    } catch (e) {}
+    setPresenceTimes(nextTimes);
+  }, [projects, users]);
+
+  const nowMs = availabilityNow;
   const availablePeople = people.filter(u => isUserActuallyOnline(u, nowMs) && (u.role === ROLES.ADMIN || (u.availability !== 'Break' && activeTasksFor(u.name).length === 0))); // admins shown available but no free-since
   const busyPeople = people.filter(u => u.role !== ROLES.ADMIN && isUserActuallyOnline(u, nowMs) && u.availability !== 'Break' && activeTasksFor(u.name).length > 0);
   const breakPeople = people.filter(u => u.role !== ROLES.ADMIN && isUserActuallyOnline(u, nowMs) && u.availability === 'Break');
@@ -1433,7 +1718,7 @@ const CommandCentreView = ({ projects = [], users = [], onSelectProject, current
         <div className="lg:col-span-2 bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
           <div className="p-5 border-b-2 border-slate-100"><h2 className="font-black text-slate-800 text-xl">Daily Operations Board</h2><p className="text-xs font-bold text-slate-400 mt-1">Includes today's tasks plus older pending tasks carried forward.</p></div>
           <div className="divide-y divide-slate-100 max-h-[520px] overflow-y-auto custom-scrollbar">
-            {activeBoard.map(p => <div key={p.id} onClick={() => onSelectProject(p)} className="p-5 hover:bg-slate-50 cursor-pointer flex justify-between items-center"><div><p className="font-black text-slate-800">{p.id} <span className="text-xs font-bold text-slate-400 ml-2">{getCustomerDisplayName(p)}</span></p><p className="text-sm font-extrabold text-slate-700 mt-1">{p.taskName || makeTaskDisplayName(p)}</p><p className="text-xs font-bold text-slate-500 mt-1">{p.type} • {p.location} • {p.assignedTo || 'Unassigned'}</p>{getLatestCompletedFileName(p) && <p className="text-[11px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mt-2 w-fit">Completed: {getLatestCompletedFileName(p)}</p>}{isCarriedForwardProject(p, dateKey) && <span className="inline-flex mt-2 text-[10px] bg-orange-50 text-orange-700 border border-orange-100 px-2 py-1 rounded-lg font-black uppercase">Carried Forward</span>}</div><Badge colorClass={getStatusColor(p.status)}>{p.status}</Badge></div>)}
+            {activeBoard.map(p => <div key={p.id} onClick={() => onSelectProject(p)} className="p-5 hover:bg-slate-50 cursor-pointer flex justify-between items-center"><div><p className="font-black text-slate-800">{p.id} <span className="text-xs font-bold text-slate-400 ml-2">{getCustomerDisplayName(p)}</span></p><p className="text-sm font-extrabold text-slate-700 mt-1">{p.taskName || makeTaskDisplayName(p)}</p><p className="text-xs font-bold text-slate-500 mt-1">{p.type} • {p.location} • {p.assignedTo || 'Unassigned'}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-slate-500 mt-1 line-clamp-2 max-w-2xl">{getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 mt-1 line-clamp-2 max-w-2xl">Estimate: {getEstimateDetails(p)}</p>}{getLatestCompletedFileName(p) && <p className="text-[11px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mt-2 w-fit">Completed: {getLatestCompletedFileName(p)}</p>}{isCarriedForwardProject(p, dateKey) && <span className="inline-flex mt-2 text-[10px] bg-orange-50 text-orange-700 border border-orange-100 px-2 py-1 rounded-lg font-black uppercase">Carried Forward</span>}</div><Badge colorClass={getStatusColor(p.status)}>{p.status}</Badge></div>)}
             {activeBoard.length === 0 && <div className="p-10 text-center text-slate-400 font-bold">No operations for this date.</div>}
           </div>
         </div>
@@ -1451,16 +1736,29 @@ const CommandCentreView = ({ projects = [], users = [], onSelectProject, current
               {selectedAvailabilityPeople.length === 0 && <MiniEmptyState>No team members in {availabilityFilter}.</MiniEmptyState>}
               {selectedAvailabilityPeople.map(member => {
                 const tasks = activeTasksFor(member.name);
-                const since = availabilityFilter === 'Break' ? (member.breakStartedAt || member.availabilityUpdatedAt || Date.now()) : (member.availabilityUpdatedAt || member.lastSeenAt || member.lastLoginAt || Date.now());
+                const breakSince = member.breakStartedAt || member.availabilityUpdatedAt || Date.now();
+                const freeSince = getUserFreeSince(projects, member.name, presenceTimes, member);
+                const busySince = getUserBusySince(projects, member.name, presenceTimes);
+                const busyTaskLine = tasks.length
+                  ? tasks.slice().sort((a, b) => getTaskBusySince(b) - getTaskBusySince(a)).slice(0, 2).map(t => `${t.id} • ${formatDuration(getTaskBusySince(t), availabilityNow)}`).join(' | ')
+                  : '';
+                const isAdminMember = normalizeRole(member.role) === ROLES.ADMIN;
+                const availabilityLine = availabilityFilter === 'Busy'
+                  ? (busyTaskLine || (busySince ? `Busy since ${formatDuration(busySince, availabilityNow)}` : 'Busy now'))
+                  : availabilityFilter === 'Break'
+                    ? `Break since ${formatDuration(breakSince, availabilityNow)}`
+                    : availabilityFilter === 'Available'
+                      ? (isAdminMember ? 'Available' : (freeSince ? `Free since ${formatDuration(freeSince, availabilityNow)}` : 'Available • no completed task yet'))
+                      : `Last seen ${formatLastSeenDateTime(member.lastSeenAt || member.lastLogoutAt || member.lastHeartbeatAt)}`;
                 return (
                   <div key={member.id} className="flex items-center justify-between bg-slate-50 border border-slate-100 rounded-2xl p-3">
                     <div className="flex items-center gap-3">
                       <div className="w-9 h-9 rounded-xl bg-white border border-slate-200 overflow-hidden flex items-center justify-center shrink-0">
-                        {member.profilePhoto ? <img src={member.profilePhoto} alt={member.name} className="w-full h-full object-cover" /> : <User className="w-4 h-4 text-slate-400" />}
+                        {member.profilePhoto ? <img src={absoluteApiUrl(member.profilePhoto, member.profilePhotoUpdatedAt || member.profileUpdatedAt || '')} alt={member.name} className="w-full h-full object-cover" /> : <User className="w-4 h-4 text-slate-400" />}
                       </div>
                       <div>
                         <p className="font-black text-slate-800 text-sm">{member.name}</p>
-                        <p className="text-[11px] font-bold text-slate-400">{member.role === ROLES.ADMIN && availabilityFilter === 'Available' ? 'Available' : availabilityFilter === 'Busy' ? tasks.map(t => t.id).join(', ') : availabilityFilter === 'Break' ? `Break since ${formatDuration(since, Date.now())}` : availabilityFilter === 'Available' ? `Free since ${formatDuration(since, Date.now())}` : `Last seen ${formatLastSeenDateTime(member.lastSeenAt || member.lastLogoutAt || member.lastHeartbeatAt)}`}</p>
+                        <p className="text-[11px] font-bold text-slate-400">{availabilityLine}</p>
                       </div>
                     </div>
                     <Badge colorClass={availabilityFilter === 'Busy' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : availabilityFilter === 'Break' ? 'bg-amber-50 text-amber-700 border-amber-100' : availabilityFilter === 'Available' ? 'bg-blue-50 text-blue-700 border-blue-100' : 'bg-slate-50 text-slate-600 border-slate-100'}>{availabilityFilter}</Badge>
@@ -1958,7 +2256,9 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
   const completedFileInputRef = useRef(null);
   
   const canManage = user.role === ROLES.ADMIN || user.role === ROLES.MANAGER;
-  const isAssignedToMe = project.assignedTo === user.name;
+  const isAssignedToMe = samePerson(project.assignedTo, user.name);
+  const canDesignerRevertOwnTask = user.role === ROLES.DESIGNER && isAssignedToMe;
+  const canRevertTask = (canManage || canDesignerRevertOwnTask) && project.status !== 'Lead Received';
   const showFinancials = user.role === ROLES.ADMIN;
 
   const handleAdvanceStatus = () => {
@@ -2006,7 +2306,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
       updatedProject.status = revertedTo;
       updatedProject.timeline = [
         ...(updatedProject.timeline || []), 
-        { id: Date.now(), text: `Status reverted back to ${revertedTo}`, time: new Date().toLocaleString() }
+        { id: Date.now(), text: `Status reverted back to ${revertedTo} by ${user.name}`, time: new Date().toLocaleString() }
       ];
       onUpdateProject(updatedProject, project);
     }
@@ -2054,6 +2354,36 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
       if (type === 'completed') setIsUploadingFinal(false);
       if (e?.target) e.target.value = '';
     }
+  };
+
+  const handleFileDelete = async (docToDelete) => {
+    if (!docToDelete) return;
+    if (!canDeleteProjectFile(docToDelete, user)) {
+      alert('Only Admin, Manager, or the uploader can delete this file.');
+      return;
+    }
+    const fileName = docToDelete.name || 'this file';
+    if (!window.confirm(`Delete ${fileName}? This will remove it from this task.`)) return;
+
+    await deleteProjectFileFromServer(docToDelete);
+
+    const sameFile = (doc) => {
+      if (!doc) return false;
+      if (docToDelete.id && doc.id) return String(doc.id) === String(docToDelete.id);
+      return String(doc.url || doc.downloadUrl || doc.name || '') === String(docToDelete.url || docToDelete.downloadUrl || docToDelete.name || '');
+    };
+
+    const updatedProject = {
+      ...project,
+      documents: (project.documents || []).filter(doc => !sameFile(doc)),
+      completedFiles: (project.completedFiles || []).filter(doc => !sameFile(doc)),
+      timeline: [
+        ...(project.timeline || []),
+        { id: Date.now(), text: `File deleted: ${fileName}`, time: new Date().toLocaleString() }
+      ]
+    };
+
+    onUpdateProject(updatedProject, project);
   };
 
   const handleLedgerScreenshot = async (e) => {
@@ -2255,8 +2585,8 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
              )
           )}
           
-          {(canManage && project.status !== 'Lead Received') && (
-              <button type="button" onClick={handleRevertStatus} className="px-4 py-2.5 bg-slate-100 text-slate-700 rounded-xl hover:bg-slate-200 transition-all flex items-center font-bold text-sm whitespace-nowrap">
+          {canRevertTask && (
+              <button type="button" onClick={handleRevertStatus} className="px-4 py-2.5 bg-slate-100 text-slate-700 rounded-xl hover:bg-slate-200 transition-all flex items-center font-bold text-sm whitespace-nowrap" title={canDesignerRevertOwnTask ? 'Revert your own task to the previous workflow stage' : 'Revert task to the previous workflow stage'}>
                   <ArrowLeft className="w-4 h-4 mr-1.5" /> Revert
               </button>
           )}
@@ -2326,9 +2656,17 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
                 </p>
               </div>
 
-              {showFinancials && project.estimateDetails && (
+              {getTaskDescription(project) && (
+                <div className="col-span-1 sm:col-span-2 mt-2 p-4 bg-indigo-50 rounded-2xl border border-indigo-100">
+                  <p className="text-xs font-black text-indigo-500 uppercase tracking-widest mb-2">Task Description / Special Instructions</p>
+                  <p className="text-sm text-slate-700 font-semibold whitespace-pre-wrap leading-relaxed">{getTaskDescription(project)}</p>
+                </div>
+              )}
+
+              {getEstimateDetails(project) && (
                 <div className="col-span-1 sm:col-span-2 mt-2 p-4 bg-amber-50 rounded-2xl border border-amber-100">
-                  <p className="text-sm text-amber-800 font-bold">Estimate Detail: <span className="font-medium">{project.estimateDetails}</span></p>
+                  <p className="text-xs font-black text-amber-600 uppercase tracking-widest mb-2">Estimate Details</p>
+                  <p className="text-sm text-amber-800 font-semibold whitespace-pre-wrap leading-relaxed">{getEstimateDetails(project)}</p>
                 </div>
               )}
             </div>
@@ -2386,7 +2724,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
                      <span className="font-bold ml-4 truncate">{doc.name}</span>
                    </div>
                    {doc.url ? (
-                     <a href={doc.url} download={doc.name} className="text-xs font-bold text-indigo-600 bg-white border border-slate-200 hover:bg-indigo-50 px-4 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm">Download</a>
+                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-indigo-600 bg-white border border-slate-200 hover:bg-indigo-50 px-4 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
                    ) : (
                      <button type="button" className="text-xs font-bold text-slate-400 bg-slate-50 px-4 py-2 rounded-xl whitespace-nowrap cursor-not-allowed border border-slate-200">Unavailable</button>
                    )}
@@ -2409,7 +2747,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
                      <span className="text-[11px] font-bold ml-3 text-blue-600 bg-blue-100 px-2 py-1 rounded-lg whitespace-nowrap hidden sm:inline-block border border-blue-200">by {doc.uploadedBy}</span>
                    </div>
                    {doc.url ? (
-                     <a href={doc.url} download={doc.name} className="text-xs font-bold text-blue-700 bg-white hover:bg-blue-50 shadow-sm border border-blue-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</a>
+                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-blue-700 bg-white hover:bg-blue-50 shadow-sm border border-blue-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
                    ) : (
                      <button type="button" className="text-xs font-bold text-slate-400 bg-slate-50 px-4 py-2 rounded-xl whitespace-nowrap cursor-not-allowed border border-slate-200">Unavailable</button>
                    )}
@@ -2429,7 +2767,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
                      <span className="text-[11px] font-bold ml-3 text-emerald-600 bg-emerald-100 px-2 py-1 rounded-lg whitespace-nowrap hidden sm:inline-block border border-emerald-200">by {doc.uploadedBy}</span>
                    </div>
                    {doc.url && (
-                     <a href={doc.url} download={doc.name} className="text-xs font-bold text-emerald-700 bg-white hover:bg-emerald-50 shadow-sm border border-emerald-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</a>
+                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-emerald-700 bg-white hover:bg-emerald-50 shadow-sm border border-emerald-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
                    )}
                  </div>
                ))}
@@ -3019,6 +3357,9 @@ function AppShell() {
                 date: today,
                 loginTime: timeStr,
                 logoutTime: timeStr,
+                loginAt: now,
+                logoutAt: now,
+                totalLoggedInMinutes: 0,
                 activeMinutes: 0,
                 totalBreakMinutes: 0,
                 currentBreakStartedAt: currentUser.availability === 'Break' ? (currentUser.breakStartedAt || now) : null,
@@ -3046,9 +3387,8 @@ function AppShell() {
             if (!currentLog) return prev;
             
             const now = Date.now();
-            const elapsedMins = (now - currentLog.lastTick) / (1000 * 60);
-            const safeElapsed = elapsedMins < 5 ? elapsedMins : 0;
             const isOnBreak = currentUser.availability === 'Break';
+            const accrued = buildAttendanceAccrual(currentLog, now, isOnBreak);
             const breakStart = isOnBreak ? (currentLog.currentBreakStartedAt || currentUser.breakStartedAt || now) : null;
             const existingEvents = Array.isArray(currentLog.breakEvents) ? currentLog.breakEvents : [];
             const hasOpenBreak = existingEvents.some(ev => ev.start && !ev.end);
@@ -3059,8 +3399,10 @@ function AppShell() {
             const updated = {
                 ...currentLog,
                 logoutTime: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
-                activeMinutes: currentLog.activeMinutes + (!isOnBreak ? safeElapsed : 0),
-                totalBreakMinutes: (Number(currentLog.totalBreakMinutes) || 0) + (isOnBreak ? safeElapsed : 0),
+                logoutAt: now,
+                totalLoggedInMinutes: accrued.totalLoggedInMinutes,
+                activeMinutes: accrued.activeMinutes,
+                totalBreakMinutes: accrued.totalBreakMinutes,
                 currentBreakStartedAt: breakStart,
                 breakEvents,
                 isOnline: true,
@@ -3191,16 +3533,29 @@ function AppShell() {
       return next;
     });
     try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'chats', normalizedMsg.id.toString()), sanitizeChatMessageForCache(normalizedMsg)); } catch(e){}
-    if (normalizedMsg.text.includes('@all')) {
-        addNotification(ROLES.ADMIN, null, `@all mention from ${normalizedMsg.sender}`, 'mention');
-        addNotification(ROLES.MANAGER, null, `@all mention from ${normalizedMsg.sender}`, 'mention');
-        addNotification(ROLES.DESIGNER, null, `@all mention from ${normalizedMsg.sender}`, 'mention');
+    const recipient = String(normalizedMsg.recipient || 'global');
+    const isGlobalChat = recipient === 'global' || !recipient;
+    const text = String(normalizedMsg.text || '');
+    const notifiedUsers = new Set();
+
+    if (isGlobalChat && text.includes('@all')) {
+        addNotification(ROLES.ADMIN, null, `@all mention from ${normalizedMsg.sender}`, 'mention', { category: 'Chat', priority: 'High' });
+        addNotification(ROLES.MANAGER, null, `@all mention from ${normalizedMsg.sender}`, 'mention', { category: 'Chat', priority: 'High' });
+        addNotification(ROLES.DESIGNER, null, `@all mention from ${normalizedMsg.sender}`, 'mention', { category: 'Chat', priority: 'High' });
     }
     (activeUsers || []).forEach(u => {
-      if (u.name !== normalizedMsg.sender && normalizedMsg.text?.toLowerCase().includes(`@${u.name}`.toLowerCase())) {
-        addNotification(u.role, u.name, `You were mentioned by ${normalizedMsg.sender}`, 'mention');
+      if (u.name !== normalizedMsg.sender && text.toLowerCase().includes(`@${u.name}`.toLowerCase())) {
+        notifiedUsers.add(String(u.name).toLowerCase());
+        addNotification(u.role, u.name, `You were mentioned by ${normalizedMsg.sender}`, 'mention', { category: 'Chat', priority: 'High' });
       }
     });
+    if (!isGlobalChat && !samePerson(recipient, normalizedMsg.sender)) {
+      const target = (activeUsers || []).find(u => samePerson(u.name, recipient));
+      if (target && !notifiedUsers.has(String(target.name).toLowerCase())) {
+        const preview = text || normalizedMsg.fileName || 'Attachment';
+        addNotification(target.role, target.name, `New message from ${normalizedMsg.sender}: ${preview.length > 60 ? `${preview.slice(0, 57)}...` : preview}`, 'chat', { category: 'Chat', priority: 'Normal' });
+      }
+    }
   };
 
   const handleMarkMessagesRead = async (activeChannel) => {
@@ -3357,6 +3712,9 @@ function AppShell() {
         date: today,
         loginTime: timeStr,
         logoutTime: timeStr,
+        loginAt: now,
+        logoutAt: now,
+        totalLoggedInMinutes: 0,
         activeMinutes: 0,
         totalBreakMinutes: 0,
         currentBreakStartedAt: null,
@@ -3386,11 +3744,15 @@ function AppShell() {
   const handleLogout = () => {
     if (currentUser) {
       updateTodayAttendance((log, now, timeStr) => {
+        const isOnBreak = currentUser.availability === 'Break' || log.status === 'On Break' || !!log.currentBreakStartedAt;
+        const accrued = buildAttendanceAccrual(log, now, isOnBreak);
         const events = Array.isArray(log.breakEvents) ? log.breakEvents : [];
         const updatedEvents = events.map(ev => ev.start && !ev.end ? { ...ev, end: now, endTime: timeStr, minutes: Math.floor(Math.max(0, now - Number(ev.start)) / 60000) } : ev);
         return {
           ...log,
+          ...accrued,
           logoutTime: timeStr,
+          logoutAt: now,
           isOnline: false,
           status: 'Logged Out',
           currentBreakStartedAt: null,
@@ -3413,8 +3775,10 @@ function AppShell() {
     updateTodayAttendance((log, ts, timeStr) => {
       const events = Array.isArray(log.breakEvents) ? log.breakEvents : [];
       if (!onBreak) {
+        const accrued = buildAttendanceAccrual(log, ts, false);
         return {
           ...log,
+          ...accrued,
           isOnline: true,
           status: 'On Break',
           currentBreakStartedAt: now,
@@ -3422,15 +3786,14 @@ function AppShell() {
           lastTick: ts
         };
       }
-      const openStart = log.currentBreakStartedAt || currentUser.breakStartedAt || now;
-      const duration = Math.floor(Math.max(0, ts - Number(openStart)) / 60000);
+      const accrued = buildAttendanceAccrual(log, ts, true);
       const updatedEvents = events.map(ev => ev.start && !ev.end ? { ...ev, end: ts, endTime: timeStr, minutes: Math.floor(Math.max(0, ts - Number(ev.start)) / 60000) } : ev);
       return {
         ...log,
+        ...accrued,
         isOnline: true,
         status: 'Online',
         currentBreakStartedAt: null,
-        totalBreakMinutes: (Number(log.totalBreakMinutes) || 0) + Math.max(0, Math.min(5, (ts - (Number(log.lastTick) || ts)) / 60000)),
         breakEvents: updatedEvents,
         lastTick: ts
       };
@@ -3562,7 +3925,7 @@ function AppShell() {
             <div className="flex justify-end mb-3">
               <button type="button" onClick={() => setShowProfilePanel(false)} className="bg-white text-slate-700 px-4 py-2 rounded-xl font-black shadow-lg border border-slate-100 hover:bg-slate-50 flex items-center"><X className="w-4 h-4 mr-2" /> Close Profile</button>
             </div>
-            <ProfileView currentUser={currentUser} onUpdateUser={handleUpdateUser} setCurrentUser={setCurrentUser} fileToBase64={fileToBase64} sendRealOtp={sendRealOtp} />
+            <ProfileView currentUser={currentUser} onUpdateUser={handleUpdateUser} setCurrentUser={setCurrentUser} fileToBase64={fileToBase64} sendRealOtp={sendRealOtp} verifyRealOtp={verifyRealOtp} />
           </div>
         </div>
       )}
@@ -3581,7 +3944,7 @@ function AppShell() {
                 <button key={p.id} type="button" onClick={() => setSelectedProject(p)} className="text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 hover:border-indigo-100 rounded-2xl p-4 transition-all">
                   <p className="font-black text-slate-800">{p.id}</p>
                   <p className="text-xs font-bold text-slate-500 mt-1">{getCustomerDisplayName(p)} • {p.location}</p>
-                  <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase">{p.type} • {p.assignedTo || 'Unassigned'} • {p.status}</p>
+                  <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase">{p.type} • {p.assignedTo || 'Unassigned'} • {p.status}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-slate-500 mt-2 line-clamp-2">{getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 mt-1 line-clamp-2">Estimate: {getEstimateDetails(p)}</p>}
                 </button>
               ))}
               {displayedProjects.length === 0 && <div className="col-span-full"><EmptyState icon={Search} title="No matching cases found" description="Try a customer name, bank, branch, location, task ID, or designer name." compact /></div>}
@@ -3610,7 +3973,7 @@ function AppShell() {
         ) : activeTab === 'attendance' ? (
           <AttendanceView attendanceLogs={attendanceLogs} users={activeUsers} />
         ) : activeTab === 'profile' ? (
-          <ProfileView currentUser={currentUser} onUpdateUser={handleUpdateUser} setCurrentUser={setCurrentUser} fileToBase64={fileToBase64} sendRealOtp={sendRealOtp} />
+          <ProfileView currentUser={currentUser} onUpdateUser={handleUpdateUser} setCurrentUser={setCurrentUser} fileToBase64={fileToBase64} sendRealOtp={sendRealOtp} verifyRealOtp={verifyRealOtp} />
         ) : activeTab === 'calculator' ? (
           <CalculatorView />
         ) : activeTab === 'meeting' ? (
@@ -3658,7 +4021,7 @@ function AppShell() {
                                         {p.priority === 'Urgent' && <Flag className="w-4 h-4 text-red-500 animate-pulse"/>}
                                      </div>
                                      <p className="text-sm font-bold text-slate-700 mb-1">{getCustomerDisplayName(p)}</p>
-                                     <p className="text-xs text-slate-500 mb-3">{p.type} • {p.location}</p>{getLatestCompletedFileName(p) && <p className="text-[10px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mb-3 truncate">Completed: {getLatestCompletedFileName(p)}</p>}
+                                     <p className="text-xs text-slate-500 mb-3">{p.type} • {p.location}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-slate-500 mb-2 line-clamp-2">{getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-bold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mb-3 line-clamp-2">Estimate: {getEstimateDetails(p)}</p>}{getLatestCompletedFileName(p) && <p className="text-[10px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mb-3 truncate">Completed: {getLatestCompletedFileName(p)}</p>}
                                      <div className="flex justify-between items-center pt-3 border-t border-slate-100">
                                         <Badge colorClass={p.assignedTo === 'Unassigned' ? 'bg-red-50 text-red-600 border-red-200' : 'bg-slate-50 text-slate-700 border-slate-200'}>{p.assignedTo}</Badge>
                                         {p.subTasks?.length > 0 && <span className="text-[10px] text-red-600 bg-red-50 px-2 py-0.5 rounded font-black">{p.subTasks.length} Revs</span>}
@@ -3695,7 +4058,7 @@ function AppShell() {
                               </td>
                               <td className="px-6 py-5">
                                 <p className="font-bold text-slate-700">{p.type}</p>
-                                <p className="text-slate-400 font-medium text-xs mt-1">{p.location}</p>
+                                <p className="text-slate-400 font-medium text-xs mt-1">{p.location}</p>{getTaskDescription(p) && <p className="text-slate-500 font-semibold text-xs mt-2 max-w-xs whitespace-normal line-clamp-2">{getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-amber-700 font-semibold text-xs mt-1 max-w-xs whitespace-normal line-clamp-2">Estimate: {getEstimateDetails(p)}</p>}
                               </td>
                               <td className="px-6 py-5">
                                 <Badge colorClass={p.assignedTo === 'Unassigned' ? 'bg-red-50 text-red-600 border-red-200' : 'bg-slate-50 text-slate-700 border-slate-200'}>{p.assignedTo}</Badge>
@@ -3721,7 +4084,7 @@ function AppShell() {
                 <div className="bg-white rounded-3xl p-6 shadow-sm border-2 border-slate-100 space-y-5">
                   {getOperationalUsers(activeUsers, { includeAdmins: false }).filter(u => u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER).map(designer => {
                     const designerOnline = isUserActuallyOnline(designer, nowTick);
-                    const activeTasks = designerOnline ? projects.filter(p => p.assignedTo === designer.name && p.status !== 'Completed') : [];
+                    const activeTasks = designerOnline ? getUserActiveTasks(projects, designer.name) : [];
                     const todayStart = new Date().setHours(0,0,0,0);
                     
                     const submittedToday = projects.filter(p => {
@@ -3738,7 +4101,7 @@ function AppShell() {
                       const recentlyCompleted = projects.filter(p => p.assignedTo === designer.name && (p.completedAt || p.submittedAt)).sort((a,b) => ((b.completedAt||b.submittedAt)||0) - ((a.completedAt||a.submittedAt)||0))[0];
                       if (recentlyCompleted) {
                          const hoursIdle = Math.floor((nowTick - (recentlyCompleted.completedAt||recentlyCompleted.submittedAt)) / (1000 * 60 * 60));
-                         idleStatus = hoursIdle > 0 ? `Free for ${hoursIdle}h` : "Just finished a task";
+                         idleStatus = recentlyCompleted ? `Free since ${formatDuration((recentlyCompleted.completedAt||recentlyCompleted.submittedAt), nowTick)}` : idleStatus;
                       }
                     }
 
@@ -3766,7 +4129,7 @@ function AppShell() {
                               const totalRevs = (at.subTasks||[]).length;
                               return (
                                 <div key={at.id} className="text-xs font-bold bg-slate-50 p-2.5 rounded-xl border border-slate-100 flex justify-between items-center group cursor-pointer hover:bg-slate-100 transition-colors" onClick={() => setSelectedProject(at)}>
-                                  <span className="text-slate-700 truncate mr-2">{at.id}</span>
+                                  <span className="text-slate-700 truncate mr-2">{at.id}<span className="block text-[10px] text-slate-400 font-black mt-0.5">Busy since {formatDuration(getTaskBusySince(at), nowTick)}</span></span>
                                   {totalRevs > 0 && <span className="text-[10px] text-red-600 font-black bg-red-50 border border-red-100 px-2 py-0.5 rounded-md whitespace-nowrap uppercase tracking-wider">{pendingRevs} pending</span>}
                                 </div>
                               )

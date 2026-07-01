@@ -445,13 +445,16 @@ function sanitize(d, role){
   if(role==='DESIGNER') out.audit=[];
   return out;
 }
+function isActiveCase(c={}){ return !['COMPLETED','CLOSED'].includes(String(c.status||'').toUpperCase()); }
+function caseBusySince(c={}){ return toMs(c.startedAt)||toMs(c.assignedAt)||toMs(c.createdAt); }
 function teamStatus(d){
   return sanitizePresenceUsers(d.users).map(u=>{
-    const active=d.cases.filter(c=>c.assigneeId===u.id && !['COMPLETED','CLOSED'].includes(c.status));
-    const lastDone=d.cases.filter(c=>c.assigneeId===u.id && c.completedAt).sort((a,b)=>new Date(b.completedAt)-new Date(a.completedAt))[0];
-    const freeSince=active.length?null:(lastDone?.completedAt || u.freeSince || now());
+    const active=d.cases.filter(c=>c.assigneeId===u.id && isActiveCase(c));
+    const lastDone=d.cases.filter(c=>c.assigneeId===u.id && c.completedAt && !isActiveCase(c)).sort((a,b)=>toMs(b.completedAt)-toMs(a.completedAt))[0];
+    const freeSince=active.length?null:(lastDone?.completedAt || null);
+    const busySince=active.length?active.map(caseBusySince).filter(Boolean).sort((a,b)=>a-b)[0]:null;
     const completedToday=d.cases.filter(c=>c.assigneeId===u.id && c.completedAt && new Date(c.completedAt).toDateString()===new Date().toDateString()).length;
-    return {id:u.id,name:u.name,role:u.role,phone:u.phone,status:active.length?'BUSY':'FREE',activeTasks:active.map(c=>({id:c.id,caseId:c.caseId,customerName:c.customerName,status:c.status})),freeSince,freeForMinutes:freeSince?Math.max(0,Math.floor((Date.now()-new Date(freeSince).getTime())/60000)):0,completedToday};
+    return {id:u.id,name:u.name,role:u.role,phone:u.phone,status:active.length?'BUSY':'FREE',activeTasks:active.map(c=>({id:c.id,caseId:c.caseId,customerName:c.customerName,status:c.status,busySince:caseBusySince(c)})),freeSince,freeForMinutes:freeSince?Math.max(0,Math.floor((Date.now()-new Date(freeSince).getTime())/60000)):0,busySince,busyForMinutes:busySince?Math.max(0,Math.floor((Date.now()-Number(busySince))/60000)):0,completedToday};
   });
 }
 function dailyLedger(d, dateStr=new Date().toISOString().slice(0,10)){
@@ -482,6 +485,33 @@ app.use((req,res,next)=>{
 });
 app.use(express.json({limit: process.env.JSON_BODY_LIMIT || '30mb'}));
 app.use('/uploads',express.static(UPLOAD_DIR));
+
+app.get('/api/profile/photo/:filename', (req, res) => {
+  try {
+    const filename = safeName(req.params.filename || '');
+    if (!filename) return res.status(404).send('Photo not found');
+    const fp = path.resolve(UPLOAD_DIR, filename);
+    if (!fp.startsWith(path.resolve(UPLOAD_DIR)) || !fs.existsSync(fp)) return res.status(404).send('Photo not found');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.sendFile(fp);
+  } catch (err) {
+    res.status(500).send('Unable to load photo');
+  }
+});
+
+app.get('/api/uploads/:filename', (req, res) => {
+  try {
+    const filename = safeName(req.params.filename || '');
+    if (!filename) return res.status(404).send('File not found');
+    const fp = path.resolve(UPLOAD_DIR, filename);
+    if (!fp.startsWith(path.resolve(UPLOAD_DIR)) || !fs.existsSync(fp)) return res.status(404).send('File not found');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.sendFile(fp);
+  } catch (err) {
+    res.status(500).send('Unable to load file');
+  }
+});
+
 app.get('/api/health', (_req, res) => res.json({ ok:true, service:'Kalpvriksha OTP/API', time:now(), smsProvider:process.env.SMS_PROVIDER || '', emailProvider:process.env.EMAIL_PROVIDER || '' }));
 
 function getEmailStatusPayload() {
@@ -649,7 +679,103 @@ app.post('/api/cases/:id/upload-final', upload.array('files',20),(req,res)=>{ co
 app.post('/api/cases/:id/manager-complete', async (req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); c.status='COMPLETED'; c.completedAt=now(); c.history.unshift({at:now(),by:req.body.by||'Manager',action:'Reviewed by manager and marked complete'}); notifyRole(d,'ADMIN',`Case completed after manager review: ${c.caseId}`,'completed',c.id); notifyUser(d,c.assigneeName,`Case marked complete: ${c.caseId}`,'completed',c.id); addAudit(d,req.body.by||'Manager','Case completed',c.caseId); save(d); res.json(c); });
 app.post('/api/cases/:id/revision',(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); c.status='REOPENED_FOR_REVISION'; c.priority='Urgent'; const rev={id:nanoid(8),note:req.body.note||'Banker revision requested',by:req.body.by||'Admin/Manager',createdAt:now()}; c.revisions.unshift(rev); c.history.unshift({at:now(),by:rev.by,action:'Revision opened as urgent'}); notifyUser(d,c.assigneeName,`URGENT revision task: ${c.caseId} - ${rev.note}`,'task',c.id); notifyRole(d,'MANAGER',`URGENT revision opened: ${c.caseId}`,'task',c.id); save(d); res.json(c); });
 app.post('/api/cases/:id/payment',(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const received=String(req.body.paymentReceived||'').toUpperCase(); if(!['YES','NO','PARTIAL','REFUND'].includes(received)) return res.status(400).json({error:'paymentReceived is mandatory: YES, NO, PARTIAL or REFUND'}); const p={id:nanoid(8),caseId:c.id,caseNo:c.caseId,location:c.city,bankerName:c.bankerName,bank:c.bank,branch:c.branch,paymentReceived:received,paymentAmountIn:Number(req.body.paymentAmountIn||0),refundAmount:Number(req.body.refundAmount||0),paymentDate:req.body.paymentDate||new Date().toISOString().slice(0,10),paymentTime:req.body.paymentTime||new Date().toTimeString().slice(0,5),payerName:req.body.payerName||'',transactionId:req.body.transactionId||'',mode:req.body.mode||'',note:req.body.note||'',createdAt:now(),createdBy:req.body.by||'Admin'}; d.payments.unshift(p); Object.assign(c,{paymentStatus:received,paymentAmountIn:p.paymentAmountIn,refundAmount:p.refundAmount,payerName:p.payerName,transactionId:p.transactionId,paymentDate:p.paymentDate,paymentTime:p.paymentTime}); c.history.unshift({at:now(),by:p.createdBy,action:`Payment ledger updated: ${received}`}); addAudit(d,p.createdBy,'Payment ledger updated',c.caseId); save(d); res.json(p); });
-app.get('/api/files/:id/download',(req,res)=>{ const d=db(); const docs=d.cases.flatMap(c=>c.documents||[]).concat(d.teamChat.flatMap(m=>m.files||[])); const doc=docs.find(x=>x.id===req.params.id); if(!doc) return res.status(404).send('File not found'); const fp=path.join(UPLOAD_DIR,doc.storedName); res.download(fp,doc.name); });
+
+
+app.post('/api/profile/photo', upload.single('photo'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ ok:false, error:'No photo uploaded' });
+    if (!String(req.file.mimetype || '').startsWith('image/')) {
+      try { fs.unlinkSync(req.file.path); } catch (e) {}
+      return res.status(400).json({ ok:false, error:'Only image files are allowed for profile photo.' });
+    }
+    const d = db();
+    const userId = String(req.body.userId || '').trim();
+    const username = String(req.body.username || '').trim().toLowerCase();
+    const user = (d.users || []).find(u => String(u.id || '') === userId || String(u.username || '').toLowerCase() === username);
+    const profilePhoto = `/api/profile/photo/${req.file.filename}`;
+    if (user) {
+      user.profilePhoto = profilePhoto;
+      user.profilePhotoFile = req.file.filename;
+      user.profileUpdatedAt = Date.now();
+      user.profilePhotoUpdatedAt = Date.now();
+      save(d);
+    }
+    res.json({ ok:true, profilePhoto, url:profilePhoto, storedName:req.file.filename, updated:!!user });
+  } catch (err) {
+    res.status(500).json({ ok:false, error:err.message || 'Profile photo upload failed' });
+  }
+});
+
+app.post('/api/files/upload', upload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  const type = String(req.body.type || 'source').toLowerCase();
+  const purpose = type === 'completed' ? 'FINAL' : (type === 'working' ? 'WORKING' : 'SOURCE');
+  const file = docPayload(req.file, req.body.by || 'Team', req.body.role || 'USER', purpose, req.body.projectId || req.body.caseId || '');
+  file.type = type;
+  file.folder = type;
+  file.downloadUrl = `/api/files/${file.id}/download`;
+  res.json({ ok: true, file });
+});
+app.get('/api/files/:id/download',(req,res)=>{
+  const d=db();
+  const docs=d.cases.flatMap(c=>[...(c.documents||[]),...(c.completedFiles||[])]).concat(d.teamChat.flatMap(m=>m.files||[]));
+  let doc=docs.find(x=>String(x.id)===String(req.params.id));
+  if(!doc) {
+    // Generic uploads are returned to the frontend before the case state is saved.
+    // During that small window, resolve by matching the stored filename in /uploads if possible.
+    return res.status(404).send('File not found in saved state. Please save/reload the task or re-upload the file.');
+  }
+  const stored = doc.storedName || String(doc.url || '').split('/').pop();
+  if(!stored) return res.status(404).send('Stored file name missing');
+  const fp=path.resolve(UPLOAD_DIR, stored);
+  if(!fp.startsWith(path.resolve(UPLOAD_DIR))) return res.status(400).send('Invalid file path');
+  if(!fs.existsSync(fp)) return res.status(404).send('File missing on server');
+  res.setHeader('Access-Control-Expose-Headers','Content-Disposition, Content-Length, Content-Type');
+  res.download(fp, doc.name || stored);
+});
+
+app.delete('/api/files/:id',(req,res)=>{
+  const d=db();
+  let removed = false;
+  let storedNames = [];
+  const matches = (doc) => String(doc?.id || '') === String(req.params.id);
+
+  for (const c of d.cases || []) {
+    const docs = c.documents || [];
+    const completed = c.completedFiles || [];
+    [...docs, ...completed].filter(matches).forEach(doc => {
+      const stored = doc.storedName || String(doc.url || '').split('/').pop();
+      if (stored) storedNames.push(stored);
+    });
+    c.documents = docs.filter(doc => !matches(doc));
+    c.completedFiles = completed.filter(doc => !matches(doc));
+    if (c.documents.length !== docs.length || c.completedFiles.length !== completed.length) {
+      removed = true;
+      c.history ||= [];
+      c.history.unshift({ at: now(), by: req.body?.by || 'Team', action: 'File deleted' });
+    }
+  }
+
+  for (const m of d.teamChat || []) {
+    const files = m.files || [];
+    files.filter(matches).forEach(doc => {
+      const stored = doc.storedName || String(doc.url || '').split('/').pop();
+      if (stored) storedNames.push(stored);
+    });
+    m.files = files.filter(doc => !matches(doc));
+    if (m.files.length !== files.length) removed = true;
+  }
+
+  [...new Set(storedNames)].forEach(stored => {
+    const fp = path.resolve(UPLOAD_DIR, stored);
+    if (fp.startsWith(path.resolve(UPLOAD_DIR)) && fs.existsSync(fp)) {
+      try { fs.unlinkSync(fp); } catch(e) { console.warn('File unlink failed:', e.message); }
+    }
+  });
+
+  if (removed) save(d);
+  res.json({ ok: true, removed });
+});
 app.get('/api/cases/:id/share-whatsapp',(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const finalDocs=(c.documents||[]).filter(doc=>doc.purpose==='FINAL' || doc.purpose==='REVISION_FINAL'); if(!finalDocs.length) return res.status(400).json({error:'No completed document available to share'}); const latestOriginal=finalDocs.filter(x=>x.purpose==='FINAL').slice(-1); const docs=latestOriginal.length?latestOriginal:finalDocs.slice(-1); const links=docs.map(x=>`${publicUrl().replace(':5173',':8080')}/api/files/${x.id}/download`).join('\n'); const msg=`Kalpvriksha Designs completed document for ${c.caseId}\nCustomer: ${c.customerName}\n${links}`; res.json({message:msg,waLink:`https://wa.me/?text=${encodeURIComponent(msg)}`,documents:docs}); });
 app.post('/api/chat', upload.array('files',10),(req,res)=>{ const d=db(); const ments=mentionTargets(req.body.text,d.users).concat(req.body.mentions?JSON.parse(req.body.mentions||'[]'):[]); const unique=[...new Set(ments)]; const msg={id:nanoid(8),by:req.body.by||'Team',role:req.body.role||'ADMIN',caseId:req.body.caseId||'',text:req.body.text||'',mentions:unique,files:(req.files||[]).map(f=>docPayload(f,req.body.by||'Team',req.body.role||'ADMIN','CHAT')),createdAt:now()}; d.teamChat.unshift(msg); if(unique.length){ unique.forEach(name=>notifyUser(d,name,`You were mentioned by ${msg.by} in team chat`,'mention','chat')); } else { notifyRole(d,'ADMIN','New normal chat message','normal','chat'); notifyRole(d,'MANAGER','New normal chat message','normal','chat'); notifyRole(d,'DESIGNER','New normal chat message','normal','chat'); } save(d); res.json(msg); });
 app.post('/api/chat/read',(req,res)=>{ const d=db(); const role=req.body.role||'ADMIN'; d.chatReads ||= {}; d.chatReads[role]=(d.teamChat||[]).map(m=>m.id); d.notifications.forEach(n=>{ if(n.target==='chat' && (n.to===role || n.to===req.body.name || n.category==='mention')) n.status='READ'; }); save(d); res.json({ok:true}); });

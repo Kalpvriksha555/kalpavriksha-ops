@@ -30,14 +30,22 @@ export const buildNotification = ({ targetRole, targetUser, title, type = 'info'
   };
 };
 
+const norm = (value = '') => String(value || '').trim().toLowerCase();
+const readName = (entry) => typeof entry === 'string' ? entry : (entry?.name || '');
+
 export const isNotificationForUser = (notification = {}, user = {}) => {
   if (!notification || !user) return false;
-  return (!notification.targetUser && notification.targetRole === user.role) || notification.targetUser === user.name;
+  const targetUser = norm(notification.targetUser);
+  const userName = norm(user.name);
+  const targetRole = norm(notification.targetRole);
+  const userRole = norm(user.role);
+  if (targetUser) return targetUser === userName;
+  return !!targetRole && targetRole === userRole;
 };
 
 export const isNotificationUnreadForUser = (notification = {}, user = {}) => {
   if (!notification || !user?.name) return false;
-  return !(notification.readBy || []).includes(user.name);
+  return !(notification.readBy || []).some(entry => norm(readName(entry)) === norm(user.name));
 };
 
 export const getVisibleNotifications = (notifications = [], user = {}, { unreadOnly = false, limit } = {}) => {
