@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { formatLastSeenDateTime, formatCallDuration, formatDateKey, formatDateTime, formatDuration, formatMinutes } from './utils/date';
 import { allProjectDocs, getCompletedDocuments, getLatestCompletedFileName, getTaskDescription, getEstimateDetails, getCompletedFileBadge } from './utils/taskDisplayUtils';
-import { getBreakMinutesFromLog, getTaskBusySince, getUserActiveTasks, getUserLastCompletedAt, getUserFreeSince, getUserBusySince, getTotalLoggedInMinutesFromLog, getActiveMinutesFromLog, buildAttendanceAccrual } from './utils/presenceAttendanceUtils';
+import { getBreakMinutesFromLog, getTaskBusySince, getUserActiveTasks, getUserLastCompletedAt, getUserFreeSince, getUserBusySince, getTotalLoggedInMinutesFromLog, getActiveMinutesFromLog, getAttendanceActiveTaskMinutes, buildAttendanceAccrual, deriveAttendanceSession, getAttendanceFirstLoginLabel } from './utils/presenceAttendanceUtils';
 import { createSafeMeetingRoomName, buildJitsiUrl } from './utils/meeting';
 import { copyTextToClipboard } from './utils/clipboard';
 import { Badge, PageLoadingScreen, EmptyState, MiniEmptyState } from './components/shared';
@@ -1125,7 +1125,7 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser }) => 
   );
 };
 
-const AttendanceView = ({ attendanceLogs = [], users = [] }) => {
+const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
   const [filterDate, setFilterDate] = useState(new Date().toLocaleDateString('en-CA'));
   const [monthKey, setMonthKey] = useState(new Date().toLocaleDateString('en-CA').slice(0, 7));
   const safeLogs = Array.isArray(attendanceLogs) ? attendanceLogs : [];
@@ -1139,14 +1139,13 @@ const AttendanceView = ({ attendanceLogs = [], users = [] }) => {
   const isPresent = (user, date) => safeLogs.some(log => String(log.userId) === String(user.id) && log.date === date);
   const attendanceRows = teamMembers.map(user => {
     const log = safeLogs.find(l => l.date === filterDate && (String(l.userId) === String(user.id) || samePerson(l.name, user.name)));
-    return {
+    const rowBase = {
       ...(log || {}),
       id: log?.id || `${user.id}_${filterDate}_empty`,
       userId: user.id,
       name: user.name,
       role: user.role,
       date: filterDate,
-      loginTime: log?.loginTime || '-',
       logoutTime: log?.logoutTime || '',
       activeMinutes: log?.activeMinutes || 0,
       totalBreakMinutes: log?.totalBreakMinutes || 0,
@@ -1154,15 +1153,21 @@ const AttendanceView = ({ attendanceLogs = [], users = [] }) => {
       breakEvents: Array.isArray(log?.breakEvents) ? log.breakEvents : [],
       totalLoggedInMinutes: log?.totalLoggedInMinutes || 0,
       loginAt: log?.loginAt || null,
-      logoutAt: log?.logoutAt || null
+      logoutAt: log?.logoutAt || null,
+      lastTick: log?.lastTick || null
+    };
+    return {
+      ...rowBase,
+      loginTime: getAttendanceFirstLoginLabel(rowBase, user)
     };
   }).sort((a, b) => String(a.name).localeCompare(String(b.name)));
 
   const attendanceSummary = attendanceRows.reduce((acc, log) => {
     const user = getAttendanceUser(log, users);
-    const logged = getTotalLoggedInMinutesFromLog(log, user);
-    const active = getActiveMinutesFromLog(log, user);
-    const breaks = getBreakMinutesFromLog(log);
+    const session = deriveAttendanceSession(log, user);
+    const logged = session.totalLoggedInMinutes;
+    const active = getAttendanceActiveTaskMinutes(log, user, projects);
+    const breaks = session.breakMinutes;
     acc.totalLogged += logged;
     acc.totalActive += active;
     acc.totalBreak += breaks;
@@ -1178,7 +1183,7 @@ const AttendanceView = ({ attendanceLogs = [], users = [] }) => {
       const isOnline = isUserActuallyOnline(user);
       const lastSeen = formatLastSeenDateTime(user?.lastSeenAt || user?.lastLogoutAt || user?.lastHeartbeatAt);
       return [
-        log.name, log.role, log.date, log.loginTime, isOnline ? "Online" : `Last seen ${lastSeen}`, formatMinutes(getTotalLoggedInMinutesFromLog(log, user)), ((log.activeMinutes || 0) / 60).toFixed(1) + " hrs", formatMinutes(getBreakMinutesFromLog(log))
+        log.name, log.role, log.date, log.loginTime, isOnline ? "Online" : `Last seen ${lastSeen}`, formatMinutes(getTotalLoggedInMinutesFromLog(log, user)), (getAttendanceActiveTaskMinutes(log, user, projects) / 60).toFixed(1) + " hrs", formatMinutes(getBreakMinutesFromLog(log))
       ];
     });
     exportToCSV(headers, rows, `Attendance_${filterDate}.csv`);
@@ -1223,11 +1228,12 @@ const AttendanceView = ({ attendanceLogs = [], users = [] }) => {
               {attendanceRows.map(log => {
                 const user = getAttendanceUser(log, users);
                 const isOnline = isUserActuallyOnline(user);
-                const safeMinutes = getActiveMinutesFromLog(log, user);
+                const session = deriveAttendanceSession(log, user);
+                const safeMinutes = getAttendanceActiveTaskMinutes(log, user, projects);
                 const hours = Math.floor(safeMinutes / 60);
                 const mins = Math.floor(safeMinutes % 60);
-                const breakMinutes = getBreakMinutesFromLog(log);
-                const totalLoggedInMinutes = getTotalLoggedInMinutesFromLog(log, user);
+                const breakMinutes = session.breakMinutes;
+                const totalLoggedInMinutes = session.totalLoggedInMinutes;
                 const breakEvents = Array.isArray(log.breakEvents) ? log.breakEvents : [];
                 return (
                   <tr key={log.id} className="hover:bg-slate-50 transition-colors">
@@ -3302,7 +3308,7 @@ function AppShell() {
         ) : activeTab === 'team' ? (
           <TeamPerformanceView users={activeUsers} projects={projects} onUpdateUser={handleUpdateUser} currentUser={currentUser} />
         ) : activeTab === 'attendance' ? (
-          <AttendanceView attendanceLogs={attendanceLogs} users={activeUsers} />
+          <AttendanceView attendanceLogs={attendanceLogs} users={activeUsers} projects={projects} />
         ) : activeTab === 'profile' ? (
           <ProfileView currentUser={currentUser} onUpdateUser={handleUpdateUser} setCurrentUser={setCurrentUser} fileToBase64={fileToBase64} sendRealOtp={sendRealOtp} verifyRealOtp={verifyRealOtp} />
         ) : activeTab === 'calculator' ? (
