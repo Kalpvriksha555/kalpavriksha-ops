@@ -1,4 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { formatLastSeenDateTime, formatCallDuration, formatDateKey, formatDateTime, formatDuration, formatMinutes } from './utils/date';
+import { createSafeMeetingRoomName, buildJitsiUrl } from './utils/meeting';
+import { copyTextToClipboard } from './utils/clipboard';
 import { 
   Briefcase, CheckCircle, Clock, FileText, LayoutDashboard, LogOut, 
   MapPin, Plus, Search, User, Users, Wallet, ArrowRight, Upload, 
@@ -215,19 +218,6 @@ const verifyRealOtp = async ({ challengeId, otp, purpose }) => {
   }
 };
 
-
-const formatLastSeenDateTime = (value) => {
-  if (!value) return '-';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '-';
-  return date.toLocaleString('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit'
-  });
-};
 
 const ONLINE_STALE_MS = 2 * 60 * 1000;
 const toMs = (value) => {
@@ -536,63 +526,6 @@ const normalizePersonName = (name = '') => normalizeTeamUser({ name, username: n
 const identityKey = (value = '') => normalizePersonName(String(value || '')).toLowerCase().replace(/[^a-z0-9]/g, '');
 const samePerson = (a = '', b = '') => identityKey(a) === identityKey(b);
 
-const createSafeMeetingRoomName = (...parts) => parts
-  .filter(Boolean)
-  .map(part => String(part).trim())
-  .join('_')
-  .replace(/[^a-zA-Z0-9_-]/g, '_')
-  .replace(/_+/g, '_')
-  .slice(0, 96) || 'KalpaVriksha_Meeting';
-
-const buildJitsiUrl = (roomName, displayName, options = {}) => {
-  const base = `https://meet.jit.si/${createSafeMeetingRoomName(roomName)}`;
-  const params = new URLSearchParams({
-    lang: 'en',
-    'userInfo.displayName': displayName || 'Kalpvriksha Team'
-  });
-  const config = [
-    'config.defaultLanguage="en"',
-    'config.prejoinPageEnabled=true',
-    'config.disableDeepLinking=true',
-    'config.enableClosePage=false',
-    'config.enableWelcomePage=false',
-    'config.readOnlyName=true',
-    options.audioOnly ? 'config.startAudioOnly=true' : '',
-    (options.muteAudio || options.shareScreen) ? 'config.startWithAudioMuted=true' : '',
-    (options.muteVideo || options.shareScreen || options.audioOnly) ? 'config.startWithVideoMuted=true' : '',
-    options.shareScreen ? 'config.startScreenSharing=true' : ''
-  ].filter(Boolean).join('&');
-  return `${base}?${params.toString()}#${config}`;
-};
-
-const copyTextToClipboard = async (text) => {
-  try {
-    if (navigator?.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch (e) {}
-  try {
-    const el = document.createElement('textarea');
-    el.value = text;
-    el.setAttribute('readonly', '');
-    el.style.position = 'absolute';
-    el.style.left = '-9999px';
-    document.body.appendChild(el);
-    el.select();
-    const ok = document.execCommand('copy');
-    document.body.removeChild(el);
-    return ok;
-  } catch (e) { return false; }
-};
-
-const formatCallDuration = (startedAt, nowMs = Date.now()) => {
-  if (!startedAt) return '00:00';
-  const total = Math.max(0, Math.floor((nowMs - Number(startedAt)) / 1000));
-  const mins = Math.floor(total / 60).toString().padStart(2, '0');
-  const secs = (total % 60).toString().padStart(2, '0');
-  return `${mins}:${secs}`;
-};
 const readEntryName = (entry) => typeof entry === 'string' ? entry : (entry?.name || '');
 const hasReadBy = (message, userName) => (message?.readBy || []).some(r => samePerson(readEntryName(r), userName));
 
@@ -744,47 +677,6 @@ const exportToCSV = (headers, rows, filename) => {
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
-};
-
-const formatDateKey = (value = Date.now()) => {
-  try {
-    const d = new Date(value);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  } catch(e) { return new Date().toLocaleDateString('en-CA'); }
-};
-
-const formatDateTime = (value) => {
-  if (!value) return '-';
-  try {
-    const d = new Date(value);
-    if (Number.isNaN(d.getTime())) return '-';
-    return d.toLocaleString('en-IN', {
-      day: '2-digit',
-      month: '2-digit',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: true
-    });
-  } catch (e) {
-    return '-';
-  }
-};
-
-const formatDuration = (start, end = Date.now()) => {
-  if (!start) return '-';
-  const diff = Math.max(0, (end || Date.now()) - start);
-  const totalMins = Math.floor(diff / 60000);
-  const hours = Math.floor(totalMins / 60);
-  const mins = totalMins % 60;
-  return hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
-};
-
-const formatMinutes = (minutes = 0) => {
-  const safe = Math.max(0, Math.floor(Number(minutes) || 0));
-  const hours = Math.floor(safe / 60);
-  const mins = safe % 60;
-  return hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
 };
 
 const getAttendanceUser = (log, users = []) => {
