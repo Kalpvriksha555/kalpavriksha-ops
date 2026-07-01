@@ -57,11 +57,17 @@ export const ActiveToasts = ({ toasts = [], notifications = [], currentUser }) =
   if (!source.length) return null;
 
   return (
-    <div className="fixed top-24 right-4 z-[9998] space-y-3 pointer-events-none max-w-[calc(100vw-2rem)]">
+    <div
+      className="fixed top-24 right-4 space-y-3 pointer-events-none max-w-[calc(100vw-2rem)] kalpa-toast-host"
+      style={{ zIndex: 2147483000 }}
+      aria-live="polite"
+      aria-relevant="additions"
+    >
       {source.slice(0, 3).map((toast, index) => (
         <div
           key={toast.id || index}
-          className="pointer-events-auto bg-white/95 backdrop-blur border border-slate-200 shadow-2xl rounded-2xl px-4 py-3 text-sm text-slate-800 w-[320px] max-w-full animate-in slide-in-from-right-4 fade-in duration-200"
+          className="pointer-events-auto bg-white/95 backdrop-blur border border-slate-200 shadow-2xl rounded-2xl px-4 py-3 text-sm text-slate-800 w-[340px] max-w-full animate-in slide-in-from-right-4 fade-in duration-200 kalpa-toast-card"
+          style={{ transform: `translateY(${index * 2}px)` }}
         >
           <div className="flex items-start gap-3">
             <div className="mt-0.5 w-9 h-9 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-center shrink-0">{iconFor(toast)}</div>

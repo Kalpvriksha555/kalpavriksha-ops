@@ -87,12 +87,16 @@ export const TopNavigation = ({
           <span className="text-lg leading-none">{darkMode ? '☀️' : '🌙'}</span>
         </button>
         <div className="relative">
-          <button type="button" onClick={() => setShowNotifs(!showNotifs)} className="p-2 sm:p-2.5 relative text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all duration-200 active:scale-95" title={unreadNotifs > 0 ? `${unreadNotifs} unread notification${unreadNotifs > 1 ? 's' : ''}` : 'Notifications'}>
+          <button type="button" onClick={() => setShowNotifs(!showNotifs)} className="p-2 sm:p-2.5 relative text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all duration-200 active:scale-95 overflow-visible" title={unreadNotifs > 0 ? `${unreadNotifs} unread notification${unreadNotifs > 1 ? 's' : ''}` : 'Notifications'}>
             <Bell className="w-6 h-6" />
-            {unreadNotifs > 0 && <span className="absolute -top-1 -right-1 min-w-[20px] h-5 px-1 bg-red-500 text-white text-[10px] font-black rounded-full border-2 border-white shadow-sm animate-pulse flex items-center justify-center">{unreadNotifs > 99 ? '99+' : unreadNotifs}</span>}
+            {unreadNotifs > 0 && <span
+              className="absolute bg-red-500 text-white font-black rounded-full border-2 border-white shadow-md animate-pulse flex items-center justify-center kalpa-notification-badge"
+              style={{ top: '-8px', right: '-10px', minWidth: unreadNotifs > 99 ? 34 : unreadNotifs > 9 ? 28 : 22, height: 22, padding: '0 6px', fontSize: 11, lineHeight: '18px', zIndex: 3 }}
+            >{unreadNotifs > 99 ? '99+' : unreadNotifs}</span>}
           </button>
           {showNotifs && (
-            <div className="absolute right-0 mt-3 w-[420px] max-w-[calc(100vw-2rem)] bg-white rounded-3xl shadow-2xl border-2 border-slate-100 overflow-hidden z-50 animate-in fade-in slide-in-from-top-4">
+            <div className="absolute right-0 mt-3 w-[420px] max-w-[calc(100vw-2rem)] bg-white rounded-3xl shadow-2xl border-2 border-slate-100 overflow-hidden animate-in fade-in slide-in-from-top-4 kalpa-notification-panel"
+            style={{ zIndex: 2147482000 }}>
               <div className="p-4 bg-slate-50 border-b border-slate-100">
                 <div className="font-extrabold text-sm text-slate-800 uppercase tracking-widest flex justify-between items-center gap-3">
                   <span>Notification Centre</span>

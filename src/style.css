@@ -1043,3 +1043,41 @@ button:disabled {
     transition-duration: .001ms !important;
   }
 }
+
+/* Notification System v3 UI layering and badge polish. */
+.kalpa-toast-host {
+  z-index: 2147483000 !important;
+  isolation: isolate !important;
+}
+.kalpa-toast-card {
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.22), 0 8px 18px rgba(15, 23, 42, 0.12) !important;
+}
+.kalpa-notification-panel {
+  z-index: 2147482000 !important;
+  box-shadow: 0 28px 80px rgba(15, 23, 42, 0.22), 0 10px 30px rgba(15, 23, 42, 0.12) !important;
+}
+.kalpa-notification-badge {
+  white-space: nowrap !important;
+  text-align: center !important;
+  font-variant-numeric: tabular-nums !important;
+  overflow: visible !important;
+}
+@media (max-width: 640px) {
+  .kalpa-toast-host {
+    top: 5rem !important;
+    right: .75rem !important;
+    left: .75rem !important;
+    max-width: calc(100vw - 1.5rem) !important;
+  }
+  .kalpa-toast-card {
+    width: 100% !important;
+  }
+  .kalpa-notification-panel {
+    position: fixed !important;
+    top: 4.75rem !important;
+    left: .75rem !important;
+    right: .75rem !important;
+    width: auto !important;
+    max-width: none !important;
+  }
+}
