@@ -2,69 +2,6 @@
   "audit": [],
   "cases": [
     {
-      "id": "VARA-ADHA-SUMI-0001",
-      "type": "Map Estimate",
-      "notes": [],
-      "client": "Adhar",
-      "ledger": {},
-      "status": "Lead Received",
-      "dueDate": null,
-      "history": [],
-      "comments": [],
-      "estimate": 0,
-      "location": "Varanasi",
-      "priority": "Normal",
-      "subTasks": [],
-      "taskName": "Map Estimate • Sumit • Varanasi",
-      "timeline": [
-        {
-          "text": "Case Created",
-          "time": "7/1/2026, 11:23:28 PM",
-          "id": 1782928408926
-        },
-        {
-          "time": "7/1/2026, 11:23:28 PM",
-          "id": 1782928408927,
-          "text": "1 Source File(s) Attached"
-        }
-      ],
-      "createdAt": 1782928408926,
-      "createdBy": "Shubham Upadhyay",
-      "documents": [
-        {
-          "mimeType": "application/pdf",
-          "size": 4061555,
-          "date": "7/1/2026",
-          "uploadedBy": "Shubham Upadhyay",
-          "id": 1782928408913.0793,
-          "url": "blob:https://ops.kalpvriksha.co.in/9f8b79b7-37aa-419d-bb11-d0d8fe2b0dce",
-          "localOnly": true,
-          "type": "source",
-          "name": "Shabbir Ahmed deed.pdf"
-        }
-      ],
-      "ownership": {
-        "createdBy": "Shubham Upadhyay",
-        "assignedBy": "",
-        "assignedTo": "Unassigned"
-      },
-      "revisions": [],
-      "updatedAt": 1782928408926,
-      "assignedAt": null,
-      "assignedBy": "",
-      "assignedTo": "Unassigned",
-      "bankerName": "",
-      "reportSent": false,
-      "creatorName": "Shubham Upadhyay",
-      "description": "715gf@1400",
-      "syncVersion": 1782928408926,
-      "customerName": "Sumit",
-      "completedFiles": [],
-      "estimateDetails": "1000000",
-      "assignmentVersion": null,
-      "reassignmentHistory": []
-    },
-    {
       "id": "VARA-FIN-YATH-0001",
       "type": "Map Estimate",
       "notes": [],
@@ -384,8 +321,8 @@
         "active": true,
         "restricted": false,
         "archived": false,
-        "createdAt": 1782933549068,
-        "updatedAt": 1782933550656,
+        "createdAt": 1782935498670,
+        "updatedAt": 1782935499653,
         "archivedAt": null,
         "archivedBy": ""
       },
@@ -393,7 +330,7 @@
       "lastSeenAt": 1782859998550,
       "bankDetails": "",
       "chatProfile": {
-        "createdAt": 1782933549068,
+        "createdAt": 1782935498670,
         "active": true,
         "directMessages": true,
         "mentions": true
@@ -411,14 +348,14 @@
       "lifecycleEvents": [],
       "lifecycleStatus": "ACTIVE",
       "workloadProfile": {
-        "createdAt": 1782933549068,
+        "createdAt": 1782935498670,
         "active": false,
         "dailyLimit": 0,
         "activeTasks": 0,
         "pendingTasks": 0
       },
       "analyticsProfile": {
-        "createdAt": 1782933549068,
+        "createdAt": 1782935498670,
         "active": true,
         "role": "ADMIN",
         "daily": {},
@@ -426,31 +363,31 @@
         "monthly": {}
       },
       "emergencyContact": "",
-      "profileCreatedAt": 1782933549068,
-      "profileUpdatedAt": 1782933550656,
+      "profileCreatedAt": 1782935498670,
+      "profileUpdatedAt": 1782935499653,
       "attendanceProfile": {
-        "createdAt": 1782933549068,
+        "createdAt": 1782935498670,
         "active": true,
         "includeInAttendance": false,
-        "lastPreparedAt": 1782933550652
+        "lastPreparedAt": 1782935499642
       },
       "emailRegisteredAt": 1782381347285,
       "performanceProfile": {
-        "createdAt": 1782933549068,
+        "createdAt": 1782935498670,
         "active": false,
         "completedTasks": 0,
         "revisionsHandled": 0,
         "averageCompletionMinutes": 0
       },
       "availabilityProfile": {
-        "createdAt": 1782933549068,
+        "createdAt": 1782935498670,
         "active": true,
         "trackAvailability": true,
         "defaultAvailability": "Unavailable"
       },
       "availabilityUpdatedAt": 1782852406580,
       "notificationPreferences": {
-        "createdAt": 1782933549068,
+        "createdAt": 1782935498670,
         "enabled": true,
         "task": true,
         "chat": true,
@@ -473,14 +410,14 @@
         "active": true,
         "restricted": false,
         "archived": false,
-        "createdAt": 1782933549068,
-        "updatedAt": 1782933550656,
+        "createdAt": 1782935498670,
+        "updatedAt": 1782935499653,
         "archivedAt": null,
         "archivedBy": ""
       },
       "lastSeenAt": 1782450776375,
       "chatProfile": {
-        "createdAt": 1782933549068,
+        "createdAt": 1782935498670,
         "active": true,
         "directMessages": true,
         "mentions": true
@@ -493,44 +430,44 @@
       "lifecycleEvents": [],
       "lifecycleStatus": "ACTIVE",
       "workloadProfile": {
-        "createdAt": 1782933549068,
+        "createdAt": 1782935498670,
         "active": false,
         "dailyLimit": 0,
         "activeTasks": 0,
         "pendingTasks": 0
       },
       "analyticsProfile": {
-        "createdAt": 1782933549068,
+        "createdAt": 1782935498670,
         "active": true,
         "role": "ADMIN",
         "daily": {},
         "weekly": {},
         "monthly": {}
       },
-      "profileCreatedAt": 1782933549068,
-      "profileUpdatedAt": 1782933550656,
+      "profileCreatedAt": 1782935498670,
+      "profileUpdatedAt": 1782935499653,
       "attendanceProfile": {
-        "createdAt": 1782933549068,
+        "createdAt": 1782935498670,
         "active": true,
         "includeInAttendance": false,
-        "lastPreparedAt": 1782933550652
+        "lastPreparedAt": 1782935499642
       },
       "performanceProfile": {
-        "createdAt": 1782933549068,
+        "createdAt": 1782935498670,
         "active": false,
         "completedTasks": 0,
         "revisionsHandled": 0,
         "averageCompletionMinutes": 0
       },
       "availabilityProfile": {
-        "createdAt": 1782933549068,
+        "createdAt": 1782935498670,
         "active": true,
         "trackAvailability": true,
         "defaultAvailability": "Unavailable"
       },
       "availabilityUpdatedAt": 1782450138885,
       "notificationPreferences": {
-        "createdAt": 1782933549068,
+        "createdAt": 1782935498670,
         "enabled": true,
         "task": true,
         "chat": true,
@@ -552,18 +489,18 @@
       "password": "123",
       "username": "shubham",
       "lifecycle": {
+        "active": true,
+        "archivedBy": "",
+        "updatedAt": 1782935499653,
+        "archived": false,
+        "restricted": false,
         "createdAt": 1782854407537,
         "status": "ACTIVE",
-        "archivedAt": null,
-        "updatedAt": 1782933550656,
-        "restricted": false,
-        "archived": false,
-        "active": true,
-        "archivedBy": ""
+        "archivedAt": null
       },
       "panNumber": "",
       "updatedAt": 1782849448557,
-      "lastSeenAt": 1782933547639,
+      "lastSeenAt": 1782935498651,
       "bankDetails": "",
       "chatProfile": {
         "createdAt": 1782854407537,
@@ -572,7 +509,7 @@
         "mentions": true
       },
       "designation": "Admin",
-      "lastLoginAt": 1782933424994,
+      "lastLoginAt": 1782934662658,
       "aadharNumber": "",
       "availability": "Available",
       "lastChatRead": 1782901456960,
@@ -581,7 +518,7 @@
       "breakStartedAt": null,
       "lastActivityAt": 1782332840917,
       "emailRegistered": true,
-      "lastHeartbeatAt": 1782933547639,
+      "lastHeartbeatAt": 1782935498651,
       "lifecycleEvents": [],
       "lifecycleStatus": "ACTIVE",
       "workloadProfile": {
@@ -595,19 +532,19 @@
         "createdAt": 1782854407537,
         "active": true,
         "role": "ADMIN",
-        "monthly": {},
+        "daily": {},
         "weekly": {},
-        "daily": {}
+        "monthly": {}
       },
       "emergencyContact": "",
       "mobileRegistered": false,
       "profileCreatedAt": 1782854407537,
-      "profileUpdatedAt": 1782933550656,
+      "profileUpdatedAt": 1782935499653,
       "attendanceProfile": {
         "createdAt": 1782854407537,
         "active": true,
         "includeInAttendance": false,
-        "lastPreparedAt": 1782933550652
+        "lastPreparedAt": 1782935499642
       },
       "emailRegisteredAt": 1782335648371,
       "performanceProfile": {
@@ -623,7 +560,7 @@
         "trackAvailability": true,
         "defaultAvailability": "Unavailable"
       },
-      "availabilityUpdatedAt": 1782933424994,
+      "availabilityUpdatedAt": 1782934662658,
       "notificationPreferences": {
         "createdAt": 1782854407537,
         "enabled": true,
@@ -631,8 +568,8 @@
         "chat": true,
         "mention": true,
         "meeting": true,
-        "digest": true,
-        "desktop": true
+        "desktop": true,
+        "digest": true
       }
     },
     {
@@ -645,7 +582,7 @@
       "username": "amit",
       "lifecycle": {
         "restricted": false,
-        "updatedAt": 1782933550656,
+        "updatedAt": 1782935499653,
         "archived": false,
         "archivedAt": null,
         "status": "ACTIVE",
@@ -685,12 +622,12 @@
         "weekly": {}
       },
       "profileCreatedAt": 1782898883085,
-      "profileUpdatedAt": 1782933550656,
+      "profileUpdatedAt": 1782935499653,
       "attendanceProfile": {
         "createdAt": 1782898883085,
         "active": true,
         "includeInAttendance": true,
-        "lastPreparedAt": 1782933550652
+        "lastPreparedAt": 1782935499642
       },
       "performanceProfile": {
         "createdAt": 1782898883085,
@@ -729,7 +666,7 @@
       "lifecycle": {
         "archived": false,
         "active": true,
-        "updatedAt": 1782933550656,
+        "updatedAt": 1782935499653,
         "status": "ACTIVE",
         "archivedAt": null,
         "createdAt": 1782886234510,
@@ -768,12 +705,12 @@
         "daily": {}
       },
       "profileCreatedAt": 1782886234510,
-      "profileUpdatedAt": 1782933550656,
+      "profileUpdatedAt": 1782935499653,
       "attendanceProfile": {
         "createdAt": 1782886234510,
         "active": true,
         "includeInAttendance": true,
-        "lastPreparedAt": 1782933550652
+        "lastPreparedAt": 1782935499642
       },
       "performanceProfile": {
         "createdAt": 1782886234510,
@@ -809,29 +746,29 @@
       "password": "123",
       "username": "nilu",
       "lifecycle": {
-        "archived": false,
-        "status": "ACTIVE",
-        "archivedAt": null,
-        "createdAt": 1782889120636,
-        "updatedAt": 1782933550656,
         "active": true,
-        "restricted": false,
-        "archivedBy": ""
+        "archivedBy": "",
+        "createdAt": 1782889120636,
+        "archivedAt": null,
+        "status": "ACTIVE",
+        "updatedAt": 1782935499653,
+        "archived": false,
+        "restricted": false
       },
-      "lastSeenAt": 1782918787647,
+      "lastSeenAt": 1782934656708,
       "chatProfile": {
         "createdAt": 1782889120636,
         "active": true,
         "directMessages": true,
         "mentions": true
       },
-      "lastLoginAt": 1782917920678,
+      "lastLoginAt": 1782934604024,
       "availability": "Unavailable",
       "lastChatRead": 1782907377303,
-      "lastLogoutAt": 1782890477895,
+      "lastLogoutAt": 1782934656708,
       "profilePhoto": "/api/profile/photo/1782911421263-9HeijP-download.jpg",
       "breakStartedAt": null,
-      "lastHeartbeatAt": 1782918787647,
+      "lastHeartbeatAt": 1782934656708,
       "lastMentionRead": 1782901323793,
       "lifecycleEvents": [],
       "lifecycleStatus": "ACTIVE",
@@ -846,18 +783,18 @@
         "createdAt": 1782889120636,
         "active": true,
         "role": "DESIGNER",
-        "monthly": {},
         "daily": {},
+        "monthly": {},
         "weekly": {}
       },
       "profileCreatedAt": 1782889120636,
       "profilePhotoFile": "1782911421263-9HeijP-download.jpg",
-      "profileUpdatedAt": 1782933550656,
+      "profileUpdatedAt": 1782935499653,
       "attendanceProfile": {
         "createdAt": 1782889120636,
         "active": true,
         "includeInAttendance": true,
-        "lastPreparedAt": 1782933550652
+        "lastPreparedAt": 1782935499642
       },
       "performanceProfile": {
         "createdAt": 1782889120636,
@@ -872,7 +809,7 @@
         "trackAvailability": true,
         "defaultAvailability": "Unavailable"
       },
-      "availabilityUpdatedAt": 1782917920678,
+      "availabilityUpdatedAt": 1782934656708,
       "profilePhotoUpdatedAt": 1782911421512,
       "notificationPreferences": {
         "createdAt": 1782889120636,
@@ -897,7 +834,7 @@
         "archived": false,
         "archivedAt": null,
         "active": true,
-        "updatedAt": 1782933550656,
+        "updatedAt": 1782935499653,
         "createdAt": 1782880198351,
         "status": "ACTIVE",
         "archivedBy": "",
@@ -934,12 +871,12 @@
         "monthly": {}
       },
       "profileCreatedAt": 1782880198351,
-      "profileUpdatedAt": 1782933550656,
+      "profileUpdatedAt": 1782935499653,
       "attendanceProfile": {
         "createdAt": 1782880198351,
         "active": true,
         "includeInAttendance": true,
-        "lastPreparedAt": 1782933550652
+        "lastPreparedAt": 1782935499642
       },
       "performanceProfile": {
         "createdAt": 1782880198351,
@@ -981,12 +918,12 @@
         "archivedAt": null,
         "archivedBy": "",
         "restricted": false,
-        "updatedAt": 1782933550656,
+        "updatedAt": 1782935499653,
         "status": "ACTIVE",
         "createdAt": 1782887496970,
         "active": true
       },
-      "lastSeenAt": 1782933549068,
+      "lastSeenAt": 1782935498670,
       "chatProfile": {
         "createdAt": 1782887496970,
         "active": true,
@@ -996,7 +933,7 @@
       "lastLoginAt": 1782903576139,
       "availability": "Unavailable",
       "lastChatRead": 1782901462401,
-      "lastLogoutAt": 1782933549068,
+      "lastLogoutAt": 1782935498670,
       "breakStartedAt": null,
       "lastHeartbeatAt": 1782911338104,
       "lifecycleEvents": [],
@@ -1017,12 +954,12 @@
         "daily": {}
       },
       "profileCreatedAt": 1782887496970,
-      "profileUpdatedAt": 1782933550656,
+      "profileUpdatedAt": 1782935499653,
       "attendanceProfile": {
         "createdAt": 1782887496970,
         "active": true,
         "includeInAttendance": true,
-        "lastPreparedAt": 1782933550652
+        "lastPreparedAt": 1782935499642
       },
       "performanceProfile": {
         "createdAt": 1782887496970,
@@ -1037,7 +974,7 @@
         "trackAvailability": true,
         "defaultAvailability": "Unavailable"
       },
-      "availabilityUpdatedAt": 1782933549068,
+      "availabilityUpdatedAt": 1782935498670,
       "notificationPreferences": {
         "createdAt": 1782887496970,
         "enabled": true,
@@ -3806,836 +3743,855 @@
   },
   "notifications": [
     {
-      "id": 1782912192526,
-      "time": "6:53:12 PM",
-      "type": "info",
-      "title": "Task Re-assigned to you: LUCK-CAPR-RUDR-0001",
-      "readBy": [],
-      "category": "Task",
-      "priority": "High",
       "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "time": "6:53:12 PM",
+      "targetUser": "Nilu Gupta",
+      "priority": "High",
+      "title": "Task Re-assigned to you: LUCK-CAPR-RUDR-0001",
+      "id": 1782912192526,
+      "type": "info",
+      "readBy": [
+        "Nilu Gupta"
+      ],
+      "category": "Task"
     },
     {
+      "category": "Task",
+      "readBy": [],
+      "type": "success",
+      "targetUser": "Unassigned",
       "id": 1782909333138,
       "time": "6:05:33 PM",
-      "type": "success",
-      "title": "Task AGRA-AB-RUDR-0001 marked as Completed",
-      "readBy": [],
-      "category": "Task",
-      "priority": "High",
       "targetRole": "Designer",
-      "targetUser": "Unassigned"
+      "priority": "High",
+      "title": "Task AGRA-AB-RUDR-0001 marked as Completed"
     },
     {
+      "category": "Task",
+      "targetUser": null,
       "id": 1782909333137,
+      "type": "success",
+      "readBy": [],
       "time": "6:05:33 PM",
-      "type": "success",
-      "title": "Task AGRA-AB-RUDR-0001 completed and ready",
-      "readBy": [],
-      "category": "Task",
       "priority": "High",
       "targetRole": "Manager",
-      "targetUser": null
+      "title": "Task AGRA-AB-RUDR-0001 completed and ready"
     },
     {
+      "type": "success",
+      "category": "Task",
+      "readBy": [
+        "Nilu Gupta"
+      ],
       "id": 1782907284471,
-      "time": "17:31:24",
-      "type": "success",
       "title": "Task VARA-FIN-YATH-0001 marked as Completed",
-      "readBy": [],
-      "category": "Task",
       "priority": "High",
       "targetRole": "Designer",
+      "time": "17:31:24",
       "targetUser": "Nilu Gupta"
     },
     {
-      "id": 1782906775378,
+      "targetRole": "Designer",
       "time": "5:22:55 pm",
-      "type": "info",
+      "targetUser": "Nilu Gupta",
+      "priority": "High",
       "title": "New Task Assigned: VARA-FIN-YATH-0001",
-      "readBy": [],
-      "category": "Task",
-      "priority": "High",
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "id": 1782906775378,
+      "type": "info",
+      "readBy": [
+        "Nilu Gupta"
+      ],
+      "category": "Task"
     },
     {
+      "category": "Task",
+      "targetUser": "Khushbu Pandey",
       "id": 1782906337048,
+      "type": "info",
+      "readBy": [],
       "time": "5:15:37 pm",
-      "type": "info",
-      "title": "New Task Assigned: KANP-MUTH-SACH-0001",
-      "readBy": [],
-      "category": "Task",
       "priority": "High",
       "targetRole": "Designer",
-      "targetUser": "Khushbu Pandey"
+      "title": "New Task Assigned: KANP-MUTH-SACH-0001"
     },
     {
-      "id": 1782905582855,
+      "targetRole": "Designer",
+      "priority": "High",
       "time": "5:03:02 PM",
-      "type": "info",
       "title": "Task Re-assigned to you: KANP-SH-GULS-0001",
-      "readBy": [],
       "category": "Task",
-      "priority": "High",
-      "targetRole": "Designer",
-      "targetUser": "Khushbu Pandey"
+      "readBy": [],
+      "type": "info",
+      "targetUser": "Khushbu Pandey",
+      "id": 1782905582855
     },
     {
-      "id": 1782904250585,
-      "time": "4:40:50 PM",
-      "type": "success",
+      "priority": "High",
       "title": "Task KANP-CAPR-RUDR-0001 marked as Completed",
-      "readBy": [],
-      "category": "Task",
-      "priority": "High",
+      "time": "4:40:50 PM",
+      "targetUser": "Nilu Gupta",
       "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "readBy": [
+        "Nilu Gupta"
+      ],
+      "category": "Task",
+      "type": "success",
+      "id": 1782904250585
     },
     {
-      "id": 1782904250584,
-      "time": "4:40:50 PM",
-      "type": "success",
-      "title": "Task KANP-CAPR-RUDR-0001 completed and ready",
-      "readBy": [],
       "category": "Task",
+      "targetUser": null,
+      "id": 1782904250584,
+      "type": "success",
+      "readBy": [],
+      "time": "4:40:50 PM",
       "priority": "High",
       "targetRole": "Manager",
-      "targetUser": null
+      "title": "Task KANP-CAPR-RUDR-0001 completed and ready"
     },
     {
-      "id": 1782904179337,
-      "time": "4:39:39 PM",
-      "type": "urgent",
-      "title": "URGENT REVISION: Task KANP-CAPR-RUDR-0001",
-      "readBy": [],
+      "readBy": [
+        "Nilu Gupta"
+      ],
       "category": "Task",
+      "type": "urgent",
+      "id": 1782904179337,
       "priority": "Critical",
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "title": "URGENT REVISION: Task KANP-CAPR-RUDR-0001",
+      "targetUser": "Nilu Gupta",
+      "time": "4:39:39 PM",
+      "targetRole": "Designer"
     },
     {
+      "category": "Task",
+      "readBy": [],
+      "type": "success",
+      "targetUser": "Amit Kushwaha",
       "id": 1782903169756,
       "time": "4:22:49 pm",
-      "type": "success",
-      "title": "Task AYOD-MUTH-MUKE-0001 marked as Completed",
-      "readBy": [],
-      "category": "Task",
-      "priority": "High",
       "targetRole": "Designer",
-      "targetUser": "Amit Kushwaha"
+      "priority": "High",
+      "title": "Task AYOD-MUTH-MUKE-0001 marked as Completed"
     },
     {
+      "type": "success",
+      "readBy": [
+        "Nilu Gupta"
+      ],
+      "category": "Task",
       "id": 1782903168650,
-      "time": "4:22:48 PM",
-      "type": "success",
-      "title": "Task KANP-CAPR-RUDR-0001 marked as Completed",
-      "readBy": [],
-      "category": "Task",
       "priority": "High",
+      "title": "Task KANP-CAPR-RUDR-0001 marked as Completed",
       "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "targetUser": "Nilu Gupta",
+      "time": "4:22:48 PM"
     },
     {
+      "readBy": [],
+      "type": "success",
       "id": 1782903168649,
-      "time": "4:22:48 PM",
-      "type": "success",
+      "targetUser": null,
+      "category": "Task",
       "title": "Task KANP-CAPR-RUDR-0001 completed and ready",
-      "readBy": [],
-      "category": "Task",
-      "priority": "High",
+      "time": "4:22:48 PM",
       "targetRole": "Manager",
-      "targetUser": null
+      "priority": "High"
     },
     {
-      "id": 1782903026676,
-      "time": "4:20:26 PM",
-      "type": "success",
       "title": "Task LUCK-PNB-RAJN-0001 marked as Completed",
-      "readBy": [],
-      "category": "Task",
       "priority": "High",
       "targetRole": "Designer",
-      "targetUser": "Md. Faraz"
+      "time": "4:20:26 PM",
+      "id": 1782903026676,
+      "targetUser": "Md. Faraz",
+      "readBy": [],
+      "type": "success",
+      "category": "Task"
     },
     {
+      "readBy": [
+        "Nilu Gupta"
+      ],
+      "category": "Task",
+      "type": "success",
       "id": 1782903001503,
+      "priority": "High",
+      "title": "Task KANP-CAPR-RUDR-0001 marked as Completed",
       "time": "4:20:01 PM",
-      "type": "success",
-      "title": "Task KANP-CAPR-RUDR-0001 marked as Completed",
-      "readBy": [],
-      "category": "Task",
-      "priority": "High",
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "targetUser": "Nilu Gupta",
+      "targetRole": "Designer"
     },
     {
-      "id": 1782902950942,
+      "priority": "High",
+      "title": "Task KANP-CAPR-RUDR-0001 marked as Completed",
+      "targetUser": "Nilu Gupta",
       "time": "16:19:10",
-      "type": "success",
-      "title": "Task KANP-CAPR-RUDR-0001 marked as Completed",
-      "readBy": [],
-      "category": "Task",
-      "priority": "High",
       "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "readBy": [
+        "Nilu Gupta"
+      ],
+      "category": "Task",
+      "type": "success",
+      "id": 1782902950942
     },
     {
+      "category": "Task",
+      "readBy": [],
+      "type": "success",
       "id": 1782902922989,
+      "targetUser": "Amit Kushwaha",
+      "targetRole": "Designer",
+      "priority": "High",
       "time": "4:18:42 pm",
-      "type": "success",
-      "title": "Task AYOD-MUTH-MUKE-0001 marked as Completed",
-      "readBy": [],
-      "category": "Task",
-      "priority": "High",
-      "targetRole": "Designer",
-      "targetUser": "Amit Kushwaha"
+      "title": "Task AYOD-MUTH-MUKE-0001 marked as Completed"
     },
     {
-      "id": 1782902907425,
+      "targetRole": "Designer",
+      "priority": "High",
       "time": "4:18:27 PM",
-      "type": "success",
       "title": "Task VARA-AB-RAUN-0001 marked as Completed",
-      "readBy": [],
       "category": "Task",
-      "priority": "High",
-      "targetRole": "Designer",
-      "targetUser": "Khushbu Pandey"
-    },
-    {
-      "id": 1782902907424,
-      "time": "4:18:27 PM",
+      "readBy": [],
       "type": "success",
-      "title": "Task VARA-AB-RAUN-0001 completed and ready",
-      "readBy": [],
-      "category": "Task",
-      "priority": "High",
-      "targetRole": "Manager",
-      "targetUser": null
-    },
-    {
-      "id": 1782902227652,
-      "time": "4:07:07 pm",
-      "type": "info",
-      "title": "Task Re-assigned to you: AYOD-MUTH-MUKE-0001",
-      "readBy": [],
-      "category": "Task",
-      "priority": "High",
-      "targetRole": "Manager",
-      "targetUser": "Amit Kushwaha"
-    },
-    {
-      "id": 1782902219907,
-      "time": "4:06:59 pm",
-      "type": "info",
-      "title": "Task Re-assigned to you: AGRA-MAHI-KUNA-0001",
-      "readBy": [],
-      "category": "Task",
-      "priority": "High",
-      "targetRole": "Designer",
-      "targetUser": "Waqar"
-    },
-    {
-      "id": 1782902213391,
-      "time": "4:06:53 pm",
-      "type": "info",
-      "title": "Task Re-assigned to you: AGRA-MAHI-KUNA-0001",
-      "readBy": [],
-      "category": "Task",
-      "priority": "High",
-      "targetRole": "Designer",
-      "targetUser": "Md. Faraz"
-    },
-    {
-      "id": 1782902207516,
-      "time": "4:06:47 pm",
-      "type": "info",
-      "title": "Task Re-assigned to you: KANP-CAPR-RUDR-0001",
-      "readBy": [],
-      "category": "Task",
-      "priority": "High",
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
-    },
-    {
-      "id": 1782902198876,
-      "time": "4:06:38 pm",
-      "type": "info",
-      "title": "Task Re-assigned to you: LUCK-PNB-RAJN-0001",
-      "readBy": [],
-      "category": "Task",
-      "priority": "High",
-      "targetRole": "Designer",
-      "targetUser": "Md. Faraz"
-    },
-    {
-      "id": 1782901784978,
-      "time": "3:59:44 pm",
-      "type": "info",
-      "title": "Task Re-assigned to you: VARA-AB-RAUN-0001",
-      "readBy": [],
-      "category": "Task",
-      "priority": "High",
-      "targetRole": "Designer",
+      "id": 1782902907425,
       "targetUser": "Khushbu Pandey"
     },
     {
-      "id": 1782901324199,
-      "time": "3:52:04 PM",
-      "type": "mention",
-      "title": "@all mention from Shubham Upadhyay",
+      "time": "4:18:27 PM",
+      "targetRole": "Manager",
+      "priority": "High",
+      "title": "Task VARA-AB-RAUN-0001 completed and ready",
+      "category": "Task",
       "readBy": [],
-      "category": "Chat",
-      "priority": "Normal",
-      "targetRole": "Designer",
-      "targetUser": null
+      "type": "success",
+      "targetUser": null,
+      "id": 1782902907424
     },
     {
-      "id": 1782901324198,
-      "time": "3:52:04 PM",
-      "type": "mention",
-      "title": "@all mention from Shubham Upadhyay",
+      "title": "Task Re-assigned to you: AYOD-MUTH-MUKE-0001",
+      "time": "4:07:07 pm",
+      "targetRole": "Manager",
+      "priority": "High",
+      "type": "info",
       "readBy": [],
+      "targetUser": "Amit Kushwaha",
+      "id": 1782902227652,
+      "category": "Task"
+    },
+    {
+      "time": "4:06:59 pm",
+      "priority": "High",
+      "targetRole": "Designer",
+      "title": "Task Re-assigned to you: AGRA-MAHI-KUNA-0001",
+      "category": "Task",
+      "targetUser": "Waqar",
+      "id": 1782902219907,
+      "type": "info",
+      "readBy": []
+    },
+    {
+      "category": "Task",
+      "targetUser": "Md. Faraz",
+      "id": 1782902213391,
+      "readBy": [],
+      "type": "info",
+      "time": "4:06:53 pm",
+      "priority": "High",
+      "targetRole": "Designer",
+      "title": "Task Re-assigned to you: AGRA-MAHI-KUNA-0001"
+    },
+    {
+      "targetUser": "Nilu Gupta",
+      "time": "4:06:47 pm",
+      "targetRole": "Designer",
+      "title": "Task Re-assigned to you: KANP-CAPR-RUDR-0001",
+      "priority": "High",
+      "id": 1782902207516,
+      "category": "Task",
+      "readBy": [
+        "Nilu Gupta"
+      ],
+      "type": "info"
+    },
+    {
+      "category": "Task",
+      "targetUser": "Md. Faraz",
+      "id": 1782902198876,
+      "type": "info",
+      "readBy": [],
+      "time": "4:06:38 pm",
+      "priority": "High",
+      "targetRole": "Designer",
+      "title": "Task Re-assigned to you: LUCK-PNB-RAJN-0001"
+    },
+    {
+      "category": "Task",
+      "id": 1782901784978,
+      "targetUser": "Khushbu Pandey",
+      "readBy": [],
+      "type": "info",
+      "priority": "High",
+      "targetRole": "Designer",
+      "time": "3:59:44 pm",
+      "title": "Task Re-assigned to you: VARA-AB-RAUN-0001"
+    },
+    {
+      "priority": "Normal",
+      "title": "@all mention from Shubham Upadhyay",
+      "time": "3:52:04 PM",
+      "targetUser": null,
+      "targetRole": "Designer",
+      "readBy": [
+        "Nilu Gupta"
+      ],
       "category": "Chat",
+      "type": "mention",
+      "id": 1782901324199
+    },
+    {
+      "title": "@all mention from Shubham Upadhyay",
+      "time": "3:52:04 PM",
       "priority": "Normal",
       "targetRole": "Manager",
-      "targetUser": null
+      "id": 1782901324198,
+      "targetUser": null,
+      "readBy": [],
+      "type": "mention",
+      "category": "Chat"
     },
     {
-      "id": 1782901324193,
-      "time": "3:52:04 PM",
-      "type": "mention",
-      "title": "@all mention from Shubham Upadhyay",
       "readBy": [
         "Shubham Upadhyay"
       ],
       "category": "Chat",
+      "type": "mention",
+      "id": 1782901324193,
       "priority": "Normal",
-      "targetRole": "Admin",
-      "targetUser": null
+      "title": "@all mention from Shubham Upadhyay",
+      "time": "3:52:04 PM",
+      "targetUser": null,
+      "targetRole": "Admin"
     },
     {
+      "type": "info",
+      "readBy": [],
+      "targetUser": "Waqar",
+      "title": "Task Re-assigned to you: VARA-CAPR-PUNE-0001",
       "id": 1782475448998,
       "time": "17:34:08",
-      "type": "info",
-      "title": "Task Re-assigned to you: VARA-CAPR-PUNE-0001",
-      "readBy": [],
-      "targetRole": "Designer",
-      "targetUser": "Waqar"
+      "targetRole": "Designer"
     },
     {
-      "id": 1782449930723,
       "time": "10:28:50 AM",
-      "type": "info",
+      "targetRole": "Designer",
       "title": "New Task Assigned: VARA-CAPR-PUNE-0001",
+      "id": 1782449930723,
+      "targetUser": "Nilu Gupta",
       "readBy": [
         "Nilu Gupta"
       ],
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "type": "info"
     },
     {
-      "id": 1782421308273,
-      "time": "02:31:48",
       "type": "success",
-      "title": "Task KANP-KOTA-ROHA-0001 marked as Completed",
       "readBy": [],
-      "targetRole": "Designer",
-      "targetUser": "Unassigned"
+      "id": 1782421308273,
+      "title": "Task KANP-KOTA-ROHA-0001 marked as Completed",
+      "targetUser": "Unassigned",
+      "time": "02:31:48",
+      "targetRole": "Designer"
     },
     {
       "id": 1782421308272,
-      "time": "02:31:48",
-      "type": "success",
       "title": "Task KANP-KOTA-ROHA-0001 completed and ready",
-      "readBy": [],
-      "targetRole": "Manager",
-      "targetUser": null
-    },
-    {
-      "id": 1782417759081,
-      "time": "1:32:39 AM",
+      "targetUser": null,
       "type": "success",
+      "readBy": [],
+      "time": "02:31:48",
+      "targetRole": "Manager"
+    },
+    {
+      "targetRole": "Designer",
+      "time": "1:32:39 AM",
+      "id": 1782417759081,
       "title": "Task VARA-CAPR-KUNA-0001 marked as Completed",
+      "targetUser": "Nilu Gupta",
+      "type": "success",
       "readBy": [
         "Nilu Gupta"
-      ],
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      ]
     },
     {
-      "id": 1782417732458,
       "time": "1:32:12 AM",
-      "type": "info",
+      "targetRole": "Designer",
+      "targetUser": "Nilu Gupta",
+      "id": 1782417732458,
       "title": "Task Re-assigned to you: VARA-CAPR-KUNA-0001",
+      "type": "info",
       "readBy": [
         "Nilu Gupta"
-      ],
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      ]
     },
     {
-      "id": 1782381427649,
+      "targetRole": "Manager",
       "time": "3:27:07 PM",
-      "type": "info",
+      "id": 1782381427649,
+      "targetUser": "Amit Kushwaha",
       "title": "New Task Assigned: VARA-MAHI-RUDR-0001",
       "readBy": [
         "Amit Kushwaha"
       ],
-      "targetRole": "Manager",
-      "targetUser": "Amit Kushwaha"
+      "type": "info"
     },
     {
-      "id": 1782381195079,
       "time": "3:23:15 PM",
-      "type": "mention",
-      "title": "You were mentioned by Shubham Upadhyay",
+      "targetRole": "Manager",
       "readBy": [
         "Amit Kushwaha"
       ],
-      "targetRole": "Manager",
-      "targetUser": "Amit Kushwaha"
+      "type": "mention",
+      "targetUser": "Amit Kushwaha",
+      "title": "You were mentioned by Shubham Upadhyay",
+      "id": 1782381195079
     },
     {
-      "id": 1782379534118,
-      "time": "2:55:34 PM",
-      "type": "info",
-      "title": "Task Re-assigned to you: LUCK-CAPR-KUNA-0001",
-      "readBy": [],
       "targetRole": "Designer",
-      "targetUser": "Khushbu Pandey"
+      "time": "2:55:34 PM",
+      "targetUser": "Khushbu Pandey",
+      "title": "Task Re-assigned to you: LUCK-CAPR-KUNA-0001",
+      "id": 1782379534118,
+      "type": "info",
+      "readBy": []
     },
     {
-      "id": 1782379533214,
       "time": "2:55:33 PM",
-      "type": "info",
-      "title": "Task Re-assigned to you: LUCK-CAPR-KUNA-0001",
+      "targetRole": "Designer",
       "readBy": [
         "Nilu Gupta"
       ],
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "type": "info",
+      "targetUser": "Nilu Gupta",
+      "id": 1782379533214,
+      "title": "Task Re-assigned to you: LUCK-CAPR-KUNA-0001"
     },
     {
-      "id": 1782379533122,
+      "targetRole": "Designer",
       "time": "2:55:33 PM",
       "type": "info",
-      "title": "Task Re-assigned to you: LUCK-CAPR-KUNA-0001",
       "readBy": [],
-      "targetRole": "Designer",
+      "id": 1782379533122,
+      "title": "Task Re-assigned to you: LUCK-CAPR-KUNA-0001",
       "targetUser": "Khushbu Pandey"
     },
     {
+      "targetUser": "Shubham Upadhyay",
       "id": 1782337328813,
-      "time": "3:12:08 AM",
-      "type": "mention",
       "title": "You were mentioned by Nilu Gupta",
+      "type": "mention",
       "readBy": [
         "Shubham Upadhyay"
       ],
       "targetRole": "Admin",
-      "targetUser": "Shubham Upadhyay"
+      "time": "3:12:08 AM"
     },
     {
-      "id": 1782337276090,
       "time": "3:11:16 AM",
-      "type": "info",
+      "targetRole": "Designer",
+      "id": 1782337276090,
       "title": "Task Re-assigned to you: LUCK-ADHA-GAUR-0001",
+      "targetUser": "Nilu Gupta",
       "readBy": [
         "Nilu Gupta"
       ],
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "type": "info"
     },
     {
+      "targetRole": "Designer",
+      "time": "7:10:44 PM",
+      "type": "success",
+      "readBy": [
+        "Amit Kushwaha"
+      ],
+      "targetUser": "Amit Kushwaha",
       "id": 1782308444628,
-      "time": "7:10:44 PM",
-      "type": "success",
-      "title": "Task AYOD-AB-RAJN-0001 marked as Completed",
-      "readBy": [
-        "Amit Kushwaha"
-      ],
-      "targetRole": "Designer",
-      "targetUser": "Amit Kushwaha"
+      "title": "Task AYOD-AB-RAJN-0001 marked as Completed"
     },
     {
-      "id": 1782308444624,
-      "time": "7:10:44 PM",
-      "type": "success",
-      "title": "Task AYOD-AB-RAJN-0001 completed and ready",
-      "readBy": [
-        "Amit Kushwaha"
-      ],
       "targetRole": "Manager",
-      "targetUser": null
+      "time": "7:10:44 PM",
+      "type": "success",
+      "readBy": [
+        "Amit Kushwaha"
+      ],
+      "id": 1782308444624,
+      "targetUser": null,
+      "title": "Task AYOD-AB-RAJN-0001 completed and ready"
     },
     {
-      "id": 1782307307769,
-      "time": "6:51:47 PM",
+      "readBy": [
+        "Amit Kushwaha"
+      ],
       "type": "info",
       "title": "Task Re-assigned to you: AYOD-AB-RAJN-0001",
-      "readBy": [
-        "Amit Kushwaha"
-      ],
-      "targetRole": "Manager",
-      "targetUser": "Amit Kushwaha"
+      "id": 1782307307769,
+      "targetUser": "Amit Kushwaha",
+      "time": "6:51:47 PM",
+      "targetRole": "Manager"
     },
     {
-      "id": 1782217756818,
+      "targetRole": "Designer",
       "time": "5:59:16 PM",
       "type": "info",
-      "title": "Task Re-assigned to you: VARA-AB-2026-0001",
       "readBy": [],
-      "targetRole": "Designer",
-      "targetUser": "Waqar"
+      "targetUser": "Waqar",
+      "title": "Task Re-assigned to you: VARA-AB-2026-0001",
+      "id": 1782217756818
     },
     {
-      "id": 1782217571078,
+      "targetRole": "Designer",
       "time": "5:56:11 PM",
-      "type": "info",
-      "title": "Task Re-assigned to you: VARA-AB-2026-0001",
       "readBy": [
         "Nilu Gupta"
       ],
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "type": "info",
+      "targetUser": "Nilu Gupta",
+      "id": 1782217571078,
+      "title": "Task Re-assigned to you: VARA-AB-2026-0001"
     },
     {
-      "id": 1782217568189,
-      "time": "5:56:08 PM",
-      "type": "info",
+      "targetUser": "Waqar",
       "title": "Task Re-assigned to you: VARA-AB-2026-0001",
+      "id": 1782217568189,
+      "type": "info",
       "readBy": [],
       "targetRole": "Designer",
-      "targetUser": "Waqar"
+      "time": "5:56:08 PM"
     },
     {
-      "id": 1782217568114,
-      "time": "5:56:08 PM",
-      "type": "info",
+      "targetUser": "Nilu Gupta",
       "title": "Task Re-assigned to you: VARA-AB-2026-0001",
+      "id": 1782217568114,
+      "type": "info",
       "readBy": [
         "Nilu Gupta"
       ],
       "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "time": "5:56:08 PM"
     },
     {
+      "type": "info",
+      "readBy": [],
+      "targetUser": "Waqar",
+      "title": "Task Re-assigned to you: VARA-AB-2026-0001",
       "id": 1782217561968,
       "time": "5:56:01 PM",
-      "type": "info",
-      "title": "Task Re-assigned to you: VARA-AB-2026-0001",
-      "readBy": [],
-      "targetRole": "Designer",
-      "targetUser": "Waqar"
+      "targetRole": "Designer"
     },
     {
-      "id": 1782213979654,
       "time": "4:56:19 PM",
+      "targetRole": "Designer",
       "type": "info",
-      "title": "Task Re-assigned to you: VARA-AB-BNKR-2026-0001",
       "readBy": [
         "Nilu Gupta"
       ],
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "id": 1782213979654,
+      "targetUser": "Nilu Gupta",
+      "title": "Task Re-assigned to you: VARA-AB-BNKR-2026-0001"
     },
     {
-      "id": 1782212738370,
       "time": "4:35:38 PM",
-      "type": "mention",
-      "title": "@all mention from Amit Kushwaha",
+      "targetRole": "Designer",
       "readBy": [
         "Nilu Gupta",
         "Md. Faraz"
       ],
-      "targetRole": "Designer",
+      "type": "mention",
+      "title": "@all mention from Amit Kushwaha",
+      "id": 1782212738370,
       "targetUser": null
     },
     {
-      "id": 1782210635471,
       "time": "4:00:35 PM",
-      "type": "info",
+      "targetRole": "Designer",
+      "targetUser": "Nilu Gupta",
       "title": "Task Re-assigned to you: AYOD-PNB-RAJN-0001",
+      "id": 1782210635471,
+      "type": "info",
       "readBy": [
         "Nilu Gupta"
-      ],
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      ]
     },
     {
-      "id": 1782209946177,
       "time": "3:49:06 PM",
-      "type": "info",
+      "targetRole": "Manager",
       "title": "Task Re-assigned to you: AYOD-PNB-RAJN-0001",
+      "id": 1782209946177,
+      "targetUser": "Amit Kushwaha",
       "readBy": [
         "Amit Kushwaha"
       ],
-      "targetRole": "Manager",
-      "targetUser": "Amit Kushwaha"
+      "type": "info"
     },
     {
-      "id": 1782203699552,
-      "time": "2:04:59 PM",
-      "type": "info",
-      "title": "Task Re-assigned to you: VARA-AB-BNKR-2026-0001",
       "readBy": [],
+      "type": "info",
+      "id": 1782203699552,
+      "targetUser": "Waqar",
+      "title": "Task Re-assigned to you: VARA-AB-BNKR-2026-0001",
       "targetRole": "Designer",
-      "targetUser": "Waqar"
+      "time": "2:04:59 PM"
     },
     {
       "id": 1782203683036,
-      "time": "2:04:43 PM",
-      "type": "info",
+      "targetUser": "Amit Kushwaha",
       "title": "Task Re-assigned to you: AYOD-PNB-RAJN-0001",
+      "type": "info",
       "readBy": [
         "Amit Kushwaha"
       ],
-      "targetRole": "Manager",
-      "targetUser": "Amit Kushwaha"
+      "time": "2:04:43 PM",
+      "targetRole": "Manager"
     },
     {
+      "readBy": [
+        "Amit Kushwaha"
+      ],
+      "type": "info",
+      "targetUser": "Amit Kushwaha",
+      "title": "Task Re-assigned to you: AYOD-PNB-RAJN-0001",
       "id": 1782198668186,
       "time": "12:41:08 PM",
-      "type": "info",
-      "title": "Task Re-assigned to you: AYOD-PNB-RAJN-0001",
-      "readBy": [
-        "Amit Kushwaha"
-      ],
-      "targetRole": "Manager",
-      "targetUser": "Amit Kushwaha"
+      "targetRole": "Manager"
     },
     {
+      "title": "Task Re-assigned to you: AYOD-PNB-RAJN-0001",
+      "targetUser": "Amit Kushwaha",
       "id": 1782159414108,
+      "readBy": [
+        "Amit Kushwaha"
+      ],
+      "type": "info",
       "time": "1:46:54 AM",
-      "type": "info",
-      "title": "Task Re-assigned to you: AYOD-PNB-RAJN-0001",
-      "readBy": [
-        "Amit Kushwaha"
-      ],
-      "targetRole": "Manager",
-      "targetUser": "Amit Kushwaha"
+      "targetRole": "Manager"
     },
     {
+      "targetUser": "Amit Kushwaha",
+      "title": "Task Re-assigned to you: AYOD-PNB-RAJN-0001",
       "id": 1782159412662,
-      "time": "1:46:52 AM",
       "type": "info",
-      "title": "Task Re-assigned to you: AYOD-PNB-RAJN-0001",
       "readBy": [
         "Amit Kushwaha"
       ],
-      "targetRole": "Manager",
-      "targetUser": "Amit Kushwaha"
+      "time": "1:46:52 AM",
+      "targetRole": "Manager"
     },
     {
-      "id": 1782157286874,
-      "time": "1:11:26 AM",
-      "type": "info",
       "title": "Task Re-assigned to you: VARA-AB-2026-0001",
+      "id": 1782157286874,
+      "targetUser": "Nilu Gupta",
+      "type": "info",
       "readBy": [
         "Nilu Gupta"
       ],
       "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "time": "1:11:26 AM"
     },
     {
-      "id": 1782157286202,
-      "time": "1:11:26 AM",
-      "type": "info",
-      "title": "Task Re-assigned to you: VARA-AB-2026-0001",
       "readBy": [
         "Waqar"
       ],
-      "targetRole": "Designer",
-      "targetUser": "Waqar"
-    },
-    {
-      "id": 1782157285945,
-      "time": "1:11:25 AM",
       "type": "info",
+      "targetUser": "Waqar",
+      "id": 1782157286202,
       "title": "Task Re-assigned to you: VARA-AB-2026-0001",
+      "time": "1:11:26 AM",
+      "targetRole": "Designer"
+    },
+    {
       "readBy": [
         "Nilu Gupta"
       ],
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "type": "info",
+      "id": 1782157285945,
+      "title": "Task Re-assigned to you: VARA-AB-2026-0001",
+      "targetUser": "Nilu Gupta",
+      "time": "1:11:25 AM",
+      "targetRole": "Designer"
     },
     {
+      "readBy": [],
+      "type": "success",
       "id": 1782157238694,
-      "time": "1:10:38 AM",
-      "type": "success",
+      "targetUser": "Unassigned",
       "title": "Task AYOD-PNB-RAJN-0001 marked as Completed",
-      "readBy": [],
       "targetRole": "Designer",
-      "targetUser": "Unassigned"
+      "time": "1:10:38 AM"
     },
     {
+      "type": "success",
+      "readBy": [],
       "id": 1782157227077,
-      "time": "1:10:27 AM",
-      "type": "success",
       "title": "Task AYOD-PNB-RAJN-0001 marked as Completed",
-      "readBy": [],
+      "targetUser": "Unassigned",
       "targetRole": "Designer",
-      "targetUser": "Unassigned"
+      "time": "1:10:27 AM"
     },
     {
-      "id": 1782157227076,
+      "targetRole": "Manager",
       "time": "1:10:27 AM",
-      "type": "success",
+      "id": 1782157227076,
+      "targetUser": null,
       "title": "Task AYOD-PNB-RAJN-0001 completed and ready",
+      "type": "success",
       "readBy": [
         "Amit Kushwaha"
-      ],
-      "targetRole": "Manager",
-      "targetUser": null
+      ]
     },
     {
-      "id": 1782157190470,
+      "targetRole": "Manager",
       "time": "1:09:50 AM",
-      "type": "info",
+      "targetUser": "Amit Kushwaha",
       "title": "Task Re-assigned to you: AYOD-PNB-RAJN-0001",
+      "id": 1782157190470,
+      "type": "info",
       "readBy": [
         "Amit Kushwaha"
-      ],
-      "targetRole": "Manager",
-      "targetUser": "Amit Kushwaha"
+      ]
     },
     {
-      "id": 1782154117047,
+      "targetRole": "Designer",
       "time": "12:18:37 AM",
-      "type": "info",
+      "targetUser": "Nilu Gupta",
+      "id": 1782154117047,
       "title": "Task Re-assigned to you: AYOD-PNB-RAJN-0001",
+      "type": "info",
       "readBy": [
         "Nilu Gupta"
-      ],
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      ]
     },
     {
       "id": 1782151013104,
+      "targetUser": "Amit Kushwaha",
+      "title": "Task Re-assigned to you: VARA-AB-2026-0001",
+      "readBy": [
+        "Amit Kushwaha"
+      ],
+      "type": "info",
       "time": "11:26:53 PM",
-      "type": "info",
-      "title": "Task Re-assigned to you: VARA-AB-2026-0001",
-      "readBy": [
-        "Amit Kushwaha"
-      ],
-      "targetRole": "Manager",
-      "targetUser": "Amit Kushwaha"
+      "targetRole": "Manager"
     },
     {
+      "time": "11:26:50 PM",
+      "targetRole": "Designer",
+      "title": "Task Re-assigned to you: VARA-AB-2026-0001",
+      "targetUser": "Nilu Gupta",
       "id": 1782151010921,
-      "time": "11:26:50 PM",
-      "type": "info",
-      "title": "Task Re-assigned to you: VARA-AB-2026-0001",
       "readBy": [
         "Nilu Gupta"
       ],
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "type": "info"
     },
     {
-      "id": 1782151010792,
-      "time": "11:26:50 PM",
-      "type": "info",
       "title": "Task Re-assigned to you: VARA-AB-2026-0001",
+      "id": 1782151010792,
+      "targetUser": "Amit Kushwaha",
+      "type": "info",
       "readBy": [
         "Amit Kushwaha"
       ],
-      "targetRole": "Manager",
-      "targetUser": "Amit Kushwaha"
+      "time": "11:26:50 PM",
+      "targetRole": "Manager"
     },
     {
-      "id": 1782150973533,
       "time": "11:26:13 PM",
-      "type": "info",
+      "targetRole": "Designer",
+      "id": 1782150973533,
+      "targetUser": "Nilu Gupta",
       "title": "Task Re-assigned to you: TSK-238635",
+      "type": "info",
       "readBy": [
         "Nilu Gupta"
-      ],
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      ]
     },
     {
-      "id": 1782150787682,
+      "targetRole": "Manager",
       "time": "11:23:07 PM",
-      "type": "info",
+      "id": 1782150787682,
+      "targetUser": "Amit Kushwaha",
       "title": "Task Re-assigned to you: LUCK-GRIH-2026-0001",
       "readBy": [
         "Amit Kushwaha"
       ],
-      "targetRole": "Manager",
-      "targetUser": "Amit Kushwaha"
+      "type": "info"
     },
     {
-      "id": 1782149701150,
+      "targetRole": "Designer",
       "time": "11:05:01 PM",
-      "type": "info",
+      "id": 1782149701150,
+      "targetUser": "Nilu Gupta",
       "title": "Task Re-assigned to you: TSK-238635",
       "readBy": [
         "Nilu Gupta"
       ],
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "type": "info"
     },
     {
-      "id": 1782149688135,
+      "targetRole": "Designer",
       "time": "11:04:48 PM",
-      "type": "info",
       "title": "Task Re-assigned to you: TSK-238635",
-      "readBy": [
-        "Waqar"
-      ],
-      "targetRole": "Designer",
-      "targetUser": "Waqar"
-    },
-    {
-      "id": 1782149391919,
-      "time": "10:59:51 PM",
-      "type": "mention",
-      "title": "You were mentioned by Ashutosh Rai",
-      "readBy": [
-        "Waqar"
-      ],
-      "targetRole": "Designer",
-      "targetUser": "Waqar"
-    },
-    {
-      "id": 1782149366026,
-      "time": "10:59:26 PM",
-      "type": "mention",
-      "title": "You were mentioned by Ashutosh Rai",
-      "readBy": [
-        "Waqar"
-      ],
-      "targetRole": "Designer",
-      "targetUser": "Waqar"
-    },
-    {
-      "id": 1782133277076,
-      "time": "6:31:17 PM",
+      "id": 1782149688135,
+      "targetUser": "Waqar",
       "type": "info",
+      "readBy": [
+        "Waqar"
+      ]
+    },
+    {
+      "readBy": [
+        "Waqar"
+      ],
+      "type": "mention",
+      "id": 1782149391919,
+      "targetUser": "Waqar",
+      "title": "You were mentioned by Ashutosh Rai",
+      "targetRole": "Designer",
+      "time": "10:59:51 PM"
+    },
+    {
+      "type": "mention",
+      "readBy": [
+        "Waqar"
+      ],
+      "targetUser": "Waqar",
+      "id": 1782149366026,
+      "title": "You were mentioned by Ashutosh Rai",
+      "targetRole": "Designer",
+      "time": "10:59:26 PM"
+    },
+    {
+      "targetRole": "Manager",
+      "time": "6:31:17 PM",
+      "id": 1782133277076,
       "title": "New Task Assigned: AGRA-CAPR-2026-0001",
+      "targetUser": "Amit Kushwaha",
+      "type": "info",
       "readBy": [
         "Amit Kushwaha"
-      ],
-      "targetRole": "Manager",
-      "targetUser": "Amit Kushwaha"
+      ]
     },
     {
-      "id": 1782123965704,
       "time": "3:56:05 PM",
-      "type": "urgent",
-      "title": "URGENT REVISION: Task TSK-238635",
-      "readBy": [],
       "targetRole": "Designer",
-      "targetUser": "Unassigned"
+      "id": 1782123965704,
+      "title": "URGENT REVISION: Task TSK-238635",
+      "targetUser": "Unassigned",
+      "type": "urgent",
+      "readBy": []
     },
     {
       "id": 1782122214579,
-      "time": "3:26:54 PM",
-      "type": "mention",
       "title": "@all mention from Shubham Upadhyay",
+      "targetUser": null,
       "readBy": [
         "Amit Kushwaha",
         "Nilu Gupta",
@@ -4643,906 +4599,926 @@
         "Waqar",
         "Md. Faraz"
       ],
+      "type": "mention",
       "targetRole": "Designer",
-      "targetUser": null
+      "time": "3:26:54 PM"
     },
     {
-      "id": 1782119063096,
-      "time": "2:34:23 PM",
-      "type": "success",
-      "title": "Task TSK-238635 marked as Completed",
-      "readBy": [],
       "targetRole": "Designer",
-      "targetUser": "Unassigned"
+      "time": "2:34:23 PM",
+      "id": 1782119063096,
+      "title": "Task TSK-238635 marked as Completed",
+      "targetUser": "Unassigned",
+      "type": "success",
+      "readBy": []
     },
     {
       "id": 1782070737871,
-      "time": "1:08:57 AM",
-      "type": "success",
       "title": "Task TSK-959192 marked as Completed",
+      "targetUser": "Ali Waqar",
+      "type": "success",
       "readBy": [
         "Ali Waqar"
       ],
-      "targetRole": "Designer",
-      "targetUser": "Ali Waqar"
+      "time": "1:08:57 AM",
+      "targetRole": "Designer"
     },
     {
-      "id": 1782065430312,
-      "time": "11:40:30 PM",
-      "type": "success",
+      "targetUser": "Nilu Gupta",
       "title": "Task TSK-955382 marked as Completed",
+      "id": 1782065430312,
+      "type": "success",
       "readBy": [
         "Nilu Gupta"
       ],
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "time": "11:40:30 PM",
+      "targetRole": "Designer"
     },
     {
+      "readBy": [
+        "Amit Kushwaha"
+      ],
+      "type": "success",
+      "targetUser": "Amit Kushwaha",
+      "title": "Task TSK-970542 marked as Completed",
       "id": 1782064721440,
-      "time": "11:28:41 PM",
-      "type": "success",
-      "title": "Task TSK-970542 marked as Completed",
-      "readBy": [
-        "Amit Kushwaha"
-      ],
       "targetRole": "Designer",
-      "targetUser": "Amit Kushwaha"
+      "time": "11:28:41 PM"
     },
     {
-      "id": 1782061168889,
+      "targetRole": "Designer",
       "time": "10:29:28 PM",
-      "type": "success",
-      "title": "Task TSK-970542 marked as Completed",
       "readBy": [
         "Amit Kushwaha"
       ],
-      "targetRole": "Designer",
+      "type": "success",
+      "id": 1782061168889,
+      "title": "Task TSK-970542 marked as Completed",
       "targetUser": "Amit Kushwaha"
     },
     {
-      "id": 1782061162236,
+      "targetRole": "Manager",
       "time": "10:29:22 PM",
-      "type": "success",
+      "targetUser": null,
       "title": "Task TSK-970542 submitted for review",
+      "id": 1782061162236,
       "readBy": [
         "Amit Kushwaha",
         "Nilu Gupta"
       ],
-      "targetRole": "Manager",
-      "targetUser": null
+      "type": "success"
     },
     {
-      "id": 1782061138580,
       "time": "10:28:58 PM",
-      "type": "success",
+      "targetRole": "Designer",
+      "targetUser": "Amit Kushwaha",
       "title": "Task TSK-970542 marked as Completed",
+      "id": 1782061138580,
+      "type": "success",
       "readBy": [
         "Amit Kushwaha"
-      ],
-      "targetRole": "Designer",
-      "targetUser": "Amit Kushwaha"
+      ]
     },
     {
-      "id": 1782061128006,
-      "time": "10:28:48 PM",
-      "type": "success",
       "title": "Task TSK-970542 submitted for review",
+      "id": 1782061128006,
+      "targetUser": null,
       "readBy": [
         "Amit Kushwaha",
         "Nilu Gupta"
       ],
-      "targetRole": "Manager",
-      "targetUser": null
+      "type": "success",
+      "time": "10:28:48 PM",
+      "targetRole": "Manager"
     },
     {
-      "id": 1782061072846,
       "time": "10:27:52 PM",
-      "type": "info",
+      "targetRole": "Manager",
+      "id": 1782061072846,
+      "targetUser": "Amit Kushwaha",
       "title": "Task Re-assigned to you: TSK-970542",
       "readBy": [
         "Amit Kushwaha"
       ],
-      "targetRole": "Manager",
-      "targetUser": "Amit Kushwaha"
+      "type": "info"
     },
     {
-      "id": 1782059119725,
       "time": "9:55:19 PM",
-      "type": "info",
-      "title": "Task Re-assigned to you: TSK-003482",
+      "targetRole": "Designer",
       "readBy": [
         "Khusbu Pandey"
       ],
-      "targetRole": "Designer",
+      "type": "info",
+      "id": 1782059119725,
+      "title": "Task Re-assigned to you: TSK-003482",
       "targetUser": "Khusbu Pandey"
     },
     {
-      "id": 1782059115883,
+      "targetRole": "Designer",
       "time": "9:55:15 PM",
-      "type": "info",
+      "id": 1782059115883,
       "title": "Task Re-assigned to you: TSK-871583",
+      "targetUser": "Ali Waqar",
+      "type": "info",
       "readBy": [
         "Ali Waqar"
-      ],
-      "targetRole": "Designer",
-      "targetUser": "Ali Waqar"
+      ]
     },
     {
-      "id": 1782059108453,
       "time": "9:55:08 PM",
+      "targetRole": "Designer",
       "type": "info",
-      "title": "Task Re-assigned to you: TSK-898742",
       "readBy": [
         "Nilu Gupta"
       ],
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "id": 1782059108453,
+      "targetUser": "Nilu Gupta",
+      "title": "Task Re-assigned to you: TSK-898742"
     },
     {
-      "id": 1782059102210,
-      "time": "9:55:02 PM",
-      "type": "info",
+      "targetUser": "Khusbu Pandey",
       "title": "Task Re-assigned to you: TSK-925196",
+      "id": 1782059102210,
       "readBy": [
         "Khusbu Pandey"
       ],
+      "type": "info",
       "targetRole": "Designer",
-      "targetUser": "Khusbu Pandey"
+      "time": "9:55:02 PM"
     },
     {
-      "id": 1782059080022,
-      "time": "9:54:40 PM",
-      "type": "info",
-      "title": "Task Re-assigned to you: TSK-959192",
       "readBy": [
         "Ali Waqar"
       ],
-      "targetRole": "Designer",
-      "targetUser": "Ali Waqar"
+      "type": "info",
+      "targetUser": "Ali Waqar",
+      "id": 1782059080022,
+      "title": "Task Re-assigned to you: TSK-959192",
+      "time": "9:54:40 PM",
+      "targetRole": "Designer"
     },
     {
-      "id": 1782058686405,
+      "targetRole": "Designer",
       "time": "9:48:06 PM",
-      "type": "info",
+      "id": 1782058686405,
+      "targetUser": "Nilu Gupta",
       "title": "Task Re-assigned to you: TSK-955382",
       "readBy": [
         "Nilu Gupta"
       ],
-      "targetRole": "Designer",
-      "targetUser": "Nilu Gupta"
+      "type": "info"
     },
     {
       "id": 1782046216361,
-      "time": "6:20:16 PM",
-      "type": "success",
+      "targetUser": "Shubham Upadhyay",
       "title": "Task TSK-336531 marked as Completed",
       "readBy": [
         "Shubham Upadhyay"
       ],
-      "targetRole": "Designer",
-      "targetUser": "Shubham Upadhyay"
+      "type": "success",
+      "time": "6:20:16 PM",
+      "targetRole": "Designer"
     },
     {
-      "id": 1782046213273,
+      "targetRole": "Manager",
       "time": "6:20:13 PM",
-      "type": "success",
+      "targetUser": null,
       "title": "Task TSK-336531 submitted for review",
+      "id": 1782046213273,
       "readBy": [
         "Amit Kushwaha",
         "Nilu Gupta"
       ],
-      "targetRole": "Manager",
-      "targetUser": null
+      "type": "success"
     },
     {
-      "id": 1782041817938,
       "time": "5:06:57 PM",
-      "type": "success",
+      "targetRole": "Designer",
       "title": "Task TSK-336531 marked as Completed",
+      "id": 1782041817938,
+      "targetUser": "Shubham Upadhyay",
       "readBy": [
         "Shubham Upadhyay"
       ],
-      "targetRole": "Designer",
-      "targetUser": "Shubham Upadhyay"
+      "type": "success"
     },
     {
+      "readBy": [
+        "Amit Kushwaha",
+        "Nilu Gupta"
+      ],
+      "type": "success",
+      "targetUser": null,
+      "title": "Task TSK-336531 submitted for review",
       "id": 1782041814928,
       "time": "5:06:54 PM",
-      "type": "success",
-      "title": "Task TSK-336531 submitted for review",
-      "readBy": [
-        "Amit Kushwaha",
-        "Nilu Gupta"
-      ],
-      "targetRole": "Manager",
-      "targetUser": null
+      "targetRole": "Manager"
     },
     {
-      "id": 1782041802152,
+      "targetRole": "Manager",
       "time": "5:06:42 PM",
-      "type": "success",
+      "id": 1782041802152,
+      "targetUser": null,
       "title": "Task TSK-336531 submitted for review",
       "readBy": [
         "Amit Kushwaha",
         "Nilu Gupta"
       ],
-      "targetRole": "Manager",
-      "targetUser": null
+      "type": "success"
     },
     {
-      "id": 1782039439870,
+      "targetRole": "Designer",
       "time": "4:27:19 PM",
-      "type": "success",
-      "title": "Task TSK-336531 marked as Completed",
       "readBy": [
         "Shubham Upadhyay"
       ],
-      "targetRole": "Designer",
+      "type": "success",
+      "title": "Task TSK-336531 marked as Completed",
+      "id": 1782039439870,
       "targetUser": "Shubham Upadhyay"
     },
     {
-      "id": 1782039418212,
+      "targetRole": "Manager",
       "time": "4:26:58 PM",
-      "type": "success",
-      "title": "Task TSK-336531 submitted for review",
       "readBy": [
         "Amit Kushwaha",
         "Nilu Gupta"
       ],
-      "targetRole": "Manager",
-      "targetUser": null
+      "type": "success",
+      "id": 1782039418212,
+      "targetUser": null,
+      "title": "Task TSK-336531 submitted for review"
     },
     {
       "id": 1782039377834,
-      "time": "4:26:17 PM",
-      "type": "info",
+      "targetUser": "Shubham Upadhyay",
       "title": "Task Re-assigned to you: TSK-336531",
+      "type": "info",
       "readBy": [
         "Shubham Upadhyay"
       ],
       "targetRole": "Designer",
-      "targetUser": "Shubham Upadhyay"
+      "time": "4:26:17 PM"
     }
   ],
   "whatsappInbox": [],
   "attendanceLogs": [
     {
-      "id": "1782827220707_2026-07-01",
-      "date": "2026-07-01",
-      "name": "Md. Faraz",
-      "role": "Designer",
-      "status": "Online",
-      "userId": 1782827220707,
-      "isOnline": true,
-      "lastTick": 1782907344003,
-      "loginTime": "12:01 pm",
-      "logoutTime": "03:50 PM",
       "breakEvents": [
         {
-          "end": 1782907344003,
+          "startTime": "04:32 PM",
           "start": 1782903730723,
           "endTime": "05:32 PM",
-          "minutes": 60,
-          "startTime": "04:32 PM"
+          "end": 1782907344003,
+          "minutes": 60
         },
         {
-          "end": 1782907344003,
-          "start": 1782907342763,
           "endTime": "05:32 PM",
-          "minutes": 0,
-          "startTime": "05:32 PM"
+          "start": 1782907342763,
+          "startTime": "05:32 PM",
+          "end": 1782907344003,
+          "minutes": 0
         }
       ],
       "activeMinutes": 0,
+      "status": "Online",
+      "role": "Designer",
+      "name": "Md. Faraz",
+      "id": "1782827220707_2026-07-01",
+      "isOnline": true,
+      "lastTick": 1782907344003,
       "totalBreakMinutes": 0.020666666666666667,
-      "currentBreakStartedAt": null
+      "date": "2026-07-01",
+      "currentBreakStartedAt": null,
+      "loginTime": "12:01 pm",
+      "userId": 1782827220707,
+      "logoutTime": "03:50 PM"
     },
     {
-      "id": "1_2026-06-22",
-      "date": "2026-06-22",
-      "name": "Ashutosh Rai",
-      "role": "Admin",
-      "userId": 1,
-      "lastTick": 1782153672921,
-      "loginTime": "10:57 PM",
       "logoutTime": "12:11 AM",
-      "activeMinutes": 73.31986666666668
-    },
-    {
-      "id": "1_2026-06-23",
-      "date": "2026-06-23",
-      "name": "Ashutosh Rai",
       "role": "Admin",
       "userId": 1,
+      "loginTime": "10:57 PM",
+      "activeMinutes": 73.31986666666668,
+      "date": "2026-06-22",
+      "lastTick": 1782153672921,
+      "id": "1_2026-06-22",
+      "name": "Ashutosh Rai"
+    },
+    {
+      "date": "2026-06-23",
       "lastTick": 1782218952654,
+      "activeMinutes": 138.2595833333333,
       "loginTime": "04:00 PM",
       "logoutTime": "06:19 PM",
-      "activeMinutes": 138.2595833333333
+      "role": "Admin",
+      "userId": 1,
+      "id": "1_2026-06-23",
+      "name": "Ashutosh Rai"
     },
     {
-      "id": "1_2026-06-25",
       "date": "2026-06-25",
-      "name": "Ashutosh Rai",
-      "role": "Admin",
-      "status": "Online",
-      "userId": 1,
-      "isOnline": true,
       "lastTick": 1782381282314,
+      "totalBreakMinutes": 0,
+      "currentBreakStartedAt": null,
       "loginTime": "03:24 PM",
       "logoutTime": "03:24 PM",
+      "userId": 1,
+      "id": "1_2026-06-25",
+      "name": "Ashutosh Rai",
+      "isOnline": true,
       "breakEvents": [],
       "activeMinutes": 0,
-      "totalBreakMinutes": 0,
-      "currentBreakStartedAt": null
+      "status": "Online",
+      "role": "Admin"
     },
     {
-      "id": "1_2026-06-26",
       "date": "2026-06-26",
-      "name": "Ashutosh Rai",
-      "role": "Admin",
-      "status": "Online",
-      "userId": 1,
-      "isOnline": true,
+      "totalBreakMinutes": 0,
       "lastTick": 1782488602561,
+      "currentBreakStartedAt": null,
       "loginTime": "10:27 AM",
+      "userId": 1,
       "logoutTime": "09:13 PM",
+      "name": "Ashutosh Rai",
+      "id": "1_2026-06-26",
+      "isOnline": true,
       "breakEvents": [],
       "activeMinutes": 0,
-      "totalBreakMinutes": 0,
-      "currentBreakStartedAt": null
+      "status": "Online",
+      "role": "Admin"
     },
     {
-      "id": "1_2026-06-27",
-      "date": "2026-06-27",
-      "name": "Ashutosh Rai",
-      "role": "Admin",
-      "status": "Online",
-      "userId": 1,
-      "isOnline": true,
+      "totalBreakMinutes": 0,
       "lastTick": 1782555753869,
+      "date": "2026-06-27",
+      "currentBreakStartedAt": null,
       "loginTime": "15:21",
       "logoutTime": "15:52",
+      "userId": 1,
+      "id": "1_2026-06-27",
+      "name": "Ashutosh Rai",
+      "isOnline": true,
       "breakEvents": [],
       "activeMinutes": 2.8920333333333335,
-      "totalBreakMinutes": 0,
-      "currentBreakStartedAt": null
+      "status": "Online",
+      "role": "Admin"
     },
     {
-      "id": "1_2026-06-30",
+      "currentBreakStartedAt": null,
+      "totalBreakMinutes": 0,
       "date": "2026-06-30",
-      "name": "Ashutosh Rai",
-      "role": "Admin",
-      "status": "Online",
-      "userId": 1,
-      "isOnline": true,
       "lastTick": 1782833707239,
-      "loginTime": "17:09",
+      "userId": 1,
       "logoutTime": "21:05",
-      "breakEvents": [],
+      "loginTime": "17:09",
+      "name": "Ashutosh Rai",
+      "id": "1_2026-06-30",
+      "isOnline": true,
       "activeMinutes": 0,
-      "totalBreakMinutes": 0,
-      "currentBreakStartedAt": null
+      "breakEvents": [],
+      "role": "Admin",
+      "status": "Online"
     },
     {
-      "id": "1_2026-07-01",
-      "date": "2026-07-01",
-      "name": "Ashutosh Rai",
       "role": "Admin",
       "status": "Online",
-      "userId": 1,
-      "isOnline": true,
-      "lastTick": 1782852406592,
-      "loginTime": "02:16 AM",
-      "logoutTime": "02:16 AM",
-      "breakEvents": [],
       "activeMinutes": 0,
+      "breakEvents": [],
+      "userId": 1,
+      "logoutTime": "02:16 AM",
+      "loginTime": "02:16 AM",
+      "currentBreakStartedAt": null,
       "totalBreakMinutes": 0,
-      "currentBreakStartedAt": null
+      "lastTick": 1782852406592,
+      "date": "2026-07-01",
+      "isOnline": true,
+      "name": "Ashutosh Rai",
+      "id": "1_2026-07-01"
     },
     {
       "id": "2_2026-06-21",
-      "date": "2026-06-21",
       "name": "Vaibhav Singh",
       "role": "Admin",
-      "userId": 2,
-      "lastTick": 1782062831669,
-      "loginTime": "06:40 PM",
       "logoutTime": "10:57 PM",
-      "activeMinutes": 32.918166666666664
+      "userId": 2,
+      "loginTime": "06:40 PM",
+      "activeMinutes": 32.918166666666664,
+      "date": "2026-06-21",
+      "lastTick": 1782062831669
     },
     {
-      "id": "2_2026-06-25",
-      "date": "2026-06-25",
-      "name": "Vaibhav Singh",
-      "role": "Admin",
-      "status": "Online",
-      "userId": 2,
-      "isOnline": true,
-      "lastTick": 1782338780848,
-      "loginTime": "03:36 AM",
-      "logoutTime": "03:36 AM",
       "breakEvents": [],
       "activeMinutes": 0,
+      "status": "Online",
+      "role": "Admin",
+      "lastTick": 1782338780848,
       "totalBreakMinutes": 0,
-      "currentBreakStartedAt": null
+      "date": "2026-06-25",
+      "currentBreakStartedAt": null,
+      "loginTime": "03:36 AM",
+      "userId": 2,
+      "logoutTime": "03:36 AM",
+      "name": "Vaibhav Singh",
+      "id": "2_2026-06-25",
+      "isOnline": true
     },
     {
-      "id": "2_2026-06-26",
-      "date": "2026-06-26",
-      "name": "Vaibhav Singh",
-      "role": "Admin",
       "status": "Online",
-      "userId": 2,
+      "role": "Admin",
+      "breakEvents": [],
+      "activeMinutes": 0,
       "isOnline": true,
-      "lastTick": 1782450746298,
+      "id": "2_2026-06-26",
+      "name": "Vaibhav Singh",
       "loginTime": "10:32",
       "logoutTime": "10:42",
-      "breakEvents": [],
-      "activeMinutes": 0,
+      "userId": 2,
+      "lastTick": 1782450746298,
+      "date": "2026-06-26",
       "totalBreakMinutes": 0,
       "currentBreakStartedAt": null
     },
     {
       "id": "3_2026-06-21",
-      "date": "2026-06-21",
       "name": "Shubham Upadhyay",
+      "logoutTime": "01:07 AM",
       "role": "Admin",
       "userId": 3,
-      "lastTick": 1782070666602,
       "loginTime": "05:57 PM",
-      "logoutTime": "01:07 AM",
-      "activeMinutes": 172.15994999999998
+      "activeMinutes": 172.15994999999998,
+      "date": "2026-06-21",
+      "lastTick": 1782070666602
     },
     {
       "id": "3_2026-06-22",
-      "date": "2026-06-22",
       "name": "Shubham Upadhyay",
+      "activeMinutes": 405.5022500000001,
+      "lastTick": 1782151632872,
+      "date": "2026-06-22",
+      "logoutTime": "11:37 PM",
       "role": "Admin",
       "userId": 3,
-      "lastTick": 1782151632872,
-      "loginTime": "01:09 AM",
-      "logoutTime": "11:37 PM",
-      "activeMinutes": 405.5022500000001
+      "loginTime": "01:09 AM"
     },
     {
-      "id": "3_2026-06-23",
+      "userId": 3,
+      "role": "Admin",
+      "logoutTime": "03:30 PM",
+      "loginTime": "12:16 AM",
+      "activeMinutes": 164.43193333333338,
+      "lastTick": 1782208837473,
       "date": "2026-06-23",
       "name": "Shubham Upadhyay",
-      "role": "Admin",
-      "userId": 3,
-      "lastTick": 1782208837473,
-      "loginTime": "12:16 AM",
-      "logoutTime": "03:30 PM",
-      "activeMinutes": 164.43193333333338
+      "id": "3_2026-06-23"
     },
     {
-      "id": "3_2026-06-25",
-      "date": "2026-06-25",
-      "name": "Shubham Upadhyay",
       "role": "Admin",
       "status": "Online",
-      "userId": 3,
-      "isOnline": true,
-      "lastTick": 1782338590908,
-      "loginTime": "12:58 AM",
-      "logoutTime": "03:33 AM",
-      "breakEvents": [],
       "activeMinutes": 97.49625,
+      "breakEvents": [],
+      "logoutTime": "03:33 AM",
+      "userId": 3,
+      "loginTime": "12:58 AM",
+      "currentBreakStartedAt": null,
+      "lastTick": 1782338590908,
       "totalBreakMinutes": 0,
-      "currentBreakStartedAt": null
+      "date": "2026-06-25",
+      "isOnline": true,
+      "id": "3_2026-06-25",
+      "name": "Shubham Upadhyay"
     },
     {
       "id": "3_2026-06-26",
+      "name": "Shubham Upadhyay",
+      "isOnline": false,
+      "currentBreakStartedAt": null,
+      "totalBreakMinutes": 0,
       "date": "2026-06-26",
-      "name": "Shubham Upadhyay",
-      "role": "Admin",
-      "status": "Logged Out",
-      "userId": 3,
-      "isOnline": false,
       "lastTick": 1782479646064,
-      "loginTime": "01:27 AM",
       "logoutTime": "06:44 PM",
-      "breakEvents": [],
+      "userId": 3,
+      "loginTime": "01:27 AM",
       "activeMinutes": 0,
-      "totalBreakMinutes": 0,
-      "currentBreakStartedAt": null
+      "breakEvents": [],
+      "role": "Admin",
+      "status": "Logged Out"
     },
     {
+      "activeMinutes": 0,
+      "breakEvents": [],
+      "role": "Admin",
+      "status": "Online",
+      "name": "Shubham Upadhyay",
       "id": "3_2026-06-27",
-      "date": "2026-06-27",
-      "name": "Shubham Upadhyay",
-      "role": "Admin",
-      "status": "Online",
-      "userId": 3,
       "isOnline": true,
+      "currentBreakStartedAt": null,
       "lastTick": 1782583425353,
-      "loginTime": "23:19",
-      "logoutTime": "23:33",
-      "breakEvents": [],
-      "activeMinutes": 0,
       "totalBreakMinutes": 0,
-      "currentBreakStartedAt": null
+      "date": "2026-06-27",
+      "userId": 3,
+      "logoutTime": "23:33",
+      "loginTime": "23:19"
     },
     {
-      "id": "3_2026-06-30",
-      "date": "2026-06-30",
-      "name": "Shubham Upadhyay",
+      "activeMinutes": 0,
+      "breakEvents": [],
       "role": "Admin",
       "status": "Online",
-      "userId": 3,
-      "isOnline": true,
+      "currentBreakStartedAt": null,
       "lastTick": 1782812406356,
-      "loginTime": "03:10 PM",
-      "logoutTime": "03:10 PM",
-      "breakEvents": [],
-      "activeMinutes": 0,
       "totalBreakMinutes": 0,
-      "currentBreakStartedAt": null
+      "date": "2026-06-30",
+      "userId": 3,
+      "logoutTime": "03:10 PM",
+      "loginTime": "03:10 PM",
+      "name": "Shubham Upadhyay",
+      "id": "3_2026-06-30",
+      "isOnline": true
     },
     {
-      "id": "3_2026-07-01",
-      "date": "2026-07-01",
-      "name": "Shubham Upadhyay",
+      "activeMinutes": 0,
+      "breakEvents": [],
       "role": "Admin",
       "status": "Logged Out",
-      "userId": 3,
-      "isOnline": false,
+      "currentBreakStartedAt": null,
       "lastTick": 1782893898203,
-      "loginTime": "12:14 AM",
-      "logoutTime": "01:48 PM",
-      "breakEvents": [],
-      "activeMinutes": 0,
+      "date": "2026-07-01",
       "totalBreakMinutes": 0,
-      "currentBreakStartedAt": null
+      "logoutTime": "01:48 PM",
+      "userId": 3,
+      "loginTime": "12:14 AM",
+      "id": "3_2026-07-01",
+      "name": "Shubham Upadhyay",
+      "isOnline": false
     },
     {
-      "id": "3_2026-07-02",
-      "date": "2026-07-02",
-      "name": "Shubham Upadhyay",
       "role": "Admin",
+      "logoutTime": "12:00 AM",
       "status": "Online",
-      "userId": 3,
+      "totalBreakMinutes": 0,
+      "name": "Shubham Upadhyay",
+      "date": "2026-07-02",
       "isOnline": true,
+      "breakEvents": [],
+      "activeMinutes": 0,
       "lastTick": 1782930615007,
       "loginTime": "12:00 AM",
-      "logoutTime": "12:00 AM",
-      "breakEvents": [],
-      "activeMinutes": 0,
-      "totalBreakMinutes": 0,
-      "currentBreakStartedAt": null
+      "userId": 3,
+      "currentBreakStartedAt": null,
+      "id": "3_2026-07-02"
     },
     {
       "id": "4_2026-06-21",
+      "name": "Amit Kushwaha",
       "date": "2026-06-21",
-      "name": "Amit Kushwaha",
-      "role": "Manager",
-      "userId": 4,
       "lastTick": 1782064874706,
+      "activeMinutes": 35.33316666666667,
       "loginTime": "06:40 PM",
+      "role": "Manager",
       "logoutTime": "11:31 PM",
-      "activeMinutes": 35.33316666666667
+      "userId": 4
     },
     {
-      "id": "4_2026-06-22",
-      "date": "2026-06-22",
-      "name": "Amit Kushwaha",
-      "role": "Manager",
-      "userId": 4,
+      "activeMinutes": 130.00845000000007,
       "lastTick": 1782151627297,
-      "loginTime": "12:54 PM",
-      "logoutTime": "11:37 PM",
-      "activeMinutes": 130.00845000000007
-    },
-    {
-      "id": "4_2026-06-23",
-      "date": "2026-06-23",
-      "name": "Amit Kushwaha",
-      "role": "Manager",
+      "date": "2026-06-22",
       "userId": 4,
-      "lastTick": 1782218952654,
-      "loginTime": "03:49 PM",
-      "logoutTime": "06:19 PM",
-      "activeMinutes": 149.63035000000008
+      "logoutTime": "11:37 PM",
+      "role": "Manager",
+      "loginTime": "12:54 PM",
+      "name": "Amit Kushwaha",
+      "id": "4_2026-06-22"
     },
     {
-      "id": "4_2026-06-25",
-      "date": "2026-06-25",
+      "activeMinutes": 149.63035000000008,
+      "lastTick": 1782218952654,
+      "date": "2026-06-23",
+      "userId": 4,
+      "role": "Manager",
+      "logoutTime": "06:19 PM",
+      "loginTime": "03:49 PM",
       "name": "Amit Kushwaha",
+      "id": "4_2026-06-23"
+    },
+    {
+      "isOnline": true,
+      "id": "4_2026-06-25",
+      "name": "Amit Kushwaha",
+      "logoutTime": "03:19 AM",
+      "userId": 4,
+      "loginTime": "01:02 AM",
+      "currentBreakStartedAt": 1782394325965,
+      "date": "2026-06-25",
+      "totalBreakMinutes": 0.27431666666666665,
+      "lastTick": 1782394325965,
       "role": "Manager",
       "status": "On Break",
-      "userId": 4,
-      "isOnline": true,
-      "lastTick": 1782394325965,
-      "loginTime": "01:02 AM",
-      "logoutTime": "03:19 AM",
+      "activeMinutes": 31.906483333333327,
       "breakEvents": [
         {
           "end": 1782329537380,
+          "minutes": 0,
           "start": 1782329535765,
           "endTime": "01:02 AM",
-          "minutes": 0,
           "startTime": "01:02 AM"
         },
         {
-          "end": 1782329554524,
+          "startTime": "01:02 AM",
           "start": 1782329539680,
           "endTime": "01:02 AM",
           "minutes": 0,
-          "startTime": "01:02 AM"
+          "end": 1782329554524
         },
         {
-          "start": 1782394325965,
-          "startTime": "07:02 PM"
+          "startTime": "07:02 PM",
+          "start": 1782394325965
         }
-      ],
-      "activeMinutes": 31.906483333333327,
-      "totalBreakMinutes": 0.27431666666666665,
-      "currentBreakStartedAt": 1782394325965
+      ]
     },
     {
-      "id": "4_2026-06-26",
-      "date": "2026-06-26",
-      "name": "Amit Kushwaha",
       "role": "Manager",
       "status": "Logged Out",
-      "userId": 4,
-      "isOnline": false,
-      "lastTick": 1782418081386,
-      "loginTime": "01:37 AM",
-      "logoutTime": "01:38 AM",
-      "breakEvents": [],
       "activeMinutes": 0,
+      "breakEvents": [],
+      "isOnline": false,
+      "id": "4_2026-06-26",
+      "name": "Amit Kushwaha",
+      "logoutTime": "01:38 AM",
+      "userId": 4,
+      "loginTime": "01:37 AM",
+      "currentBreakStartedAt": null,
+      "date": "2026-06-26",
       "totalBreakMinutes": 0,
-      "currentBreakStartedAt": null
+      "lastTick": 1782418081386
     },
     {
-      "id": "4_2026-07-01",
-      "date": "2026-07-01",
-      "name": "Amit Kushwaha",
-      "role": "Manager",
-      "status": "Online",
-      "userId": 4,
-      "isOnline": true,
       "lastTick": 1782912676485,
-      "loginTime": "03:11 pm",
-      "logoutTime": "07:01 pm",
+      "date": "2026-07-01",
+      "currentBreakStartedAt": null,
+      "totalBreakMinutes": 0.36735,
       "breakEvents": [
         {
-          "end": 1782903744080,
-          "start": 1782903722039,
           "endTime": "04:32 pm",
+          "start": 1782903722039,
           "minutes": 0,
-          "startTime": "04:32 pm"
+          "startTime": "04:32 pm",
+          "end": 1782903744080
         }
       ],
+      "name": "Amit Kushwaha",
+      "logoutTime": "07:01 pm",
+      "isOnline": true,
+      "id": "4_2026-07-01",
       "activeMinutes": 0,
-      "totalBreakMinutes": 0.36735,
-      "currentBreakStartedAt": null
+      "role": "Manager",
+      "userId": 4,
+      "status": "Online",
+      "loginTime": "03:11 pm"
     },
     {
       "id": "5_2026-06-21",
-      "date": "2026-06-21",
       "name": "Ali Waqar",
+      "logoutTime": "06:39 PM",
       "role": "Designer",
       "userId": 5,
-      "lastTick": 1782047395093,
       "loginTime": "06:39 PM",
-      "logoutTime": "06:39 PM",
-      "activeMinutes": 0
+      "activeMinutes": 0,
+      "lastTick": 1782047395093,
+      "date": "2026-06-21"
     },
     {
-      "id": "5_2026-06-22",
+      "activeMinutes": 67.3088,
       "date": "2026-06-22",
-      "name": "Ali Waqar",
+      "lastTick": 1782151632871,
+      "logoutTime": "11:37 PM",
       "role": "Designer",
       "userId": 5,
-      "lastTick": 1782151632871,
       "loginTime": "01:07 AM",
-      "logoutTime": "11:37 PM",
-      "activeMinutes": 67.3088
+      "id": "5_2026-06-22",
+      "name": "Ali Waqar"
     },
     {
       "id": "5_2026-06-23",
-      "date": "2026-06-23",
       "name": "Waqar",
-      "role": "Designer",
-      "userId": 5,
+      "activeMinutes": 133.85075000000003,
       "lastTick": 1782208833337,
-      "loginTime": "12:38 AM",
+      "date": "2026-06-23",
+      "role": "Designer",
       "logoutTime": "03:30 PM",
-      "activeMinutes": 133.85075000000003
+      "userId": 5,
+      "loginTime": "12:38 AM"
     },
     {
-      "id": "5_2026-07-01",
-      "date": "2026-07-01",
-      "name": "Waqar",
-      "role": "Designer",
-      "status": "Online",
-      "userId": 5,
-      "isOnline": true,
-      "lastTick": 1782906982091,
-      "loginTime": "11:40",
-      "logoutTime": "04:56",
       "breakEvents": [],
       "activeMinutes": 0,
+      "status": "Online",
+      "role": "Designer",
+      "id": "5_2026-07-01",
+      "name": "Waqar",
+      "isOnline": true,
       "totalBreakMinutes": 0,
-      "currentBreakStartedAt": null
+      "lastTick": 1782906982091,
+      "date": "2026-07-01",
+      "currentBreakStartedAt": null,
+      "loginTime": "11:40",
+      "logoutTime": "04:56",
+      "userId": 5
     },
     {
-      "id": "6_2026-06-21",
-      "date": "2026-06-21",
       "name": "Nilu Gupta",
-      "role": "Designer",
-      "userId": 6,
-      "lastTick": 1782065332713,
+      "id": "6_2026-06-21",
       "loginTime": "06:39 PM",
+      "userId": 6,
       "logoutTime": "11:38 PM",
+      "role": "Designer",
+      "date": "2026-06-21",
+      "lastTick": 1782065332713,
       "activeMinutes": 26.316749999999995
     },
     {
-      "id": "6_2026-06-22",
-      "date": "2026-06-22",
-      "name": "Nilu Gupta",
-      "role": "Designer",
-      "userId": 6,
-      "lastTick": 1782132312860,
       "loginTime": "12:26 PM",
+      "userId": 6,
+      "role": "Designer",
       "logoutTime": "06:15 PM",
-      "activeMinutes": 97.01068333333332
+      "lastTick": 1782132312860,
+      "date": "2026-06-22",
+      "activeMinutes": 97.01068333333332,
+      "name": "Nilu Gupta",
+      "id": "6_2026-06-22"
     },
     {
       "id": "6_2026-06-23",
-      "date": "2026-06-23",
       "name": "Nilu Gupta",
-      "role": "Designer",
-      "userId": 6,
+      "activeMinutes": 512.6233666666667,
+      "date": "2026-06-23",
       "lastTick": 1782242592655,
-      "loginTime": "03:48 PM",
+      "role": "Designer",
       "logoutTime": "12:53 AM",
-      "activeMinutes": 512.6233666666667
+      "userId": 6,
+      "loginTime": "03:48 PM"
     },
     {
-      "id": "6_2026-06-25",
-      "date": "2026-06-25",
-      "name": "Nilu Gupta",
-      "role": "Designer",
-      "status": "On Break",
-      "userId": 6,
-      "isOnline": true,
-      "lastTick": 1782388488262,
-      "loginTime": "01:02 AM",
-      "logoutTime": "03:33 AM",
+      "activeMinutes": 45.10988333333334,
       "breakEvents": [
         {
-          "start": 1782336971110,
-          "startTime": "03:06 AM"
+          "startTime": "03:06 AM",
+          "start": 1782336971110
         },
         {
           "start": 1782388488261,
           "startTime": "05:24 PM"
         }
       ],
-      "activeMinutes": 45.10988333333334,
+      "role": "Designer",
+      "status": "On Break",
+      "currentBreakStartedAt": 1782388488261,
+      "lastTick": 1782388488262,
       "totalBreakMinutes": 1.0130833333333333,
-      "currentBreakStartedAt": 1782388488261
+      "date": "2026-06-25",
+      "logoutTime": "03:33 AM",
+      "userId": 6,
+      "loginTime": "01:02 AM",
+      "id": "6_2026-06-25",
+      "name": "Nilu Gupta",
+      "isOnline": true
     },
     {
-      "id": "6_2026-06-26",
-      "date": "2026-06-26",
-      "name": "Nilu Gupta",
       "role": "Designer",
       "status": "Logged Out",
-      "userId": 6,
-      "isOnline": false,
-      "lastTick": 1782418301574,
-      "loginTime": "01:39 AM",
-      "logoutTime": "01:41 AM",
+      "activeMinutes": 0,
       "breakEvents": [
         {
-          "end": 1782418289894,
-          "start": 1782418284910,
-          "endTime": "01:41 AM",
           "minutes": 0,
+          "end": 1782418289894,
+          "endTime": "01:41 AM",
+          "start": 1782418284910,
           "startTime": "01:41 AM"
         }
       ],
-      "activeMinutes": 0,
+      "isOnline": false,
+      "name": "Nilu Gupta",
+      "id": "6_2026-06-26",
+      "userId": 6,
+      "logoutTime": "01:41 AM",
+      "loginTime": "01:39 AM",
+      "currentBreakStartedAt": null,
+      "date": "2026-06-26",
       "totalBreakMinutes": 0.08306666666666666,
-      "currentBreakStartedAt": null
+      "lastTick": 1782418301574
     },
     {
-      "id": "6_2026-07-01",
-      "date": "2026-07-01",
-      "name": "Nilu Gupta",
-      "role": "Designer",
-      "status": "Online",
-      "userId": 6,
-      "isOnline": true,
-      "lastTick": 1782903735738,
-      "loginTime": "12:28 PM",
-      "logoutTime": "12:51 PM",
       "breakEvents": [
         {
           "end": 1782903735738,
-          "start": 1782903718367,
-          "endTime": "04:32 PM",
           "minutes": 0,
-          "startTime": "04:31 PM"
+          "startTime": "04:31 PM",
+          "start": 1782903718367,
+          "endTime": "04:32 PM"
         }
       ],
       "activeMinutes": 0,
+      "status": "Online",
+      "role": "Designer",
+      "name": "Nilu Gupta",
+      "id": "6_2026-07-01",
+      "isOnline": true,
+      "lastTick": 1782903735738,
       "totalBreakMinutes": 0.28951666666666664,
-      "currentBreakStartedAt": null
+      "date": "2026-07-01",
+      "currentBreakStartedAt": null,
+      "loginTime": "12:28 PM",
+      "userId": 6,
+      "logoutTime": "12:51 PM"
     },
     {
-      "id": "7_2026-06-21",
-      "date": "2026-06-21",
-      "name": "Khusbu Pandey",
       "role": "Designer",
-      "userId": 7,
+      "id": "6_2026-07-02",
+      "breakEvents": [],
+      "loginAt": 1782934604049,
+      "totalLoggedInMinutes": 0,
+      "logoutTime": "01:06 AM",
+      "userId": 6,
+      "date": "2026-07-02",
+      "loginTime": "01:06 AM",
+      "isOnline": true,
+      "lastTick": 1782934604049,
+      "logoutAt": 1782934604049,
+      "activeMinutes": 0,
+      "totalBreakMinutes": 0,
+      "name": "Nilu Gupta",
+      "currentBreakStartedAt": null,
+      "status": "Online"
+    },
+    {
+      "name": "Khusbu Pandey",
+      "id": "7_2026-06-21",
+      "activeMinutes": 0,
       "lastTick": 1782047428471,
-      "loginTime": "06:40 PM",
+      "date": "2026-06-21",
+      "userId": 7,
       "logoutTime": "06:40 PM",
+      "role": "Designer",
+      "loginTime": "06:40 PM"
+    },
+    {
+      "loginTime": "01:35 PM",
+      "userId": 7,
+      "role": "Designer",
+      "logoutTime": "06:28 PM",
+      "date": "2026-06-22",
+      "lastTick": 1782133128842,
+      "activeMinutes": 14.68775,
+      "name": "Khusbu Pandey",
+      "id": "7_2026-06-22"
+    },
+    {
+      "loginTime": "03:35 AM",
+      "logoutTime": "03:35 AM",
+      "userId": 7,
+      "date": "2026-06-25",
+      "totalBreakMinutes": 0,
+      "lastTick": 1782338743901,
+      "currentBreakStartedAt": null,
+      "isOnline": true,
+      "id": "7_2026-06-25",
+      "name": "Khushbu Pandey",
+      "status": "Online",
+      "role": "Designer",
+      "breakEvents": [],
       "activeMinutes": 0
     },
     {
-      "id": "7_2026-06-22",
-      "date": "2026-06-22",
-      "name": "Khusbu Pandey",
-      "role": "Designer",
-      "userId": 7,
-      "lastTick": 1782133128842,
-      "loginTime": "01:35 PM",
-      "logoutTime": "06:28 PM",
-      "activeMinutes": 14.68775
-    },
-    {
-      "id": "7_2026-06-25",
-      "date": "2026-06-25",
-      "name": "Khushbu Pandey",
-      "role": "Designer",
-      "status": "Online",
-      "userId": 7,
-      "isOnline": true,
-      "lastTick": 1782338743901,
-      "loginTime": "03:35 AM",
-      "logoutTime": "03:35 AM",
       "breakEvents": [],
       "activeMinutes": 0,
-      "totalBreakMinutes": 0,
-      "currentBreakStartedAt": null
-    },
-    {
-      "id": "7_2026-06-27",
+      "status": "Online",
+      "role": "Designer",
       "date": "2026-06-27",
-      "name": "Khushbu Pandey",
-      "role": "Designer",
-      "status": "Online",
-      "userId": 7,
-      "isOnline": true,
       "lastTick": 1782530440922,
-      "loginTime": "08:50 AM",
-      "logoutTime": "08:50 AM",
-      "breakEvents": [],
-      "activeMinutes": 0,
       "totalBreakMinutes": 0,
-      "currentBreakStartedAt": null
+      "currentBreakStartedAt": null,
+      "loginTime": "08:50 AM",
+      "userId": 7,
+      "logoutTime": "08:50 AM",
+      "name": "Khushbu Pandey",
+      "id": "7_2026-06-27",
+      "isOnline": true
     },
     {
-      "id": "7_2026-07-01",
-      "date": "2026-07-01",
-      "name": "Khushbu Pandey",
+      "activeMinutes": 0,
+      "breakEvents": [],
       "role": "Designer",
       "status": "Online",
-      "userId": 7,
-      "isOnline": true,
+      "currentBreakStartedAt": null,
+      "date": "2026-07-01",
       "lastTick": 1782906277504,
-      "loginTime": "10:00 AM",
-      "logoutTime": "05:14 PM",
-      "breakEvents": [],
-      "activeMinutes": 0,
       "totalBreakMinutes": 0,
-      "currentBreakStartedAt": null
+      "logoutTime": "05:14 PM",
+      "userId": 7,
+      "loginTime": "10:00 AM",
+      "id": "7_2026-07-01",
+      "name": "Khushbu Pandey",
+      "isOnline": true
     }
   ],
   "deletedProjectIds": [
@@ -5565,6 +5541,7 @@
     "AYOD-MUTH-MUKE-0001",
     "AGRA-AB-GAUR-0001",
     "AGRA-AB-RUDR-0001",
-    "LUCK-CAPR-RUDR-0001"
+    "LUCK-CAPR-RUDR-0001",
+    "VARA-ADHA-SUMI-0001"
   ]
 }

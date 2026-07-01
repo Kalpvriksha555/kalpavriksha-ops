@@ -2225,9 +2225,24 @@ const HistoryArchiveView = ({ projects, onSelectProject }) => {
                     <span className="font-bold text-slate-700">{p.completedAt ? formatDateTime(p.completedAt) : '-'}</span>
                     <p className="text-[11px] font-semibold text-slate-400 mt-1">{p.completedAt ? new Date(p.completedAt).toLocaleTimeString() : ''}</p>
                   </td>
-                  <td className="px-6 py-5">
+                  <td className="px-6 py-5 min-w-[320px]">
                      <p className="font-bold text-slate-800 text-base">{p.id}</p>
                      <p className="text-xs font-medium text-slate-500 mt-1">{getCustomerDisplayName(p)} • {p.type}</p>
+                     {getTaskDescription(p) && (
+                       <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mt-2 whitespace-normal line-clamp-2 max-w-lg">
+                         <span className="font-black">Description:</span> {getTaskDescription(p)}
+                       </p>
+                     )}
+                     {getEstimateDetails(p) && (
+                       <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1 whitespace-normal line-clamp-2 max-w-lg">
+                         <span className="font-black">Estimate:</span> {getEstimateDetails(p)}
+                       </p>
+                     )}
+                     {getLatestCompletedFileName(p) && (
+                       <p className="text-[11px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mt-2 w-fit max-w-lg truncate">
+                         Completed: {getLatestCompletedFileName(p)}
+                       </p>
+                     )}
                   </td>
                   <td className="px-6 py-5 font-medium text-slate-600">{p.location}</td>
                   <td className="px-6 py-5 font-medium text-slate-600">{p.assignedTo}</td>
