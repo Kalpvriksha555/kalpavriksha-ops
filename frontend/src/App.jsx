@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { formatLastSeenDateTime, formatCallDuration, formatDateKey, formatDateTime, formatDuration, formatMinutes } from './utils/date';
+import { allProjectDocs, getCompletedDocuments, getLatestCompletedFileName, getTaskDescription, getEstimateDetails, getCompletedFileBadge } from './utils/taskDisplayUtils';
+import { getBreakMinutesFromLog, getTaskBusySince, getUserActiveTasks, getUserLastCompletedAt, getUserFreeSince, getUserBusySince, getTotalLoggedInMinutesFromLog, getActiveMinutesFromLog, buildAttendanceAccrual } from './utils/presenceAttendanceUtils';
 import { createSafeMeetingRoomName, buildJitsiUrl } from './utils/meeting';
 import { copyTextToClipboard } from './utils/clipboard';
 import { Badge, PageLoadingScreen, EmptyState, MiniEmptyState } from './components/shared';
@@ -9,7 +11,14 @@ import { ProfileView } from './components/profile/ProfileView';
 import { CalculatorView } from './components/calculator/CalculatorView';
 import { TeamMeetingRoom } from './components/meetings/TeamMeetingRoom';
 import { CommunicationHub } from './components/chat/CommunicationHub';
+import { HistoryArchiveView } from './components/archive/HistoryArchiveView';
+import { CommandCentreView, ProductivityDashboard, DailyClosingReport } from './components/command-centre/CommandCentreView';
+import { ActiveOperationsView } from './components/operations/ActiveOperationsView';
 import { getStatusColor, getPriorityColor } from './services/taskService';
+import { API_BASE, USE_BACKEND_STATE, ONLINE_STALE_MS, MAX_INLINE_DATA_URL_CHARS } from './config/appConfig';
+import { fileToBase64, cleanFileName } from './utils/fileUtils';
+import { absoluteApiUrl, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile } from './services/fileService';
+import { sendRealOtp, verifyRealOtp } from './services/otpService';
 import { buildNotification, getVisibleNotifications, NOTIFICATION_CATEGORIES, getNotificationCategory, getNotificationPriority, buildActivityTimeline, isNotificationForUser } from './services/notificationService';
 import { 
   Briefcase, CheckCircle, Clock, FileText, LayoutDashboard, LogOut, 
@@ -50,10 +59,6 @@ const storage = getStorage(app);
 const rawAppId = typeof __app_id !== 'undefined' ? __app_id : 'kalpavriksha_production_v1';
 const safeAppId = String(rawAppId).split('/')[0] || 'kalpavriksha_production_v1';
 
-const API_BASE = import.meta.env.VITE_API_BASE || import.meta.env.VITE_API_URL || 'http://localhost:8080';
-// Production mode uses the central backend/PostgreSQL state first.
-// Firebase/localStorage are kept only as UI fallback/cache.
-const USE_BACKEND_STATE = true;
 const isLocalMock = !USE_BACKEND_STATE && getFirebaseConfig().apiKey === "mock-key";
 
 const createOpsBroadcast = () => {
@@ -64,7 +69,6 @@ const createOpsBroadcast = () => {
 };
 const opsBroadcast = createOpsBroadcast();
 const OPS_TAB_ID = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-const MAX_INLINE_DATA_URL_CHARS = 180000;
 
 const stripInlineDataUrl = (value) => {
   if (typeof value !== 'string') return value;
@@ -191,44 +195,8 @@ const broadcastProjectsSync = (projects) => {
   try { localStorage.setItem('kalpa_projects_sync_ping', JSON.stringify({ ts: now, source: OPS_TAB_ID })); } catch(e) {}
 };
 
-const OTP_API_BASE = (typeof import.meta !== 'undefined' && import.meta.env) ? (import.meta.env.VITE_API_BASE || import.meta.env.VITE_API_URL || 'http://localhost:8080') : 'http://localhost:8080';
-const buildOtpError = (error) => {
-  if (error?.name === 'TypeError' || String(error?.message || '').toLowerCase().includes('failed to fetch')) {
-    return 'OTP backend is not reachable. Start the backend first with: npm run dev:all, or run backend on port 8080.';
-  }
-  return error?.message || 'OTP service error.';
-};
-const sendRealOtp = async ({ username, mobile, email, channel, purpose }) => {
-  try {
-    const res = await fetch(`${OTP_API_BASE}/api/otp/send`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, mobile, email, channel, purpose })
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.ok) throw new Error(data.error || 'OTP service is not configured or reachable.');
-    return data;
-  } catch (error) {
-    throw new Error(buildOtpError(error));
-  }
-};
-const verifyRealOtp = async ({ challengeId, otp, purpose }) => {
-  try {
-    const res = await fetch(`${OTP_API_BASE}/api/otp/verify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ challengeId, otp, purpose })
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.ok) throw new Error(data.error || 'OTP verification failed.');
-    return data;
-  } catch (error) {
-    throw new Error(buildOtpError(error));
-  }
-};
 
 
-const ONLINE_STALE_MS = 2 * 60 * 1000;
 const toMs = (value) => {
   if (!value) return 0;
   if (typeof value === 'number') return value;
@@ -312,135 +280,9 @@ const detectEmployeeLifecycleEventType = (existing = {}, next = {}) => {
   return 'EMPLOYEE_UPDATED';
 };
 
-const fileToBase64 = (file) => new Promise((resolve, reject) => {
-  const reader = new FileReader();
-  reader.readAsDataURL(file);
-  reader.onload = () => resolve(reader.result);
-  reader.onerror = error => reject(error);
-});
 
-const cleanFileName = (name = 'file') => String(name).replace(/[^a-zA-Z0-9._-]/g, '_');
-
-const absoluteApiUrl = (url = '', version = '') => {
-  let value = String(url || '').trim();
-  if (!value) return '';
-  if (/^(blob:|data:|https?:)/i.test(value)) return value;
-  if (value.startsWith('/uploads/')) value = value.replace('/uploads/', '/api/profile/photo/');
-  if (value.startsWith('uploads/')) value = value.replace('uploads/', '/api/profile/photo/');
-  const full = value.startsWith('/') ? `${API_BASE}${value}` : `${API_BASE}/${value.replace(/^\/+/, '')}`;
-  return version ? `${full}${full.includes('?') ? '&' : '?'}v=${encodeURIComponent(version)}` : full;
-};
-
-const getProjectFileDownloadUrl = (doc = {}) => {
-  if (!doc) return '';
-  if (doc.downloadUrl) return absoluteApiUrl(doc.downloadUrl);
-  if (doc.id && !String(doc.id).includes('.')) return `${API_BASE}/api/files/${encodeURIComponent(doc.id)}/download`;
-  if (doc.url) return absoluteApiUrl(doc.url);
-  return '';
-};
-
-const uploadProjectFile = async (file, projectId, type, uploadedBy) => {
-  const baseDoc = {
-    id: Date.now() + Math.random(),
-    name: file.name,
-    type,
-    date: new Date().toLocaleDateString(),
-    uploadedBy,
-    size: file.size || 0,
-    mimeType: file.type || 'application/octet-stream'
-  };
-
-  const form = new FormData();
-  form.append('file', file);
-  form.append('projectId', projectId || '');
-  form.append('type', type || 'source');
-  form.append('by', uploadedBy || 'Team');
-
-  try {
-    const res = await fetch(`${API_BASE}/api/files/upload`, { method: 'POST', body: form });
-    if (!res.ok) throw new Error(await res.text());
-    const payload = await res.json();
-    return {
-      ...baseDoc,
-      ...payload.file,
-      type,
-      folder: type,
-      uploadedBy,
-      date: new Date().toLocaleDateString(),
-      url: payload.file?.downloadUrl || payload.file?.url || '',
-      downloadUrl: payload.file?.downloadUrl || ''
-    };
-  } catch (error) {
-    console.error('Backend file upload failed:', error);
-    throw error;
-  }
-};
-
-const downloadProjectFile = async (doc = {}) => {
-  const url = getProjectFileDownloadUrl(doc);
-  if (!url) {
-    alert('This file does not have a valid download link. Please re-upload it once.');
-    return;
-  }
-  try {
-    const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) throw new Error(`Download failed (${res.status})`);
-    const blob = await res.blob();
-    if (!blob || blob.size === 0) throw new Error('Downloaded file is empty');
-    const objectUrl = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = objectUrl;
-    a.download = doc.name || 'download';
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => {
-      URL.revokeObjectURL(objectUrl);
-      a.remove();
-    }, 1500);
-  } catch (error) {
-    console.error('File download failed:', error);
-    window.open(url, '_blank', 'noopener,noreferrer');
-  }
-};
-
-const deleteProjectFileFromServer = async (doc = {}) => {
-  if (!doc?.id) return;
-  try {
-    await fetch(`${API_BASE}/api/files/${encodeURIComponent(doc.id)}`, { method: 'DELETE' });
-  } catch (error) {
-    // The UI state is still updated below. This endpoint is best-effort so old/local files do not block removal.
-    console.warn('Server file delete failed:', error);
-  }
-};
-
-const canDeleteProjectFile = (doc = {}, user = {}) => {
-  const role = normalizeRole(user?.role);
-  if (role === 'ADMIN' || role === 'MANAGER') return true;
-  return String(doc?.uploadedBy || '').trim().toLowerCase() === String(user?.name || '').trim().toLowerCase();
-};
 
 const stripLargeLocalFilesForCloud = (project) => sanitizeProjectForCache(project);
-
-const allProjectDocs = (project) => {
-  const docs = [...(project?.documents || []), ...(project?.completedFiles || [])];
-  const seen = new Set();
-  return docs.filter((doc) => {
-    const key = doc?.id || doc?.url || `${doc?.name}-${doc?.type}-${doc?.uploadedBy}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-};
-const isCompletedDocument = (doc) => {
-  const value = String(doc?.type || doc?.folder || doc?.category || doc?.documentType || doc?.status || '').toLowerCase();
-  return ['completed', 'final', 'finished', 'submitted'].includes(value) && !String(doc?.name || '').toLowerCase().includes('qr');
-};
-const getCompletedDocuments = (project) => allProjectDocs(project).filter(isCompletedDocument);
-const getLatestCompletedFileName = (project) => {
-  const completed = getCompletedDocuments(project);
-  return completed.length ? completed[completed.length - 1].name : '';
-};
 
 const TASK_CATEGORIES = [
   'Key Route Map', 'Key Route + Map Estimate', 'Key Route + Floor Map',
@@ -716,125 +558,6 @@ const getAttendanceUser = (log, users = []) => {
     || null;
 };
 
-const getBreakMinutesFromLog = (log = {}, now = Date.now()) => {
-  const stored = Number(log.totalBreakMinutes) || 0;
-  const openBreak = log.currentBreakStartedAt ? Math.floor(Math.max(0, now - Number(log.currentBreakStartedAt)) / 60000) : 0;
-  return stored + openBreak;
-};
-
-
-const normalizeWorkStatus = (status = '') => String(status || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-const WORK_DONE_STATUSES = new Set(['COMPLETED', 'CLOSED', 'CANCELLED', 'CANCELED', 'ARCHIVED', 'DELETED']);
-const isActiveWorkStatus = (status = '') => !WORK_DONE_STATUSES.has(normalizeWorkStatus(status));
-
-const getTaskBusySince = (project = {}) => (
-  toMs(project.draftingStartedAt)
-  || toMs(project.workStartedAt)
-  || toMs(project.busySinceAt)
-  || toMs(project.assignedAt)
-  || toMs(project.startedAt)
-  || toMs(project.createdAt)
-  || 0
-);
-
-const getTaskFinishedAt = (project = {}) => Math.max(
-  toMs(project.completedAt),
-  toMs(project.draftingCompletedAt),
-  toMs(project.submittedAt),
-  toMs(project.closedAt),
-  toMs(project.reviewedAt),
-  toMs(project.finishedAt),
-  toMs(project.updatedAt)
-);
-
-const getUserActiveTasks = (projects = [], userName = '') => (projects || []).filter(project => samePerson(project.assignedTo, userName) && isActiveWorkStatus(project.status));
-
-const getUserLastCompletedAt = (projects = [], userName = '') => {
-  const completed = (projects || [])
-    .filter(project => samePerson(project.assignedTo, userName) && !isActiveWorkStatus(project.status) && getTaskFinishedAt(project))
-    .map(project => getTaskFinishedAt(project))
-    .sort((a, b) => b - a);
-  return completed.length ? completed[0] : 0;
-};
-
-const getUserFreeSince = (projects = [], userName = '', presenceTimes = {}, user = null) => {
-  // Admins are visible as Available, but they are not measured as free/idle workers.
-  // "Free since" is only for managers/designers after actual task completion.
-  if (normalizeRole(user?.role) === ROLES.ADMIN) return 0;
-  const active = getUserActiveTasks(projects, userName);
-  if (active.length > 0) return 0;
-  const key = normalizePersonName(userName);
-  return (
-    toMs(presenceTimes?.[key]?.freeSince)
-    || getUserLastCompletedAt(projects, userName)
-    || toMs(user?.freeSinceAt)
-    || toMs(user?.availableSinceAt)
-    || toMs(user?.availabilityUpdatedAt)
-    || 0
-  );
-};
-
-const getUserBusySince = (projects = [], userName = '', presenceTimes = {}) => {
-  const active = getUserActiveTasks(projects, userName)
-    .map(project => ({ project, since: getTaskBusySince(project) }))
-    .filter(item => item.since)
-    .sort((a, b) => b.since - a.since);
-  if (active.length) return active[0].since;
-  const key = normalizePersonName(userName);
-  return toMs(presenceTimes?.[key]?.busySince) || 0;
-};
-
-const getSafeAttendanceDeltaMinutes = (fromMs, toMsValue = Date.now(), maxGapMinutes = 10) => {
-  const from = Number(fromMs) || 0;
-  const to = Number(toMsValue) || Date.now();
-  if (!from || to <= from) return 0;
-  const elapsed = (to - from) / 60000;
-  // If laptop sleeps / tab is killed, avoid adding a fake huge active stretch.
-  return elapsed > maxGapMinutes ? 0 : elapsed;
-};
-
-const getAttendanceBaseLoginMs = (log = {}, user = null) => (
-  toMs(log.loginAt)
-  || toMs(log.firstLoginAt)
-  || toMs(user?.lastLoginAt)
-  || 0
-);
-
-const getTotalLoggedInMinutesFromLog = (log = {}, user = null, now = Date.now()) => {
-  const saved = Number(log.totalLoggedInMinutes) || 0;
-  const loginMs = getAttendanceBaseLoginMs(log, user);
-  const isOnline = user && isUserActuallyOnline(user, now);
-
-  if (isOnline) {
-    const lastTick = toMs(log.lastTick) || toMs(log.logoutAt) || loginMs || toMs(user?.lastHeartbeatAt) || toMs(user?.lastSeenAt);
-    return Math.max(0, Math.floor(saved + getSafeAttendanceDeltaMinutes(lastTick, now, 10)));
-  }
-
-  if (saved > 0) return Math.max(0, Math.floor(saved));
-  if (!loginMs) return Math.max(0, Math.floor((Number(log.activeMinutes) || 0) + getBreakMinutesFromLog(log, now)));
-  const endMs = toMs(log.logoutAt) || toMs(user?.lastLogoutAt) || toMs(user?.lastSeenAt) || toMs(log.lastTick) || now;
-  return Math.max(0, Math.floor((endMs - loginMs) / 60000));
-};
-
-const getActiveMinutesFromLog = (log = {}, user = null, now = Date.now()) => {
-  const saved = Number(log.activeMinutes) || 0;
-  const isOnline = user && isUserActuallyOnline(user, now);
-  const isOnBreak = log.status === 'On Break' || user?.availability === 'Break' || !!log.currentBreakStartedAt;
-  if (!isOnline || isOnBreak) return Math.max(0, Math.floor(saved));
-  const lastTick = toMs(log.lastTick) || toMs(log.logoutAt) || getAttendanceBaseLoginMs(log, user);
-  return Math.max(0, Math.floor(saved + getSafeAttendanceDeltaMinutes(lastTick, now, 10)));
-};
-
-const buildAttendanceAccrual = (log = {}, now = Date.now(), isOnBreak = false) => {
-  const delta = getSafeAttendanceDeltaMinutes(log.lastTick || log.logoutAt || log.loginAt, now, 10);
-  return {
-    totalLoggedInMinutes: (Number(log.totalLoggedInMinutes) || 0) + delta,
-    activeMinutes: (Number(log.activeMinutes) || 0) + (!isOnBreak ? delta : 0),
-    totalBreakMinutes: (Number(log.totalBreakMinutes) || 0) + (isOnBreak ? delta : 0),
-    lastTick: now
-  };
-};
-
 const getProjectDateKey = (project) => formatDateKey(project.createdAt || project.completedAt || Date.now());
 
 const getDraftElapsed = (project, now = Date.now()) => {
@@ -879,20 +602,6 @@ const generateTraceableTaskId = ({ location = '', client = '', bankerName = '', 
 
 const getCustomerDisplayName = (project = {}) => project.customerName || 'Customer not added';
 const getBankDisplayName = (project = {}) => project.client || project.bankName || 'Bank not added';
-const getCompletedFileBadge = (project = {}) => getLatestCompletedFileName(project) || '';
-
-
-const getTaskDescription = (project = {}) => {
-  const raw = project.description ?? project.taskDescription ?? project.task_description ?? project.instructions ?? project.specialInstructions ?? project.special_instructions ?? project.otherDescription ?? project.other_description ?? project.taskNote ?? project.task_note ?? project.workDescription ?? project.work_description ?? project.details ?? '';
-  return String(raw || '').trim();
-};
-
-
-const getEstimateDetails = (project = {}) => {
-  const raw = project.estimateDetails ?? project.estimate_details ?? project.propertyEstimateValue ?? project.property_estimate_value ?? project.estimateInstruction ?? project.estimate_instruction ?? project.estimateNote ?? project.estimate_note ?? '';
-  return String(raw || '').trim();
-};
-
 const makeTaskDisplayName = (project = {}) => {
   return [project.type, getCustomerDisplayName(project), project.location].filter(Boolean).join(' • ');
 };
@@ -1572,290 +1281,6 @@ const AttendanceView = ({ attendanceLogs = [], users = [] }) => {
   );
 };
 
-const CommandCentreView = ({ projects = [], users = [], onSelectProject, currentUser }) => {
-  const [dateKey, setDateKey] = useState(formatDateKey());
-  const [availabilityFilter, setAvailabilityFilter] = useState('Available');
-  const [availabilityNow, setAvailabilityNow] = useState(Date.now());
-  const [presenceTimes, setPresenceTimes] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('kalpa_presence_times') || '{}'); } catch (e) { return {}; }
-  });
-  useEffect(() => { const timer = setInterval(() => setAvailabilityNow(Date.now()), 30000); return () => clearInterval(timer); }, []);
-  const metrics = getTodayMetrics(projects, dateKey);
-  const activeBoard = metrics.activeToday.slice().sort((a,b) => (b.createdAt || 0) - (a.createdAt || 0));
-  const people = getOperationalUsers(users || [], { includeAdmins: true });
-  const workingTeam = people.filter(u => u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER);
-  const activeTasksFor = (userName) => getUserActiveTasks(projects, userName);
-
-  useEffect(() => {
-    const now = Date.now();
-    let previous = {};
-    try { previous = JSON.parse(localStorage.getItem('kalpa_presence_task_state') || '{}'); } catch (e) { previous = {}; }
-    let existingTimes = {};
-    try { existingTimes = JSON.parse(localStorage.getItem('kalpa_presence_times') || '{}'); } catch (e) { existingTimes = {}; }
-    const nextState = {};
-    const nextTimes = { ...existingTimes };
-
-    people.forEach(member => {
-      if (member.role === ROLES.ADMIN) return;
-      const key = normalizePersonName(member.name);
-      const active = getUserActiveTasks(projects, member.name);
-      const activeIds = active.map(task => String(task.id || task.caseId || '')).filter(Boolean).sort();
-      const activeCount = activeIds.length;
-      const previousCount = Number(previous?.[key]?.activeCount || 0);
-      const previousIds = Array.isArray(previous?.[key]?.activeIds) ? previous[key].activeIds.join('|') : '';
-      const nextIds = activeIds.join('|');
-      const completedAt = getUserLastCompletedAt(projects, member.name);
-      const busySince = getUserBusySince(projects, member.name);
-
-      nextState[key] = { activeCount, activeIds, updatedAt: now };
-      nextTimes[key] = nextTimes[key] || {};
-
-      if (activeCount > 0) {
-        const newTaskStarted = previousCount === 0 || previousIds !== nextIds;
-        nextTimes[key].busySince = newTaskStarted ? (busySince || now) : (nextTimes[key].busySince || busySince || now);
-        nextTimes[key].freeSince = null;
-      } else {
-        nextTimes[key].busySince = null;
-        if (previousCount > 0) {
-          nextTimes[key].freeSince = completedAt || now;
-        } else if (!nextTimes[key].freeSince && completedAt) {
-          nextTimes[key].freeSince = completedAt;
-        }
-      }
-    });
-
-    try {
-      localStorage.setItem('kalpa_presence_task_state', JSON.stringify(nextState));
-      localStorage.setItem('kalpa_presence_times', JSON.stringify(nextTimes));
-    } catch (e) {}
-    setPresenceTimes(nextTimes);
-  }, [projects, users]);
-
-  const nowMs = availabilityNow;
-  const availablePeople = people.filter(u => isUserActuallyOnline(u, nowMs) && (u.role === ROLES.ADMIN || (u.availability !== 'Break' && activeTasksFor(u.name).length === 0))); // admins shown available but no free-since
-  const busyPeople = people.filter(u => u.role !== ROLES.ADMIN && isUserActuallyOnline(u, nowMs) && u.availability !== 'Break' && activeTasksFor(u.name).length > 0);
-  const breakPeople = people.filter(u => u.role !== ROLES.ADMIN && isUserActuallyOnline(u, nowMs) && u.availability === 'Break');
-  const offlinePeople = people.filter(u => !isUserActuallyOnline(u, nowMs));
-  const free = availablePeople.length;
-  const busy = busyPeople.length;
-  const breaks = breakPeople.length;
-  const availabilityGroups = { Available: availablePeople, Busy: busyPeople, Break: breakPeople, Offline: offlinePeople };
-  const selectedAvailabilityPeople = availabilityGroups[availabilityFilter] || [];
-  const completionRate = metrics.received ? Math.round((metrics.completed / metrics.received) * 100) : 0;
-  const pendingNow = activeBoard.filter(p => p.status !== 'Completed').length;
-  const delayedCount = activeBoard.filter(p => getSlaInfo(p).label === 'Delayed').length;
-  const nearSlaCount = activeBoard.filter(p => getSlaInfo(p).label === 'Near SLA').length;
-  const activeCapacity = workingTeam.reduce((sum, u) => sum + activeTasksFor(u.name).length, 0);
-  const capacityLimit = workingTeam.reduce((sum, u) => sum + Number(u.dailyLimit || u.taskLimit || 10), 0) || Math.max(workingTeam.length * 10, 1);
-  const capacityPct = Math.min(100, Math.round((activeCapacity / capacityLimit) * 100));
-  const statusFlow = [
-    ['Received', metrics.received, 'bg-blue-500'],
-    ['Carried', metrics.carriedCount, 'bg-orange-500'],
-    ['Drafting', metrics.drafting, 'bg-indigo-500'],
-    ['Review', metrics.review, 'bg-purple-500'],
-    ['Completed', metrics.completed, 'bg-emerald-500'],
-    ['Revisions', metrics.revisions.length, 'bg-red-500']
-  ];
-  const maxFlow = Math.max(...statusFlow.map(([, value]) => Number(value) || 0), 1);
-  const workloadCards = workingTeam.map(u => {
-    const active = activeTasksFor(u.name);
-    const completedToday = projects.filter(p => normalizePersonName(p.assignedTo) === normalizePersonName(u.name) && p.status === 'Completed' && formatDateKey(p.completedAt || p.createdAt) === dateKey).length;
-    const revisions = projects.filter(p => normalizePersonName(p.assignedTo) === normalizePersonName(u.name) && (p.subTasks || []).some(st => st.status !== 'Done')).length;
-    const limit = Number(u.dailyLimit || u.taskLimit || 10) || 10;
-    const loadPct = Math.min(100, Math.round((active.length / limit) * 100));
-    return { ...u, active, completedToday, revisions, limit, loadPct };
-  }).sort((a,b) => b.active.length - a.active.length || b.completedToday - a.completedToday || a.name.localeCompare(b.name));
-  const topPerformers = workloadCards.slice().sort((a,b) => b.completedToday - a.completedToday || a.active.length - b.active.length).slice(0, 4);
-  const stats = [
-    ['Cases Received', metrics.received, 'bg-blue-50 text-blue-700 border-blue-100'],
-    ['Active Pending', pendingNow, 'bg-orange-50 text-orange-700 border-orange-100'],
-    ['Completion Rate', `${completionRate}%`, 'bg-emerald-50 text-emerald-700 border-emerald-100'],
-    ['Delayed SLA', delayedCount, 'bg-red-50 text-red-700 border-red-100'],
-    ['Near SLA', nearSlaCount, 'bg-amber-50 text-amber-700 border-amber-100'],
-    ['Urgent Revisions', metrics.revisions.length, 'bg-purple-50 text-purple-700 border-purple-100']
-  ];
-  return (
-    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
-      <div className="flex flex-col sm:flex-row justify-between sm:items-end gap-4">
-        <div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Command Centre</h1><p className="text-slate-500 font-medium mt-2">Live operations snapshot with workload, SLA, productivity, and carried-forward work.</p></div>
-        <input type="date" value={dateKey} onChange={e => setDateKey(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none" />
-      </div>
-
-      <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">{stats.map(([label, value, cls]) => <div key={label} className={`kalpa-stat-card ${cls} border-2 rounded-3xl p-5 shadow-sm`}><p className="text-[10px] font-black uppercase tracking-widest opacity-80">{label}</p><p className="text-3xl font-black mt-2">{value}</p></div>)}</div>
-
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <div className="kalpa-panel xl:col-span-2 bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
-          <div className="flex items-start justify-between gap-4 mb-5">
-            <div><h2 className="font-black text-slate-800 text-xl flex items-center"><BarChart3 className="w-5 h-5 mr-2 text-indigo-500" /> Operations Flow</h2><p className="text-xs font-bold text-slate-400 mt-1">Pending vs completed trend for the selected day.</p></div>
-            <Badge colorClass={completionRate >= 70 ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : completionRate >= 40 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}>{completionRate}% Done</Badge>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-            {statusFlow.map(([label, value, color]) => (
-              <div key={label} className="bg-slate-50 border border-slate-100 rounded-2xl p-4">
-                <div className="h-28 flex items-end justify-center">
-                  <div className={`${color} rounded-t-xl w-full max-w-[42px] transition-all`} style={{ height: `${Math.max(8, (Number(value || 0) / maxFlow) * 100)}%` }}></div>
-                </div>
-                <p className="text-center text-2xl font-black text-slate-800 mt-3">{value}</p>
-                <p className="text-center text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
-          <h3 className="font-black text-slate-800 mb-1">Active Workload</h3><p className="text-xs font-bold text-slate-400 mb-4">Current assigned load across managers/designers.</p>
-          <div className="flex items-end justify-between mb-3"><p className="text-4xl font-black text-slate-800">{activeCapacity}</p><p className="text-xs font-black text-slate-400 uppercase tracking-widest">of {capacityLimit} capacity</p></div>
-          <div className="h-4 bg-slate-100 rounded-full overflow-hidden mb-4"><div className="h-full bg-indigo-500 rounded-full transition-all" style={{ width: `${capacityPct}%` }}></div></div>
-          <div className="grid grid-cols-3 gap-2 text-center">
-            <div className="bg-blue-50 border border-blue-100 rounded-2xl p-3"><p className="font-black text-blue-700">{free}</p><p className="text-[9px] font-black uppercase text-blue-500">Available</p></div>
-            <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-3"><p className="font-black text-emerald-700">{busy}</p><p className="text-[9px] font-black uppercase text-emerald-500">Busy</p></div>
-            <div className="bg-amber-50 border border-amber-100 rounded-2xl p-3"><p className="font-black text-amber-700">{breaks}</p><p className="text-[9px] font-black uppercase text-amber-500">Break</p></div>
-          </div>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="kalpa-panel lg:col-span-2 bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
-          <div className="p-5 border-b-2 border-slate-100"><h2 className="font-black text-slate-800 text-xl">Daily Operations Board</h2><p className="text-xs font-bold text-slate-400 mt-1">Includes today's tasks plus older pending tasks carried forward.</p></div>
-          <div className="divide-y divide-slate-100 max-h-[520px] overflow-y-auto custom-scrollbar">
-            {activeBoard.map(p => <div key={p.id} onClick={() => onSelectProject(p)} className="kalpa-task-row p-5 hover:bg-slate-50 cursor-pointer flex justify-between items-center gap-4"><div><p className="font-black text-slate-800">{p.id} <span className="text-xs font-bold text-slate-400 ml-2">{getCustomerDisplayName(p)}</span></p><p className="text-sm font-extrabold text-slate-700 mt-1">{p.taskName || makeTaskDisplayName(p)}</p><p className="text-xs font-bold text-slate-500 mt-1">{p.type} • {p.location} • {p.assignedTo || 'Unassigned'}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mt-2 line-clamp-2 max-w-2xl"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1 line-clamp-2 max-w-2xl"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}{getLatestCompletedFileName(p) && <p className="text-[11px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mt-2 w-fit">Completed: {getLatestCompletedFileName(p)}</p>}{isCarriedForwardProject(p, dateKey) && <span className="inline-flex mt-2 text-[10px] bg-orange-50 text-orange-700 border border-orange-100 px-2 py-1 rounded-lg font-black uppercase">Carried Forward</span>}</div><Badge colorClass={getStatusColor(p.status)}>{p.status}</Badge></div>)}
-            {activeBoard.length === 0 && <div className="p-10 text-center text-slate-400 font-bold">No operations for this date.</div>}
-          </div>
-        </div>
-        <div className="space-y-6">
-          <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
-            <h3 className="font-black text-slate-800 mb-1">Team Availability</h3><p className="text-xs font-bold text-slate-400 mb-4">Click Available, Busy, Break, or Offline to see the members in that status.</p>
-            <div className="grid grid-cols-4 gap-2 mb-4">
-              {[["Available", free, "bg-blue-50 text-blue-700 border-blue-100"], ["Busy", busy, "bg-emerald-50 text-emerald-700 border-emerald-100"], ["Break", breaks, "bg-amber-50 text-amber-700 border-amber-100"], ["Offline", offlinePeople.length, "bg-slate-50 text-slate-600 border-slate-100"]].map(([label, count, cls]) => (
-                <button key={label} type="button" onClick={() => setAvailabilityFilter(label)} className={`${cls} border-2 p-3 rounded-2xl text-center font-black transition-all ${availabilityFilter === label ? 'ring-2 ring-slate-300 scale-[1.02]' : 'hover:scale-[1.01]'}`}>
-                  {count}<p className="text-[10px] uppercase tracking-widest">{label}</p>
-                </button>
-              ))}
-            </div>
-            <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar">
-              {selectedAvailabilityPeople.length === 0 && <MiniEmptyState>No team members in {availabilityFilter}.</MiniEmptyState>}
-              {selectedAvailabilityPeople.map(member => {
-                const tasks = activeTasksFor(member.name);
-                const breakSince = member.breakStartedAt || member.availabilityUpdatedAt || Date.now();
-                const freeSince = getUserFreeSince(projects, member.name, presenceTimes, member);
-                const busySince = getUserBusySince(projects, member.name, presenceTimes);
-                const busyTaskLine = tasks.length
-                  ? tasks.slice().sort((a, b) => getTaskBusySince(b) - getTaskBusySince(a)).slice(0, 2).map(t => `${t.id} • ${formatDuration(getTaskBusySince(t), availabilityNow)}`).join(' | ')
-                  : '';
-                const isAdminMember = normalizeRole(member.role) === ROLES.ADMIN;
-                const availabilityLine = availabilityFilter === 'Busy'
-                  ? (busyTaskLine || (busySince ? `Busy since ${formatDuration(busySince, availabilityNow)}` : 'Busy now'))
-                  : availabilityFilter === 'Break'
-                    ? `Break since ${formatDuration(breakSince, availabilityNow)}`
-                    : availabilityFilter === 'Available'
-                      ? (isAdminMember ? 'Available' : (freeSince ? `Free since ${formatDuration(freeSince, availabilityNow)}` : 'Available • no completed task yet'))
-                      : `Last seen ${formatLastSeenDateTime(member.lastSeenAt || member.lastLogoutAt || member.lastHeartbeatAt)}`;
-                return (
-                  <div key={member.id} className="flex items-center justify-between bg-slate-50 border border-slate-100 rounded-2xl p-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-xl bg-white border border-slate-200 overflow-hidden flex items-center justify-center shrink-0">
-                        {member.profilePhoto ? <img src={absoluteApiUrl(member.profilePhoto, member.profilePhotoUpdatedAt || member.profileUpdatedAt || '')} alt={member.name} className="w-full h-full object-cover" /> : <User className="w-4 h-4 text-slate-400" />}
-                      </div>
-                      <div>
-                        <p className="font-black text-slate-800 text-sm">{member.name}</p>
-                        <p className="text-[11px] font-bold text-slate-400">{availabilityLine}</p>
-                      </div>
-                    </div>
-                    <Badge colorClass={availabilityFilter === 'Busy' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : availabilityFilter === 'Break' ? 'bg-amber-50 text-amber-700 border-amber-100' : availabilityFilter === 'Available' ? 'bg-blue-50 text-blue-700 border-blue-100' : 'bg-slate-50 text-slate-600 border-slate-100'}>{availabilityFilter}</Badge>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-          {currentUser?.role === ROLES.ADMIN && <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm"><h3 className="font-black text-slate-800 mb-4">Payment Health</h3><p className="text-xs font-black text-slate-400 uppercase tracking-widest">Received Today</p><p className="text-3xl font-black text-emerald-600 mb-4">₹{metrics.paymentReceived.toLocaleString()}</p><p className="text-xs font-black text-slate-400 uppercase tracking-widest">Pending Collections</p><p className="text-3xl font-black text-red-500">₹{metrics.pendingAmount.toLocaleString()}</p></div>}
-          <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm"><h3 className="font-black text-slate-800 mb-4">Urgent Revision Queue</h3>{metrics.revisions.slice(0,5).map(p => <button key={p.id} onClick={() => onSelectProject(p)} className="w-full text-left bg-red-50 border border-red-100 p-3 rounded-xl mb-2"><p className="font-black text-red-700 text-xs">{p.id}</p><p className="text-[10px] font-bold text-red-500">{p.subTasks?.length || 0} revision items</p></button>)}{metrics.revisions.length === 0 && <p className="text-sm text-slate-400 font-bold">No urgent revisions.</p>}</div>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <div className="kalpa-panel xl:col-span-2 bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
-          <div className="flex items-center justify-between gap-3 mb-4"><h3 className="font-black text-slate-800 flex items-center"><Users className="w-5 h-5 mr-2 text-indigo-500" /> Designer Performance Cards</h3><span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Active workload</span></div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-96 overflow-y-auto custom-scrollbar pr-1">
-            {workloadCards.map(member => (
-              <div key={member.id} className="border border-slate-100 bg-slate-50 rounded-2xl p-4">
-                <div className="flex items-start justify-between gap-3 mb-3"><div><p className="font-black text-slate-800">{member.name}</p><p className="text-[11px] font-bold text-slate-400">{member.role} • {member.active.length}/{member.limit} active</p></div><Badge colorClass={member.loadPct >= 90 ? 'bg-red-50 text-red-700 border-red-100' : member.loadPct >= 60 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-emerald-50 text-emerald-700 border-emerald-100'}>{member.loadPct}%</Badge></div>
-                <div className="h-2 bg-white rounded-full overflow-hidden mb-3"><div className="h-full bg-indigo-500 rounded-full" style={{ width: `${member.loadPct}%` }}></div></div>
-                <div className="grid grid-cols-3 gap-2 text-center"><div className="bg-white rounded-xl p-2"><p className="font-black text-slate-800">{member.active.length}</p><p className="text-[9px] font-black uppercase text-slate-400">Active</p></div><div className="bg-white rounded-xl p-2"><p className="font-black text-emerald-600">{member.completedToday}</p><p className="text-[9px] font-black uppercase text-slate-400">Done</p></div><div className="bg-white rounded-xl p-2"><p className="font-black text-red-500">{member.revisions}</p><p className="text-[9px] font-black uppercase text-slate-400">Revisions</p></div></div>
-              </div>
-            ))}
-            {workloadCards.length === 0 && <p className="text-sm text-slate-400 font-bold text-center py-8">No designer or manager workload available.</p>}
-          </div>
-        </div>
-        <div className="space-y-6">
-          <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
-            <h3 className="font-black text-slate-800 mb-4 flex items-center"><Star className="w-5 h-5 mr-2 text-amber-500" /> Top Today</h3>
-            <div className="space-y-3">
-              {topPerformers.map((member, idx) => <div key={member.id} className="flex items-center justify-between bg-slate-50 border border-slate-100 rounded-2xl p-3"><div><p className="font-black text-slate-800 text-sm">{idx + 1}. {member.name}</p><p className="text-[11px] font-bold text-slate-400">{member.completedToday} completed • {member.active.length} active</p></div><Badge colorClass="bg-amber-50 text-amber-700 border-amber-100">{member.role}</Badge></div>)}
-              {topPerformers.length === 0 && <p className="text-sm text-slate-400 font-bold">No completion data yet.</p>}
-            </div>
-          </div>
-          <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
-            <h3 className="font-black text-slate-800 mb-4 flex items-center"><Clock className="w-5 h-5 mr-2 text-indigo-500" /> SLA Tracking</h3>
-            <div className="space-y-3 max-h-72 overflow-y-auto custom-scrollbar">
-              {activeBoard.slice().sort((a,b) => getSlaInfo(b).ageHours - getSlaInfo(a).ageHours).slice(0,8).map(p => { const sla = getSlaInfo(p); return (
-                <button key={p.id} type="button" onClick={() => onSelectProject(p)} className="w-full text-left border border-slate-100 hover:border-indigo-100 hover:bg-slate-50 rounded-2xl p-4 transition-all">
-                  <div className="flex justify-between items-start gap-3">
-                    <div><p className="font-black text-slate-800">{p.id}</p><p className="text-xs font-bold text-slate-400 mt-1">Draft: {sla.drafting} • Review: {sla.review} • Total: {sla.total}</p></div>
-                    <Badge colorClass={sla.colorClass}>{sla.label}</Badge>
-                  </div>
-                </button>
-              )})}
-              {activeBoard.length === 0 && <p className="text-sm text-slate-400 font-bold text-center py-8">No SLA items for this date.</p>}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
-        <h3 className="font-black text-slate-800 mb-4 flex items-center"><Bell className="w-5 h-5 mr-2 text-indigo-500" /> Latest Activity</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-72 overflow-y-auto custom-scrollbar">
-          {projects.slice().sort((a,b) => (b.updatedAt || b.completedAt || b.submittedAt || b.createdAt || 0) - (a.updatedAt || a.completedAt || a.submittedAt || a.createdAt || 0)).slice(0,10).map(p => (
-            <button key={p.id} type="button" onClick={() => onSelectProject(p)} className="w-full text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 rounded-2xl p-4 transition-all">
-              <p className="font-black text-slate-800">{p.id} • {p.status}</p>
-              <p className="text-xs font-bold text-slate-500 mt-1">{getCustomerDisplayName(p)} • {p.location} • {p.assignedTo || 'Unassigned'}</p>
-            </button>
-          ))}
-          {projects.length === 0 && <p className="text-sm text-slate-400 font-bold text-center py-8">No recent activity yet.</p>}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const ProductivityDashboard = ({ users = [], projects = [] }) => {
-  const todayKey = formatDateKey();
-  const weekStart = Date.now() - (7 * 24 * 60 * 60 * 1000);
-  const monthKey = todayKey.slice(0,7);
-  const team = (users || []).filter(u => (u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER) && u.status === 'APPROVED');
-  return (
-    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
-      <div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Productivity Dashboard</h1><p className="text-slate-500 font-medium mt-2">Designer and manager performance, visible to the whole team.</p></div>
-      <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden"><div className="overflow-x-auto"><table className="w-full text-left text-sm whitespace-nowrap"><thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100"><tr><th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Member</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Today</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Week</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Month</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Active</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Avg SLA</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Revision %</th></tr></thead><tbody className="divide-y divide-slate-100">{team.map(u => { const userTasks = projects.filter(p => p.assignedTo === u.name); const completed = userTasks.filter(p => p.status === 'Completed'); const today = completed.filter(p => formatDateKey(p.completedAt || p.createdAt) === todayKey).length; const week = completed.filter(p => (p.completedAt || 0) >= weekStart).length; const month = completed.filter(p => formatDateKey(p.completedAt || p.createdAt).slice(0,7) === monthKey).length; const active = userTasks.filter(p => p.status !== 'Completed').length; const revs = userTasks.filter(p => (p.subTasks || []).length > 0).length; const revPct = userTasks.length ? Math.round((revs / userTasks.length) * 100) : 0; const avgMins = completed.length ? Math.round(completed.reduce((sum,p) => sum + Math.max(0, ((p.completedAt || p.submittedAt || p.createdAt || Date.now()) - (p.createdAt || Date.now()))/60000), 0) / completed.length) : 0; return <tr key={u.id} className="hover:bg-slate-50"><td className="px-6 py-5"><p className="font-black text-slate-800">{u.name}</p><p className="text-xs font-bold text-slate-400">{u.role}</p></td><td className="px-6 py-5 text-center font-black text-emerald-600">{today}</td><td className="px-6 py-5 text-center font-black text-indigo-600">{week}</td><td className="px-6 py-5 text-center font-black text-slate-800">{month}</td><td className="px-6 py-5 text-center"><span className="bg-orange-50 text-orange-700 px-3 py-1 rounded-lg font-black text-xs">{active}</span></td><td className="px-6 py-5 text-center font-bold text-slate-600">{avgMins ? formatDuration(0, avgMins * 60000) : '-'}</td><td className="px-6 py-5 text-center font-bold text-red-500">{revPct}%</td></tr> })}</tbody></table></div></div>
-    </div>
-  );
-};
-
-const DailyClosingReport = ({ projects = [] }) => {
-  const [dateKey, setDateKey] = useState(formatDateKey());
-  const metrics = getTodayMetrics(projects, dateKey);
-  const rows = [
-    ['Cases Received', metrics.received], ['Carried Forward Pending', metrics.carriedCount], ['Cases Completed', metrics.completed], ['Urgent Revisions', metrics.revisions.length], ['Payments Received', `₹${metrics.paymentReceived.toLocaleString()}`], ['Pending Collections', `₹${metrics.pendingAmount.toLocaleString()}`]
-  ];
-  const handleExport = () => exportToCSV(['Metric','Value'], rows, `Daily_Closing_${dateKey}.csv`);
-  return (
-    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
-      <div className="flex flex-col sm:flex-row justify-between sm:items-end gap-4"><div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Daily Closing Report</h1><p className="text-slate-500 font-medium mt-2">End-of-day summary with pending work carried forward.</p></div><div className="flex gap-3"><input type="date" value={dateKey} onChange={e => setDateKey(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none" /><button onClick={handleExport} className="bg-emerald-100 text-emerald-700 font-bold px-4 py-2.5 rounded-xl"><Download className="w-4 h-4 inline mr-2"/>Export</button></div></div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">{rows.map(([label,value]) => <div key={label} className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm"><p className="text-xs text-slate-400 font-black uppercase tracking-widest">{label}</p><p className="text-3xl font-black text-slate-800 mt-2">{value}</p></div>)}</div>
-      <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden"><div className="p-5 border-b-2 border-slate-100"><h2 className="font-black text-slate-800 text-xl">Pending Carry Forward List</h2></div><div className="divide-y divide-slate-100">{metrics.carried.map(p => <div key={p.id} className="p-5 flex justify-between items-center"><div><p className="font-black text-slate-800">{p.id}</p><p className="text-xs font-bold text-slate-400">{getCustomerDisplayName(p)} • {p.location} • {p.assignedTo}</p></div><Badge colorClass={getStatusColor(p.status)}>{p.status}</Badge></div>)}{metrics.carried.length === 0 && <div className="p-10 text-center text-slate-400 font-bold">No previous pending tasks to carry forward.</div>}</div></div>
-    </div>
-  );
-};
-
 const LedgerView = ({ projects, onSelectProject }) => {
   const [activeTab, setActiveTab] = useState('transactions');
   const [selectedLocation, setSelectedLocation] = useState('All');
@@ -2148,115 +1573,6 @@ const LedgerView = ({ projects, onSelectProject }) => {
               </tbody>
             </table>
           )}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const HistoryArchiveView = ({ projects, onSelectProject }) => {
-  const [filterMonth, setFilterMonth] = useState('All');
-  const [filterDate, setFilterDate] = useState('');
-
-  const archived = projects.filter(p => p.status === 'Completed').sort((a, b) => (b.completedAt || 0) - (a.completedAt || 0));
-
-  const uniqueMonths = [...new Set(archived.map(p => {
-    if (!p.completedAt) return null;
-    try {
-        return new Date(p.completedAt).toLocaleString('default', { month: 'long', year: 'numeric' });
-    } catch(e) { return null; }
-  }).filter(Boolean))];
-
-  const filteredArchived = archived.filter(p => {
-    if (!p.completedAt) return false;
-    try {
-        const d = new Date(p.completedAt);
-        const monthYear = d.toLocaleString('default', { month: 'long', year: 'numeric' });
-        const exactDate = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-
-        if (filterDate) return exactDate === filterDate;
-        if (filterMonth !== 'All') return monthYear === filterMonth;
-        return true;
-    } catch(e) { return false; }
-  });
-
-  return (
-    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-5">
-         <div>
-             <h2 className="text-3xl font-extrabold text-slate-800 flex items-center tracking-tight"><Archive className="w-8 h-8 mr-3 text-indigo-500"/> Task History Catalog</h2>
-             <p className="text-slate-500 mt-2 font-medium">{filteredArchived.length} Completed Tasks securely stored on the cloud.</p>
-         </div>
-         <div className="flex flex-wrap items-center gap-3 bg-white p-2 rounded-2xl border-2 border-slate-100 shadow-sm w-full sm:w-auto">
-            <div className="flex items-center space-x-2 px-3 py-1">
-                <Calendar className="w-5 h-5 text-indigo-400" />
-                <select value={filterMonth} onChange={(e) => {setFilterMonth(e.target.value); setFilterDate('');}} className="bg-transparent text-sm font-bold text-slate-700 outline-none cursor-pointer">
-                    <option value="All">All Months</option>
-                    {uniqueMonths.map(m => <option key={m} value={m}>{m}</option>)}
-                </select>
-            </div>
-            <div className="w-0.5 h-8 bg-slate-100 hidden sm:block"></div>
-            <div className="flex items-center space-x-2 px-3 py-1">
-                <Filter className="w-5 h-5 text-indigo-400" />
-                <input type="date" value={filterDate} onChange={(e) => {setFilterDate(e.target.value); setFilterMonth('All');}} className="bg-transparent text-sm font-bold text-slate-700 outline-none cursor-pointer" />
-            </div>
-            {(filterDate || filterMonth !== 'All') && (
-                <button type="button" onClick={() => {setFilterMonth('All'); setFilterDate('');}} className="ml-2 text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-2 rounded-xl transition-colors">Clear</button>
-            )}
-         </div>
-      </div>
-      
-      <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm whitespace-nowrap">
-            <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
-              <tr>
-                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Date Completed</th>
-                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Task Details</th>
-                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Location</th>
-                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Designer</th>
-                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Action</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {filteredArchived.map(p => (
-                <tr key={p.id} className="hover:bg-slate-50 cursor-pointer transition-colors group" onClick={() => onSelectProject(p)}>
-                  <td className="px-6 py-5">
-                    <span className="font-bold text-slate-700">{p.completedAt ? formatDateTime(p.completedAt) : '-'}</span>
-                    <p className="text-[11px] font-semibold text-slate-400 mt-1">{p.completedAt ? new Date(p.completedAt).toLocaleTimeString() : ''}</p>
-                  </td>
-                  <td className="px-6 py-5 min-w-[320px]">
-                     <p className="font-bold text-slate-800 text-base">{p.id}</p>
-                     <p className="text-xs font-medium text-slate-500 mt-1">{getCustomerDisplayName(p)} • {p.type}</p>
-                     {getTaskDescription(p) && (
-                       <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mt-2 whitespace-normal line-clamp-2 max-w-lg">
-                         <span className="font-black">Description:</span> {getTaskDescription(p)}
-                       </p>
-                     )}
-                     {getEstimateDetails(p) && (
-                       <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1 whitespace-normal line-clamp-2 max-w-lg">
-                         <span className="font-black">Estimate:</span> {getEstimateDetails(p)}
-                       </p>
-                     )}
-                     {getLatestCompletedFileName(p) && (
-                       <p className="text-[11px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mt-2 w-fit max-w-lg truncate">
-                         Completed: {getLatestCompletedFileName(p)}
-                       </p>
-                     )}
-                  </td>
-                  <td className="px-6 py-5 font-medium text-slate-600">{p.location}</td>
-                  <td className="px-6 py-5 font-medium text-slate-600">{p.assignedTo}</td>
-                  <td className="px-6 py-5 text-right flex items-center justify-end gap-2">
-                     {p.reportSent && <span className="bg-emerald-50 text-emerald-600 border border-emerald-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider rounded-lg flex items-center mr-2"><Check className="w-3 h-3 mr-1"/> Sent</span>}
-                     <button type="button" className="text-indigo-600 bg-indigo-50 group-hover:bg-indigo-600 group-hover:text-white px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-sm">View Files</button>
-                  </td>
-                </tr>
-              ))}
-              {filteredArchived.length === 0 && (
-                <tr><td colSpan={5} className="px-6 py-16 text-center text-slate-400 font-medium">No completed tasks found for this period.</td></tr>
-              )}
-            </tbody>
-          </table>
         </div>
       </div>
     </div>
@@ -3994,172 +3310,26 @@ function AppShell() {
         ) : activeTab === 'meeting' ? (
           <TeamMeetingRoom currentUser={currentUser} safeAppId={safeAppId} />
         ) : (
-          <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
-            <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-6">
-              <div>
-                <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">{activeTab === 'my_tasks' ? 'My Tasks' : (canManage ? 'Active Operations' : 'My Workspace')}</h1>
-              </div>
-              <div className="flex flex-wrap gap-3">
-                {(activeTab === 'board' || activeTab === 'my_tasks') && (
-                   <div className="bg-white border-2 border-slate-100 rounded-xl px-3 py-1.5 flex items-center gap-2 shadow-sm">
-                      <Calendar className="w-4 h-4 text-indigo-500" />
-                      <input type="date" value={selectedBoardDate} onChange={(e) => setSelectedBoardDate(e.target.value)} className="text-xs font-bold text-slate-700 bg-transparent outline-none" />
-                   </div>
-                )}
-                {(activeTab === 'board' || activeTab === 'my_tasks') && (
-                   <div className="bg-slate-100 p-1 rounded-xl flex items-center shadow-inner">
-                      <button onClick={() => setBoardViewMode('list')} className={`px-4 py-1.5 text-xs font-bold rounded-lg transition-colors flex items-center ${boardViewMode === 'list' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><List className="w-4 h-4 mr-1.5" /> List</button>
-                      <button onClick={() => setBoardViewMode('kanban')} className={`px-4 py-1.5 text-xs font-bold rounded-lg transition-colors flex items-center ${boardViewMode === 'kanban' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><KanbanSquare className="w-4 h-4 mr-1.5" /> Board</button>
-                   </div>
-                )}
-                {canManage && (
-                  <button type="button" onClick={() => { setLeadFiles([]); setShowNewLead(true); }} className="bg-slate-800 text-white px-6 py-2.5 rounded-xl text-sm font-bold hover:bg-slate-700 transition-all shadow-xl shadow-slate-200 flex items-center w-full sm:w-auto justify-center hover:scale-105 transform">
-                    <Plus className="w-5 h-5 mr-2" /> Log New Case
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-4 gap-5 sm:gap-8">
-              <div className="lg:col-span-3 w-full">
-                
-                {boardViewMode === 'kanban' ? (
-                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6">
-                      {['Lead Received', 'Drafting', 'Completed'].map(statusCol => (
-                         <div key={statusCol} className="bg-slate-100/50 rounded-3xl p-3 sm:p-4 border-2 border-slate-100/50 min-h-[420px] sm:min-h-[500px] transition-colors duration-200">
-                            <h3 className="font-black text-slate-500 uppercase tracking-widest text-xs mb-4 px-2">{statusCol} <span className="ml-2 bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full">{displayedProjects.filter(p => p.status === statusCol).length}</span></h3>
-                            <div className="space-y-4">
-                               {displayedProjects.filter(p => p.status === statusCol).map(p => (
-                                  <div key={p.id} onClick={() => setSelectedProject(p)} className="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-200 hover:border-indigo-300 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 cursor-pointer group active:scale-[0.99]">
-                                     <div className="flex justify-between items-start mb-2">
-                                        <p className="font-extrabold text-slate-800 group-hover:text-indigo-600 transition-colors">{p.id}</p>
-                                        {p.priority === 'Urgent' && <Flag className="w-4 h-4 text-red-500 animate-pulse"/>}
-                                     </div>
-                                     <p className="text-sm font-bold text-slate-700 mb-1">{getCustomerDisplayName(p)}</p>
-                                     <p className="text-xs text-slate-500 mb-3">{p.type} • {p.location}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mb-2 line-clamp-2"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-bold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mb-3 line-clamp-2"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}{getLatestCompletedFileName(p) && <p className="text-[10px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mb-3 truncate">Completed: {getLatestCompletedFileName(p)}</p>}
-                                     <div className="flex justify-between items-center pt-3 border-t border-slate-100">
-                                        <Badge colorClass={p.assignedTo === 'Unassigned' ? 'bg-red-50 text-red-600 border-red-200' : 'bg-slate-50 text-slate-700 border-slate-200'}>{p.assignedTo}</Badge>
-                                        {p.subTasks?.length > 0 && <span className="text-[10px] text-red-600 bg-red-50 px-2 py-0.5 rounded font-black">{p.subTasks.length} Revs</span>}
-                                     </div>
-                                  </div>
-                               ))}
-                            </div>
-                         </div>
-                      ))}
-                   </div>
-                ) : (
-                  <div className="bg-white rounded-3xl shadow-sm border-2 border-slate-100 overflow-hidden transition-shadow duration-200 hover:shadow-md">
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left text-sm whitespace-nowrap">
-                        <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
-                          <tr>
-                            <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Task ID</th>
-                            <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Type & Location</th>
-                            <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Assigned To</th>
-                            <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Elapsed</th>
-                            <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Status</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {displayedProjects.map(p => (
-                            <tr key={p.id} onClick={() => setSelectedProject(p)} className="hover:bg-slate-50 cursor-pointer transition-colors group">
-                              <td className="px-6 py-5">
-                                <div className="flex items-center gap-2">
-                                  <p className="font-extrabold text-slate-800 text-base">{p.id}</p>
-                                  {p.priority === 'Urgent' && <Flag className="w-4 h-4 text-red-500 animate-pulse"/>}
-                                </div>
-                                <p className="text-slate-500 font-semibold text-xs mt-1">{getCustomerDisplayName(p)}</p>
-                                <p className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded mt-1.5 w-fit font-bold">Created: {p.createdAt ? formatDateTime(p.createdAt) : '-'}</p>{getLatestCompletedFileName(p) && <p className="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-100 px-1.5 py-0.5 rounded mt-1.5 w-fit font-black">Completed: {getLatestCompletedFileName(p)}</p>}
-                              </td>
-                              <td className="px-6 py-5">
-                                <p className="font-bold text-slate-700">{p.type}</p>
-                                <p className="text-slate-400 font-medium text-xs mt-1">{p.location}</p>{getTaskDescription(p) && <p className="text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 font-semibold text-xs mt-2 max-w-xs whitespace-normal line-clamp-2"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 font-semibold text-xs mt-1 max-w-xs whitespace-normal line-clamp-2"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}
-                              </td>
-                              <td className="px-6 py-5">
-                                <Badge colorClass={p.assignedTo === 'Unassigned' ? 'bg-red-50 text-red-600 border-red-200' : 'bg-slate-50 text-slate-700 border-slate-200'}>{p.assignedTo}</Badge>
-                              </td>
-                              <td className="px-6 py-5 font-bold text-slate-600">{p.status === 'Drafting' ? getDraftElapsed(p, nowTick) : (p.draftingStartedAt ? getDraftElapsed(p, nowTick) : '-')}</td>
-                              <td className="px-6 py-5">
-                                <Badge colorClass={`border-transparent ${getStatusColor(p.status)}`}>{p.status}</Badge>
-                              </td>
-                            </tr>
-                          ))}
-                          {displayedProjects.length === 0 && (
-                            <tr><td colSpan={5} className="px-6 py-16 text-center text-slate-400 font-bold">No active projects found for this date.</td></tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className="lg:col-span-1 space-y-6">
-                <h3 className="text-xl font-extrabold text-slate-800 flex items-center tracking-tight"><Users className="w-6 h-6 mr-3 text-indigo-500" /> Team Activity</h3>
-                <div className="bg-white rounded-3xl p-6 shadow-sm border-2 border-slate-100 space-y-5">
-                  {getOperationalUsers(activeUsers, { includeAdmins: false }).filter(u => u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER).map(designer => {
-                    const designerOnline = isUserActuallyOnline(designer, nowTick);
-                    const activeTasks = designerOnline ? getUserActiveTasks(projects, designer.name) : [];
-                    const todayStart = new Date().setHours(0,0,0,0);
-                    
-                    const submittedToday = projects.filter(p => {
-                      if (p.assignedTo !== designer.name) return false;
-                      if (p.completedAt && p.completedAt >= todayStart) return true;
-                      if (p.submittedAt && p.submittedAt >= todayStart) return true;
-                      return false;
-                    }).length;
-
-                    let idleStatus = designerOnline ? "Available" : `Unavailable${designer.lastSeenAt || designer.lastLogoutAt || designer.lastHeartbeatAt ? ` - Last seen ${formatLastSeenDateTime(designer.lastSeenAt || designer.lastLogoutAt || designer.lastHeartbeatAt)}` : ''}`;
-                    if (designerOnline && designer.availability === 'Break') {
-                      idleStatus = `On break${designer.breakStartedAt ? ` for ${formatDuration(designer.breakStartedAt, nowTick)}` : ''}`;
-                    } else if (designerOnline && activeTasks.length === 0) {
-                      const recentlyCompleted = projects.filter(p => p.assignedTo === designer.name && (p.completedAt || p.submittedAt)).sort((a,b) => ((b.completedAt||b.submittedAt)||0) - ((a.completedAt||a.submittedAt)||0))[0];
-                      if (recentlyCompleted) {
-                         const hoursIdle = Math.floor((nowTick - (recentlyCompleted.completedAt||recentlyCompleted.submittedAt)) / (1000 * 60 * 60));
-                         idleStatus = recentlyCompleted ? `Free since ${formatDuration((recentlyCompleted.completedAt||recentlyCompleted.submittedAt), nowTick)}` : idleStatus;
-                      }
-                    }
-
-                    return (
-                      <div key={designer.id} className="border-b-2 border-slate-50 pb-5 last:border-0 last:pb-0">
-                        <div className="flex justify-between items-start mb-3">
-                          <p className="font-extrabold text-slate-800 text-base flex items-center">
-                            {!designerOnline ? (
-                                <span title="Unavailable" className="w-2.5 h-2.5 rounded-full mr-3 shadow-sm bg-slate-300"></span>
-                            ) : designer.availability === 'Break' ? (
-                                <span title="On Break" className="w-2.5 h-2.5 rounded-full mr-3 shadow-sm bg-amber-500 animate-pulse"></span>
-                            ) : activeTasks.length > 0 ? (
-                                <span title="Working" className="w-2.5 h-2.5 rounded-full mr-3 shadow-sm bg-emerald-500 animate-pulse"></span>
-                            ) : (
-                                <span title="Available" className="w-2.5 h-2.5 rounded-full mr-3 shadow-sm bg-blue-500"></span>
-                            )}
-                            {designer.name}
-                          </p>
-                          <span className="text-[10px] bg-indigo-50 border border-indigo-100 text-indigo-700 px-2.5 py-1 rounded-lg font-black uppercase tracking-wider">{submittedToday} done today</span>
-                        </div>
-                        {designerOnline && designer.availability !== 'Break' && activeTasks.length > 0 ? (
-                          <div className="ml-5 space-y-2">
-                            {activeTasks.map(at => {
-                              const pendingRevs = (at.subTasks||[]).filter(st => st.status === 'Pending').length;
-                              const totalRevs = (at.subTasks||[]).length;
-                              return (
-                                <div key={at.id} className="text-xs font-bold bg-slate-50 p-2.5 rounded-xl border border-slate-100 flex justify-between items-center group cursor-pointer hover:bg-slate-100 transition-colors" onClick={() => setSelectedProject(at)}>
-                                  <span className="text-slate-700 truncate mr-2">{at.id}<span className="block text-[10px] text-slate-400 font-black mt-0.5">Busy since {formatDuration(getTaskBusySince(at), nowTick)}</span></span>
-                                  {totalRevs > 0 && <span className="text-[10px] text-red-600 font-black bg-red-50 border border-red-100 px-2 py-0.5 rounded-md whitespace-nowrap uppercase tracking-wider">{pendingRevs} pending</span>}
-                                </div>
-                              )
-                            })}
-                          </div>
-                        ) : (
-                          <p className="text-xs text-slate-400 font-semibold ml-5 italic flex items-center"><Clock className="w-3 h-3 mr-1.5"/>{idleStatus}</p>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-          </div>
+          <ActiveOperationsView
+            activeTab={activeTab}
+            canManage={canManage}
+            selectedBoardDate={selectedBoardDate}
+            setSelectedBoardDate={setSelectedBoardDate}
+            boardViewMode={boardViewMode}
+            setBoardViewMode={setBoardViewMode}
+            setLeadFiles={setLeadFiles}
+            setShowNewLead={setShowNewLead}
+            displayedProjects={displayedProjects}
+            projects={projects}
+            activeUsers={activeUsers}
+            setSelectedProject={setSelectedProject}
+            nowTick={nowTick}
+            ROLES={ROLES}
+            getCustomerDisplayName={getCustomerDisplayName}
+            getDraftElapsed={getDraftElapsed}
+            getOperationalUsers={getOperationalUsers}
+            isUserActuallyOnline={isUserActuallyOnline}
+          />
         )}
       </main>
 

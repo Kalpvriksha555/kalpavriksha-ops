@@ -4,65 +4,8 @@ import { formatLastSeenDateTime } from '../../utils/date';
 import { createSafeMeetingRoomName, buildJitsiUrl } from '../../utils/meeting';
 import { copyTextToClipboard } from '../../utils/clipboard';
 import { MiniEmptyState } from '../shared';
-
-const ONLINE_STALE_MS = 2 * 60 * 1000;
-const toMs = (value) => {
-  if (!value) return 0;
-  if (typeof value === 'number') return value;
-  const n = Number(value);
-  if (Number.isFinite(n) && n > 0) return n;
-  const parsed = new Date(value).getTime();
-  return Number.isNaN(parsed) ? 0 : parsed;
-};
-const userLastActivityAt = (user = {}) => Math.max(
-  toMs(user.lastHeartbeatAt),
-  toMs(user.lastSeenAt),
-  toMs(user.lastLoginAt),
-  toMs(user.availabilityUpdatedAt)
-);
-const isUserActuallyOnline = (user = {}, nowMs = Date.now()) => {
-  if (!user || !user.isOnline) return false;
-  const lastActivity = userLastActivityAt(user);
-  return !!lastActivity && (nowMs - lastActivity) <= ONLINE_STALE_MS;
-};
-const normalizeRole = (role = '') => {
-  const value = String(role || '').trim().toUpperCase();
-  if (value === 'ADMIN') return 'Admin';
-  if (value === 'MANAGER') return 'Manager';
-  if (value === 'DESIGNER') return 'Designer';
-  return role || '';
-};
-const normalizeStatus = (status = 'APPROVED') => String(status || 'APPROVED').trim().toUpperCase() || 'APPROVED';
-const ROLES = { ADMIN: 'Admin', MANAGER: 'Manager', DESIGNER: 'Designer' };
-const normalizeChatUser = (u = {}) => {
-  const rawName = String(u.name || '').trim();
-  const rawUsername = String(u.username || '').trim();
-  const isKhushbu = /khus+h?bu|khushboo|khushbu/i.test(rawName) || /khus+h?bu|khushboo|khushbu/i.test(rawUsername);
-  const isWaqar = /ali\s*waqar|^ali$|^waqar$/i.test(rawName) || /ali|waqar/i.test(rawUsername);
-  return {
-    ...u,
-    name: isKhushbu ? 'Khushbu Pandey' : (isWaqar ? 'Waqar' : (rawName || u.name)),
-    username: isKhushbu ? 'khushbu' : (isWaqar ? 'waqar' : rawUsername),
-    role: normalizeRole(u.role),
-    status: normalizeStatus(u.status),
-    lastSeenAt: u.lastSeenAt || u.lastLogoutAt || null
-  };
-};
-const isSystemPlaceholderUser = (u = {}) => /operations\s*manager/i.test(String(u.name || '')) || String(u.id || '') === 'u-manager';
-const hasValidTeamRole = (u = {}) => [ROLES.ADMIN, ROLES.MANAGER, ROLES.DESIGNER].includes(normalizeRole(u.role));
-const isApprovedUser = (u = {}) => normalizeStatus(u.status) === 'APPROVED' && hasValidTeamRole(u) && !isSystemPlaceholderUser(u);
-const getOperationalUsers = (users = [], { includeAdmins = true } = {}) => (users || [])
-  .map(normalizeChatUser)
-  .filter(u => isApprovedUser(u) && (includeAdmins || u.role !== ROLES.ADMIN))
-  .sort((a, b) => {
-    const roleOrder = { [ROLES.ADMIN]: 0, [ROLES.MANAGER]: 1, [ROLES.DESIGNER]: 2 };
-    return (roleOrder[a.role] ?? 9) - (roleOrder[b.role] ?? 9) || String(a.name).localeCompare(String(b.name));
-  });
-const normalizePersonName = (name = '') => normalizeChatUser({ name, username: name }).name || name;
-const identityKey = (value = '') => normalizePersonName(String(value || '')).toLowerCase().replace(/[^a-z0-9]/g, '');
-const samePerson = (a = '', b = '') => identityKey(a) === identityKey(b);
-const readEntryName = (entry) => typeof entry === 'string' ? entry : (entry?.name || '');
-const hasReadBy = (message, userName) => (message?.readBy || []).some(r => samePerson(readEntryName(r), userName));
+import { getVisibleNotifications } from '../../services/notificationService';
+import { CHAT_API_BASE, absoluteChatUrl, makeMessageId, QUICK_EMOJIS, isUserActuallyOnline, getOperationalUsers, identityKey, samePerson, readEntryName, hasReadBy, ROLES, normalizeChannelKey, chatEmojiGroups, reactionEmojis } from '../../utils/chatUtils';
 
 export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onDeleteMessage, onUpdateMessage, onMarkMessagesRead, appId }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -80,6 +23,10 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const [showLatestButton, setShowLatestButton] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
+  const [voiceStartedAt, setVoiceStartedAt] = useState(null);
+  const [voiceNow, setVoiceNow] = useState(Date.now());
+  const [uploadingAttachment, setUploadingAttachment] = useState(null);
+  const [forwardMessageData, setForwardMessageData] = useState(null);
   const [actionMenu, setActionMenu] = useState(null);
   const [reactionMenu, setReactionMenu] = useState(null);
   const [replyTo, setReplyTo] = useState(null);
@@ -102,8 +49,6 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     try { const saved = JSON.parse(localStorage.getItem(pinnedKey) || '[]'); return Array.isArray(saved) ? saved.map(String) : []; } catch(e) { return []; }
   });
   const readThroughRef = useRef(localReadState);
-  const normalizeChannelKey = (channel) => channel === 'global' ? 'global' : identityKey(channel);
-
   const chatUsers = getOperationalUsers(users || [], { includeAdmins: true }).filter(u => !samePerson(u.name, currentUser.name));
   const liveCurrentUser = getOperationalUsers(users || [], { includeAdmins: true }).find(u => samePerson(u.name, currentUser.name)) || currentUser;
   const currentUserOnline = isUserActuallyOnline(liveCurrentUser, presenceNow);
@@ -111,15 +56,6 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const activePeerOnline = activePeer ? isUserActuallyOnline(activePeer, presenceNow) : false;
   const activeCallRoom = activePeer ? createSafeMeetingRoomName('KalpaVriksha_DM', appId || 'kalpavriksha_production_v1', ...[currentUser.name, activePeer.name].sort()) : '';
   const activeCallUrl = activePeer ? buildJitsiUrl(activeCallRoom, currentUser.name, { audioOnly: callAudioOnly, shareScreen: callShareScreen }) : '';
-
-  const chatEmojiGroups = [
-    { label: 'Quick reactions', emojis: ['👍','❤️','😂','😮','😢','👏','🎉','🔥','✅','👀','🙏','🤝','🙌','💯','⭐','✨'] },
-    { label: 'Smileys', emojis: ['😀','😃','😄','😁','😊','🙂','😉','😎','🤩','😅','🤣','😂','🥹','😍','😘','😇','🤔','🫡','🤫','😐','🙄','😮','😯','😴','😢','😭','😡','😤','🤯'] },
-    { label: 'Work', emojis: ['📌','📎','📝','📁','📂','📄','📊','📈','📉','🗂️','🧾','🖊️','🧮','🏗️','🏠','📐','📏','🧱','💼','📅','⏰','⏳','🔔','💬','📞','🎥'] },
-    { label: 'Status', emojis: ['✅','☑️','✔️','❌','⚠️','🚨','🔴','🟠','🟡','🟢','🔵','🟣','⬆️','⬇️','➡️','🔁','🔄','📍','🎯','🚀','🏁','🔒','🔓'] },
-    { label: 'Celebration', emojis: ['🎉','🥳','🏆','🥇','🙌','👏','💪','🔥','⭐','✨','💯','🌟','🎊','🍰','☕','🌈'] },
-  ];
-  const reactionEmojis = ['👍','❤️','😂','😮','😢','👏','🎉','🔥','✅','👀','🙏','🤝','🙌','💯','⭐','✨','⚠️','🚀'];
 
   useEffect(() => {
     try { const saved = JSON.parse(localStorage.getItem(localReadKey) || '{}'); readThroughRef.current = saved; setLocalReadState(saved); } catch(e) { readThroughRef.current = {}; setLocalReadState({}); }
@@ -138,6 +74,11 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     const timer = setInterval(() => setCallNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
+  useEffect(() => {
+    if (!isRecordingVoice) return;
+    const timer = setInterval(() => setVoiceNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [isRecordingVoice]);
   useEffect(() => {
     if (isOpen && !chatSearch) chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [isOpen, chatMessages.length, activeChannel, isCalling, chatSearch]);
@@ -216,12 +157,14 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       const sentAt = Number(m.sentAt || m.id || 0);
       if (sentAt && cutoff && sentAt <= cutoff) return false;
       if (isOpen && samePerson(activeChannel, userName)) return false;
+      if (hasReadBy(m, currentUser.name)) return false;
       return true;
     }).length;
   };
 
   const unreadDirectTotal = chatUsers.reduce((sum, u) => sum + getDirectUnreadCountForUser(u.name), 0);
-  const totalUnreadCount = isOpen ? unreadMessages.filter(m => !isMessageInActiveChannel(m)).length + unreadDirectTotal : Math.max(unreadMessages.length, unreadGlobalCount + unreadDirectTotal);
+  const totalUnreadCount = unreadMessages.length;
+  const latestUnreadMessage = unreadMessages.slice().sort((a, b) => Number(b.sentAt || b.id || 0) - Number(a.sentAt || a.id || 0))[0];
   const hasUnreadGlobalMention = unreadMessages.some(m => (m.recipient === 'global' || !m.recipient) && (m.text?.includes(`@${currentUser.name}`) || m.text?.includes('@all')));
 
   useEffect(() => {
@@ -250,7 +193,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const handleSend = () => {
     const text = msg.trim();
     if (!text) return;
-    const now = Date.now();
+    const now = makeMessageId();
     const nowText = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
     if (editingMessage) {
       const updated = { ...editingMessage, text, edited: true, editedAt: now, time: editingMessage.time || nowText };
@@ -292,7 +235,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   };
 
   const createBaseMessage = (overrides = {}) => {
-    const now = Date.now();
+    const now = makeMessageId();
     const senderRole = users.find(u => samePerson(u.name, currentUser.name))?.role || '';
     return {
       id: now,
@@ -307,20 +250,67 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     };
   };
 
+
+  const uploadChatFileToServer = async (file, type = 'chat') => {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('type', type);
+    form.append('by', currentUser?.name || 'Team');
+    form.append('role', currentUser?.role || 'USER');
+    const res = await fetch(`${CHAT_API_BASE}/api/files/upload`, { method: 'POST', body: form });
+    if (!res.ok) throw new Error(await res.text());
+    const payload = await res.json();
+    return payload.file || {};
+  };
+
+  const buildAttachmentMessage = (fileMeta = {}, fallback = {}, extra = {}) => {
+    const fileName = fileMeta.name || fallback.name || 'Attachment';
+    const fileType = fileMeta.mime || fileMeta.mimeType || fallback.type || '';
+    const fileSize = fileMeta.size || fallback.size || 0;
+    const url = fileMeta.url ? absoluteChatUrl(fileMeta.url) : (fileMeta.downloadUrl ? absoluteChatUrl(fileMeta.downloadUrl) : fallback.url || '');
+    const downloadUrl = fileMeta.downloadUrl ? absoluteChatUrl(fileMeta.downloadUrl) : url;
+    const fileRecord = {
+      ...fileMeta,
+      id: fileMeta.id || fallback.id,
+      name: fileName,
+      storedName: fileMeta.storedName,
+      mime: fileType,
+      mimeType: fileType,
+      size: fileSize,
+      url: fileMeta.url || fallback.url || '',
+      downloadUrl: fileMeta.downloadUrl || fileMeta.url || fallback.url || ''
+    };
+    return createBaseMessage({
+      text: extra.text || `Shared attachment: ${fileName}`,
+      fileName,
+      fileUrl: url,
+      downloadUrl,
+      fileType,
+      fileSize,
+      files: [fileRecord],
+      localPreviewOnly: !!extra.localPreviewOnly,
+      uploadStatus: extra.uploadStatus || 'ready',
+      replyTo: replyTo ? { id: replyTo.id, sender: replyTo.sender, text: replyTo.text || replyTo.fileName || 'Attachment' } : null,
+      ...extra
+    });
+  };
+
   const handleChatFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    onSendMessage(createBaseMessage({
-      text: `Shared attachment: ${file.name}`,
-      fileName: file.name,
-      fileUrl: URL.createObjectURL(file),
-      fileType: file.type || '',
-      localPreviewOnly: true,
-      fileSize: file.size || 0,
-      replyTo: replyTo ? { id: replyTo.id, sender: replyTo.sender, text: replyTo.text || replyTo.fileName || 'Attachment' } : null,
-    }));
-    setReplyTo(null);
-    if (e?.target) e.target.value = '';
+    const previewUrl = URL.createObjectURL(file);
+    setUploadingAttachment({ name: file.name, size: file.size || 0, type: file.type || '' });
+    try {
+      const fileMeta = await uploadChatFileToServer(file, 'chat');
+      onSendMessage(buildAttachmentMessage(fileMeta, { name: file.name, type: file.type, size: file.size, url: previewUrl }));
+    } catch (error) {
+      console.error('Chat attachment upload failed, sending local preview only:', error);
+      onSendMessage(buildAttachmentMessage({}, { name: file.name, type: file.type, size: file.size, url: previewUrl }, { localPreviewOnly: true, uploadStatus: 'local-only', text: `Shared attachment: ${file.name}` }));
+    } finally {
+      setUploadingAttachment(null);
+      setReplyTo(null);
+      if (e?.target) e.target.value = '';
+    }
   };
 
   const startVoiceRecording = async () => {
@@ -336,28 +326,34 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       recorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) voiceChunksRef.current.push(event.data);
       };
-      recorder.onstop = () => {
+      recorder.onstop = async () => {
         const blob = new Blob(voiceChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
         stream.getTracks().forEach(track => track.stop());
         setIsRecordingVoice(false);
+        setVoiceStartedAt(null);
         if (!blob.size) return;
-        const createdAt = Date.now();
-        onSendMessage(createBaseMessage({
-          id: createdAt,
-          text: 'Shared voice note',
-          fileName: `voice-note-${createdAt}.webm`,
-          fileUrl: URL.createObjectURL(blob),
-          fileType: blob.type || 'audio/webm',
-          localPreviewOnly: true,
-          fileSize: blob.size,
-          sentAt: createdAt,
-        }));
+        const createdAt = makeMessageId();
+        const file = new File([blob], `voice-note-${createdAt}.webm`, { type: blob.type || 'audio/webm' });
+        const previewUrl = URL.createObjectURL(blob);
+        setUploadingAttachment({ name: file.name, size: blob.size, type: file.type, voice: true });
+        try {
+          const fileMeta = await uploadChatFileToServer(file, 'chat');
+          onSendMessage(buildAttachmentMessage(fileMeta, { name: file.name, type: file.type, size: blob.size, url: previewUrl }, { id: createdAt, text: '🎙️ Shared voice note', sentAt: createdAt, isVoiceNote: true }));
+        } catch (error) {
+          console.error('Voice note upload failed, sending local preview only:', error);
+          onSendMessage(buildAttachmentMessage({}, { name: file.name, type: file.type, size: blob.size, url: previewUrl }, { id: createdAt, text: '🎙️ Shared voice note', sentAt: createdAt, localPreviewOnly: true, uploadStatus: 'local-only', isVoiceNote: true }));
+        } finally {
+          setUploadingAttachment(null);
+        }
       };
       recorder.start();
+      setVoiceStartedAt(Date.now());
+      setVoiceNow(Date.now());
       setIsRecordingVoice(true);
     } catch (error) {
       console.error('Voice note recording failed', error);
       setIsRecordingVoice(false);
+      setVoiceStartedAt(null);
       alert('Microphone permission is needed to record a voice note.');
     }
   };
@@ -366,10 +362,11 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     try {
       const recorder = mediaRecorderRef.current;
       if (recorder && recorder.state !== 'inactive') recorder.stop();
-      else setIsRecordingVoice(false);
+      else { setIsRecordingVoice(false); setVoiceStartedAt(null); }
     } catch (error) {
       console.error('Voice note stop failed', error);
       setIsRecordingVoice(false);
+      setVoiceStartedAt(null);
     }
   };
 
@@ -446,12 +443,35 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   };
 
   const forwardMessage = (m) => {
-    const body = m.text || m.fileName || 'Attachment';
     setEditingMessage(null);
     setReplyTo(null);
-    setMsg(`Forwarded from ${m.sender}: ${body}`);
+    setForwardMessageData(m);
     setActionMenu(null);
-    composerRef.current?.focus?.();
+  };
+
+  const sendForwardTo = (target) => {
+    const source = forwardMessageData;
+    if (!source) return;
+    const now = makeMessageId();
+    const summary = source.text || source.fileName || 'Attachment';
+    const forwarded = createBaseMessage({
+      id: now,
+      recipient: target,
+      sentAt: now,
+      text: `↗ Forward to...ed from ${source.sender}: ${summary}`,
+      forwardedFrom: { id: source.id, sender: source.sender, text: summary },
+      fileName: source.fileName || '',
+      fileUrl: source.fileUrl || '',
+      downloadUrl: source.downloadUrl || '',
+      fileType: source.fileType || '',
+      fileSize: source.fileSize || 0,
+      files: source.files || [],
+      roomUrl: source.roomUrl || '',
+      callType: source.callType || ''
+    });
+    onSendMessage(forwarded);
+    setForwardMessageData(null);
+    setActiveChannel(target);
   };
 
   const copyMessage = async (m) => {
@@ -514,32 +534,49 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     if (/\.pdf$/i.test(lower)) return 'PDF';
     if (/\.(xls|xlsx|csv)$/i.test(lower)) return 'Sheet';
     if (/\.(doc|docx)$/i.test(lower)) return 'Document';
+    if (/\.(ppt|pptx)$/i.test(lower)) return 'Presentation';
     if (/\.(dwg|dxf)$/i.test(lower)) return 'Drawing';
     return 'File';
   };
 
   const renderAttachmentPreview = (m, isMine) => {
-    if (!m.fileUrl) return null;
-    const fileName = m.fileName || 'Attachment';
-    const fileType = m.fileType || '';
+    const fileUrl = absoluteChatUrl(m.downloadUrl || m.fileUrl || m.files?.[0]?.downloadUrl || m.files?.[0]?.url || '');
+    if (!fileUrl) return null;
+    const fileName = m.fileName || m.files?.[0]?.name || 'Attachment';
+    const fileType = m.fileType || m.files?.[0]?.mime || m.files?.[0]?.mimeType || '';
     const lower = String(fileName).toLowerCase();
     const isImage = String(fileType).startsWith('image/') || /\.(jpg|jpeg|png|gif|webp)$/i.test(lower);
     const isVideo = String(fileType).startsWith('video/') || /\.(mp4|mov|avi|mkv|webm)$/i.test(lower);
     const isAudio = String(fileType).startsWith('audio/') || /\.(webm|mp3|wav|m4a|ogg)$/i.test(lower);
+    const isPdf = /\.pdf$/i.test(lower) || String(fileType).includes('pdf');
+    const label = getAttachmentLabel(fileName, fileType);
     return (
-      <div className={`mt-3 rounded-2xl border overflow-hidden ${isMine ? 'border-indigo-300 bg-indigo-500/20' : 'border-slate-100 bg-slate-50'}`}>
-        {isImage && <img src={m.fileUrl} alt={fileName} className="block max-h-56 w-full object-cover" />}
-        {isVideo && <video src={m.fileUrl} controls className="block max-h-56 w-full bg-black" />}
-        {isAudio && <div className="p-3"><audio src={m.fileUrl} controls className="w-full" /></div>}
-        <div className="p-3 flex items-center justify-between gap-3">
+      <div className={`kalpa-chat-attachment mt-3 rounded-2xl border overflow-hidden ${isMine ? 'border-indigo-300 bg-indigo-500/20' : 'border-slate-100 bg-slate-50'}`}>
+        {isImage && <a href={fileUrl} target="_blank" rel="noreferrer" className="block"><img src={fileUrl} alt={fileName} loading="lazy" className="kalpa-chat-attachment-image block max-h-64 w-full object-contain bg-black/5" /></a>}
+        {isVideo && <video src={fileUrl} controls preload="metadata" className="block max-h-64 w-full bg-black" />}
+        {isAudio && <div className="p-3"><div className={`text-[10px] font-black uppercase tracking-widest mb-2 ${isMine ? 'text-indigo-100' : 'text-indigo-600'}`}>{m.isVoiceNote ? 'Voice note' : 'Audio attachment'}</div><audio src={fileUrl} controls preload="metadata" className="w-full" /></div>}
+        {!isImage && !isVideo && !isAudio && (
+          <div className={`p-4 flex items-center gap-3 ${isMine ? 'bg-indigo-500/20' : 'bg-white'}`}>
+            <div className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 ${isMine ? 'bg-white/15 text-white' : 'bg-indigo-50 text-indigo-600'}`}><FileIcon className="w-5 h-5" /></div>
+            <div className="min-w-0 flex-1">
+              <p className={`text-sm font-black truncate ${isMine ? 'text-white' : 'text-slate-800'}`}>{fileName}</p>
+              <p className={`text-[10px] font-bold uppercase tracking-wider ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>{label}{getReadableFileSize(m.fileSize || m.files?.[0]?.size) ? ` • ${getReadableFileSize(m.fileSize || m.files?.[0]?.size)}` : ''}</p>
+            </div>
+          </div>
+        )}
+        {isPdf && <div className={`px-3 pb-3 ${isMine ? 'bg-indigo-500/20' : 'bg-white'}`}><object data={fileUrl} type="application/pdf" className="w-full h-40 rounded-xl border border-slate-200 bg-white"><p className="text-xs text-slate-400 p-3">PDF preview unavailable. Open the file below.</p></object></div>}
+        <div className={`p-3 flex items-center justify-between gap-3 border-t ${isMine ? 'border-indigo-300/40' : 'border-slate-100'}`}>
           <div className="min-w-0 flex items-center gap-2">
             <FileIcon className={`w-4 h-4 shrink-0 ${isMine ? 'text-white' : 'text-indigo-500'}`} />
             <div className="min-w-0">
               <p className={`text-xs font-black truncate ${isMine ? 'text-white' : 'text-slate-700'}`}>{fileName}</p>
-              <p className={`text-[10px] font-bold ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>{getAttachmentLabel(fileName, fileType)} {getReadableFileSize(m.fileSize) ? `• ${getReadableFileSize(m.fileSize)}` : ''}</p>
+              <p className={`text-[10px] font-bold ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>{label} {getReadableFileSize(m.fileSize || m.files?.[0]?.size) ? `• ${getReadableFileSize(m.fileSize || m.files?.[0]?.size)}` : ''}{m.localPreviewOnly ? ' • local preview' : ''}</p>
             </div>
           </div>
-          <a href={m.fileUrl} download={fileName} target="_blank" rel="noreferrer" className={`px-3 py-1.5 rounded-lg text-[11px] font-black shrink-0 ${isMine ? 'bg-white text-indigo-700' : 'bg-white text-indigo-700 border border-indigo-100'}`}>Open</a>
+          <div className="flex items-center gap-2 shrink-0">
+            <a href={fileUrl} target="_blank" rel="noreferrer" className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white/90 text-slate-700' : 'bg-white text-indigo-700 border border-indigo-100'}`}>Open</a>
+            <a href={fileUrl} download={fileName} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white text-indigo-700' : 'bg-indigo-600 text-white'}`}>Download</a>
+          </div>
         </div>
       </div>
     );
@@ -652,7 +689,8 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
                           {isMine && <button type="button" onClick={(e) => openActionMenu(e, m)} className="mt-2 w-8 h-8 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 shadow-sm flex items-center justify-center opacity-100" title="Message options">⋮</button>}
                           <div className={`kalpa-chat-bubble px-4 py-2.5 rounded-2xl text-[15px] font-medium leading-relaxed shadow-sm relative break-words ${pinned ? 'ring-2 ring-amber-300' : ''} ${isMine ? 'bg-indigo-600 text-white rounded-tr-sm' : 'bg-white border border-slate-200 text-slate-800 rounded-tl-sm'}`} style={{ maxWidth: m.fileUrl ? 'min(520px, 84vw)' : 'min(620px, 78vw)', minWidth: 0, overflow: 'visible' }}>
                             {pinned && <span className={`absolute -top-2 ${isMine ? 'right-3 bg-amber-200 text-amber-900' : 'left-3 bg-amber-100 text-amber-700'} text-[9px] font-black px-2 py-0.5 rounded-full border border-amber-200`}>PINNED</span>}
-                            {m.replyTo && <div className={`mb-2 border-l-4 pl-2 py-1 rounded ${isMine ? 'border-white/70 bg-indigo-500/30' : 'border-indigo-300 bg-indigo-50'}`}><p className={`text-[10px] font-black ${isMine ? 'text-indigo-100' : 'text-indigo-600'}`}>Replying to {m.replyTo.sender}</p><p className={`text-xs truncate ${isMine ? 'text-white/90' : 'text-slate-500'}`}>{m.replyTo.text}</p></div>}
+                            {m.replyTo && <button type="button" onClick={() => jumpToPinnedMessage(m.replyTo.id)} className={`w-full text-left mb-2 border-l-4 pl-2 py-1 rounded ${isMine ? 'border-white/70 bg-indigo-500/30' : 'border-indigo-300 bg-indigo-50'}`}><p className={`text-[10px] font-black ${isMine ? 'text-indigo-100' : 'text-indigo-600'}`}>Replying to {m.replyTo.sender}</p><p className={`text-xs truncate ${isMine ? 'text-white/90' : 'text-slate-500'}`}>{m.replyTo.text}</p></button>}
+                            {m.forwardedFrom && <div className={`mb-2 border-l-4 pl-2 py-1 rounded ${isMine ? 'border-white/70 bg-indigo-500/30' : 'border-amber-300 bg-amber-50'}`}><p className={`text-[10px] font-black ${isMine ? 'text-indigo-100' : 'text-amber-700'}`}>Forwarded from {m.forwardedFrom.sender}</p><p className={`text-xs truncate ${isMine ? 'text-white/90' : 'text-slate-500'}`}>{m.forwardedFrom.text}</p></div>}
                             <div className={m.deleted ? 'italic opacity-75' : ''}>{renderMessageText(m.text)} {m.edited && !m.deleted && <span className={`text-[10px] ml-1 ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>(edited)</span>}</div>
                             {m.roomUrl && (
                               <div className={`mt-3 rounded-xl p-3 border ${isMine ? 'bg-indigo-500/30 border-indigo-300' : 'bg-indigo-50 border-indigo-100'}`}>
@@ -685,6 +723,8 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
             {!isCalling && (
               <div className="kalpa-chat-inputbar p-3 bg-white border-t-2 border-slate-100 flex flex-col gap-2 z-10 relative shrink-0">
                 {(replyTo || editingMessage) && <div className="flex items-center justify-between gap-3 bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-2"><div className="min-w-0"><p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">{editingMessage ? 'Editing message' : `Replying to ${replyTo?.sender}`}</p><p className="text-xs font-bold text-slate-600 truncate">{editingMessage?.text || replyTo?.text || replyTo?.fileName}</p></div><button type="button" onClick={clearComposerContext} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button></div>}
+                {uploadingAttachment && <div className="flex items-center justify-between gap-3 bg-slate-50 border border-slate-100 rounded-xl px-3 py-2"><div className="min-w-0"><p className="text-[10px] font-black uppercase tracking-widest text-slate-500">{uploadingAttachment.voice ? 'Saving voice note' : 'Uploading attachment'}</p><p className="text-xs font-bold text-slate-600 truncate">{uploadingAttachment.name} {getReadableFileSize(uploadingAttachment.size) ? `• ${getReadableFileSize(uploadingAttachment.size)}` : ''}</p></div><span className="w-4 h-4 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin shrink-0" /></div>}
+                {isRecordingVoice && <div className="flex items-center justify-between gap-3 bg-red-50 border border-red-100 rounded-xl px-3 py-2"><div><p className="text-[10px] font-black uppercase tracking-widest text-red-600">Recording voice note</p><p className="text-xs font-bold text-red-500">{voiceStartedAt ? `${Math.floor((voiceNow - voiceStartedAt)/60000)}:${String(Math.floor(((voiceNow - voiceStartedAt)%60000)/1000)).padStart(2,'0')}` : '0:00'}</p></div><button type="button" onClick={stopVoiceRecording} className="bg-red-600 text-white px-3 py-1.5 rounded-lg text-[11px] font-black">Stop</button></div>}
                 {showEmojiPicker && (
                   <div
                     className="fixed bg-white border border-slate-100 rounded-2xl shadow-2xl p-3 z-[99998] overflow-hidden"
@@ -724,9 +764,10 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
                   </div>
                 )}
                 <div className="kalpa-chat-composer flex flex-col gap-2">
+                  <div className="kalpa-chat-quick-emojis flex items-center gap-1 overflow-x-auto custom-scrollbar pb-0.5">{QUICK_EMOJIS.map(emoji => <button type="button" key={emoji} onClick={() => addEmojiToMessage(emoji)} className="shrink-0 w-9 h-8 rounded-xl bg-slate-50 hover:bg-indigo-50 text-lg border border-slate-100 hover:border-indigo-100 transition-all">{emoji}</button>)}</div>
                   <textarea ref={composerRef} rows={2} value={msg} onChange={handleInputChange} onKeyDown={handleMessageKeyDown} placeholder={editingMessage ? 'Edit your message...' : activeChannel === 'global' ? 'Message team or @mention...' : `Message ${activeChannel}...`} className="kalpa-chat-textarea w-full bg-slate-50 border border-slate-100 rounded-xl px-4 py-3 text-base font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all resize-none" style={{ minHeight: 58, maxHeight: 132, overflowY: 'auto' }} />
                   <div className="kalpa-chat-actions-row flex items-center gap-2">
-                    <label title="Attach file" className="kalpa-chat-tool-btn p-2.5 text-slate-400 hover:text-indigo-600 bg-slate-50 hover:bg-indigo-50 rounded-xl transition-colors cursor-pointer"><Paperclip className="w-5 h-5" /><input type="file" className="hidden" accept="image/*,video/*,.pdf,.dwg,.dxf,.xls,.xlsx,.csv,.doc,.docx" onChange={handleChatFileUpload} /></label>
+                    <label title="Attach file" className="kalpa-chat-tool-btn p-2.5 text-slate-400 hover:text-indigo-600 bg-slate-50 hover:bg-indigo-50 rounded-xl transition-colors cursor-pointer"><Paperclip className="w-5 h-5" /><input type="file" className="hidden" accept="image/*,video/*,audio/*,.pdf,.dwg,.dxf,.xls,.xlsx,.csv,.doc,.docx,.ppt,.pptx,.zip,.rar" onChange={handleChatFileUpload} /></label>
                     <button type="button" title="Add emoji" onClick={() => setShowEmojiPicker(v => !v)} className={`kalpa-chat-tool-btn p-2.5 rounded-xl transition-colors ${showEmojiPicker ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}><Smile className="w-5 h-5" /></button>
                     <button type="button" title={isRecordingVoice ? 'Stop voice note' : 'Record voice note'} onClick={isRecordingVoice ? stopVoiceRecording : startVoiceRecording} className={`kalpa-chat-tool-btn p-2.5 rounded-xl transition-colors ${isRecordingVoice ? 'bg-red-50 text-red-600 animate-pulse' : 'bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}>{isRecordingVoice ? <Square className="w-5 h-5" /> : <Mic className="w-5 h-5" />}</button>
                     <div className="flex-1" />
@@ -739,12 +780,28 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
         </div>
       )}
 
+
+      {forwardMessageData && (
+        <div className="fixed inset-0 z-[99998] bg-slate-900/30 backdrop-blur-sm flex items-end sm:items-center justify-center p-3" onClick={() => setForwardMessageData(null)}>
+          <div className="bg-white rounded-3xl shadow-2xl border border-slate-100 w-full max-w-md overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+              <div><p className="text-sm font-black text-slate-800">Forward message</p><p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest truncate max-w-xs">{forwardMessageData.text || forwardMessageData.fileName || 'Attachment'}</p></div>
+              <button type="button" onClick={() => setForwardMessageData(null)} className="p-2 rounded-xl bg-slate-50 text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="max-h-[55vh] overflow-y-auto p-2 custom-scrollbar">
+              <button type="button" onClick={() => sendForwardTo('global')} className="w-full text-left px-4 py-3 rounded-2xl hover:bg-indigo-50 font-bold text-slate-700 flex items-center gap-3"><Hash className="w-4 h-4 text-indigo-500" /> Global Chat</button>
+              {chatUsers.map(u => <button type="button" key={`fwd-${u.id}`} onClick={() => sendForwardTo(u.name)} className="w-full text-left px-4 py-3 rounded-2xl hover:bg-indigo-50 font-bold text-slate-700 flex items-center gap-3"><User className="w-4 h-4 text-indigo-500" /> <span className="truncate">{u.name}</span><span className="ml-auto text-[10px] font-black text-slate-300 uppercase">{u.role}</span></button>)}
+            </div>
+          </div>
+        </div>
+      )}
+
       {actionMenu && activeActionMessage && (
         <div className="fixed z-[99999] bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden w-56" style={{ left: actionMenu.x, top: actionMenu.y }} onClick={(e) => e.stopPropagation()}>
           <button type="button" onClick={() => replyToMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">↩ Reply</button>
           <button type="button" onClick={() => togglePinMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">{isPinnedMessage(activeActionMessage) ? '★ Unpin' : '☆ Pin'}</button>
           <button type="button" onClick={(e) => openReactionMenu(e, activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">😊 React</button>
-          <button type="button" onClick={() => forwardMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">↗ Forward</button>
+          <button type="button" onClick={() => forwardMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">↗ Forward to...</button>
           <button type="button" onClick={() => copyMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">⧉ Copy</button>
           {samePerson(activeActionMessage.sender, currentUser.name) && !activeActionMessage.deleted && <button type="button" onClick={() => editMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">✎ Edit</button>}
           <button type="button" onClick={() => deleteForMe(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">Hide for me</button>
@@ -758,9 +815,27 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
         </div>
       )}
 
+      {latestUnreadMessage && !isOpen && (
+        <button type="button" onClick={() => {
+          const target = (latestUnreadMessage.recipient === 'global' || !latestUnreadMessage.recipient) ? 'global' : latestUnreadMessage.sender;
+          setActiveChannel(target);
+          setIsOpen(true);
+          window.setTimeout(() => markCurrentChannelReadNow(target), 100);
+        }} className="mb-3 w-[320px] max-w-[calc(100vw-2rem)] text-left bg-white border border-indigo-100 rounded-2xl shadow-xl p-3 animate-in slide-in-from-bottom-2 hover:shadow-2xl transition-shadow">
+          <div className="flex items-start gap-3">
+            <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0"><MessageSquare className="w-5 h-5" /></div>
+            <div className="min-w-0 flex-1">
+              <p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">New chat message</p>
+              <p className="text-sm font-black text-slate-800 truncate">{latestUnreadMessage.sender || 'Team'}</p>
+              <p className="text-xs font-semibold text-slate-500 truncate">{latestUnreadMessage.text || latestUnreadMessage.fileName || 'Attachment'}</p>
+            </div>
+          </div>
+        </button>
+      )}
+
       <button type="button" onClick={() => { const nextOpen = !isOpen; setIsOpen(nextOpen); if (nextOpen) markCurrentChannelReadNow(activeChannel); }} className="bg-slate-800 hover:bg-slate-700 text-white p-4 rounded-2xl shadow-xl shadow-slate-300 transition-all hover:scale-105 relative">
         <MessageSquare className="w-7 h-7" />
-        {totalUnreadCount > 0 && !isOpen && <span className="absolute -top-2 -right-2 bg-red-500 text-white text-[11px] font-black px-2.5 py-1 rounded-full border-2 border-white shadow-sm animate-pulse">{totalUnreadCount}</span>}
+        {totalUnreadCount > 0 && !isOpen && <span className="absolute -top-2 -right-2 bg-red-500 text-white text-[11px] font-black px-2.5 py-1 rounded-full border-2 border-white shadow-sm animate-pulse">{totalUnreadCount > 99 ? '99+' : totalUnreadCount}</span>}
       </button>
     </div>
   );

@@ -1,30 +1,25 @@
 import React, { useState } from 'react';
 import { User, Upload, Lock, CheckCircle } from 'lucide-react';
+import { uploadProfilePhoto } from '../../services/profileService';
+import {
+  buildInitialProfileDraft,
+  buildPasswordUpdatePayload,
+  buildProfileSavePayload,
+  buildRegisteredEmailPayload,
+  buildRegisteredMobilePayload,
+  getProfilePhotoVersion,
+  isValidEmail,
+  maskEmail,
+  normalizeEmail,
+  normalizePhone,
+  profilePhotoUrl,
+  validatePasswordChange
+} from '../../utils/profileUtils';
 
 const ROLES = { ADMIN: 'Admin', MANAGER: 'Manager', DESIGNER: 'Designer' };
-const API_BASE = import.meta.env.VITE_API_BASE || import.meta.env.VITE_API_URL || 'http://localhost:8080';
-const mediaUrl = (value = '', version = '') => {
-  let url = String(value || '').trim();
-  if (!url) return '';
-  if (/^(blob:|data:|https?:\/\/)/i.test(url)) return url;
-  if (url.startsWith('/uploads/')) url = url.replace('/uploads/', '/api/profile/photo/');
-  if (url.startsWith('uploads/')) url = url.replace('uploads/', '/api/profile/photo/');
-  const full = url.startsWith('/') ? `${API_BASE}${url}` : `${API_BASE}/${url.replace(/^\/+/, '')}`;
-  return version ? `${full}${full.includes('?') ? '&' : '?'}v=${encodeURIComponent(version)}` : full;
-};
 
 export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToBase64, sendRealOtp, verifyRealOtp }) => {
-  const [draft, setDraft] = useState({
-    phone: currentUser.phone || '',
-    email: currentUser.email || '',
-    address: currentUser.address || '',
-    aadharNumber: currentUser.aadharNumber || '',
-    panNumber: currentUser.panNumber || '',
-    emergencyContact: currentUser.emergencyContact || '',
-    designation: currentUser.designation || currentUser.role || '',
-    bankDetails: currentUser.bankDetails || '',
-    profilePhoto: currentUser.profilePhoto || ''
-  });
+  const [draft, setDraft] = useState(() => buildInitialProfileDraft(currentUser));
   const [saved, setSaved] = useState(false);
   const [photoMessage, setPhotoMessage] = useState('');
   const [photoUploading, setPhotoUploading] = useState(false);
@@ -57,16 +52,9 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
       // Preview is helpful but upload should still continue even if preview fails.
     }
 
-    const form = new FormData();
-    form.append('photo', file);
-    form.append('userId', String(currentUser.id || ''));
-    form.append('username', String(currentUser.username || ''));
-
     setPhotoUploading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/profile/photo`, { method: 'POST', body: form });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) throw new Error(data.error || 'Profile photo upload failed.');
+      const data = await uploadProfilePhoto({ file, user: currentUser });
       const profilePhoto = data.profilePhoto || data.url || preview;
       const updated = { ...currentUser, profilePhoto, profilePhotoUpdatedAt: Date.now(), profileUpdatedAt: Date.now() };
       setDraft(prev => ({ ...prev, profilePhoto }));
@@ -83,9 +71,8 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
   };
 
   const handleSave = () => {
-    const phoneChanged = String(draft.phone || '').replace(/\D/g, '') !== String(currentUser.phone || '').replace(/\D/g, '');
-    const emailChanged = String(draft.email || '').trim().toLowerCase() !== String(currentUser.email || '').trim().toLowerCase();
-    const updated = { ...currentUser, ...draft, mobileRegistered: phoneChanged ? false : !!currentUser.mobileRegistered, emailRegistered: emailChanged ? false : !!currentUser.emailRegistered, profileUpdatedAt: Date.now() };
+    const updated = buildProfileSavePayload(currentUser, draft);
+    setDraft(prev => ({ ...prev, email: updated.email }));
     setCurrentUser(updated);
     onUpdateUser(updated);
     setSaved(true);
@@ -94,19 +81,12 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
 
   const handleChangePassword = () => {
     setPasswordMessage('');
-    if ((currentUser.password || '123') !== passwordForm.current) {
-      setPasswordMessage('Current password is incorrect.');
+    const validationMessage = validatePasswordChange(currentUser, passwordForm);
+    if (validationMessage) {
+      setPasswordMessage(validationMessage);
       return;
     }
-    if (!passwordForm.next || passwordForm.next.length < 3) {
-      setPasswordMessage('New password must be at least 3 characters.');
-      return;
-    }
-    if (passwordForm.next !== passwordForm.confirm) {
-      setPasswordMessage('New password and confirm password do not match.');
-      return;
-    }
-    const updated = { ...currentUser, password: passwordForm.next, passwordUpdatedAt: Date.now() };
+    const updated = buildPasswordUpdatePayload(currentUser, passwordForm);
     setCurrentUser(updated);
     onUpdateUser(updated);
     setPasswordForm({ current: '', next: '', confirm: '' });
@@ -115,7 +95,7 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
 
   const sendMobileRegistrationOtp = async () => {
     setMobileMessage('');
-    const clean = String(draft.phone || '').replace(/\D/g, '');
+    const clean = normalizePhone(draft.phone);
     if (clean.length < 10) {
       setMobileMessage('Enter a valid mobile number before sending OTP.');
       return;
@@ -141,7 +121,7 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
       setMobileMessage(err.message || 'Invalid OTP. Please try again.');
       return;
     }
-    const updated = { ...currentUser, ...draft, mobileRegistered: true, mobileRegisteredAt: Date.now(), profileUpdatedAt: Date.now() };
+    const updated = buildRegisteredMobilePayload(currentUser, draft);
     setCurrentUser(updated);
     onUpdateUser(updated);
     setMobileChallengeId('');
@@ -152,8 +132,8 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
 
   const sendEmailRegistrationOtp = async () => {
     setEmailMessage('');
-    const clean = String(draft.email || '').trim().toLowerCase();
-    if (!clean || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean)) {
+    const clean = normalizeEmail(draft.email);
+    if (!isValidEmail(clean)) {
       setEmailMessage('Enter a valid email address before sending OTP.');
       return;
     }
@@ -168,7 +148,7 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
       setEmailChallengeId(otpResponse.challengeId || '');
       setEmailOtp('');
       const localHint = otpResponse.devOtp ? ` Testing OTP: ${otpResponse.devOtp}` : '';
-      setEmailMessage(`OTP sent to ${clean.replace(/(.{2}).+(@.+)/, '$1***$2')}.${localHint}`);
+      setEmailMessage(`OTP sent to ${maskEmail(clean)}.${localHint}`);
     } catch (err) {
       setEmailChallengeId('');
       setEmailMessage(err.message || 'Unable to send email OTP. Please check Email OTP settings.');
@@ -199,8 +179,8 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
       setEmailVerifying(false);
       return;
     }
-    const clean = String(draft.email || '').trim().toLowerCase();
-    const updated = { ...currentUser, ...draft, email: clean, emailRegistered: true, emailRegisteredAt: Date.now(), profileUpdatedAt: Date.now() };
+    const clean = normalizeEmail(draft.email);
+    const updated = buildRegisteredEmailPayload(currentUser, draft);
     setDraft(prev => ({ ...prev, email: clean }));
     setCurrentUser(updated);
     onUpdateUser(updated);
@@ -226,7 +206,7 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
         <div className="flex flex-col md:flex-row gap-8">
           <div className="md:w-72 text-center">
             <div className="w-36 h-36 rounded-3xl bg-slate-100 border-2 border-slate-200 mx-auto overflow-hidden flex items-center justify-center shadow-sm">
-              {draft.profilePhoto ? <img src={mediaUrl(draft.profilePhoto, currentUser.profilePhotoUpdatedAt || currentUser.profileUpdatedAt || '')} alt="Profile" className="w-full h-full object-cover" /> : <User className="w-16 h-16 text-slate-300" />}
+              {draft.profilePhoto ? <img src={profilePhotoUrl(draft.profilePhoto, getProfilePhotoVersion(currentUser))} alt="Profile" className="w-full h-full object-cover" /> : <User className="w-16 h-16 text-slate-300" />}
             </div>
             <label className="mt-4 inline-flex items-center justify-center bg-indigo-50 text-indigo-700 px-4 py-2 rounded-xl font-black text-sm cursor-pointer hover:bg-indigo-100 border border-indigo-100">
               <Upload className="w-4 h-4 mr-2" /> {photoUploading ? 'Uploading...' : 'Add Photo'}

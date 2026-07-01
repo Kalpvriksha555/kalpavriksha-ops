@@ -4,75 +4,8 @@ import { formatLastSeenDateTime } from '../../utils/date';
 import { createSafeMeetingRoomName, buildJitsiUrl } from '../../utils/meeting';
 import { copyTextToClipboard } from '../../utils/clipboard';
 import { MiniEmptyState } from '../shared';
-
-const CHAT_API_BASE = import.meta.env.VITE_API_BASE || import.meta.env.VITE_API_URL || 'http://localhost:8080';
-const absoluteChatUrl = (value = '') => {
-  if (!value) return '';
-  const str = String(value);
-  if (/^(blob:|data:|https?:)/i.test(str)) return str;
-  return str.startsWith('/') ? `${CHAT_API_BASE}${str}` : `${CHAT_API_BASE}/${str.replace(/^\/+/, '')}`;
-};
-const makeMessageId = () => Number(`${Date.now()}${String(Math.floor(Math.random() * 1000)).padStart(3, '0')}`);
-const QUICK_EMOJIS = ['👍','✅','🙏','😂','❤️','👏','🔥','🎉'];
-
-const ONLINE_STALE_MS = 2 * 60 * 1000;
-const toMs = (value) => {
-  if (!value) return 0;
-  if (typeof value === 'number') return value;
-  const n = Number(value);
-  if (Number.isFinite(n) && n > 0) return n;
-  const parsed = new Date(value).getTime();
-  return Number.isNaN(parsed) ? 0 : parsed;
-};
-const userLastActivityAt = (user = {}) => Math.max(
-  toMs(user.lastHeartbeatAt),
-  toMs(user.lastSeenAt),
-  toMs(user.lastLoginAt),
-  toMs(user.availabilityUpdatedAt)
-);
-const isUserActuallyOnline = (user = {}, nowMs = Date.now()) => {
-  if (!user || !user.isOnline) return false;
-  const lastActivity = userLastActivityAt(user);
-  return !!lastActivity && (nowMs - lastActivity) <= ONLINE_STALE_MS;
-};
-const normalizeRole = (role = '') => {
-  const value = String(role || '').trim().toUpperCase();
-  if (value === 'ADMIN') return 'Admin';
-  if (value === 'MANAGER') return 'Manager';
-  if (value === 'DESIGNER') return 'Designer';
-  return role || '';
-};
-const normalizeStatus = (status = 'APPROVED') => String(status || 'APPROVED').trim().toUpperCase() || 'APPROVED';
-const ROLES = { ADMIN: 'Admin', MANAGER: 'Manager', DESIGNER: 'Designer' };
-const normalizeChatUser = (u = {}) => {
-  const rawName = String(u.name || '').trim();
-  const rawUsername = String(u.username || '').trim();
-  const isKhushbu = /khus+h?bu|khushboo|khushbu/i.test(rawName) || /khus+h?bu|khushboo|khushbu/i.test(rawUsername);
-  const isWaqar = /ali\s*waqar|^ali$|^waqar$/i.test(rawName) || /ali|waqar/i.test(rawUsername);
-  return {
-    ...u,
-    name: isKhushbu ? 'Khushbu Pandey' : (isWaqar ? 'Waqar' : (rawName || u.name)),
-    username: isKhushbu ? 'khushbu' : (isWaqar ? 'waqar' : rawUsername),
-    role: normalizeRole(u.role),
-    status: normalizeStatus(u.status),
-    lastSeenAt: u.lastSeenAt || u.lastLogoutAt || null
-  };
-};
-const isSystemPlaceholderUser = (u = {}) => /operations\s*manager/i.test(String(u.name || '')) || String(u.id || '') === 'u-manager';
-const hasValidTeamRole = (u = {}) => [ROLES.ADMIN, ROLES.MANAGER, ROLES.DESIGNER].includes(normalizeRole(u.role));
-const isApprovedUser = (u = {}) => normalizeStatus(u.status) === 'APPROVED' && hasValidTeamRole(u) && !isSystemPlaceholderUser(u);
-const getOperationalUsers = (users = [], { includeAdmins = true } = {}) => (users || [])
-  .map(normalizeChatUser)
-  .filter(u => isApprovedUser(u) && (includeAdmins || u.role !== ROLES.ADMIN))
-  .sort((a, b) => {
-    const roleOrder = { [ROLES.ADMIN]: 0, [ROLES.MANAGER]: 1, [ROLES.DESIGNER]: 2 };
-    return (roleOrder[a.role] ?? 9) - (roleOrder[b.role] ?? 9) || String(a.name).localeCompare(String(b.name));
-  });
-const normalizePersonName = (name = '') => normalizeChatUser({ name, username: name }).name || name;
-const identityKey = (value = '') => normalizePersonName(String(value || '')).toLowerCase().replace(/[^a-z0-9]/g, '');
-const samePerson = (a = '', b = '') => identityKey(a) === identityKey(b);
-const readEntryName = (entry) => typeof entry === 'string' ? entry : (entry?.name || '');
-const hasReadBy = (message, userName) => (message?.readBy || []).some(r => samePerson(readEntryName(r), userName));
+import { getVisibleNotifications } from '../../services/notificationService';
+import { CHAT_API_BASE, absoluteChatUrl, makeMessageId, QUICK_EMOJIS, isUserActuallyOnline, getOperationalUsers, identityKey, samePerson, readEntryName, hasReadBy, ROLES, normalizeChannelKey, chatEmojiGroups, reactionEmojis } from '../../utils/chatUtils';
 
 export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onDeleteMessage, onUpdateMessage, onMarkMessagesRead, appId }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -116,8 +49,6 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     try { const saved = JSON.parse(localStorage.getItem(pinnedKey) || '[]'); return Array.isArray(saved) ? saved.map(String) : []; } catch(e) { return []; }
   });
   const readThroughRef = useRef(localReadState);
-  const normalizeChannelKey = (channel) => channel === 'global' ? 'global' : identityKey(channel);
-
   const chatUsers = getOperationalUsers(users || [], { includeAdmins: true }).filter(u => !samePerson(u.name, currentUser.name));
   const liveCurrentUser = getOperationalUsers(users || [], { includeAdmins: true }).find(u => samePerson(u.name, currentUser.name)) || currentUser;
   const currentUserOnline = isUserActuallyOnline(liveCurrentUser, presenceNow);
@@ -125,15 +56,6 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const activePeerOnline = activePeer ? isUserActuallyOnline(activePeer, presenceNow) : false;
   const activeCallRoom = activePeer ? createSafeMeetingRoomName('KalpaVriksha_DM', appId || 'kalpavriksha_production_v1', ...[currentUser.name, activePeer.name].sort()) : '';
   const activeCallUrl = activePeer ? buildJitsiUrl(activeCallRoom, currentUser.name, { audioOnly: callAudioOnly, shareScreen: callShareScreen }) : '';
-
-  const chatEmojiGroups = [
-    { label: 'Quick reactions', emojis: ['👍','❤️','😂','😮','😢','👏','🎉','🔥','✅','👀','🙏','🤝','🙌','💯','⭐','✨'] },
-    { label: 'Smileys', emojis: ['😀','😃','😄','😁','😊','🙂','😉','😎','🤩','😅','🤣','😂','🥹','😍','😘','😇','🤔','🫡','🤫','😐','🙄','😮','😯','😴','😢','😭','😡','😤','🤯'] },
-    { label: 'Work', emojis: ['📌','📎','📝','📁','📂','📄','📊','📈','📉','🗂️','🧾','🖊️','🧮','🏗️','🏠','📐','📏','🧱','💼','📅','⏰','⏳','🔔','💬','📞','🎥'] },
-    { label: 'Status', emojis: ['✅','☑️','✔️','❌','⚠️','🚨','🔴','🟠','🟡','🟢','🔵','🟣','⬆️','⬇️','➡️','🔁','🔄','📍','🎯','🚀','🏁','🔒','🔓'] },
-    { label: 'Celebration', emojis: ['🎉','🥳','🏆','🥇','🙌','👏','💪','🔥','⭐','✨','💯','🌟','🎊','🍰','☕','🌈'] },
-  ];
-  const reactionEmojis = ['👍','❤️','😂','😮','😢','👏','🎉','🔥','✅','👀','🙏','🤝','🙌','💯','⭐','✨','⚠️','🚀'];
 
   useEffect(() => {
     try { const saved = JSON.parse(localStorage.getItem(localReadKey) || '{}'); readThroughRef.current = saved; setLocalReadState(saved); } catch(e) { readThroughRef.current = {}; setLocalReadState({}); }

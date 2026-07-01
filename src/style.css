@@ -626,3 +626,420 @@ svg {
     min-width: 0 !important;
   }
 }
+
+/* Deep chat polish: stable desktop/mobile layout, smooth attachment previews, compact controls. */
+.kalpa-chat-panel {
+  isolation: isolate !important;
+}
+.kalpa-chat-messages {
+  scroll-behavior: smooth !important;
+  -webkit-overflow-scrolling: touch !important;
+}
+.kalpa-chat-bubble {
+  overflow-wrap: anywhere !important;
+  word-break: break-word !important;
+}
+.kalpa-chat-attachment audio {
+  width: 100% !important;
+  min-width: 220px !important;
+}
+.kalpa-chat-attachment object {
+  max-width: 100% !important;
+}
+.kalpa-chat-quick-emojis {
+  max-width: 100% !important;
+  scrollbar-width: thin !important;
+}
+.kalpa-chat-actions-row {
+  min-width: 0 !important;
+}
+.kalpa-chat-textarea {
+  overscroll-behavior: contain !important;
+}
+@media (min-width: 769px) {
+  .kalpa-chat-panel {
+    width: min(1080px, calc(100vw - 48px)) !important;
+    height: min(680px, calc(100vh - 96px)) !important;
+  }
+  .kalpa-chat-bubble {
+    max-width: min(640px, 82%) !important;
+  }
+}
+@media (max-width: 768px) {
+  .kalpa-chat-shell {
+    left: 0.5rem !important;
+    right: 0.5rem !important;
+    bottom: calc(0.65rem + env(safe-area-inset-bottom)) !important;
+    align-items: stretch !important;
+    max-width: none !important;
+    z-index: 80 !important;
+  }
+  .kalpa-chat-shell > button {
+    align-self: flex-end !important;
+    width: 58px !important;
+    height: 58px !important;
+  }
+  .kalpa-chat-panel {
+    width: calc(100vw - 1rem) !important;
+    max-width: calc(100vw - 1rem) !important;
+    height: calc(100dvh - 5.75rem - env(safe-area-inset-bottom)) !important;
+    max-height: calc(100dvh - 5.75rem - env(safe-area-inset-bottom)) !important;
+    margin-bottom: 0.65rem !important;
+    border-radius: 1.35rem !important;
+    flex-direction: column !important;
+  }
+  .kalpa-chat-sidebar {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    height: 124px !important;
+    flex: 0 0 124px !important;
+    border-right: 0 !important;
+    border-bottom: 1px solid #e2e8f0 !important;
+  }
+  .kalpa-chat-sidebar > div:first-child {
+    padding: 0.75rem 0.9rem !important;
+  }
+  .kalpa-chat-sidebar > div:last-child {
+    display: flex !important;
+    gap: 0.5rem !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    padding: 0.5rem !important;
+    white-space: nowrap !important;
+    -webkit-overflow-scrolling: touch !important;
+  }
+  .kalpa-chat-sidebar button {
+    min-width: 136px !important;
+    max-width: 170px !important;
+    flex: 0 0 auto !important;
+    padding: 0.62rem !important;
+  }
+  .kalpa-chat-panel > .flex-1 {
+    min-height: 0 !important;
+    flex: 1 1 auto !important;
+  }
+  .kalpa-chat-messages {
+    padding: 0.85rem !important;
+    min-height: 0 !important;
+  }
+  .kalpa-chat-bubble {
+    max-width: 94% !important;
+    font-size: 0.92rem !important;
+  }
+  .kalpa-chat-attachment-image,
+  .kalpa-chat-attachment video {
+    max-height: 210px !important;
+  }
+  .kalpa-chat-inputbar {
+    padding: 0.62rem !important;
+    gap: 0.45rem !important;
+  }
+  .kalpa-chat-composer {
+    gap: 0.4rem !important;
+  }
+  .kalpa-chat-actions-row {
+    gap: 0.4rem !important;
+  }
+  .kalpa-chat-tool-btn,
+  .kalpa-chat-send-btn {
+    width: 42px !important;
+    height: 42px !important;
+    min-width: 42px !important;
+    padding: 0 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+  .kalpa-chat-textarea {
+    min-height: 46px !important;
+    max-height: 92px !important;
+    font-size: 16px !important;
+    line-height: 1.35 !important;
+    padding: 0.72rem !important;
+  }
+}
+@media (max-width: 420px) {
+  .kalpa-chat-panel {
+    height: calc(100dvh - 5.25rem - env(safe-area-inset-bottom)) !important;
+  }
+  .kalpa-chat-sidebar {
+    height: 116px !important;
+    flex-basis: 116px !important;
+  }
+  .kalpa-chat-sidebar button {
+    min-width: 124px !important;
+    max-width: 148px !important;
+  }
+  .kalpa-chat-quick-emojis button {
+    width: 34px !important;
+    height: 30px !important;
+    min-width: 34px !important;
+  }
+}
+
+
+/* ==========================================================
+   Final UX & Production Polish Layer
+   Scope: visual polish, smoothness, mobile ergonomics only.
+   Core workflow/API logic is intentionally untouched.
+   ========================================================== */
+:root {
+  --kalpa-surface: rgba(255,255,255,.92);
+  --kalpa-border: rgba(226,232,240,.95);
+  --kalpa-shadow-sm: 0 10px 30px rgba(15, 23, 42, .06);
+  --kalpa-shadow-md: 0 18px 45px rgba(15, 23, 42, .10);
+  --kalpa-radius-xl: 1.5rem;
+}
+
+body {
+  background:
+    radial-gradient(circle at top left, rgba(99,102,241,.08), transparent 28rem),
+    radial-gradient(circle at top right, rgba(16,185,129,.07), transparent 26rem),
+    #f8fafc;
+}
+
+.kalpa-production-polish,
+main {
+  animation: kalpaPageIn .22s ease-out both;
+}
+
+@keyframes kalpaPageIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.kalpa-panel,
+.kalpa-stat-card,
+.kalpa-task-row,
+.kalpa-chat-panel,
+.kalpa-lead-modal-card {
+  transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease, background-color .18s ease;
+}
+
+.kalpa-panel,
+.kalpa-stat-card {
+  background: var(--kalpa-surface) !important;
+  box-shadow: var(--kalpa-shadow-sm) !important;
+  backdrop-filter: blur(12px);
+}
+
+.kalpa-panel:hover,
+.kalpa-stat-card:hover {
+  border-color: rgba(129,140,248,.34) !important;
+  box-shadow: var(--kalpa-shadow-md) !important;
+  transform: translateY(-1px);
+}
+
+.kalpa-task-row {
+  position: relative;
+  isolation: isolate;
+}
+
+.kalpa-task-row::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: .75rem;
+  bottom: .75rem;
+  width: 4px;
+  border-radius: 999px;
+  background: transparent;
+  transition: background .18s ease, opacity .18s ease;
+  opacity: 0;
+}
+
+.kalpa-task-row:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 30px rgba(15,23,42,.07);
+  border-color: rgba(129,140,248,.26) !important;
+}
+
+.kalpa-task-row:hover::before {
+  background: linear-gradient(180deg, #6366f1, #10b981);
+  opacity: 1;
+}
+
+.custom-scrollbar,
+.kalpa-chat-messages,
+.kalpa-chat-sidebar,
+.kalpa-chat-panel * {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148,163,184,.55) transparent;
+}
+.custom-scrollbar::-webkit-scrollbar,
+.kalpa-chat-messages::-webkit-scrollbar,
+.kalpa-chat-sidebar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb,
+.kalpa-chat-messages::-webkit-scrollbar-thumb,
+.kalpa-chat-sidebar::-webkit-scrollbar-thumb {
+  background: rgba(148,163,184,.45);
+  border-radius: 999px;
+}
+.custom-scrollbar::-webkit-scrollbar-track,
+.kalpa-chat-messages::-webkit-scrollbar-track,
+.kalpa-chat-sidebar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.kalpa-chat-shell {
+  z-index: 70 !important;
+}
+
+.kalpa-chat-panel {
+  border: 1px solid rgba(226,232,240,.95) !important;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, .22) !important;
+  background: rgba(255,255,255,.98) !important;
+  border-radius: 1.5rem !important;
+}
+
+.kalpa-chat-sidebar {
+  background: linear-gradient(180deg, rgba(248,250,252,.96), rgba(255,255,255,.96)) !important;
+  border-right: 1px solid rgba(226,232,240,.9) !important;
+}
+
+.kalpa-chat-main {
+  background:
+    linear-gradient(180deg, rgba(248,250,252,.78), rgba(255,255,255,.9)) !important;
+}
+
+.kalpa-chat-bubble {
+  box-shadow: 0 8px 24px rgba(15,23,42,.06) !important;
+  word-break: break-word !important;
+}
+
+.kalpa-chat-attachment {
+  border-radius: 1rem !important;
+  background: rgba(248,250,252,.9) !important;
+  border: 1px solid rgba(226,232,240,.95) !important;
+}
+
+.kalpa-chat-attachment-image,
+.kalpa-chat-attachment video,
+.kalpa-chat-attachment audio {
+  border-radius: .9rem !important;
+}
+
+.kalpa-emoji-grid {
+  max-height: min(270px, 45vh) !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain !important;
+  padding-right: .25rem !important;
+}
+
+.kalpa-chat-inputbar {
+  background: rgba(255,255,255,.96) !important;
+  border-top: 1px solid rgba(226,232,240,.95) !important;
+  box-shadow: 0 -12px 30px rgba(15,23,42,.04) !important;
+}
+
+.kalpa-modal-backdrop {
+  animation: kalpaFadeIn .16s ease-out both;
+}
+@keyframes kalpaFadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid rgba(99,102,241,.28) !important;
+  outline-offset: 2px !important;
+}
+
+button:disabled {
+  cursor: not-allowed !important;
+}
+
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+@media (max-width: 900px) {
+  .kalpa-chat-shell {
+    right: .5rem !important;
+    left: .5rem !important;
+    bottom: .75rem !important;
+    max-width: none !important;
+  }
+  .kalpa-chat-panel {
+    width: calc(100vw - 1rem) !important;
+    height: min(78vh, 680px) !important;
+    max-height: calc(100dvh - 5.5rem) !important;
+    border-radius: 1.25rem !important;
+  }
+  .kalpa-chat-sidebar {
+    flex-basis: 220px !important;
+    width: 220px !important;
+    min-width: 210px !important;
+  }
+  .kalpa-chat-bubble {
+    max-width: 90% !important;
+  }
+}
+
+@media (max-width: 640px) {
+  body { background: #f8fafc; }
+  main { padding-bottom: 6rem !important; }
+  .kalpa-production-polish .grid,
+  main .grid {
+    gap: .85rem !important;
+  }
+  .kalpa-stat-card,
+  .kalpa-panel {
+    border-radius: 1.25rem !important;
+    padding: 1rem !important;
+  }
+  .kalpa-task-row {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    padding: 1rem !important;
+    border-radius: 1.1rem !important;
+  }
+  .kalpa-task-row > div:first-child {
+    min-width: 0 !important;
+  }
+  .kalpa-chat-panel {
+    width: 100vw !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    max-width: 100vw !important;
+    border-radius: 0 !important;
+    border: none !important;
+  }
+  .kalpa-chat-shell {
+    inset: 0 !important;
+  }
+  .kalpa-chat-sidebar {
+    flex: 0 0 42vw !important;
+    width: 42vw !important;
+    min-width: 136px !important;
+    max-width: 178px !important;
+  }
+  .kalpa-chat-messages {
+    padding-bottom: .5rem !important;
+  }
+  .kalpa-chat-bubble {
+    max-width: 94% !important;
+  }
+  .kalpa-emoji-grid,
+  .kalpa-chat-inputbar [style*="gridTemplateColumns"] {
+    grid-template-columns: repeat(6, minmax(32px, 1fr)) !important;
+    max-height: 210px !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: .001ms !important;
+  }
+}

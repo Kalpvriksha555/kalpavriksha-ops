@@ -1,16 +1,6 @@
 import React from 'react';
 import { AlertCircle, Bell, Briefcase, Calendar, CheckCircle, Flag, LayoutDashboard, LogOut, MessageSquare, Search, User, Video, X } from 'lucide-react';
-
-const API_BASE = import.meta.env.VITE_API_BASE || import.meta.env.VITE_API_URL || 'http://localhost:8080';
-const mediaUrl = (value = '', version = '') => {
-  let url = String(value || '').trim();
-  if (!url) return '';
-  if (/^(blob:|data:|https?:\/\/)/i.test(url)) return url;
-  if (url.startsWith('/uploads/')) url = url.replace('/uploads/', '/api/profile/photo/');
-  if (url.startsWith('uploads/')) url = url.replace('uploads/', '/api/profile/photo/');
-  const full = url.startsWith('/') ? `${API_BASE}${url}` : `${API_BASE}/${url.replace(/^\/+/, '')}`;
-  return version ? `${full}${full.includes('?') ? '&' : '?'}v=${encodeURIComponent(version)}` : full;
-};
+import { getProfilePhotoVersion, profilePhotoUrl } from '../utils/profileUtils';
 
 export const LocalModeBanner = ({ onClose }) => (
   <div className="bg-amber-100 border-b border-amber-200 text-amber-800 p-2.5 text-center text-xs font-bold flex flex-wrap justify-center items-center gap-2 shadow-sm z-50 relative">
@@ -176,7 +166,7 @@ export const TopNavigation = ({
         )}
         <button type="button" onClick={() => setShowProfilePanel(true)} className="hidden sm:flex items-center gap-3 border-l-2 border-slate-100 pl-6 hover:bg-slate-50 rounded-xl pr-3 py-1 transition-colors">
           <div className="w-10 h-10 rounded-xl bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center shrink-0">
-            {currentUser.profilePhoto ? <img src={mediaUrl(currentUser.profilePhoto, currentUser.profilePhotoUpdatedAt || currentUser.profileUpdatedAt || '')} alt={currentUser.name} className="w-full h-full object-cover" /> : <User className="w-5 h-5 text-slate-400" />}
+            {currentUser.profilePhoto ? <img src={profilePhotoUrl(currentUser.profilePhoto, getProfilePhotoVersion(currentUser))} alt={currentUser.name} className="w-full h-full object-cover" /> : <User className="w-5 h-5 text-slate-400" />}
           </div>
           <div className="text-right">
             <p className="text-sm font-extrabold text-slate-800">{currentUser.name}</p>
