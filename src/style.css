@@ -1081,3 +1081,262 @@ button:disabled {
     max-width: none !important;
   }
 }
+
+/* Kalpavriksha Theme Engine 3.0 — dark-mode readability and semantic surface fix
+   Purpose: eliminate white-on-white / washed-out dark mode cards after Tailwind extraction.
+   Scope: visual-only; no business logic touched. */
+.kd-dark,
+.kd-dark-root {
+  --kd-bg: #07111f;
+  --kd-bg-soft: #0b1220;
+  --kd-surface: #111827;
+  --kd-surface-2: #162033;
+  --kd-surface-3: #1e293b;
+  --kd-surface-hover: #24324a;
+  --kd-border: rgba(148, 163, 184, 0.24);
+  --kd-border-strong: rgba(148, 163, 184, 0.38);
+  --kd-text: #f8fafc;
+  --kd-text-2: #e2e8f0;
+  --kd-text-3: #cbd5e1;
+  --kd-muted: #94a3b8;
+  --kd-faint: #64748b;
+  --kd-accent: #a5b4fc;
+  --kd-accent-strong: #818cf8;
+  --kd-success: #86efac;
+  --kd-warning: #fbbf24;
+  --kd-danger: #fca5a5;
+  --kd-shadow: 0 24px 60px rgba(0,0,0,.44), inset 0 1px 0 rgba(255,255,255,.04);
+}
+
+.kd-dark {
+  background: radial-gradient(circle at 18% 0%, rgba(99,102,241,.20), transparent 30%), linear-gradient(135deg, #08111f 0%, #0b1220 45%, #091827 100%) !important;
+  color: var(--kd-text) !important;
+}
+
+/* Surfaces: convert white/light cards and light gradients to true dark surfaces. */
+.kd-dark .bg-white,
+.kd-dark .bg-white\/95,
+.kd-dark .bg-white\/90,
+.kd-dark .bg-white\/80,
+.kd-dark .bg-white\/70,
+.kd-dark .bg-white\/60,
+.kd-dark .bg-slate-50,
+.kd-dark .bg-slate-50\/50,
+.kd-dark .bg-slate-100,
+.kd-dark .bg-slate-100\/70,
+.kd-dark .bg-slate-100\/80,
+.kd-dark .bg-slate-200,
+.kd-dark .bg-gray-50,
+.kd-dark .bg-gray-100,
+.kd-dark .bg-zinc-50,
+.kd-dark .bg-zinc-100 {
+  background-color: var(--kd-surface) !important;
+  color: var(--kd-text) !important;
+  border-color: var(--kd-border) !important;
+}
+
+/* Tailwind gradient cards that used from-white/to-slate-50 were staying bright. */
+.kd-dark .from-white,
+.kd-dark .from-slate-50,
+.kd-dark .from-gray-50,
+.kd-dark .from-zinc-50 {
+  --tw-gradient-from: var(--kd-surface) var(--tw-gradient-from-position) !important;
+  --tw-gradient-to: rgba(17,24,39,0) var(--tw-gradient-to-position) !important;
+  --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
+}
+.kd-dark .via-white,
+.kd-dark .via-slate-50,
+.kd-dark .via-gray-50 {
+  --tw-gradient-stops: var(--tw-gradient-from), var(--kd-surface-2) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
+}
+.kd-dark .to-white,
+.kd-dark .to-slate-50,
+.kd-dark .to-gray-50,
+.kd-dark .to-zinc-50,
+.kd-dark .to-slate-100,
+.kd-dark .to-gray-100 {
+  --tw-gradient-to: var(--kd-surface-2) var(--tw-gradient-to-position) !important;
+}
+.kd-dark .bg-gradient-to-br.from-white,
+.kd-dark .bg-gradient-to-br.from-slate-50,
+.kd-dark .bg-gradient-to-r.from-white,
+.kd-dark .bg-gradient-to-r.from-slate-50,
+.kd-dark .bg-gradient-to-b.from-white,
+.kd-dark .bg-gradient-to-b.from-slate-50 {
+  background-image: linear-gradient(135deg, var(--kd-surface), var(--kd-surface-2)) !important;
+  color: var(--kd-text) !important;
+}
+
+/* Common panels/cards/tables. */
+.kd-dark table,
+.kd-dark thead,
+.kd-dark tbody,
+.kd-dark tr,
+.kd-dark td,
+.kd-dark th,
+.kd-dark .rounded-xl,
+.kd-dark .rounded-2xl,
+.kd-dark .rounded-3xl,
+.kd-dark .shadow-sm,
+.kd-dark .shadow-md,
+.kd-dark .shadow-lg,
+.kd-dark .shadow-xl,
+.kd-dark .shadow-2xl {
+  border-color: var(--kd-border) !important;
+}
+.kd-dark .shadow-sm,
+.kd-dark .shadow-md,
+.kd-dark .shadow-lg,
+.kd-dark .shadow-xl,
+.kd-dark .shadow-2xl {
+  box-shadow: var(--kd-shadow) !important;
+}
+.kd-dark thead,
+.kd-dark th {
+  background: rgba(15,23,42,.72) !important;
+  color: var(--kd-text-3) !important;
+}
+.kd-dark tbody tr,
+.kd-dark td {
+  color: var(--kd-text-2) !important;
+}
+.kd-dark tbody tr:hover,
+.kd-dark .hover\:bg-slate-50:hover,
+.kd-dark .hover\:bg-indigo-50:hover,
+.kd-dark .hover\:bg-white:hover {
+  background-color: var(--kd-surface-hover) !important;
+}
+
+/* Typography hierarchy: keep primary info readable; preserve semantic status colors below. */
+.kd-dark h1,
+.kd-dark h2,
+.kd-dark h3,
+.kd-dark h4,
+.kd-dark h5,
+.kd-dark h6,
+.kd-dark .text-slate-950,
+.kd-dark .text-slate-900,
+.kd-dark .text-slate-800,
+.kd-dark .text-gray-950,
+.kd-dark .text-gray-900,
+.kd-dark .text-gray-800,
+.kd-dark strong,
+.kd-dark b {
+  color: var(--kd-text) !important;
+}
+.kd-dark .text-slate-700,
+.kd-dark .text-slate-600,
+.kd-dark .text-gray-700,
+.kd-dark .text-gray-600 {
+  color: var(--kd-text-2) !important;
+}
+.kd-dark .text-slate-500,
+.kd-dark .text-slate-400,
+.kd-dark .text-gray-500,
+.kd-dark .text-gray-400,
+.kd-dark small,
+.kd-dark .muted {
+  color: var(--kd-text-3) !important;
+}
+.kd-dark .text-slate-300,
+.kd-dark .text-gray-300 {
+  color: var(--kd-text-2) !important;
+}
+.kd-dark .text-white {
+  color: var(--kd-text) !important;
+}
+
+/* Keep colored status text vivid. */
+.kd-dark .text-indigo-600,
+.kd-dark .text-indigo-700,
+.kd-dark .text-blue-600,
+.kd-dark .text-blue-700,
+.kd-dark .text-violet-600,
+.kd-dark .text-violet-700 { color: var(--kd-accent) !important; }
+.kd-dark .text-emerald-600,
+.kd-dark .text-emerald-700,
+.kd-dark .text-green-600,
+.kd-dark .text-green-700 { color: var(--kd-success) !important; }
+.kd-dark .text-amber-600,
+.kd-dark .text-amber-700,
+.kd-dark .text-yellow-600,
+.kd-dark .text-yellow-700,
+.kd-dark .text-orange-600,
+.kd-dark .text-orange-700 { color: var(--kd-warning) !important; }
+.kd-dark .text-red-600,
+.kd-dark .text-red-700,
+.kd-dark .text-rose-600,
+.kd-dark .text-rose-700 { color: var(--kd-danger) !important; }
+
+/* Soft status badge backgrounds. */
+.kd-dark .bg-indigo-50,
+.kd-dark .bg-blue-50,
+.kd-dark .bg-violet-50 { background-color: rgba(79,70,229,.20) !important; color: #c7d2fe !important; border-color: rgba(129,140,248,.30) !important; }
+.kd-dark .bg-emerald-50,
+.kd-dark .bg-green-50 { background-color: rgba(6,78,59,.34) !important; color: #bbf7d0 !important; border-color: rgba(52,211,153,.30) !important; }
+.kd-dark .bg-amber-50,
+.kd-dark .bg-yellow-50 { background-color: rgba(120,53,15,.34) !important; color: #fde68a !important; border-color: rgba(251,191,36,.30) !important; }
+.kd-dark .bg-red-50,
+.kd-dark .bg-rose-50 { background-color: rgba(127,29,29,.34) !important; color: #fecaca !important; border-color: rgba(248,113,113,.30) !important; }
+
+/* Forms, filters, calendar inputs. */
+.kd-dark input,
+.kd-dark textarea,
+.kd-dark select {
+  background-color: rgba(15,23,42,.92) !important;
+  color: var(--kd-text) !important;
+  border-color: var(--kd-border-strong) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.04) !important;
+}
+.kd-dark input::placeholder,
+.kd-dark textarea::placeholder {
+  color: var(--kd-muted) !important;
+  opacity: 1 !important;
+}
+
+/* Navigation/tab bar and non-primary buttons. */
+.kd-dark .sticky,
+.kd-dark header,
+.kd-dark nav {
+  background-color: rgba(11,18,32,.94) !important;
+  color: var(--kd-text) !important;
+  border-color: var(--kd-border) !important;
+}
+.kd-dark button:not(.bg-indigo-600):not(.bg-slate-900):not(.bg-emerald-600):not(.bg-red-600):not(.bg-blue-600):not(.bg-violet-600):not(.bg-purple-600) {
+  border-color: var(--kd-border) !important;
+}
+
+/* Command Centre / operations flow boxes that previously became blank white. */
+.kd-dark .kalpa-empty-state,
+.kd-dark [class*="min-h-"][class*="rounded"],
+.kd-dark [class*="border-2"][class*="rounded"] {
+  border-color: var(--kd-border) !important;
+}
+.kd-dark .opacity-40,
+.kd-dark .opacity-50,
+.kd-dark .opacity-60 {
+  opacity: .92 !important;
+}
+.kd-dark .disabled\:opacity-70:disabled,
+.kd-dark button:disabled {
+  opacity: .62 !important;
+}
+
+/* Chat/notification floating surfaces. */
+.kd-dark .kalpa-chat-panel,
+.kd-dark .kalpa-chat-shell,
+.kd-dark .kalpa-chat-sidebar,
+.kd-dark .kalpa-chat-main {
+  background: rgba(15,23,42,.98) !important;
+  color: var(--kd-text) !important;
+  border-color: var(--kd-border) !important;
+}
+.kd-dark .kalpa-chat-bubble {
+  color: var(--kd-text) !important;
+}
+
+/* Scrollbars. */
+.kd-dark ::-webkit-scrollbar-thumb { background-color: #475569; border-radius: 999px; }
+.kd-dark ::-webkit-scrollbar-track { background-color: rgba(15,23,42,.35); }
+.kd-dark .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #64748b; }
+.kd-dark .custom-scrollbar::-webkit-scrollbar-track { background-color: rgba(15,23,42,.35); }
