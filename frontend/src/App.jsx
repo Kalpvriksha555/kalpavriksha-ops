@@ -4,6 +4,7 @@ import { createSafeMeetingRoomName, buildJitsiUrl } from './utils/meeting';
 import { copyTextToClipboard } from './utils/clipboard';
 import { Badge, PageLoadingScreen, EmptyState, MiniEmptyState } from './components/shared';
 import { LocalModeBanner, DatabasePermissionBanner, TopNavigation, MobileSearchBar, MainTabNavigation } from './components/layout';
+import { ActiveToasts } from './components/notifications/ActiveToasts';
 import { ProfileView } from './components/profile/ProfileView';
 import { CalculatorView } from './components/calculator/CalculatorView';
 import { TeamMeetingRoom } from './components/meetings/TeamMeetingRoom';
@@ -22,7 +23,7 @@ import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged }
 import { getFirestore, doc, setDoc, onSnapshot, collection, deleteDoc, getDocs } from 'firebase/firestore';
 import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
 
-// 👇 SMART CONFIG: Safely connects to your real database 👇
+// ðŸ‘‡ SMART CONFIG: Safely connects to your real database ðŸ‘‡
 const getFirebaseConfig = () => {
   try {
     if (typeof __firebase_config !== 'undefined' && __firebase_config) {
@@ -2371,7 +2372,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
                <div className="w-full h-2 bg-white rounded-full overflow-hidden border border-slate-100 mb-3"><div className="h-full bg-indigo-600" style={{ width: `${getDocumentReadiness(project).score}%` }}></div></div>
                <div className="grid grid-cols-2 gap-2">
                  {getDocumentReadiness(project).items.map(item => (
-                   <span key={item.label} className={`text-[11px] font-bold px-2 py-1 rounded-lg border ${item.done ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-white text-slate-400 border-slate-100'}`}>{item.done ? '✓' : '○'} {item.label}</span>
+                   <span key={item.label} className={`text-[11px] font-bold px-2 py-1 rounded-lg border ${item.done ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-white text-slate-400 border-slate-100'}`}>{item.done ? 'âœ“' : 'â—‹'} {item.label}</span>
                  ))}
                </div>
              </div>
@@ -2548,7 +2549,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
             {(project.reassignmentHistory || []).length > 0 && (
               <div className="mt-4 border-t border-slate-100 pt-4">
                 <p className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2">Reassignment History</p>
-                {(project.reassignmentHistory || []).map((r, idx) => <p key={idx} className="text-xs font-bold text-slate-600 bg-slate-50 rounded-lg px-3 py-2 mb-1">{r.from} → {r.to} by {r.by} • {r.time}</p>)}
+                {(project.reassignmentHistory || []).map((r, idx) => <p key={idx} className="text-xs font-bold text-slate-600 bg-slate-50 rounded-lg px-3 py-2 mb-1">{r.from} â†’ {r.to} by {r.by} • {r.time}</p>)}
               </div>
             )}
           </div>
@@ -2589,6 +2590,53 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
   );
 };
 
+
+
+class AppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, info) {
+    try {
+      console.error('Kalpvriksha Ops app error:', error, info);
+      localStorage.setItem('kalpa_last_error', JSON.stringify({
+        message: error?.message || String(error),
+        stack: error?.stack || '',
+        at: new Date().toISOString()
+      }));
+    } catch (_) {}
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+          <div className="max-w-xl w-full bg-white border border-red-100 rounded-3xl shadow-xl p-8 text-center">
+            <div className="w-16 h-16 rounded-2xl bg-red-50 text-red-500 flex items-center justify-center mx-auto mb-5">
+              <AlertCircle className="w-9 h-9" />
+            </div>
+            <h1 className="text-2xl font-black text-slate-900">Something needs attention</h1>
+            <p className="text-slate-500 font-semibold mt-3">The page did not load correctly, but your data is safe. Refresh the page once. If it repeats, check the saved error log.</p>
+            <div className="mt-5 px-4 py-3 rounded-xl bg-red-50 border border-red-100 text-red-600 text-sm font-bold break-words">
+              {this.state.error?.message || 'Unexpected application error'}
+            </div>
+            <button type="button" onClick={() => window.location.reload()} className="mt-6 px-6 py-3 rounded-xl bg-slate-900 text-white font-black hover:bg-slate-800 transition-colors">
+              Refresh Page
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
 
 function AppShell() {
   const [currentUser, setCurrentUser] = useState(null);
@@ -3474,9 +3522,9 @@ function AppShell() {
 
   return (
     <div className={`min-h-screen bg-slate-50/50 font-sans text-slate-900 pb-20 antialiased selection:bg-indigo-100 selection:text-indigo-900 transition-colors duration-300 ${darkMode ? 'kd-dark' : ''}`}>
-      <ActiveToasts notifications={notifications} currentUser={currentUser} />
       
-      {showLocalBanner && <LocalModeBanner onClose={() => setShowLocalBanner(false)} />}
+      
+      <ActiveToasts notifications={notifications} currentUser={currentUser} />{showLocalBanner && <LocalModeBanner onClose={() => setShowLocalBanner(false)} />}
 
       {dbError === 'permission-denied' && <DatabasePermissionBanner />}
 
@@ -3865,7 +3913,7 @@ function AppShell() {
                          <span className={`text-[10px] font-black px-2 py-1 rounded-md ${u.active >= u.limit ? 'bg-orange-100 text-orange-700' : 'bg-emerald-100 text-emerald-700'}`}>{u.active}/{u.limit} active</span>
                        </div>
                      ))}
-                     <p className="text-[10px] font-bold text-indigo-500 mt-2">Daily task limit rises automatically: 5 → 10 → 15 as case volume increases.</p>
+                     <p className="text-[10px] font-bold text-indigo-500 mt-2">Daily task limit rises automatically: 5 â†’ 10 â†’ 15 as case volume increases.</p>
                    </div>
                  </div>
                </div>
@@ -3957,3 +4005,4 @@ function AppShell() {
 export default function App() {
   return <AppErrorBoundary><AppShell /></AppErrorBoundary>;
 }
+
