@@ -883,13 +883,13 @@ const getCompletedFileBadge = (project = {}) => getLatestCompletedFileName(proje
 
 
 const getTaskDescription = (project = {}) => {
-  const raw = project.description ?? project.taskDescription ?? project.instructions ?? project.specialInstructions ?? project.otherDescription ?? '';
+  const raw = project.description ?? project.taskDescription ?? project.task_description ?? project.instructions ?? project.specialInstructions ?? project.special_instructions ?? project.otherDescription ?? project.other_description ?? project.taskNote ?? project.task_note ?? project.workDescription ?? project.work_description ?? project.details ?? '';
   return String(raw || '').trim();
 };
 
 
 const getEstimateDetails = (project = {}) => {
-  const raw = project.estimateDetails ?? project.propertyEstimateValue ?? project.estimateInstruction ?? project.estimateNote ?? '';
+  const raw = project.estimateDetails ?? project.estimate_details ?? project.propertyEstimateValue ?? project.property_estimate_value ?? project.estimateInstruction ?? project.estimate_instruction ?? project.estimateNote ?? project.estimate_note ?? '';
   return String(raw || '').trim();
 };
 
@@ -1718,7 +1718,7 @@ const CommandCentreView = ({ projects = [], users = [], onSelectProject, current
         <div className="lg:col-span-2 bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
           <div className="p-5 border-b-2 border-slate-100"><h2 className="font-black text-slate-800 text-xl">Daily Operations Board</h2><p className="text-xs font-bold text-slate-400 mt-1">Includes today's tasks plus older pending tasks carried forward.</p></div>
           <div className="divide-y divide-slate-100 max-h-[520px] overflow-y-auto custom-scrollbar">
-            {activeBoard.map(p => <div key={p.id} onClick={() => onSelectProject(p)} className="p-5 hover:bg-slate-50 cursor-pointer flex justify-between items-center"><div><p className="font-black text-slate-800">{p.id} <span className="text-xs font-bold text-slate-400 ml-2">{getCustomerDisplayName(p)}</span></p><p className="text-sm font-extrabold text-slate-700 mt-1">{p.taskName || makeTaskDisplayName(p)}</p><p className="text-xs font-bold text-slate-500 mt-1">{p.type} • {p.location} • {p.assignedTo || 'Unassigned'}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-slate-500 mt-1 line-clamp-2 max-w-2xl">{getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 mt-1 line-clamp-2 max-w-2xl">Estimate: {getEstimateDetails(p)}</p>}{getLatestCompletedFileName(p) && <p className="text-[11px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mt-2 w-fit">Completed: {getLatestCompletedFileName(p)}</p>}{isCarriedForwardProject(p, dateKey) && <span className="inline-flex mt-2 text-[10px] bg-orange-50 text-orange-700 border border-orange-100 px-2 py-1 rounded-lg font-black uppercase">Carried Forward</span>}</div><Badge colorClass={getStatusColor(p.status)}>{p.status}</Badge></div>)}
+            {activeBoard.map(p => <div key={p.id} onClick={() => onSelectProject(p)} className="p-5 hover:bg-slate-50 cursor-pointer flex justify-between items-center"><div><p className="font-black text-slate-800">{p.id} <span className="text-xs font-bold text-slate-400 ml-2">{getCustomerDisplayName(p)}</span></p><p className="text-sm font-extrabold text-slate-700 mt-1">{p.taskName || makeTaskDisplayName(p)}</p><p className="text-xs font-bold text-slate-500 mt-1">{p.type} • {p.location} • {p.assignedTo || 'Unassigned'}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mt-2 line-clamp-2 max-w-2xl"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1 line-clamp-2 max-w-2xl"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}{getLatestCompletedFileName(p) && <p className="text-[11px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mt-2 w-fit">Completed: {getLatestCompletedFileName(p)}</p>}{isCarriedForwardProject(p, dateKey) && <span className="inline-flex mt-2 text-[10px] bg-orange-50 text-orange-700 border border-orange-100 px-2 py-1 rounded-lg font-black uppercase">Carried Forward</span>}</div><Badge colorClass={getStatusColor(p.status)}>{p.status}</Badge></div>)}
             {activeBoard.length === 0 && <div className="p-10 text-center text-slate-400 font-bold">No operations for this date.</div>}
           </div>
         </div>
@@ -3931,7 +3931,7 @@ function AppShell() {
                 <button key={p.id} type="button" onClick={() => setSelectedProject(p)} className="text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 hover:border-indigo-100 rounded-2xl p-4 transition-all">
                   <p className="font-black text-slate-800">{p.id}</p>
                   <p className="text-xs font-bold text-slate-500 mt-1">{getCustomerDisplayName(p)} • {p.location}</p>
-                  <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase">{p.type} • {p.assignedTo || 'Unassigned'} • {p.status}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-slate-500 mt-2 line-clamp-2">{getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 mt-1 line-clamp-2">Estimate: {getEstimateDetails(p)}</p>}
+                  <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase">{p.type} • {p.assignedTo || 'Unassigned'} • {p.status}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mt-2 line-clamp-2"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1 line-clamp-2"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}
                 </button>
               ))}
               {displayedProjects.length === 0 && <div className="col-span-full"><EmptyState icon={Search} title="No matching cases found" description="Try a customer name, bank, branch, location, task ID, or designer name." compact /></div>}
@@ -4008,7 +4008,7 @@ function AppShell() {
                                         {p.priority === 'Urgent' && <Flag className="w-4 h-4 text-red-500 animate-pulse"/>}
                                      </div>
                                      <p className="text-sm font-bold text-slate-700 mb-1">{getCustomerDisplayName(p)}</p>
-                                     <p className="text-xs text-slate-500 mb-3">{p.type} • {p.location}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-slate-500 mb-2 line-clamp-2">{getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-bold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mb-3 line-clamp-2">Estimate: {getEstimateDetails(p)}</p>}{getLatestCompletedFileName(p) && <p className="text-[10px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mb-3 truncate">Completed: {getLatestCompletedFileName(p)}</p>}
+                                     <p className="text-xs text-slate-500 mb-3">{p.type} • {p.location}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mb-2 line-clamp-2"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-bold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mb-3 line-clamp-2"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}{getLatestCompletedFileName(p) && <p className="text-[10px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mb-3 truncate">Completed: {getLatestCompletedFileName(p)}</p>}
                                      <div className="flex justify-between items-center pt-3 border-t border-slate-100">
                                         <Badge colorClass={p.assignedTo === 'Unassigned' ? 'bg-red-50 text-red-600 border-red-200' : 'bg-slate-50 text-slate-700 border-slate-200'}>{p.assignedTo}</Badge>
                                         {p.subTasks?.length > 0 && <span className="text-[10px] text-red-600 bg-red-50 px-2 py-0.5 rounded font-black">{p.subTasks.length} Revs</span>}
@@ -4045,7 +4045,7 @@ function AppShell() {
                               </td>
                               <td className="px-6 py-5">
                                 <p className="font-bold text-slate-700">{p.type}</p>
-                                <p className="text-slate-400 font-medium text-xs mt-1">{p.location}</p>{getTaskDescription(p) && <p className="text-slate-500 font-semibold text-xs mt-2 max-w-xs whitespace-normal line-clamp-2">{getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-amber-700 font-semibold text-xs mt-1 max-w-xs whitespace-normal line-clamp-2">Estimate: {getEstimateDetails(p)}</p>}
+                                <p className="text-slate-400 font-medium text-xs mt-1">{p.location}</p>{getTaskDescription(p) && <p className="text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 font-semibold text-xs mt-2 max-w-xs whitespace-normal line-clamp-2"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 font-semibold text-xs mt-1 max-w-xs whitespace-normal line-clamp-2"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}
                               </td>
                               <td className="px-6 py-5">
                                 <Badge colorClass={p.assignedTo === 'Unassigned' ? 'bg-red-50 text-red-600 border-red-200' : 'bg-slate-50 text-slate-700 border-slate-200'}>{p.assignedTo}</Badge>
