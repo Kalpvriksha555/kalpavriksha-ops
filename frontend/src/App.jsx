@@ -475,13 +475,49 @@ const normalizeTeamUser = (u = {}) => {
   return createEmployeeLifecycleProfile(presenceSafe, u);
 };
 
+const getTeamUserIdentityKey = (u = {}) => {
+  const nameKey = identityKey(u.name || '');
+  if (nameKey) return `name:${nameKey}`;
+  const usernameKey = String(u.username || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (usernameKey) return `username:${usernameKey}`;
+  const emailKey = String(u.email || '').trim().toLowerCase();
+  if (emailKey) return `email:${emailKey}`;
+  return `id:${String(u.id || '')}`;
+};
+
+const mergeTeamUserPresence = (previous = {}, incoming = {}) => {
+  const prev = normalizeTeamUser(previous);
+  const next = normalizeTeamUser(incoming);
+  const prevActivity = userLastActivityAt(prev);
+  const nextActivity = userLastActivityAt(next);
+  const preferredPresence = nextActivity >= prevActivity ? next : prev;
+  const stableProfile = next.profileUpdatedAt && (!prev.profileUpdatedAt || toMs(next.profileUpdatedAt) >= toMs(prev.profileUpdatedAt)) ? next : prev;
+  return normalizeTeamUser({
+    ...prev,
+    ...next,
+    id: preferredPresence.id || next.id || prev.id,
+    name: stableProfile.name || next.name || prev.name,
+    username: stableProfile.username || next.username || prev.username,
+    role: stableProfile.role || next.role || prev.role,
+    status: stableProfile.status || next.status || prev.status,
+    isOnline: preferredPresence.isOnline,
+    availability: preferredPresence.availability,
+    breakStartedAt: preferredPresence.breakStartedAt || null,
+    availabilityUpdatedAt: preferredPresence.availabilityUpdatedAt || null,
+    lastLoginAt: preferredPresence.lastLoginAt || null,
+    lastSeenAt: preferredPresence.lastSeenAt || null,
+    lastHeartbeatAt: preferredPresence.lastHeartbeatAt || null,
+    lastLogoutAt: preferredPresence.lastLogoutAt || null
+  });
+};
+
 const normalizeTeamUsers = (list = []) => {
   const source = (Array.isArray(list) && list.length ? list : INITIAL_USERS).map(normalizeTeamUser);
   const byKey = new Map();
   source.forEach(u => {
-    const key = String(u.username || identityKey(u.name) || u.id);
-    const prev = byKey.get(key) || {};
-    byKey.set(key, normalizeTeamUser({ ...prev, ...u, id: prev.id || u.id }));
+    const key = getTeamUserIdentityKey(u);
+    const prev = byKey.get(key);
+    byKey.set(key, prev ? mergeTeamUserPresence(prev, u) : u);
   });
   return [...byKey.values()];
 };
@@ -584,8 +620,9 @@ const exportToCSV = (headers, rows, filename) => {
 };
 
 const getAttendanceUser = (log, users = []) => {
-  return (users || []).find(u => String(u.id) === String(log.userId))
-    || (users || []).find(u => samePerson(u.name, log.name))
+  const normalizedUsers = normalizeTeamUsers(users && users.length ? users : INITIAL_USERS);
+  return normalizedUsers.find(u => String(u.id) === String(log.userId))
+    || normalizedUsers.find(u => samePerson(u.name, log.name) || samePerson(u.username, log.name) || samePerson(u.name, log.username))
     || null;
 };
 
@@ -1206,14 +1243,13 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
   const [filterDate, setFilterDate] = useState(new Date().toLocaleDateString('en-CA'));
   const [monthKey, setMonthKey] = useState(new Date().toLocaleDateString('en-CA').slice(0, 7));
   const safeLogs = Array.isArray(attendanceLogs) ? attendanceLogs : [];
-  const filteredLogs = safeLogs.filter(log => log.date === filterDate && normalizeRole(log.role) !== ROLES.ADMIN);
   const daysInMonth = (() => {
     const [year, month] = monthKey.split('-').map(Number);
     const count = new Date(year, month, 0).getDate();
     return Array.from({ length: count }, (_, i) => `${monthKey}-${String(i + 1).padStart(2, '0')}`);
   })();
   const teamMembers = getOperationalUsers(users && users.length ? users : INITIAL_USERS, { includeAdmins: false });
-  const isPresent = (user, date) => safeLogs.some(log => String(log.userId) === String(user.id) && log.date === date);
+  const isPresent = (user, date) => safeLogs.some(log => log.date === date && (String(log.userId) === String(user.id) || samePerson(log.name, user.name) || samePerson(log.username, user.username)));
   const attendanceRows = teamMembers.map(user => {
     const log = safeLogs.find(l => l.date === filterDate && (String(l.userId) === String(user.id) || samePerson(l.name, user.name)));
     const rowBase = {
@@ -3017,9 +3053,10 @@ function AppShell() {
 
   useEffect(() => {
     if (!currentUser) return;
-    const latest = activeUsers.find(u => u.id === currentUser.id);
+    const latest = activeUsers.find(u => String(u.id) === String(currentUser.id))
+      || activeUsers.find(u => samePerson(u.name, currentUser.name) || samePerson(u.username, currentUser.username));
     if (latest && (latest.role !== currentUser.role || latest.name !== currentUser.name || latest.profilePhoto !== currentUser.profilePhoto || latest.username !== currentUser.username)) {
-      setCurrentUser(prev => ({ ...prev, ...latest }));
+      setCurrentUser(prev => mergeTeamUserPresence(latest, prev));
       if (activeTab === 'ledger' && latest.role !== ROLES.ADMIN) setActiveTab('command');
       if (activeTab === 'closing' && latest.role !== ROLES.ADMIN) setActiveTab('command');
     }
@@ -3262,9 +3299,13 @@ function AppShell() {
 
     const userHeartbeat = setInterval(() => {
       const beatNow = Date.now();
-      const refreshed = { ...currentUser, isOnline: true, lastSeenAt: beatNow, lastHeartbeatAt: beatNow };
-      setCurrentUser(refreshed);
-      handleUpdateUser(refreshed);
+      setCurrentUser(prev => {
+        if (!prev) return prev;
+        const refreshed = { ...prev, isOnline: true, lastSeenAt: beatNow, lastHeartbeatAt: beatNow };
+        handleUpdateUser(refreshed);
+        postPresenceUpdate(refreshed, refreshed.availability === 'Break' ? 'break' : 'heartbeat');
+        return refreshed;
+      });
     }, 30000);
 
     return () => { clearInterval(interval); clearInterval(userHeartbeat); };
@@ -3536,6 +3577,36 @@ function AppShell() {
     }
   };
 
+  const postPresenceUpdate = async (userPatch, action = 'heartbeat') => {
+    if (!USE_BACKEND_STATE || !userPatch) return null;
+    try {
+      const res = await fetch(`${API_BASE}/api/presence`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, user: {
+          id: userPatch.id,
+          name: userPatch.name,
+          username: userPatch.username,
+          email: userPatch.email,
+          role: userPatch.role,
+          status: userPatch.status,
+          availability: userPatch.availability,
+          breakStartedAt: userPatch.breakStartedAt || null
+        } })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.user) {
+        const normalizedServerUser = normalizeTeamUser(data.user);
+        setUsers(prev => normalizeTeamUsers([...(prev || []), normalizedServerUser]));
+        setCurrentUser(prev => prev && String(prev.id) === String(normalizedServerUser.id) ? { ...prev, ...normalizedServerUser } : prev);
+        return normalizedServerUser;
+      }
+    } catch (e) {
+      console.warn('Presence update failed:', e.message);
+    }
+    return null;
+  };
+
   const handleUpdateUser = async (u) => {
     let normalizedUser = normalizeTeamUser(u);
     const changedBy = currentUser?.name || normalizedUser.name || 'System';
@@ -3610,6 +3681,7 @@ function AppShell() {
     const onlineUser = { ...user, isOnline: true, availability: 'Available', lastLoginAt: loginNow, lastSeenAt: loginNow, lastHeartbeatAt: loginNow, availabilityUpdatedAt: loginNow, breakStartedAt: null };
     setCurrentUser(onlineUser);
     handleUpdateUser(onlineUser);
+    postPresenceUpdate(onlineUser, 'login');
   };
 
   const handleLogout = () => {
@@ -3632,7 +3704,9 @@ function AppShell() {
         };
       });
       const logoutNow = Date.now();
-      handleUpdateUser({ ...currentUser, isOnline: false, availability: 'Unavailable', lastLogoutAt: logoutNow, lastSeenAt: logoutNow, lastHeartbeatAt: logoutNow, availabilityUpdatedAt: logoutNow, breakStartedAt: null });
+      const offlineUser = { ...currentUser, isOnline: false, availability: 'Unavailable', lastLogoutAt: logoutNow, lastSeenAt: logoutNow, lastHeartbeatAt: logoutNow, availabilityUpdatedAt: logoutNow, breakStartedAt: null };
+      handleUpdateUser(offlineUser);
+      postPresenceUpdate(offlineUser, 'logout');
     }
     setCurrentUser(null);
     setSelectedProject(null);
@@ -3671,6 +3745,7 @@ function AppShell() {
     });
     setCurrentUser(updated);
     handleUpdateUser(updated);
+    postPresenceUpdate(updated, onBreak ? 'resume' : 'break');
   };
 
   const handleLeadFileChange = (e) => {
@@ -3850,7 +3925,7 @@ function AppShell() {
         {selectedProject ? (
           <TaskDetailView project={selectedProject} user={currentUser} onBack={() => setSelectedProject(null)} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} onDiscussTask={handleDiscussTaskInGlobalChat} />
         ) : activeTab === 'command' ? (
-          <CommandCentreView projects={projects} users={activeUsers} currentUser={currentUser} onSelectProject={(p) => { setActiveTab('board'); setSelectedProject(p); }} />
+          <CommandCentreView projects={projects} users={activeUsers} attendanceLogs={attendanceLogs} currentUser={currentUser} onSelectProject={(p) => { setActiveTab('board'); setSelectedProject(p); }} />
         ) : activeTab === 'productivity' ? (
           <ProductivityDashboard users={activeUsers} projects={projects} />
         ) : activeTab === 'closing' && currentUser.role === ROLES.ADMIN ? (

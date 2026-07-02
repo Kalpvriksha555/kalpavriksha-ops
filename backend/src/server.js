@@ -299,15 +299,19 @@ function sanitizePresenceUsers(users = []) {
 }
 function mergeUsersPreservingLatestPresence(existing = [], incoming = []) {
   const byId = new Map();
+  const nowMs = Date.now();
   const add = (u = {}) => {
-    const key = teamIdentityKey(u) || String(u.id || Math.random());
+    const normalized = employeeLifecycleProfile({ ...u, role: normalizeRole(u.role), status: normalizeStatus(u.status || 'APPROVED') }, {});
+    const key = teamIdentityKey(normalized) || String(normalized.id || Math.random());
     const prev = byId.get(key);
-    if (!prev) { byId.set(key, { ...u }); return; }
+    if (!prev) { byId.set(key, { ...normalized }); return; }
     const prevTs = presenceTimestamp(prev);
-    const nextTs = presenceTimestamp(u);
-    // Keep normal profile edits from incoming, but never let an older tab overwrite newer presence.
-    const merged = { ...prev, ...u };
-    if (prevTs > nextTs) {
+    const nextTs = presenceTimestamp(normalized);
+    const prevStillOnline = !!prev.isOnline && prevTs && (nowMs - prevTs) <= PRESENCE_STALE_MS;
+    const incomingLooksLikeStaleOffline = !normalized.isOnline && String(normalized.availability || '').toLowerCase() === 'unavailable';
+    // Keep profile edits, but never let stale tabs/full-state saves mark a live user offline.
+    const merged = { ...prev, ...normalized };
+    if (prevTs > nextTs || (prevStillOnline && incomingLooksLikeStaleOffline)) {
       merged.isOnline = prev.isOnline;
       merged.availability = prev.availability;
       merged.lastSeenAt = prev.lastSeenAt;
@@ -317,11 +321,64 @@ function mergeUsersPreservingLatestPresence(existing = [], incoming = []) {
       merged.availabilityUpdatedAt = prev.availabilityUpdatedAt;
       merged.breakStartedAt = prev.breakStartedAt;
     }
+    if (String(merged.availability || '').toLowerCase() === 'break' && !merged.breakStartedAt) {
+      merged.breakStartedAt = merged.availabilityUpdatedAt || merged.lastHeartbeatAt || Date.now();
+    }
     byId.set(key, merged);
   };
   (existing || []).forEach(add);
   (incoming || []).forEach(add);
   return sanitizePresenceUsers([...byId.values()]);
+}
+
+function findUserIndexByIdentity(users = [], identity = {}) {
+  const wantedKeys = new Set([
+    teamIdentityKey(identity),
+    identity.id ? `id:${String(identity.id).trim()}` : '',
+    identity.username ? `username:${String(identity.username).toLowerCase().replace(/[^a-z0-9]/g,'')}` : '',
+    identity.email ? `email:${String(identity.email).trim().toLowerCase()}` : '',
+    identity.name ? `name:${String(identity.name).toLowerCase().replace(/[^a-z0-9]/g,'')}` : ''
+  ].filter(Boolean));
+  return (users || []).findIndex(u => {
+    const keys = new Set([
+      teamIdentityKey(u),
+      u.id ? `id:${String(u.id).trim()}` : '',
+      u.username ? `username:${String(u.username).toLowerCase().replace(/[^a-z0-9]/g,'')}` : '',
+      u.email ? `email:${String(u.email).trim().toLowerCase()}` : '',
+      u.name ? `name:${String(u.name).toLowerCase().replace(/[^a-z0-9]/g,'')}` : ''
+    ].filter(Boolean));
+    for (const key of wantedKeys) if (keys.has(key)) return true;
+    return false;
+  });
+}
+
+function applyPresenceUpdate(d, userPatch = {}, action = 'heartbeat') {
+  d.users ||= [];
+  const nowMs = Date.now();
+  const idx = findUserIndexByIdentity(d.users, userPatch);
+  const existing = idx >= 0 ? d.users[idx] : {};
+  const next = employeeLifecycleProfile({ ...existing, ...userPatch }, existing);
+  next.isOnline = action === 'logout' ? false : true;
+  next.lastSeenAt = nowMs;
+  next.lastHeartbeatAt = nowMs;
+  if (action === 'login') next.lastLoginAt = nowMs;
+  if (action === 'logout') next.lastLogoutAt = nowMs;
+  if (action === 'break') {
+    next.availability = 'Break';
+    next.breakStartedAt = userPatch.breakStartedAt || nowMs;
+    next.availabilityUpdatedAt = nowMs;
+  } else if (action === 'resume' || action === 'login' || action === 'heartbeat') {
+    next.availability = userPatch.availability && userPatch.availability !== 'Unavailable' ? userPatch.availability : 'Available';
+    if (next.availability !== 'Break') next.breakStartedAt = null;
+    next.availabilityUpdatedAt = action === 'heartbeat' ? (next.availabilityUpdatedAt || nowMs) : nowMs;
+  } else if (action === 'logout') {
+    next.availability = 'Unavailable';
+    next.breakStartedAt = null;
+    next.availabilityUpdatedAt = nowMs;
+  }
+  if (idx >= 0) d.users[idx] = next; else d.users.push(next);
+  d.users = sanitizePresenceUsers(d.users);
+  return next;
 }
 
 
@@ -807,6 +864,24 @@ app.delete('/api/state/projects/:id', (req,res)=>{
   d.notifications = (d.notifications || []).filter(n => String(n.caseId || n.projectId || n.targetId || '') !== id);
   save(d);
   res.json({ok:true, deleted: before - d.cases.length, deletedProjectIds:d.deletedProjectIds || [], counts:{cases:d.cases.length}});
+});
+
+app.post('/api/presence', (req, res) => {
+  try {
+    const d = db();
+    const body = req.body || {};
+    const action = String(body.action || 'heartbeat').toLowerCase();
+    const userPatch = body.user || body;
+    if (!userPatch || (!userPatch.id && !userPatch.username && !userPatch.email && !userPatch.name)) {
+      return res.status(400).json({ ok:false, error:'User identity is required for presence update.' });
+    }
+    const safeAction = ['login','heartbeat','break','resume','logout'].includes(action) ? action : 'heartbeat';
+    const user = applyPresenceUpdate(d, userPatch, safeAction);
+    save(d);
+    res.json({ ok:true, user, users:sanitizePresenceUsers(d.users || []) });
+  } catch (e) {
+    res.status(500).json({ ok:false, error:e.message || 'Presence update failed.' });
+  }
 });
 
 app.post('/api/state',(req,res)=>{

@@ -170,7 +170,7 @@ const getTodayMetrics = (projects = [], dateKey = formatDateKey()) => {
   };
 };
 
-export const CommandCentreView = ({ projects = [], users = [], onSelectProject, currentUser }) => {
+export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = [], onSelectProject, currentUser }) => {
   const [dateKey, setDateKey] = useState(formatDateKey());
   const [availabilityFilter, setAvailabilityFilter] = useState('Available');
   const [dashboardFilter, setDashboardFilter] = useState('all');
@@ -186,6 +186,25 @@ export const CommandCentreView = ({ projects = [], users = [], onSelectProject, 
   const people = getOperationalUsers(users || [], { includeAdmins: true });
   const workingTeam = people.filter(u => u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER);
   const activeTasksFor = (userName) => getUserActiveTasks(projects, userName);
+  const todayAttendanceFor = (member = {}) => {
+    const today = formatDateKey();
+    const candidates = (attendanceLogs || []).filter(log => {
+      if (!log) return false;
+      const logDate = log.date || formatDateKey(log.loginAt || log.createdAt || Date.now());
+      const sameDate = String(logDate) === String(today);
+      const sameId = member.id && log.userId && String(log.userId) === String(member.id);
+      const sameName = member.name && log.name && normalizePersonName(log.name) === normalizePersonName(member.name);
+      return sameDate && (sameId || sameName);
+    });
+    return candidates.sort((a, b) => Math.max(toMs(b.lastTick), toMs(b.logoutAt), toMs(b.updatedAt)) - Math.max(toMs(a.lastTick), toMs(a.logoutAt), toMs(a.updatedAt)))[0] || null;
+  };
+  const isMemberOnBreak = (member = {}) => {
+    const directAvailability = String(member.availability || '').trim().toLowerCase().replace(/[^a-z]/g, '');
+    if (directAvailability === 'break' || directAvailability === 'onbreak') return true;
+    const log = todayAttendanceFor(member);
+    const logStatus = String(log?.status || '').trim().toLowerCase().replace(/[^a-z]/g, '');
+    return !!log && !!log.isOnline && (logStatus === 'onbreak' || !!log.currentBreakStartedAt || (Array.isArray(log.breakEvents) && log.breakEvents.some(ev => ev?.start && !ev?.end)));
+  };
 
   useEffect(() => {
     const now = Date.now();
@@ -233,9 +252,9 @@ export const CommandCentreView = ({ projects = [], users = [], onSelectProject, 
   }, [projects, users]);
 
   const nowMs = availabilityNow;
-  const availablePeople = people.filter(u => isUserActuallyOnline(u, nowMs) && (u.role === ROLES.ADMIN || (u.availability !== 'Break' && activeTasksFor(u.name).length === 0))); // admins shown available but no free-since
-  const busyPeople = people.filter(u => u.role !== ROLES.ADMIN && isUserActuallyOnline(u, nowMs) && u.availability !== 'Break' && activeTasksFor(u.name).length > 0);
-  const breakPeople = people.filter(u => u.role !== ROLES.ADMIN && isUserActuallyOnline(u, nowMs) && u.availability === 'Break');
+  const availablePeople = people.filter(u => isUserActuallyOnline(u, nowMs) && !isMemberOnBreak(u) && (u.role === ROLES.ADMIN || activeTasksFor(u.name).length === 0)); // admins shown available but no free-since
+  const busyPeople = people.filter(u => u.role !== ROLES.ADMIN && isUserActuallyOnline(u, nowMs) && !isMemberOnBreak(u) && activeTasksFor(u.name).length > 0);
+  const breakPeople = people.filter(u => u.role !== ROLES.ADMIN && isUserActuallyOnline(u, nowMs) && isMemberOnBreak(u));
   const offlinePeople = people.filter(u => !isUserActuallyOnline(u, nowMs));
   const free = availablePeople.length;
   const busy = busyPeople.length;
@@ -386,7 +405,8 @@ export const CommandCentreView = ({ projects = [], users = [], onSelectProject, 
               {selectedAvailabilityPeople.map(member => {
                 const draftingTask = getUserDraftingTask(projects, member.name);
                 const tasks = draftingTask ? [draftingTask] : [];
-                const breakSince = member.breakStartedAt || member.availabilityUpdatedAt || Date.now();
+                const memberAttendance = todayAttendanceFor(member);
+                const breakSince = member.breakStartedAt || memberAttendance?.currentBreakStartedAt || memberAttendance?.breakEvents?.find(ev => ev?.start && !ev?.end)?.start || member.availabilityUpdatedAt || Date.now();
                 const freeSince = getUserFreeSince(projects, member.name, presenceTimes, member);
                 const busySince = getUserBusySince(projects, member.name, presenceTimes);
                 const busyTaskLine = tasks.length
