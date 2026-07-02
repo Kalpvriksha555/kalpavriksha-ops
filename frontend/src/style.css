@@ -2904,3 +2904,419 @@ button:disabled {
     color: #94a3b8 !important;
   }
 }
+
+/* Kalpvriksha mobile scroll recovery fix.
+   Restores normal vertical scrolling on phones after the mobile polish layer.
+   Keeps chat/modals as their own scroll containers. */
+@media (max-width: 768px) {
+  html,
+  body {
+    height: auto !important;
+    min-height: 100% !important;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    overscroll-behavior-y: auto !important;
+    touch-action: pan-y !important;
+    -webkit-overflow-scrolling: touch !important;
+  }
+
+  #root {
+    height: auto !important;
+    min-height: 100dvh !important;
+    overflow-y: visible !important;
+    overflow-x: hidden !important;
+    touch-action: pan-y !important;
+  }
+
+  #root > div,
+  main,
+  .kalpa-page,
+  .kalpa-production-polish,
+  .kalpa-production-polish > div {
+    height: auto !important;
+    max-height: none !important;
+    overflow-y: visible !important;
+    touch-action: pan-y !important;
+  }
+
+  /* Tailwind's overflow-hidden was useful on desktop cards, but on mobile it can
+     trap vertical content. Keep horizontal clipping, restore vertical flow. */
+  .kalpa-production-polish .overflow-hidden:not(.kalpa-chat-panel):not(.kalpa-chat-sidebar):not(.kalpa-chat-messages):not(.kalpa-chat-inputbar):not(.kalpa-chat-shell) {
+    overflow-y: visible !important;
+  }
+
+  .kalpa-production-polish .overflow-x-auto,
+  .kalpa-table-wrap {
+    overflow-x: auto !important;
+    overflow-y: visible !important;
+    -webkit-overflow-scrolling: touch !important;
+  }
+
+  /* Fixed overlays must still scroll internally instead of locking the page. */
+  .kalpa-modal-backdrop,
+  .kalpa-lead-modal,
+  .fixed.inset-0 {
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    touch-action: pan-y !important;
+  }
+
+  /* Keep the mobile chat sheet controlled; only its message area scrolls. */
+  .kalpa-chat-panel {
+    overflow: hidden !important;
+    touch-action: auto !important;
+  }
+
+  .kalpa-chat-messages,
+  .kalpa-chat-sidebar,
+  .kalpa-chat-sidebar > .flex-1,
+  .kalpa-notification-panel,
+  [data-kalpa-notification-panel] {
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    touch-action: pan-y !important;
+  }
+}
+
+/* Kalpvriksha mobile polish round 2.
+   Frontend-only: improves touch spacing, cards, tables, chat, notifications and forms
+   while preserving normal page scrolling restored in the previous fix. */
+@media (max-width: 768px) {
+  :root {
+    --kalpa-mobile-pad: 0.85rem;
+    --kalpa-mobile-radius: 1rem;
+  }
+
+  html {
+    scroll-padding-top: calc(env(safe-area-inset-top, 0px) + 0.75rem);
+  }
+
+  body {
+    font-size: 14px !important;
+    line-height: 1.45 !important;
+    padding-bottom: env(safe-area-inset-bottom, 0px) !important;
+  }
+
+  .kalpa-production-polish {
+    padding-left: max(0.55rem, env(safe-area-inset-left)) !important;
+    padding-right: max(0.55rem, env(safe-area-inset-right)) !important;
+  }
+
+  /* Global mobile spacing: compact without feeling cramped. */
+  .kalpa-production-polish .p-8,
+  .kalpa-production-polish .p-7,
+  .kalpa-production-polish .p-6 {
+    padding: var(--kalpa-mobile-pad) !important;
+  }
+
+  .kalpa-production-polish .px-8,
+  .kalpa-production-polish .px-7,
+  .kalpa-production-polish .px-6 {
+    padding-left: var(--kalpa-mobile-pad) !important;
+    padding-right: var(--kalpa-mobile-pad) !important;
+  }
+
+  .kalpa-production-polish .py-8,
+  .kalpa-production-polish .py-7,
+  .kalpa-production-polish .py-6 {
+    padding-top: var(--kalpa-mobile-pad) !important;
+    padding-bottom: var(--kalpa-mobile-pad) !important;
+  }
+
+  .kalpa-production-polish .gap-8,
+  .kalpa-production-polish .gap-7,
+  .kalpa-production-polish .gap-6 {
+    gap: 0.75rem !important;
+  }
+
+  /* Headings and page headers. */
+  .kalpa-production-polish h1,
+  .kalpa-production-polish .text-4xl,
+  .kalpa-production-polish .text-3xl {
+    font-size: 1.38rem !important;
+    line-height: 1.2 !important;
+    letter-spacing: -0.025em !important;
+  }
+
+  .kalpa-production-polish h2,
+  .kalpa-production-polish .text-2xl {
+    font-size: 1.12rem !important;
+    line-height: 1.25 !important;
+  }
+
+  .kalpa-production-polish .text-xl {
+    font-size: 1rem !important;
+    line-height: 1.3 !important;
+  }
+
+  /* Cards: softer and easier to scan on phones. */
+  .kalpa-production-polish .rounded-3xl,
+  .kalpa-production-polish .rounded-2xl {
+    border-radius: var(--kalpa-mobile-radius) !important;
+  }
+
+  .kalpa-production-polish .shadow-2xl,
+  .kalpa-production-polish .shadow-xl {
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.10) !important;
+  }
+
+  .kd-dark .kalpa-production-polish .shadow-2xl,
+  .kd-dark .kalpa-production-polish .shadow-xl {
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.32) !important;
+  }
+
+  /* Better mobile tap targets. */
+  .kalpa-production-polish button,
+  .kalpa-production-polish a[role="button"],
+  .kalpa-production-polish input[type="button"],
+  .kalpa-production-polish input[type="submit"] {
+    min-height: 42px;
+  }
+
+  .kalpa-production-polish button svg {
+    flex-shrink: 0;
+  }
+
+  .kalpa-production-polish .text-xs button,
+  .kalpa-production-polish button.text-xs {
+    min-height: 36px;
+  }
+
+  /* Forms should never zoom or overflow on mobile. */
+  .kalpa-production-polish input,
+  .kalpa-production-polish select,
+  .kalpa-production-polish textarea {
+    font-size: 16px !important;
+    max-width: 100% !important;
+  }
+
+  .kalpa-production-polish textarea {
+    min-height: 42px;
+  }
+
+  .kalpa-production-polish input[type="date"],
+  .kalpa-production-polish input[type="time"],
+  .kalpa-production-polish select {
+    min-height: 42px;
+  }
+
+  /* Button groups wrap instead of going out of screen. */
+  .kalpa-production-polish .flex.items-center.gap-2,
+  .kalpa-production-polish .flex.items-center.gap-3,
+  .kalpa-production-polish .flex.justify-between,
+  .kalpa-production-polish .flex.justify-end {
+    flex-wrap: wrap;
+  }
+
+  .kalpa-production-polish .flex.justify-between > * {
+    min-width: 0;
+  }
+
+  /* Main tabs: horizontally scrollable but not intrusive. */
+  .kalpa-main-tabs,
+  .kalpa-production-polish [role="tablist"] {
+    max-width: 100% !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    -webkit-overflow-scrolling: touch !important;
+    scrollbar-width: none;
+    scroll-snap-type: x proximity;
+  }
+
+  .kalpa-main-tabs::-webkit-scrollbar,
+  .kalpa-production-polish [role="tablist"]::-webkit-scrollbar {
+    display: none;
+  }
+
+  .kalpa-main-tabs button,
+  .kalpa-production-polish [role="tablist"] button {
+    white-space: nowrap !important;
+    flex: 0 0 auto !important;
+    scroll-snap-align: start;
+  }
+
+  /* Tables: keep usable on mobile; do not block vertical page scroll. */
+  .kalpa-production-polish table {
+    min-width: 680px;
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+
+  .kalpa-production-polish th,
+  .kalpa-production-polish td {
+    padding: 0.72rem 0.65rem !important;
+    vertical-align: top !important;
+  }
+
+  .kalpa-production-polish th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+
+  .kalpa-production-polish .overflow-x-auto {
+    border-radius: 0.9rem;
+    margin-left: -0.15rem;
+    margin-right: -0.15rem;
+    padding-bottom: 0.35rem;
+  }
+
+  .kalpa-production-polish .overflow-x-auto::after {
+    content: "Swipe sideways to see more";
+    display: block;
+    padding: 0.35rem 0.65rem 0.15rem;
+    font-size: 0.68rem;
+    color: #64748b;
+  }
+
+  .kd-dark .kalpa-production-polish .overflow-x-auto::after {
+    color: #94a3b8;
+  }
+
+  /* Status chips stay readable and do not crush row content. */
+  .kalpa-production-polish span[class*="rounded-full"],
+  .kalpa-production-polish .rounded-full {
+    max-width: 100%;
+  }
+
+  /* Modals/drawers: fit phone viewport and keep actions reachable. */
+  .kalpa-modal-backdrop > div,
+  .fixed.inset-0 > div[class*="rounded"],
+  .kalpa-lead-modal {
+    width: calc(100vw - 1rem) !important;
+    max-width: calc(100vw - 1rem) !important;
+    max-height: calc(100dvh - 1rem) !important;
+    margin: 0.5rem auto !important;
+    border-radius: 1rem !important;
+  }
+
+  .kalpa-modal-backdrop form,
+  .fixed.inset-0 form {
+    max-height: calc(100dvh - 2rem) !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+  }
+
+  /* Notification panel: phone-friendly sheet. */
+  .kalpa-notification-panel,
+  [data-kalpa-notification-panel] {
+    position: fixed !important;
+    left: 0.5rem !important;
+    right: 0.5rem !important;
+    top: calc(env(safe-area-inset-top, 0px) + 0.65rem) !important;
+    width: auto !important;
+    max-width: none !important;
+    max-height: min(78dvh, 620px) !important;
+    border-radius: 1rem !important;
+    z-index: 80 !important;
+  }
+
+  /* Chat: keep controls visible with keyboard and safe areas. */
+  .kalpa-chat-panel {
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    padding-bottom: env(safe-area-inset-bottom, 0px) !important;
+  }
+
+  .kalpa-chat-header,
+  .kalpa-chat-inputbar {
+    flex-shrink: 0 !important;
+  }
+
+  .kalpa-chat-messages {
+    min-height: 0 !important;
+    flex: 1 1 auto !important;
+    padding-bottom: 0.75rem !important;
+  }
+
+  .kalpa-chat-inputbar {
+    border-top-width: 1px !important;
+    background-clip: padding-box !important;
+  }
+
+  .kalpa-chat-textarea {
+    max-height: 110px !important;
+    min-height: 42px !important;
+  }
+
+  .kalpa-chat-launcher {
+    right: max(1rem, env(safe-area-inset-right)) !important;
+    bottom: max(1rem, env(safe-area-inset-bottom)) !important;
+  }
+
+  .kalpa-message-menu,
+  .kalpa-chat-menu,
+  [data-kalpa-message-menu] {
+    max-width: min(92vw, 320px) !important;
+    max-height: 70dvh !important;
+    overflow-y: auto !important;
+  }
+
+  /* Operations/action rows: prevent hidden buttons. */
+  .kalpa-production-polish td .flex,
+  .kalpa-production-polish .kalpa-action-row,
+  .kalpa-production-polish [data-kalpa-action-row] {
+    flex-wrap: wrap !important;
+    gap: 0.4rem !important;
+  }
+
+  .kalpa-production-polish td button,
+  .kalpa-production-polish .kalpa-action-row button,
+  .kalpa-production-polish [data-kalpa-action-row] button {
+    min-height: 34px;
+  }
+
+  /* Finance/summary cards: numbers should not overflow. */
+  .kalpa-production-polish [class*="₹"],
+  .kalpa-production-polish .font-mono,
+  .kalpa-production-polish .tabular-nums {
+    word-break: break-word;
+  }
+
+  /* Dark mobile refinement. */
+  .kd-dark .kalpa-production-polish th {
+    background-color: rgba(15, 23, 42, 0.98) !important;
+    color: #f8fafc !important;
+  }
+
+  .kd-dark .kalpa-production-polish td {
+    color: #e2e8f0 !important;
+  }
+
+  .kd-dark .kalpa-production-polish input,
+  .kd-dark .kalpa-production-polish select,
+  .kd-dark .kalpa-production-polish textarea {
+    background-color: rgba(15, 23, 42, 0.92) !important;
+    color: #f8fafc !important;
+    border-color: rgba(148, 163, 184, 0.26) !important;
+  }
+
+  .kd-dark .kalpa-production-polish input::placeholder,
+  .kd-dark .kalpa-production-polish textarea::placeholder {
+    color: #94a3b8 !important;
+  }
+}
+
+@media (max-width: 420px) {
+  .kalpa-production-polish {
+    padding-left: 0.45rem !important;
+    padding-right: 0.45rem !important;
+  }
+
+  .kalpa-production-polish .grid,
+  .kalpa-production-polish .space-y-4 > * + *,
+  .kalpa-production-polish .space-y-5 > * + * {
+    margin-top: 0.65rem !important;
+  }
+
+  .kalpa-production-polish button,
+  .kalpa-production-polish input,
+  .kalpa-production-polish select,
+  .kalpa-production-polish textarea {
+    border-radius: 0.75rem !important;
+  }
+
+  .kalpa-chat-bubble {
+    max-width: 95vw !important;
+  }
+}
