@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { formatLastSeenDateTime, formatCallDuration, formatDateKey, formatDateTime, formatDuration, formatMinutes } from './utils/date';
 import { allProjectDocs, getCompletedDocuments, getLatestCompletedFileName, getTaskDescription, getEstimateDetails, getCompletedFileBadge } from './utils/taskDisplayUtils';
-import { getBreakMinutesFromLog, getTaskBusySince, getUserActiveTasks, getUserLastCompletedAt, getUserFreeSince, getUserBusySince, getTotalLoggedInMinutesFromLog, getActiveMinutesFromLog, getAttendanceActiveTaskMinutes, buildAttendanceAccrual, deriveAttendanceSession, getAttendanceFirstLoginLabel } from './utils/presenceAttendanceUtils';
+import { getBreakMinutesFromLog, getTaskBusySince, getUserActiveTasks, getUserLastCompletedAt, getUserFreeSince, getUserBusySince, getDraftingElapsedMs, getTotalLoggedInMinutesFromLog, getActiveMinutesFromLog, getAttendanceActiveTaskMinutes, buildAttendanceAccrual, deriveAttendanceSession, getAttendanceFirstLoginLabel } from './utils/presenceAttendanceUtils';
 import { createSafeMeetingRoomName, buildJitsiUrl } from './utils/meeting';
 import { copyTextToClipboard } from './utils/clipboard';
 import { Badge, PageLoadingScreen, EmptyState, MiniEmptyState } from './components/shared';
@@ -592,8 +592,9 @@ const getAttendanceUser = (log, users = []) => {
 const getProjectDateKey = (project) => formatDateKey(project.createdAt || project.completedAt || Date.now());
 
 const getDraftElapsed = (project, now = Date.now()) => {
-  if (!project?.draftingStartedAt) return '-';
-  return formatDuration(project.draftingStartedAt, project.draftingCompletedAt || project.submittedAt || project.completedAt || now);
+  const elapsedMs = getDraftingElapsedMs(project, now);
+  if (!elapsedMs && !project?.draftingStartedAt) return '-';
+  return formatMinutes(Math.floor(elapsedMs / 60000));
 };
 
 
@@ -668,6 +669,19 @@ const shouldShowOnOperationsDate = (project = {}, dateKey = formatDateKey()) => 
   return false;
 };
 
+const normalizeWorkStatusForRevision = (status = '') => String(status || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+const CLOSED_REVISION_STATUSES = new Set(['COMPLETED', 'APPROVED', 'ARCHIVED', 'CLOSED', 'DELETED', 'CANCELLED', 'CANCELED']);
+const ACTIVE_REVISION_STATUSES = new Set(['REVISIONPENDING', 'REVISIONINPROGRESS', 'REVERTED']);
+const isSubTaskOpen = (subTask = {}) => !['DONE', 'COMPLETED', 'APPROVED', 'CLOSED', 'RESOLVED'].includes(normalizeWorkStatusForRevision(subTask.status || 'Pending'));
+const hasActiveRevision = (project = {}) => {
+  const statusKey = normalizeWorkStatusForRevision(project.status);
+  const reviewKey = normalizeWorkStatusForRevision(project.reviewStatus || project.finalConclusion || '');
+  if (CLOSED_REVISION_STATUSES.has(statusKey) || reviewKey === 'APPROVED') return false;
+  return ACTIVE_REVISION_STATUSES.has(statusKey)
+    || ACTIVE_REVISION_STATUSES.has(reviewKey)
+    || (project.subTasks || project.revisions || []).some(isSubTaskOpen);
+};
+
 const getSlaInfo = (project = {}, now = Date.now()) => {
   const createdAt = project.createdAt || now;
   const assignedAt = project.assignedAt || project.assignedOn || (project.assignedTo && project.assignedTo !== 'Unassigned' ? createdAt : null);
@@ -699,7 +713,7 @@ const getTodayMetrics = (projects = [], dateKey = formatDateKey()) => {
   const completedToday = projects.filter(p => p.status === 'Completed' && formatDateKey(p.completedAt || p.createdAt) === dateKey);
   const pendingCollections = projects.filter(p => (Number(p.estimate) || 0) > (Number(p.ledger?.amountIn) || 0));
   const paymentsToday = projects.filter(p => p.ledger?.updatedAt && formatDateKey(p.ledger.updatedAt) === dateKey);
-  const revisions = activeToday.filter(p => (p.subTasks || []).some(st => st.status !== 'Done'));
+  const revisions = activeToday.filter(hasActiveRevision);
   return {
     todays, carried, activeToday, completedToday, pendingCollections, paymentsToday, revisions,
     received: todays.length,
@@ -1616,11 +1630,15 @@ const LedgerView = ({ projects, onSelectProject }) => {
   );
 };
 
-const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDeleteTask }) => {
+const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, projects = [], onDeleteTask }) => {
   const [newSubTask, setNewSubTask] = useState('');
   const [newNote, setNewNote] = useState('');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isUploadingFinal, setIsUploadingFinal] = useState(false);
+  const [subTaskAttachments, setSubTaskAttachments] = useState([]);
+  const [noteAttachments, setNoteAttachments] = useState([]);
+  const [isUploadingRevisionAttachment, setIsUploadingRevisionAttachment] = useState(false);
+  const [isUploadingNoteAttachment, setIsUploadingNoteAttachment] = useState(false);
   const completedFileInputRef = useRef(null);
   
   const canManage = user.role === ROLES.ADMIN || user.role === ROLES.MANAGER;
@@ -1628,12 +1646,48 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
   const canDesignerRevertOwnTask = user.role === ROLES.DESIGNER && isAssignedToMe;
   const canRevertTask = (canManage || canDesignerRevertOwnTask) && project.status !== 'Lead Received';
   const showFinancials = user.role === ROLES.ADMIN;
+  const activeDraftingForUser = (usersProjects = []) => (usersProjects || []).find(p => samePerson(p.assignedTo, project.assignedTo || user.name) && p.status === 'Drafting' && String(p.id) !== String(project.id));
+
+  const handlePauseDrafting = () => {
+    if (project.status !== 'Drafting') return;
+    const now = Date.now();
+    const sessionStart = project.draftingResumedAt || project.currentDraftingStartedAt || project.draftingStartedAt || project.workStartedAt || now;
+    const previousElapsed = Math.max(0, Number(project.draftingElapsedMsBeforePause) || Number(project.draftingElapsedMs) || 0);
+    const sessionElapsed = Math.max(0, now - Number(sessionStart));
+    const totalElapsed = previousElapsed + sessionElapsed;
+    onUpdateProject({
+      ...project,
+      status: 'Drafting Paused',
+      draftingPausedAt: now,
+      currentDraftingStartedAt: null,
+      draftingResumedAt: null,
+      draftingElapsedMsBeforePause: totalElapsed,
+      draftingElapsedMs: totalElapsed,
+      pausedBy: user.name,
+      pausedDraftingSessions: [...(project.pausedDraftingSessions || []), { start: sessionStart, pausedAt: now, elapsedMs: sessionElapsed, totalElapsedMs: totalElapsed, by: user.name }],
+      timeline: [...(project.timeline || []), { id: now, text: `Drafting paused by ${user.name}`, time: new Date(now).toLocaleString() }]
+    }, project);
+  };
 
   const handleAdvanceStatus = () => {
     const updatedProject = { ...project };
-    if (project.status === 'Lead Received') {
+    if (project.status === 'Lead Received' || project.status === 'Assigned' || project.status === 'Drafting Paused' || project.status === 'Revision Pending' || project.status === 'Revision In Progress') {
+      const otherDrafting = activeDraftingForUser(projects);
+      if (otherDrafting) {
+        alert(`Only one task can be drafted at a time. Pause drafting on ${otherDrafting.id} before starting another task.`);
+        return;
+      }
+      const now = Date.now();
+      const wasPaused = project.status === 'Drafting Paused';
+      const wasRevision = project.status === 'Revision Pending' || project.status === 'Revision In Progress';
       updatedProject.status = 'Drafting';
-      updatedProject.draftingStartedAt = updatedProject.draftingStartedAt || Date.now();
+      updatedProject.draftingStartedAt = updatedProject.draftingStartedAt || now;
+      updatedProject.currentDraftingStartedAt = now;
+      updatedProject.draftingResumedAt = now;
+      updatedProject.draftingPausedAt = null;
+      updatedProject.pausedBy = null;
+      updatedProject.reviewStatus = wasRevision ? 'Revision In Progress' : updatedProject.reviewStatus;
+      updatedProject.timeline = [...(project.timeline || []), { id: now, text: `${wasPaused ? 'Drafting resumed' : wasRevision ? 'Revision drafting started' : 'Drafting started'} by ${user.name}`, time: new Date(now).toLocaleString() }];
     }
     else if (project.status === 'Drafting') {
       if (getCompletedDocuments(project).length === 0) {
@@ -1643,6 +1697,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
       updatedProject.status = 'Internal Review';
       updatedProject.submittedAt = updatedProject.submittedAt || Date.now();
       updatedProject.draftingCompletedAt = updatedProject.draftingCompletedAt || Date.now();
+      updatedProject.draftingFinalElapsedMs = getDraftingElapsedMs(updatedProject, updatedProject.draftingCompletedAt);
       updatedProject.internalReviewStartedAt = updatedProject.internalReviewStartedAt || Date.now();
       updatedProject.finalConclusion = 'Pending Internal Review';
       updatedProject.reviewStatus = 'Pending';
@@ -1702,7 +1757,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
     const updatedProject = { ...project };
     let revertedTo = '';
     
-    if (project.status === 'Drafting') revertedTo = 'Lead Received';
+    if (project.status === 'Drafting') revertedTo = 'Assigned';
     else if (project.status === 'Internal Review') revertedTo = 'Drafting';
     else if (project.status === 'Completed') {
       revertedTo = 'Internal Review';
@@ -1756,6 +1811,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
       updatedProject.completedAt = null;
       updatedProject.finalConclusion = 'Pending Internal Review';
       updatedProject.reviewStatus = 'Pending';
+      updatedProject.subTasks = (updatedProject.subTasks || []).map(st => isSubTaskOpen(st) ? { ...st, status: 'Done', completedBy: user.name, completedAt: Date.now() } : st);
       updatedProject.timeline.push({ id: Date.now()+3, text: 'Completed work file uploaded. Sent for internal review before final approval.', time: new Date().toLocaleString() });
     }
 
@@ -1768,6 +1824,68 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
       if (type === 'completed') setIsUploadingFinal(false);
       if (e?.target) e.target.value = '';
     }
+  };
+
+
+
+  const uploadSupportingAttachments = async (event, attachmentType, setAttachments, setUploading) => {
+    const files = Array.from(event?.target?.files || []);
+    if (files.length === 0) return;
+    setUploading(true);
+    try {
+      const uploadedDocs = [];
+      for (const file of files) {
+        const uploadedDoc = await uploadProjectFile(file, project.id, attachmentType, user.name);
+        uploadedDocs.push({
+          ...uploadedDoc,
+          id: uploadedDoc.id || `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          type: attachmentType,
+          uploadedBy: uploadedDoc.uploadedBy || user.name,
+          uploadedAt: uploadedDoc.uploadedAt || Date.now(),
+        });
+      }
+      setAttachments(prev => [...prev, ...uploadedDocs]);
+    } catch (error) {
+      console.error(`${attachmentType} attachment upload failed:`, error);
+      alert('Attachment upload failed. Please try again.');
+    } finally {
+      setUploading(false);
+      if (event?.target) event.target.value = '';
+    }
+  };
+
+  const handleRevisionAttachmentUpload = (event) => {
+    uploadSupportingAttachments(event, 'revision', setSubTaskAttachments, setIsUploadingRevisionAttachment);
+  };
+
+  const handleNoteAttachmentUpload = (event) => {
+    uploadSupportingAttachments(event, 'discussion', setNoteAttachments, setIsUploadingNoteAttachment);
+  };
+
+  const removePendingAttachment = (bucket, docKey) => {
+    const removeFrom = (items = []) => items.filter((doc, idx) => String(doc.id || idx) !== String(docKey));
+    if (bucket === 'revision') setSubTaskAttachments(prev => removeFrom(prev));
+    if (bucket === 'discussion') setNoteAttachments(prev => removeFrom(prev));
+  };
+
+  const renderInlineAttachments = (attachments = []) => {
+    if (!attachments || attachments.length === 0) return null;
+    return (
+      <div className="flex flex-wrap gap-2 mt-3">
+        {attachments.map((doc, idx) => (
+          <button
+            key={doc.id || `${doc.name}-${idx}`}
+            type="button"
+            onClick={() => downloadProjectFile(doc)}
+            className="inline-flex items-center max-w-full text-xs font-black text-indigo-700 bg-white hover:bg-indigo-50 border border-indigo-100 px-3 py-2 rounded-xl transition-colors shadow-sm"
+            title={doc.name}
+          >
+            <Paperclip className="w-3.5 h-3.5 mr-1.5 flex-shrink-0" />
+            <span className="truncate max-w-[190px]">{doc.name || 'Attachment'}</span>
+          </button>
+        ))}
+      </div>
+    );
   };
 
   const handleFileDelete = async (docToDelete) => {
@@ -1812,22 +1930,35 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
   };
 
   const handleAddSubTask = () => {
-    if (!newSubTask.trim()) return;
+    const revisionText = newSubTask.trim();
+    if (!revisionText && subTaskAttachments.length === 0) return;
+    const now = Date.now();
+    const title = revisionText || `Revision attachment added by ${user.name}`;
     const updatedProject = {
       ...project,
-      priority: 'Urgent', 
-      status: 'Internal Review',
+      priority: 'Urgent',
+      status: 'Revision Pending',
+      reviewStatus: 'Reverted',
+      revisionRequestedAt: now,
+      reviewedBy: user.name,
+      documents: [...(project.documents || []), ...subTaskAttachments],
       subTasks: [
         ...(project.subTasks || []),
-        { id: Date.now(), title: newSubTask, status: 'Pending', addedBy: user.name, timeSpent: '0h' }
+        { id: now, title, status: 'Pending', addedBy: user.name, createdAt: now, time: new Date(now).toLocaleString(), timeSpent: '0h', attachments: subTaskAttachments }
+      ],
+      reviewHistory: [
+        ...(project.reviewHistory || []),
+        { id: now, action: 'Revision Requested', comment: title, reviewer: user.name, at: now, attachments: subTaskAttachments }
       ],
       timeline: [
         ...(project.timeline || []),
-        { id: Date.now(), text: `Revision/Sub-task Added: ${newSubTask}`, time: new Date().toLocaleString() }
+        { id: now, text: `Revision requested by ${user.name}: ${title}`, time: new Date(now).toLocaleString() },
+        ...(subTaskAttachments.length ? [{ id: now + 1, text: `Revision attachment added by ${user.name}: ${subTaskAttachments.map(d => d.name).join(', ')}`, time: new Date(now).toLocaleString() }] : [])
       ]
     };
     onUpdateProject(updatedProject, project);
     setNewSubTask('');
+    setSubTaskAttachments([]);
   };
 
   const toggleSubTask = (subTaskId) => {
@@ -1838,13 +1969,21 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
   };
 
   const handleAddNote = () => {
-    if (!newNote.trim()) return;
+    const noteText = newNote.trim();
+    if (!noteText && noteAttachments.length === 0) return;
+    const now = Date.now();
     const updatedProject = {
       ...project,
-      notes: [...(project.notes||[]), { id: Date.now(), text: newNote, author: user.name, time: new Date().toLocaleString() }]
+      notes: [...(project.notes||[]), { id: now, text: noteText || `Attachment added by ${user.name}`, author: user.name, time: new Date(now).toLocaleString(), attachments: noteAttachments }],
+      documents: [...(project.documents || []), ...noteAttachments],
+      timeline: [
+        ...(project.timeline || []),
+        ...(noteAttachments.length ? [{ id: now + 1, text: `Discussion attachment added by ${user.name}: ${noteAttachments.map(d => d.name).join(', ')}`, time: new Date(now).toLocaleString() }] : [])
+      ]
     };
     onUpdateProject(updatedProject, project);
     setNewNote('');
+    setNoteAttachments([]);
   };
 
   const updateLedger = (field, value) => {
@@ -1954,12 +2093,21 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
     window.open('https://web.whatsapp.com/', '_blank');
   };
 
-  const completedDocsCount = getCompletedDocuments(project).length;
+  const completedDocs = getCompletedDocuments(project);
+  const completedDocsCount = completedDocs.length;
+  const hasRevisionCycle = (project.subTasks || []).length > 0 || (project.revisionHistory || []).length > 0 || project.priority === 'Urgent';
+  const latestCompletedAt = completedDocs.reduce((max, doc) => Math.max(max, Number(doc.uploadedAt || doc.createdAt || doc.updatedAt || doc.id || 0) || new Date(doc.time || doc.date || 0).getTime() || 0), 0);
+  const latestRevisedCompletedDocs = hasRevisionCycle && completedDocs.length > 0
+    ? completedDocs.filter(doc => {
+        const t = Number(doc.uploadedAt || doc.createdAt || doc.updatedAt || doc.id || 0) || new Date(doc.time || doc.date || 0).getTime() || 0;
+        return t === latestCompletedAt || String(doc.type || doc.folder || doc.label || '').toLowerCase().includes('revision');
+      })
+    : [];
   const isAwaitingInternalReview = project.status === 'Internal Review' && completedDocsCount > 0;
   const isFinalApproved = project.status === 'Completed' && (project.finalConclusion === 'Approved' || project.reviewStatus === 'Approved' || project.approvedAt);
   const canApproveFinal = canManage && isAwaitingInternalReview;
-  const advanceLabel = project.status === 'Lead Received'
-    ? 'Start Drafting'
+  const advanceLabel = (project.status === 'Lead Received' || project.status === 'Assigned' || project.status === 'Drafting Paused')
+    ? (project.status === 'Drafting Paused' ? 'Resume Drafting' : 'Start Drafting')
     : project.status === 'Drafting'
       ? 'Send for Internal Review'
       : project.status === 'Internal Review'
@@ -1982,7 +2130,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
             <p className="text-sm font-semibold text-slate-500 flex items-center">
               <Building2 className="w-4 h-4 mr-1.5 opacity-70"/> {getCustomerDisplayName(project)} • {project.location}
             </p>
-            {project.draftingStartedAt && <p className="text-xs font-bold text-indigo-600 mt-1 flex items-center"><Clock className="w-3.5 h-3.5 mr-1" /> Drafting elapsed: {getDraftElapsed(project)}</p>}
+            {project.draftingStartedAt && <p className={`text-xs font-bold mt-1 flex items-center ${project.status === 'Drafting Paused' ? 'text-amber-600' : 'text-indigo-600'}`}><Clock className="w-3.5 h-3.5 mr-1" /> {project.status === 'Drafting Paused' ? 'Drafting paused at' : 'Drafting elapsed'}: {getDraftElapsed(project)}</p>}
           </div>
         </div>
         <div className="flex flex-wrap gap-3">
@@ -2019,6 +2167,12 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
               <button type="button" onClick={handleRevertStatus} className="px-4 py-2.5 bg-slate-100 text-slate-700 rounded-xl hover:bg-slate-200 transition-all flex items-center font-bold text-sm whitespace-nowrap" title={canDesignerRevertOwnTask ? 'Revert your own task to the previous workflow stage' : 'Revert task to the previous workflow stage'}>
                   <ArrowLeft className="w-4 h-4 mr-1.5" /> Revert
               </button>
+          )}
+
+          {project.status === 'Drafting' && isAssignedToMe && (
+             <button type="button" onClick={handlePauseDrafting} className="px-4 py-2.5 bg-amber-50 text-amber-700 border border-amber-100 rounded-xl hover:bg-amber-100 transition-all flex items-center font-bold text-sm whitespace-nowrap">
+               <Clock className="w-4 h-4 mr-2" /> Pause Drafting
+             </button>
           )}
 
           {project.status !== 'Completed' && !canApproveFinal && (isAssignedToMe || canManage) && (
@@ -2206,8 +2360,8 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
                ))}
 
                <h3 className="text-xs font-extrabold text-slate-400 uppercase tracking-widest bg-emerald-50 py-2 px-3 rounded-lg inline-block mt-8 border-t-2 border-slate-100 pt-6 w-full max-w-fit">Completed Work (AutoCAD/PDF)</h3>
-               {getCompletedDocuments(project).length === 0 && <p className="text-sm text-slate-500 font-medium italic px-2">No completed files yet.</p>}
-               {getCompletedDocuments(project).map((doc, idx) => (
+               {completedDocs.length === 0 && <p className="text-sm text-slate-500 font-medium italic px-2">No completed files yet.</p>}
+               {completedDocs.map((doc, idx) => (
                  <div key={idx} className="flex items-center justify-between p-3.5 bg-emerald-50/50 rounded-2xl border border-emerald-100 group">
                    <div className="flex items-center text-emerald-900 overflow-hidden pr-2">
                      <div className="p-2 bg-white rounded-lg shadow-sm border border-emerald-100">
@@ -2222,6 +2376,27 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
                    )}
                  </div>
                ))}
+
+               {latestRevisedCompletedDocs.length > 0 && (
+                 <div className="mt-6 p-4 bg-purple-50/70 border-2 border-purple-100 rounded-2xl">
+                   <h3 className="text-xs font-extrabold text-purple-700 uppercase tracking-widest mb-3 flex items-center"><CheckCircle className="w-4 h-4 mr-2" /> Revised Completed File - Latest</h3>
+                   <p className="text-xs font-bold text-purple-500 mb-3">These are the latest completed files submitted after revision. Use these for review/approval instead of older completed versions.</p>
+                   <div className="space-y-2">
+                     {latestRevisedCompletedDocs.map((doc, idx) => (
+                       <div key={doc.id || idx} className="flex items-center justify-between p-3 bg-white rounded-xl border border-purple-100">
+                         <div className="flex items-center min-w-0 pr-2 text-purple-900">
+                           <div className="p-2 bg-purple-50 rounded-lg border border-purple-100">{getFileIcon(doc.name)}</div>
+                           <div className="ml-3 min-w-0">
+                             <p className="font-black truncate">{doc.name}</p>
+                             <p className="text-[11px] font-bold text-purple-500">Latest revision upload • by {doc.uploadedBy || 'Team'}</p>
+                           </div>
+                         </div>
+                         <button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-100 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>
+                       </div>
+                     ))}
+                   </div>
+                 </div>
+               )}
              </div>
           </div>
 
@@ -2241,13 +2416,33 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
                     <div className="flex-1 min-w-0">
                       <p className={`font-bold text-base break-words ${st.status === 'Done' ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{st.title}</p>
                       <p className="text-xs font-semibold text-slate-400 mt-1">Added by {st.addedBy}</p>
+                      {renderInlineAttachments(st.attachments || [])}
                     </div>
                   </div>
                 ))
               )}
             </div>
             <div className="flex flex-col sm:flex-row space-y-3 sm:space-y-0 sm:space-x-3">
-              <textarea rows={3} value={newSubTask} onChange={(e) => setNewSubTask(e.target.value)} placeholder="Describe the revision... Enter creates a new line. Use Add Task to send." className="flex-1 border-2 border-slate-100 rounded-xl px-4 py-3 font-medium focus:border-indigo-500 focus:ring-0 outline-none transition-colors resize-none" />
+              <div className="flex-1">
+                <textarea rows={3} value={newSubTask} onChange={(e) => setNewSubTask(e.target.value)} placeholder="Describe the revision... Enter creates a new line. Use Add Task to send." className="w-full border-2 border-slate-100 rounded-xl px-4 py-3 font-medium focus:border-indigo-500 focus:ring-0 outline-none transition-colors resize-none" />
+                <div className="flex flex-wrap items-center gap-2 mt-2">
+                  <label className="inline-flex items-center cursor-pointer text-xs font-black text-indigo-700 bg-indigo-50 hover:bg-indigo-100 px-3 py-2 rounded-xl border border-indigo-100 transition-colors">
+                    <Paperclip className="w-3.5 h-3.5 mr-1.5" /> {isUploadingRevisionAttachment ? 'Uploading...' : 'Attach Files'}
+                    <input type="file" multiple className="hidden" onChange={handleRevisionAttachmentUpload} />
+                  </label>
+                  <span className="text-[11px] font-bold text-slate-400">No upload limit. Add screenshots, PDFs, DWG, images, videos, Word or Excel files.</span>
+                </div>
+                {subTaskAttachments.length > 0 && (
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    {subTaskAttachments.map((doc, idx) => (
+                      <span key={doc.id || idx} className="inline-flex items-center max-w-full text-xs font-bold text-slate-700 bg-white border border-slate-200 px-2.5 py-1.5 rounded-lg">
+                        <Paperclip className="w-3 h-3 mr-1" /><span className="truncate max-w-[160px]">{doc.name}</span>
+                        <button type="button" onClick={() => removePendingAttachment('revision', doc.id || idx)} className="ml-2 text-red-500 hover:text-red-700"><X className="w-3 h-3" /></button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
               <button type="button" onClick={(e) => { e.preventDefault(); handleAddSubTask(); }} className="px-6 py-3 bg-slate-800 text-white rounded-xl shadow-md hover:bg-slate-700 font-bold whitespace-nowrap transition-colors flex items-center justify-center"><Send className="w-4 h-4 mr-2" /> Add Task</button>
             </div>
           </div>
@@ -2318,11 +2513,31 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
                 <div key={idx} className="bg-slate-50 p-3.5 rounded-2xl border border-slate-100">
                   <p className="text-sm font-semibold text-slate-700 whitespace-pre-wrap">{note.text}</p>
                   <p className="text-[10px] font-bold text-slate-400 mt-2 uppercase tracking-wider">{note.author} • {note.time}</p>
+                  {renderInlineAttachments(note.attachments || [])}
                 </div>
               ))}
             </div>
             <div className="flex items-end space-x-2">
-              <textarea rows={3} value={newNote} onChange={e => setNewNote(e.target.value)} placeholder="Add note or comment... Enter creates a new line. Use Send to post." className="flex-1 border-2 border-slate-100 rounded-xl px-4 py-3 font-medium focus:border-indigo-500 outline-none transition-colors resize-none" />
+              <div className="flex-1">
+                <textarea rows={3} value={newNote} onChange={e => setNewNote(e.target.value)} placeholder="Add note or comment... Enter creates a new line. Use Send to post." className="w-full border-2 border-slate-100 rounded-xl px-4 py-3 font-medium focus:border-indigo-500 outline-none transition-colors resize-none" />
+                <div className="flex flex-wrap items-center gap-2 mt-2">
+                  <label className="inline-flex items-center cursor-pointer text-xs font-black text-indigo-700 bg-indigo-50 hover:bg-indigo-100 px-3 py-2 rounded-xl border border-indigo-100 transition-colors">
+                    <Paperclip className="w-3.5 h-3.5 mr-1.5" /> {isUploadingNoteAttachment ? 'Uploading...' : 'Attach Files'}
+                    <input type="file" multiple className="hidden" onChange={handleNoteAttachmentUpload} />
+                  </label>
+                  <span className="text-[11px] font-bold text-slate-400">Attach unlimited supporting screenshots/files.</span>
+                </div>
+                {noteAttachments.length > 0 && (
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    {noteAttachments.map((doc, idx) => (
+                      <span key={doc.id || idx} className="inline-flex items-center max-w-full text-xs font-bold text-slate-700 bg-white border border-slate-200 px-2.5 py-1.5 rounded-lg">
+                        <Paperclip className="w-3 h-3 mr-1" /><span className="truncate max-w-[160px]">{doc.name}</span>
+                        <button type="button" onClick={() => removePendingAttachment('discussion', doc.id || idx)} className="ml-2 text-red-500 hover:text-red-700"><X className="w-3 h-3" /></button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
               <button type="button" onClick={(e) => { e.preventDefault(); handleAddNote(); }} className="bg-slate-800 text-white px-5 py-3 rounded-xl hover:bg-slate-700 flex-shrink-0 shadow-sm transition-colors font-bold flex items-center"><Send className="w-4 h-4 mr-2" /> Send</button>
             </div>
           </div>
@@ -3430,7 +3645,7 @@ function AppShell() {
         )}
 
         {selectedProject ? (
-          <TaskDetailView project={selectedProject} user={currentUser} onBack={() => setSelectedProject(null)} onUpdateProject={handleUpdateProject} users={activeUsers} onDeleteTask={handleDeleteTask} />
+          <TaskDetailView project={selectedProject} user={currentUser} onBack={() => setSelectedProject(null)} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} />
         ) : activeTab === 'command' ? (
           <CommandCentreView projects={projects} users={activeUsers} currentUser={currentUser} onSelectProject={(p) => { setActiveTab('board'); setSelectedProject(p); }} />
         ) : activeTab === 'productivity' ? (
@@ -3818,6 +4033,24 @@ function AppShell() {
         .kd-dark .backdrop-blur-xl,
         .kd-dark .backdrop-blur-2xl {
           backdrop-filter: blur(20px) saturate(150%) !important;
+        }
+        @media (max-width: 640px) {
+          .kalpa-chat-shell-closed {
+            inset: auto 1rem 1rem auto !important;
+            left: auto !important;
+            top: auto !important;
+            width: auto !important;
+            height: auto !important;
+            max-width: calc(100vw - 2rem) !important;
+            pointer-events: none !important;
+          }
+          .kalpa-chat-shell-open {
+            inset: 0 !important;
+            width: 100vw !important;
+            height: 100dvh !important;
+            pointer-events: auto !important;
+          }
+          .kalpa-chat-launcher { pointer-events: auto !important; }
         }
 
 /* Kalpavriksha Theme Engine 3.0 — dark-mode readability and semantic surface fix

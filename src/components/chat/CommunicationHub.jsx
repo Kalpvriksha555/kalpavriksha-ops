@@ -668,7 +668,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const pinnedMessages = channelMessages.filter(m => isPinnedMessage(m) && !m.deleted).slice(-5);
 
   return (
-    <div className="kalpa-chat-shell fixed bottom-6 right-6 z-50 flex flex-col items-end" style={{ maxWidth: 'calc(100vw - 24px)' }}>
+    <div className={`kalpa-chat-shell ${isOpen ? 'kalpa-chat-shell-open' : 'kalpa-chat-shell-closed'} fixed bottom-6 right-6 z-50 flex flex-col items-end`} style={{ maxWidth: 'calc(100vw - 24px)' }}>
       {isOpen && (
         <div
           className="kalpa-chat-panel bg-white rounded-3xl shadow-2xl border-2 border-slate-100 mb-4 overflow-hidden flex flex-row animate-in slide-in-from-bottom-5" role="dialog" aria-label="Team chat"
@@ -902,7 +902,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
         </button>
       )}
 
-      <button type="button" onClick={() => { const nextOpen = !isOpen; setIsOpen(nextOpen); setShowEmojiPicker(false); setActionMenu(null); setReactionMenu(null); if (nextOpen) markCurrentChannelReadNow(activeChannel); }} className={`kalpa-chat-launcher bg-slate-800 hover:bg-slate-700 text-white p-4 rounded-2xl shadow-xl shadow-slate-300 transition-all hover:scale-105 relative ${isOpen ? 'kalpa-chat-launcher-open' : ''}`}>
+      <button type="button" onClick={() => { const nextOpen = !isOpen; setIsOpen(nextOpen); setShowEmojiPicker(false); setActionMenu(null); setReactionMenu(null); if (nextOpen) markCurrentChannelReadNow(activeChannel); }} className={`kalpa-chat-launcher pointer-events-auto bg-slate-800 hover:bg-slate-700 text-white p-4 rounded-2xl shadow-xl shadow-slate-300 transition-all hover:scale-105 relative ${isOpen ? 'kalpa-chat-launcher-open' : ''}`}>
         <MessageSquare className="w-7 h-7" />
         {totalUnreadCount > 0 && !isOpen && <span className="absolute -top-2 -right-2 bg-red-500 text-white text-[11px] font-black px-2.5 py-1 rounded-full border-2 border-white shadow-sm animate-pulse">{totalUnreadCount > 99 ? '99+' : totalUnreadCount}</span>}
       </button>

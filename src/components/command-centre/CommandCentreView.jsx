@@ -4,9 +4,9 @@ import { Badge, MiniEmptyState } from '../shared';
 import { ONLINE_STALE_MS } from '../../config/appConfig';
 import { absoluteApiUrl } from '../../services/fileService';
 import { getStatusColor } from '../../services/taskService';
-import { formatDateKey, formatDuration, formatLastSeenDateTime } from '../../utils/date';
+import { formatDateKey, formatDuration, formatLastSeenDateTime, formatMinutes } from '../../utils/date';
 import { getEstimateDetails, getLatestCompletedFileName, getTaskDescription } from '../../utils/taskDisplayUtils';
-import { getTaskBusySince, getUserActiveTasks, getUserBusySince, getUserFreeSince, getUserLastCompletedAt } from '../../utils/presenceAttendanceUtils';
+import { getTaskBusySince, getUserActiveTasks, getUserBusySince, getUserFreeSince, getUserLastCompletedAt, getUserDraftingTask, getDraftingElapsedMs } from '../../utils/presenceAttendanceUtils';
 
 const toMs = (value) => {
   if (!value) return 0;
@@ -119,7 +119,7 @@ const getSlaInfo = (project = {}, now = Date.now()) => {
   const isWarning = project.status !== 'Completed' && ageHours >= 4 && ageHours < 8;
   return {
     total: formatDuration(createdAt, totalEnd),
-    drafting: draftStart ? formatDuration(draftStart, draftingEnd) : '-',
+    drafting: project.draftingStartedAt ? formatMinutes(Math.floor(getDraftingElapsedMs(project, now) / 60000)) : (draftStart ? formatDuration(draftStart, draftingEnd) : '-'),
     review: reviewStart ? formatDuration(reviewStart, reviewEnd) : '-',
     ageHours,
     label: isDelayed ? 'Delayed' : isWarning ? 'Near SLA' : project.status === 'Completed' ? 'Completed' : 'On Track',
@@ -265,7 +265,7 @@ export const CommandCentreView = ({ projects = [], users = [], onSelectProject, 
     if (filterKey === 'near') return rawActiveBoard.filter(p => getSlaInfo(p).label === 'Near SLA');
     if (filterKey === 'revisions') return metrics.revisions.slice();
     if (filterKey === 'carried') return metrics.carried.slice();
-    if (filterKey === 'drafting') return rawActiveBoard.filter(p => p.status === 'Drafting');
+    if (filterKey === 'drafting') return rawActiveBoard.filter(p => p.status === 'Drafting' || p.status === 'Drafting Paused');
     if (filterKey === 'review') return rawActiveBoard.filter(p => p.status === 'Internal Review');
     return rawActiveBoard;
   };
@@ -332,7 +332,7 @@ export const CommandCentreView = ({ projects = [], users = [], onSelectProject, 
           <div className="h-4 bg-slate-100 rounded-full overflow-hidden mb-4"><div className="h-full bg-indigo-500 rounded-full transition-all" style={{ width: `${capacityPct}%` }}></div></div>
           <div className="grid grid-cols-3 gap-2 text-center">
             <button type="button" onClick={() => applyAvailabilityFilter('Available')} className="bg-blue-50 border border-blue-100 rounded-2xl p-3 transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98]"><p className="font-black text-blue-700">{free}</p><p className="text-[9px] font-black uppercase text-blue-500">Available</p></button>
-            <button type="button" onClick={() => applyAvailabilityFilter('Busy')} className="bg-emerald-50 border border-emerald-100 rounded-2xl p-3 transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98]"><p className="font-black text-emerald-700">{busy}</p><p className="text-[9px] font-black uppercase text-emerald-500">Busy</p></button>
+            <button type="button" onClick={() => applyAvailabilityFilter('Busy')} className="bg-emerald-50 border border-emerald-100 rounded-2xl p-3 transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98]"><p className="font-black text-emerald-700">{busy}</p><p className="text-[9px] font-black uppercase text-emerald-500">Drafting</p></button>
             <button type="button" onClick={() => applyAvailabilityFilter('Break')} className="bg-amber-50 border border-amber-100 rounded-2xl p-3 transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98]"><p className="font-black text-amber-700">{breaks}</p><p className="text-[9px] font-black uppercase text-amber-500">Break</p></button>
           </div>
         </div>
@@ -348,27 +348,28 @@ export const CommandCentreView = ({ projects = [], users = [], onSelectProject, 
         </div>
         <div className="space-y-6">
           <div ref={teamAvailabilityRef} className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm scroll-mt-24">
-            <h3 className="font-black text-slate-800 mb-1">Team Availability</h3><p className="text-xs font-bold text-slate-400 mb-4">Click Available, Busy, Break, or Offline to see the members in that status.</p>
+            <h3 className="font-black text-slate-800 mb-1">Team Availability</h3><p className="text-xs font-bold text-slate-400 mb-4">Click Available, Drafting, Break, or Offline to see the members in that status.</p>
             <div className="grid grid-cols-4 gap-2 mb-4">
-              {[["Available", free, "bg-blue-50 text-blue-700 border-blue-100"], ["Busy", busy, "bg-emerald-50 text-emerald-700 border-emerald-100"], ["Break", breaks, "bg-amber-50 text-amber-700 border-amber-100"], ["Offline", offlinePeople.length, "bg-slate-50 text-slate-600 border-slate-100"]].map(([label, count, cls]) => (
+              {[["Available", free, "bg-blue-50 text-blue-700 border-blue-100", "Available"], ["Busy", busy, "bg-emerald-50 text-emerald-700 border-emerald-100", "Drafting"], ["Break", breaks, "bg-amber-50 text-amber-700 border-amber-100", "Break"], ["Offline", offlinePeople.length, "bg-slate-50 text-slate-600 border-slate-100", "Offline"]].map(([label, count, cls, displayLabel]) => (
                 <button key={label} type="button" onClick={() => setAvailabilityFilter(label)} className={`${cls} border-2 p-3 rounded-2xl text-center font-black transition-all ${availabilityFilter === label ? 'ring-2 ring-slate-300 scale-[1.02]' : 'hover:scale-[1.01]'}`}>
-                  {count}<p className="text-[10px] uppercase tracking-widest">{label}</p>
+                  {count}<p className="text-[10px] uppercase tracking-widest">{displayLabel || label}</p>
                 </button>
               ))}
             </div>
             <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar">
               {selectedAvailabilityPeople.length === 0 && <MiniEmptyState>No team members in {availabilityFilter}.</MiniEmptyState>}
               {selectedAvailabilityPeople.map(member => {
-                const tasks = activeTasksFor(member.name);
+                const draftingTask = getUserDraftingTask(projects, member.name);
+                const tasks = draftingTask ? [draftingTask] : [];
                 const breakSince = member.breakStartedAt || member.availabilityUpdatedAt || Date.now();
                 const freeSince = getUserFreeSince(projects, member.name, presenceTimes, member);
                 const busySince = getUserBusySince(projects, member.name, presenceTimes);
                 const busyTaskLine = tasks.length
-                  ? tasks.slice().sort((a, b) => getTaskBusySince(b) - getTaskBusySince(a)).slice(0, 2).map(t => `${t.id} • ${formatDuration(getTaskBusySince(t), availabilityNow)}`).join(' | ')
+                  ? tasks.map(t => `${t.id} • Drafting since ${formatDuration(getTaskBusySince(t), availabilityNow)}`).join(' | ')
                   : '';
                 const isAdminMember = normalizeRole(member.role) === ROLES.ADMIN;
                 const availabilityLine = availabilityFilter === 'Busy'
-                  ? (busyTaskLine || (busySince ? `Busy since ${formatDuration(busySince, availabilityNow)}` : 'Busy now'))
+                  ? (busyTaskLine || (busySince ? `Drafting since ${formatDuration(busySince, availabilityNow)}` : 'Drafting now'))
                   : availabilityFilter === 'Break'
                     ? `Break since ${formatDuration(breakSince, availabilityNow)}`
                     : availabilityFilter === 'Available'
@@ -385,7 +386,7 @@ export const CommandCentreView = ({ projects = [], users = [], onSelectProject, 
                         <p className="text-[11px] font-bold text-slate-400">{availabilityLine}</p>
                       </div>
                     </div>
-                    <Badge colorClass={availabilityFilter === 'Busy' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : availabilityFilter === 'Break' ? 'bg-amber-50 text-amber-700 border-amber-100' : availabilityFilter === 'Available' ? 'bg-blue-50 text-blue-700 border-blue-100' : 'bg-slate-50 text-slate-600 border-slate-100'}>{availabilityFilter}</Badge>
+                    <Badge colorClass={availabilityFilter === 'Busy' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : availabilityFilter === 'Break' ? 'bg-amber-50 text-amber-700 border-amber-100' : availabilityFilter === 'Available' ? 'bg-blue-50 text-blue-700 border-blue-100' : 'bg-slate-50 text-slate-600 border-slate-100'}>{availabilityFilter === 'Busy' ? 'Drafting' : availabilityFilter}</Badge>
                   </div>
                 );
               })}

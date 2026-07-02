@@ -1,9 +1,9 @@
 import React from 'react';
 import { Calendar, List, KanbanSquare, Plus, Flag, Users, Clock } from 'lucide-react';
 import { Badge } from '../shared';
-import { formatDateTime, formatLastSeenDateTime, formatDuration } from '../../utils/date';
+import { formatDateTime, formatLastSeenDateTime, formatDuration, formatMinutes } from '../../utils/date';
 import { getTaskDescription, getEstimateDetails, getLatestCompletedFileName } from '../../utils/taskDisplayUtils';
-import { getTaskBusySince, getUserActiveTasks } from '../../utils/presenceAttendanceUtils';
+import { getTaskBusySince, getUserActiveTasks, getDraftingElapsedMs } from '../../utils/presenceAttendanceUtils';
 import { getStatusColor } from '../../services/taskService';
 
 const OperationKanbanCard = ({ project, onSelectProject, getCustomerDisplayName }) => (
@@ -31,8 +31,8 @@ const OperationKanbanCard = ({ project, onSelectProject, getCustomerDisplayName 
 );
 
 const OperationsKanban = ({ projects, onSelectProject, getCustomerDisplayName }) => (
-  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6">
-    {['Lead Received', 'Drafting', 'Completed'].map(statusCol => (
+  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-6">
+    {['Lead Received', 'Drafting', 'Drafting Paused', 'Completed'].map(statusCol => (
       <div key={statusCol} className="bg-slate-100/50 rounded-3xl p-3 sm:p-4 border-2 border-slate-100/50 min-h-[420px] sm:min-h-[500px] transition-colors duration-200">
         <h3 className="font-black text-slate-500 uppercase tracking-widest text-xs mb-4 px-2">{statusCol} <span className="ml-2 bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full">{projects.filter(p => p.status === statusCol).length}</span></h3>
         <div className="space-y-4">
@@ -65,7 +65,7 @@ const OperationTableRow = ({ project, onSelectProject, getCustomerDisplayName, g
     <td className="px-6 py-5">
       <Badge colorClass={project.assignedTo === 'Unassigned' ? 'bg-red-50 text-red-600 border-red-200' : 'bg-slate-50 text-slate-700 border-slate-200'}>{project.assignedTo}</Badge>
     </td>
-    <td className="px-6 py-5 font-bold text-slate-600">{project.status === 'Drafting' ? getDraftElapsed(project, nowTick) : (project.draftingStartedAt ? getDraftElapsed(project, nowTick) : '-')}</td>
+    <td className="px-6 py-5 font-bold text-slate-600">{project.draftingStartedAt ? getDraftElapsed(project, nowTick) : '-'}</td>
     <td className="px-6 py-5">
       <Badge colorClass={`border-transparent ${getStatusColor(project.status)}`}>{project.status}</Badge>
     </td>
@@ -105,6 +105,7 @@ const TeamActivityPanel = ({ users, projects, nowTick, ROLES, onSelectProject, g
       {getOperationalUsers(users, { includeAdmins: false }).filter(u => u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER).map(designer => {
         const designerOnline = isUserActuallyOnline(designer, nowTick);
         const activeTasks = designerOnline ? getUserActiveTasks(projects, designer.name) : [];
+        const pausedTasks = projects.filter(p => p.assignedTo === designer.name && p.status === 'Drafting Paused');
         const todayStart = new Date().setHours(0,0,0,0);
         const submittedToday = projects.filter(p => {
           if (p.assignedTo !== designer.name) return false;
@@ -130,7 +131,7 @@ const TeamActivityPanel = ({ users, projects, nowTick, ROLES, onSelectProject, g
                 ) : designer.availability === 'Break' ? (
                   <span title="On Break" className="w-2.5 h-2.5 rounded-full mr-3 shadow-sm bg-amber-500 animate-pulse"></span>
                 ) : activeTasks.length > 0 ? (
-                  <span title="Working" className="w-2.5 h-2.5 rounded-full mr-3 shadow-sm bg-emerald-500 animate-pulse"></span>
+                  <span title="Drafting" className="w-2.5 h-2.5 rounded-full mr-3 shadow-sm bg-emerald-500 animate-pulse"></span>
                 ) : (
                   <span title="Available" className="w-2.5 h-2.5 rounded-full mr-3 shadow-sm bg-blue-500"></span>
                 )}
@@ -145,7 +146,7 @@ const TeamActivityPanel = ({ users, projects, nowTick, ROLES, onSelectProject, g
                   const totalRevs = (activeTask.subTasks || []).length;
                   return (
                     <div key={activeTask.id} className="text-xs font-bold bg-slate-50 p-2.5 rounded-xl border border-slate-100 flex justify-between items-center group cursor-pointer hover:bg-slate-100 transition-colors" onClick={() => onSelectProject(activeTask)}>
-                      <span className="text-slate-700 truncate mr-2">{activeTask.id}<span className="block text-[10px] text-slate-400 font-black mt-0.5">Busy since {formatDuration(getTaskBusySince(activeTask), nowTick)}</span></span>
+                      <span className="text-slate-700 truncate mr-2">{activeTask.id}<span className="block text-[10px] text-slate-400 font-black mt-0.5">Drafting since {formatDuration(getTaskBusySince(activeTask), nowTick)}</span></span>
                       {totalRevs > 0 && <span className="text-[10px] text-red-600 font-black bg-red-50 border border-red-100 px-2 py-0.5 rounded-md whitespace-nowrap uppercase tracking-wider">{pendingRevs} pending</span>}
                     </div>
                   );
@@ -153,6 +154,16 @@ const TeamActivityPanel = ({ users, projects, nowTick, ROLES, onSelectProject, g
               </div>
             ) : (
               <p className="text-xs text-slate-400 font-semibold ml-5 italic flex items-center"><Clock className="w-3 h-3 mr-1.5" />{idleStatus}</p>
+            )}
+            {pausedTasks.length > 0 && (
+              <div className="ml-5 mt-3 space-y-2">
+                {pausedTasks.map(task => (
+                  <button key={task.id} type="button" onClick={() => onSelectProject(task)} className="w-full text-left bg-amber-50 border border-amber-100 rounded-xl px-3 py-2 hover:bg-amber-100 transition">
+                    <span className="block text-xs font-black text-amber-800">{task.id}</span>
+                    <span className="block text-[10px] font-bold text-amber-600">Drafting paused at {formatMinutes(Math.floor(getDraftingElapsedMs(task, nowTick) / 60000))}</span>
+                  </button>
+                ))}
+              </div>
             )}
           </div>
         );

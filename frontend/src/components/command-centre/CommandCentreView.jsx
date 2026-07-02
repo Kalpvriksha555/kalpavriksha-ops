@@ -4,9 +4,9 @@ import { Badge, MiniEmptyState } from '../shared';
 import { ONLINE_STALE_MS } from '../../config/appConfig';
 import { absoluteApiUrl } from '../../services/fileService';
 import { getStatusColor } from '../../services/taskService';
-import { formatDateKey, formatDuration, formatLastSeenDateTime } from '../../utils/date';
+import { formatDateKey, formatDuration, formatLastSeenDateTime, formatMinutes } from '../../utils/date';
 import { getEstimateDetails, getLatestCompletedFileName, getTaskDescription } from '../../utils/taskDisplayUtils';
-import { getTaskBusySince, getUserActiveTasks, getUserBusySince, getUserFreeSince, getUserLastCompletedAt } from '../../utils/presenceAttendanceUtils';
+import { getTaskBusySince, getUserActiveTasks, getUserBusySince, getUserFreeSince, getUserLastCompletedAt, getUserDraftingTask, getDraftingElapsedMs } from '../../utils/presenceAttendanceUtils';
 
 const toMs = (value) => {
   if (!value) return 0;
@@ -104,6 +104,28 @@ const isIncompleteProject = (project = {}) => project.status !== 'Completed';
 const isCarriedForwardProject = (project = {}, dateKey = formatDateKey()) => isIncompleteProject(project) && getProjectDateKey(project) < dateKey;
 const shouldShowOnOperationsDate = (project = {}, dateKey = formatDateKey()) => getProjectDateKey(project) === dateKey || (dateKey === formatDateKey() && isCarriedForwardProject(project, dateKey));
 
+const normalizeWorkStatus = (status = '') => String(status || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+const CLOSED_REVISION_STATUSES = new Set(['COMPLETED', 'APPROVED', 'ARCHIVED', 'CLOSED', 'DELETED', 'CANCELLED', 'CANCELED']);
+const ACTIVE_REVISION_STATUSES = new Set(['REVISIONPENDING', 'REVISIONINPROGRESS', 'REVERTED']);
+const isSubTaskOpen = (subTask = {}) => !['DONE', 'COMPLETED', 'APPROVED', 'CLOSED', 'RESOLVED'].includes(normalizeWorkStatus(subTask.status || 'Pending'));
+const getOpenRevisionItems = (project = {}) => (project.subTasks || project.revisions || []).filter(isSubTaskOpen);
+const hasActiveRevision = (project = {}) => {
+  const statusKey = normalizeWorkStatus(project.status);
+  const reviewKey = normalizeWorkStatus(project.reviewStatus || project.finalConclusion || '');
+  if (CLOSED_REVISION_STATUSES.has(statusKey) || reviewKey === 'APPROVED') return false;
+  return ACTIVE_REVISION_STATUSES.has(statusKey)
+    || ACTIVE_REVISION_STATUSES.has(reviewKey)
+    || getOpenRevisionItems(project).length > 0;
+};
+const getRevisionBadgeLabel = (project = {}) => {
+  const count = getOpenRevisionItems(project).length;
+  return count > 0 ? `${count} active revision${count === 1 ? '' : 's'}` : 'Revision pending';
+};
+const getLatestRevisionNote = (project = {}) => {
+  const latest = getOpenRevisionItems(project).slice().sort((a,b) => (Number(b.id) || 0) - (Number(a.id) || 0))[0];
+  return latest?.title || latest?.text || latest?.comment || latest?.description || '';
+};
+
 const getSlaInfo = (project = {}, now = Date.now()) => {
   const createdAt = project.createdAt || now;
   const assignedAt = project.assignedAt || project.assignedOn || (project.assignedTo && project.assignedTo !== 'Unassigned' ? createdAt : null);
@@ -119,7 +141,7 @@ const getSlaInfo = (project = {}, now = Date.now()) => {
   const isWarning = project.status !== 'Completed' && ageHours >= 4 && ageHours < 8;
   return {
     total: formatDuration(createdAt, totalEnd),
-    drafting: draftStart ? formatDuration(draftStart, draftingEnd) : '-',
+    drafting: project.draftingStartedAt ? formatMinutes(Math.floor(getDraftingElapsedMs(project, now) / 60000)) : (draftStart ? formatDuration(draftStart, draftingEnd) : '-'),
     review: reviewStart ? formatDuration(reviewStart, reviewEnd) : '-',
     ageHours,
     label: isDelayed ? 'Delayed' : isWarning ? 'Near SLA' : project.status === 'Completed' ? 'Completed' : 'On Track',
@@ -134,7 +156,7 @@ const getTodayMetrics = (projects = [], dateKey = formatDateKey()) => {
   const completedToday = projects.filter(p => p.status === 'Completed' && formatDateKey(p.completedAt || p.createdAt) === dateKey);
   const pendingCollections = projects.filter(p => (Number(p.estimate) || 0) > (Number(p.ledger?.amountIn) || 0));
   const paymentsToday = projects.filter(p => p.ledger?.updatedAt && formatDateKey(p.ledger.updatedAt) === dateKey);
-  const revisions = activeToday.filter(p => (p.subTasks || []).some(st => st.status !== 'Done'));
+  const revisions = activeToday.filter(hasActiveRevision);
   return {
     todays, carried, activeToday, completedToday, pendingCollections, paymentsToday, revisions,
     received: todays.length,
@@ -239,7 +261,7 @@ export const CommandCentreView = ({ projects = [], users = [], onSelectProject, 
   const workloadCards = workingTeam.map(u => {
     const active = activeTasksFor(u.name);
     const completedToday = projects.filter(p => normalizePersonName(p.assignedTo) === normalizePersonName(u.name) && p.status === 'Completed' && formatDateKey(p.completedAt || p.createdAt) === dateKey).length;
-    const revisions = projects.filter(p => normalizePersonName(p.assignedTo) === normalizePersonName(u.name) && (p.subTasks || []).some(st => st.status !== 'Done')).length;
+    const revisions = projects.filter(p => normalizePersonName(p.assignedTo) === normalizePersonName(u.name) && hasActiveRevision(p)).length;
     const limit = Number(u.dailyLimit || u.taskLimit || 10) || 10;
     const loadPct = Math.min(100, Math.round((active.length / limit) * 100));
     return { ...u, active, completedToday, revisions, limit, loadPct };
@@ -263,9 +285,9 @@ export const CommandCentreView = ({ projects = [], users = [], onSelectProject, 
     if (filterKey === 'completed') return metrics.completedToday.slice().sort((a,b) => (b.completedAt || b.createdAt || 0) - (a.completedAt || a.createdAt || 0));
     if (filterKey === 'delayed') return rawActiveBoard.filter(p => getSlaInfo(p).label === 'Delayed');
     if (filterKey === 'near') return rawActiveBoard.filter(p => getSlaInfo(p).label === 'Near SLA');
-    if (filterKey === 'revisions') return metrics.revisions.slice();
+    if (filterKey === 'revisions') return metrics.revisions.slice().sort((a,b) => (b.revisionRequestedAt || b.updatedAt || b.createdAt || 0) - (a.revisionRequestedAt || a.updatedAt || a.createdAt || 0));
     if (filterKey === 'carried') return metrics.carried.slice();
-    if (filterKey === 'drafting') return rawActiveBoard.filter(p => p.status === 'Drafting');
+    if (filterKey === 'drafting') return rawActiveBoard.filter(p => p.status === 'Drafting' || p.status === 'Drafting Paused');
     if (filterKey === 'review') return rawActiveBoard.filter(p => p.status === 'Internal Review');
     return rawActiveBoard;
   };
@@ -332,7 +354,7 @@ export const CommandCentreView = ({ projects = [], users = [], onSelectProject, 
           <div className="h-4 bg-slate-100 rounded-full overflow-hidden mb-4"><div className="h-full bg-indigo-500 rounded-full transition-all" style={{ width: `${capacityPct}%` }}></div></div>
           <div className="grid grid-cols-3 gap-2 text-center">
             <button type="button" onClick={() => applyAvailabilityFilter('Available')} className="bg-blue-50 border border-blue-100 rounded-2xl p-3 transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98]"><p className="font-black text-blue-700">{free}</p><p className="text-[9px] font-black uppercase text-blue-500">Available</p></button>
-            <button type="button" onClick={() => applyAvailabilityFilter('Busy')} className="bg-emerald-50 border border-emerald-100 rounded-2xl p-3 transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98]"><p className="font-black text-emerald-700">{busy}</p><p className="text-[9px] font-black uppercase text-emerald-500">Busy</p></button>
+            <button type="button" onClick={() => applyAvailabilityFilter('Busy')} className="bg-emerald-50 border border-emerald-100 rounded-2xl p-3 transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98]"><p className="font-black text-emerald-700">{busy}</p><p className="text-[9px] font-black uppercase text-emerald-500">Drafting</p></button>
             <button type="button" onClick={() => applyAvailabilityFilter('Break')} className="bg-amber-50 border border-amber-100 rounded-2xl p-3 transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98]"><p className="font-black text-amber-700">{breaks}</p><p className="text-[9px] font-black uppercase text-amber-500">Break</p></button>
           </div>
         </div>
@@ -342,33 +364,37 @@ export const CommandCentreView = ({ projects = [], users = [], onSelectProject, 
         <div ref={operationsBoardRef} className="kalpa-panel lg:col-span-2 bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden scroll-mt-24">
           <div className="p-5 border-b-2 border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"><div><h2 className="font-black text-slate-800 text-xl">Daily Operations Board</h2><p className="text-xs font-bold text-slate-400 mt-1">{filterLabels[dashboardFilter] || 'All active operations'} • {activeBoard.length} record{activeBoard.length === 1 ? '' : 's'}</p></div>{dashboardFilter !== 'all' && <button type="button" onClick={() => setDashboardFilter('all')} className="text-xs font-black uppercase tracking-widest bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-2 rounded-xl transition">Clear filter</button>}</div>
           <div className="divide-y divide-slate-100 max-h-[520px] overflow-y-auto custom-scrollbar">
-            {activeBoard.map(p => <div key={p.id} onClick={() => onSelectProject(p)} className="kalpa-task-row p-5 hover:bg-slate-50 cursor-pointer flex justify-between items-center gap-4"><div><p className="font-black text-slate-800">{p.id} <span className="text-xs font-bold text-slate-400 ml-2">{getCustomerDisplayName(p)}</span></p><p className="text-sm font-extrabold text-slate-700 mt-1">{p.taskName || makeTaskDisplayName(p)}</p><p className="text-xs font-bold text-slate-500 mt-1">{p.type} • {p.location} • {p.assignedTo || 'Unassigned'}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mt-2 line-clamp-2 max-w-2xl"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1 line-clamp-2 max-w-2xl"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}{getLatestCompletedFileName(p) && <p className="text-[11px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mt-2 w-fit">Completed: {getLatestCompletedFileName(p)}</p>}{isCarriedForwardProject(p, dateKey) && <span className="inline-flex mt-2 text-[10px] bg-orange-50 text-orange-700 border border-orange-100 px-2 py-1 rounded-lg font-black uppercase">Carried Forward</span>}</div><Badge colorClass={getStatusColor(p.status)}>{p.status}</Badge></div>)}
+            {activeBoard.map(p => {
+              const latestRevisionNote = getLatestRevisionNote(p);
+              return <div key={p.id} onClick={() => onSelectProject(p)} className="kalpa-task-row p-5 hover:bg-slate-50 cursor-pointer flex justify-between items-center gap-4"><div><p className="font-black text-slate-800">{p.id} <span className="text-xs font-bold text-slate-400 ml-2">{getCustomerDisplayName(p)}</span></p><p className="text-sm font-extrabold text-slate-700 mt-1">{p.taskName || makeTaskDisplayName(p)}</p><p className="text-xs font-bold text-slate-500 mt-1">{p.type} • {p.location} • {p.assignedTo || 'Unassigned'}</p>{dashboardFilter === 'revisions' && <div className="mt-2 max-w-2xl rounded-xl border border-red-100 bg-red-50 px-3 py-2"><p className="text-[10px] font-black uppercase tracking-widest text-red-600">{getRevisionBadgeLabel(p)}</p>{latestRevisionNote && <p className="text-xs font-bold text-red-700 mt-1 line-clamp-2">{latestRevisionNote}</p>}{p.reviewedBy && <p className="text-[10px] font-bold text-red-400 mt-1">Reviewer: {p.reviewedBy}</p>}</div>}{getTaskDescription(p) && <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mt-2 line-clamp-2 max-w-2xl"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1 line-clamp-2 max-w-2xl"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}{getLatestCompletedFileName(p) && <p className="text-[11px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mt-2 w-fit">Completed: {getLatestCompletedFileName(p)}</p>}{isCarriedForwardProject(p, dateKey) && <span className="inline-flex mt-2 text-[10px] bg-orange-50 text-orange-700 border border-orange-100 px-2 py-1 rounded-lg font-black uppercase">Carried Forward</span>}</div><Badge colorClass={dashboardFilter === 'revisions' ? 'bg-red-50 text-red-700 border-red-100' : getStatusColor(p.status)}>{dashboardFilter === 'revisions' ? 'Revision Pending' : p.status}</Badge></div>;
+            })}
             {activeBoard.length === 0 && <div className="p-10 text-center text-slate-400 font-bold">No operations for this date.</div>}
           </div>
         </div>
         <div className="space-y-6">
           <div ref={teamAvailabilityRef} className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm scroll-mt-24">
-            <h3 className="font-black text-slate-800 mb-1">Team Availability</h3><p className="text-xs font-bold text-slate-400 mb-4">Click Available, Busy, Break, or Offline to see the members in that status.</p>
+            <h3 className="font-black text-slate-800 mb-1">Team Availability</h3><p className="text-xs font-bold text-slate-400 mb-4">Click Available, Drafting, Break, or Offline to see the members in that status.</p>
             <div className="grid grid-cols-4 gap-2 mb-4">
-              {[["Available", free, "bg-blue-50 text-blue-700 border-blue-100"], ["Busy", busy, "bg-emerald-50 text-emerald-700 border-emerald-100"], ["Break", breaks, "bg-amber-50 text-amber-700 border-amber-100"], ["Offline", offlinePeople.length, "bg-slate-50 text-slate-600 border-slate-100"]].map(([label, count, cls]) => (
+              {[["Available", free, "bg-blue-50 text-blue-700 border-blue-100", "Available"], ["Busy", busy, "bg-emerald-50 text-emerald-700 border-emerald-100", "Drafting"], ["Break", breaks, "bg-amber-50 text-amber-700 border-amber-100", "Break"], ["Offline", offlinePeople.length, "bg-slate-50 text-slate-600 border-slate-100", "Offline"]].map(([label, count, cls, displayLabel]) => (
                 <button key={label} type="button" onClick={() => setAvailabilityFilter(label)} className={`${cls} border-2 p-3 rounded-2xl text-center font-black transition-all ${availabilityFilter === label ? 'ring-2 ring-slate-300 scale-[1.02]' : 'hover:scale-[1.01]'}`}>
-                  {count}<p className="text-[10px] uppercase tracking-widest">{label}</p>
+                  {count}<p className="text-[10px] uppercase tracking-widest">{displayLabel || label}</p>
                 </button>
               ))}
             </div>
             <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar">
               {selectedAvailabilityPeople.length === 0 && <MiniEmptyState>No team members in {availabilityFilter}.</MiniEmptyState>}
               {selectedAvailabilityPeople.map(member => {
-                const tasks = activeTasksFor(member.name);
+                const draftingTask = getUserDraftingTask(projects, member.name);
+                const tasks = draftingTask ? [draftingTask] : [];
                 const breakSince = member.breakStartedAt || member.availabilityUpdatedAt || Date.now();
                 const freeSince = getUserFreeSince(projects, member.name, presenceTimes, member);
                 const busySince = getUserBusySince(projects, member.name, presenceTimes);
                 const busyTaskLine = tasks.length
-                  ? tasks.slice().sort((a, b) => getTaskBusySince(b) - getTaskBusySince(a)).slice(0, 2).map(t => `${t.id} • ${formatDuration(getTaskBusySince(t), availabilityNow)}`).join(' | ')
+                  ? tasks.map(t => `${t.id} • Drafting since ${formatDuration(getTaskBusySince(t), availabilityNow)}`).join(' | ')
                   : '';
                 const isAdminMember = normalizeRole(member.role) === ROLES.ADMIN;
                 const availabilityLine = availabilityFilter === 'Busy'
-                  ? (busyTaskLine || (busySince ? `Busy since ${formatDuration(busySince, availabilityNow)}` : 'Busy now'))
+                  ? (busyTaskLine || (busySince ? `Drafting since ${formatDuration(busySince, availabilityNow)}` : 'Drafting now'))
                   : availabilityFilter === 'Break'
                     ? `Break since ${formatDuration(breakSince, availabilityNow)}`
                     : availabilityFilter === 'Available'
@@ -385,14 +411,14 @@ export const CommandCentreView = ({ projects = [], users = [], onSelectProject, 
                         <p className="text-[11px] font-bold text-slate-400">{availabilityLine}</p>
                       </div>
                     </div>
-                    <Badge colorClass={availabilityFilter === 'Busy' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : availabilityFilter === 'Break' ? 'bg-amber-50 text-amber-700 border-amber-100' : availabilityFilter === 'Available' ? 'bg-blue-50 text-blue-700 border-blue-100' : 'bg-slate-50 text-slate-600 border-slate-100'}>{availabilityFilter}</Badge>
+                    <Badge colorClass={availabilityFilter === 'Busy' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : availabilityFilter === 'Break' ? 'bg-amber-50 text-amber-700 border-amber-100' : availabilityFilter === 'Available' ? 'bg-blue-50 text-blue-700 border-blue-100' : 'bg-slate-50 text-slate-600 border-slate-100'}>{availabilityFilter === 'Busy' ? 'Drafting' : availabilityFilter}</Badge>
                   </div>
                 );
               })}
             </div>
           </div>
           {currentUser?.role === ROLES.ADMIN && <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm"><h3 className="font-black text-slate-800 mb-4">Payment Health</h3><p className="text-xs font-black text-slate-400 uppercase tracking-widest">Received Today</p><p className="text-3xl font-black text-emerald-600 mb-4">₹{metrics.paymentReceived.toLocaleString()}</p><p className="text-xs font-black text-slate-400 uppercase tracking-widest">Pending Collections</p><p className="text-3xl font-black text-red-500">₹{metrics.pendingAmount.toLocaleString()}</p></div>}
-          <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm"><h3 className="font-black text-slate-800 mb-4">Urgent Revision Queue</h3>{metrics.revisions.slice(0,5).map(p => <button key={p.id} onClick={() => onSelectProject(p)} className="w-full text-left bg-red-50 border border-red-100 p-3 rounded-xl mb-2"><p className="font-black text-red-700 text-xs">{p.id}</p><p className="text-[10px] font-bold text-red-500">{p.subTasks?.length || 0} revision items</p></button>)}{metrics.revisions.length === 0 && <p className="text-sm text-slate-400 font-bold">No urgent revisions.</p>}</div>
+          <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm"><h3 className="font-black text-slate-800 mb-4">Urgent Revision Queue</h3>{metrics.revisions.slice(0,5).map(p => <button key={p.id} onClick={() => onSelectProject(p)} className="w-full text-left bg-red-50 border border-red-100 p-3 rounded-xl mb-2"><p className="font-black text-red-700 text-xs">{p.id}</p><p className="text-[10px] font-bold text-red-500">{getRevisionBadgeLabel(p)}</p>{getLatestRevisionNote(p) && <p className="text-[11px] font-semibold text-red-700 mt-1 line-clamp-2">{getLatestRevisionNote(p)}</p>}</button>)}{metrics.revisions.length === 0 && <p className="text-sm text-slate-400 font-bold">No urgent revisions.</p>}</div>
         </div>
       </div>
 

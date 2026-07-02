@@ -1013,8 +1013,22 @@ button:disabled {
     border-radius: 0 !important;
     border: none !important;
   }
-  .kalpa-chat-shell {
+  .kalpa-chat-shell-open {
     inset: 0 !important;
+    width: 100vw !important;
+    height: 100dvh !important;
+    pointer-events: auto !important;
+  }
+  .kalpa-chat-shell-closed {
+    inset: auto .75rem .75rem auto !important;
+    left: auto !important;
+    top: auto !important;
+    width: auto !important;
+    height: auto !important;
+    pointer-events: none !important;
+  }
+  .kalpa-chat-launcher {
+    pointer-events: auto !important;
   }
   .kalpa-chat-sidebar {
     flex: 0 0 42vw !important;

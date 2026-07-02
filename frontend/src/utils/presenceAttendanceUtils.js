@@ -155,8 +155,10 @@ export const normalizeWorkStatus = (status = '') => String(status || '').trim().
 export const WORK_DONE_STATUSES = new Set(['COMPLETED', 'CLOSED', 'CANCELLED', 'CANCELED', 'ARCHIVED', 'DELETED']);
 export const isActiveWorkStatus = (status = '') => !WORK_DONE_STATUSES.has(normalizeWorkStatus(status));
 
-export const getTaskBusySince = (project = {}) => (
-  toMs(project.draftingStartedAt)
+export const getDraftingSessionStart = (project = {}) => (
+  toMs(project.draftingResumedAt)
+  || toMs(project.currentDraftingStartedAt)
+  || toMs(project.draftingStartedAt)
   || toMs(project.workStartedAt)
   || toMs(project.busySinceAt)
   || toMs(project.assignedAt)
@@ -164,6 +166,20 @@ export const getTaskBusySince = (project = {}) => (
   || toMs(project.createdAt)
   || 0
 );
+
+export const getDraftingElapsedMs = (project = {}, now = Date.now()) => {
+  const saved = Math.max(0, Number(project.draftingElapsedMsBeforePause) || Number(project.draftingElapsedMs) || 0);
+  if (isDraftingStatus(project.status)) {
+    const sessionStart = getDraftingSessionStart(project);
+    return saved + (sessionStart ? Math.max(0, toMs(now) - sessionStart) : 0);
+  }
+  if (isDraftingPausedStatus(project.status)) return saved;
+  const completed = toMs(project.draftingCompletedAt) || toMs(project.submittedAt) || toMs(project.completedAt);
+  if (completed) return Number(project.draftingFinalElapsedMs) || saved || (toMs(project.draftingStartedAt) ? Math.max(0, completed - toMs(project.draftingStartedAt)) : 0);
+  return saved || (toMs(project.draftingStartedAt) ? Math.max(0, toMs(now) - toMs(project.draftingStartedAt)) : 0);
+};
+
+export const getTaskBusySince = (project = {}) => getDraftingSessionStart(project);
 
 export const getTaskFinishedAt = (project = {}) => Math.max(
   toMs(project.completedAt),
@@ -175,8 +191,17 @@ export const getTaskFinishedAt = (project = {}) => Math.max(
   toMs(project.updatedAt)
 );
 
+export const isDraftingStatus = (status = '') => normalizeWorkStatus(status) === 'DRAFTING';
+export const isDraftingPausedStatus = (status = '') => normalizeWorkStatus(status) === 'DRAFTINGPAUSED';
+
 export const getUserActiveTasks = (projects = [], userName = '') => (
-  (projects || []).filter(project => samePerson(project.assignedTo, userName) && isActiveWorkStatus(project.status))
+  (projects || []).filter(project => samePerson(project.assignedTo, userName) && isDraftingStatus(project.status))
+);
+
+export const getUserDraftingTask = (projects = [], userName = '') => (
+  getUserActiveTasks(projects, userName)
+    .slice()
+    .sort((a, b) => getTaskBusySince(b) - getTaskBusySince(a))[0] || null
 );
 
 export const getUserLastCompletedAt = (projects = [], userName = '') => {
