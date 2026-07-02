@@ -2257,3 +2257,86 @@ button:disabled {
     max-width: 136px !important;
   }
 }
+
+/* RC3 compact operations layout: balanced columns, no horizontal scroll, full details inside task */
+.kalpa-ops-list { width: 100%; min-width: 0; }
+.kalpa-ops-grid-header,
+.kalpa-ops-grid-row {
+  display: grid;
+  grid-template-columns: minmax(185px, 1.1fr) minmax(150px, .62fr) minmax(92px, .36fr) minmax(68px, .28fr) minmax(96px, .34fr);
+  column-gap: 10px;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+}
+.kalpa-ops-grid-header {
+  padding: 14px 16px;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+.kalpa-ops-grid-row {
+  padding: 16px;
+  background: white;
+  border: 0;
+  min-height: 92px;
+  transition: background-color .18s ease;
+}
+.kalpa-ops-grid-row:hover { background: #f8fafc; }
+.kalpa-ops-cell { min-width: 0; overflow: hidden; }
+.kalpa-ops-status-cell,
+.kalpa-ops-elapsed-cell,
+.kalpa-ops-assigned-cell { display: flex; align-items: center; }
+.kalpa-ops-line-summary {
+  display: block;
+  max-width: min(100%, 260px);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: .55rem;
+  padding: .2rem .45rem;
+  margin-top: .35rem;
+  font-size: 10.5px;
+  line-height: 1.1rem;
+  font-weight: 700;
+}
+.kalpa-mobile-label { display: none; }
+@media (max-width: 1120px) {
+  .kalpa-ops-grid-header,
+  .kalpa-ops-grid-row {
+    grid-template-columns: minmax(160px, .95fr) minmax(130px, .55fr) minmax(82px, .32fr) minmax(62px, .25fr) minmax(88px, .32fr);
+    column-gap: 8px;
+  }
+  .kalpa-ops-grid-header { padding: 12px; font-size: 10px; }
+  .kalpa-ops-grid-row { padding: 14px 12px; }
+  .kalpa-ops-line-summary { max-width: 210px; }
+}
+@media (max-width: 820px) {
+  .kalpa-ops-grid-header { display: none; }
+  .kalpa-ops-grid-row {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+    padding: 16px;
+    align-items: stretch;
+  }
+  .kalpa-ops-assigned-cell,
+  .kalpa-ops-elapsed-cell,
+  .kalpa-ops-status-cell {
+    justify-content: space-between;
+    border-top: 1px solid #f1f5f9;
+    padding-top: 10px;
+  }
+  .kalpa-mobile-label {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 900;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+  }
+  .kalpa-ops-line-summary { max-width: 100%; }
+}

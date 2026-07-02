@@ -25,7 +25,7 @@ import {
   MapPin, Plus, Search, User, Users, Wallet, ArrowRight, Upload, 
   List, MessageSquare, Bell, Paperclip, X, Image as ImageIcon, 
   File as FileIcon, Archive, Send, Flag, Shield, Hash, Video, Phone,
-  Calendar, Filter, Check, ArrowLeft, Download, ChevronRight, Lock, Eye, EyeOff, Map as MapIcon, AlertCircle, KanbanSquare, Link as LinkIcon, BarChart3, Building2, Smile, Star, Mic, Square, Trash2
+  Calendar, Filter, Check, ArrowLeft, Download, ChevronRight, Lock, Eye, EyeOff, Map as MapIcon, AlertCircle, KanbanSquare, Link as LinkIcon, BarChart3, Building2, Smile, Star, Mic, Square, Trash2, Edit3, Save
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
@@ -608,28 +608,60 @@ const getDailyTaskLimit = (projects = []) => {
   return 5;
 };
 
-const makeCodePart = (value = '', fallback = 'GEN') => {
-  const clean = String(value || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-zA-Z0-9 ]/g, ' ')
-    .trim()
-    .toUpperCase();
+const LOCATION_CODE_MAP = {
+  VARANASI: 'VNS', BANARAS: 'VNS', KASHI: 'VNS',
+  LUCKNOW: 'LKO', AGRA: 'AGR', MATHURA: 'MTR', AYODHYA: 'AYD',
+  GORAKHPUR: 'GKP', PRAYAGRAJ: 'PRJ', ALLAHABAD: 'PRJ',
+  KANPUR: 'KNP', NOIDA: 'NDA', RAEBARELI: 'RBL', RAEBAREILLY: 'RBL', 'RAI BARELI': 'RBL', 'RAI BAREILLY': 'RBL',
+  BAREILLY: 'BRL', MEERUT: 'MRT', GHAZIABAD: 'GZB', JHANSI: 'JHN',
+  ALIGARH: 'ALG', MORADABAD: 'MRD', SAHARANPUR: 'SHP', FIROZABAD: 'FRZ',
+  FAIZABAD: 'AYD', BARABANKI: 'BBK', SITAPUR: 'STP', UNNAO: 'UNN',
+  SULTANPUR: 'SLP', AMETHI: 'AMT', JAUNPUR: 'JNP', BALLIA: 'BLL',
+  AZAMGARH: 'AZM', MIRZAPUR: 'MZP', GONDA: 'GND', BASTI: 'BST'
+};
+
+const normalizeCodeInput = (value = '') => String(value || '')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/[^a-zA-Z0-9 ]/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .toUpperCase();
+
+const makeCodePart = (value = '', fallback = 'GEN', maxLength = 4) => {
+  const clean = normalizeCodeInput(value);
   if (!clean) return fallback;
   const words = clean.split(/\s+/).filter(Boolean);
   const token = words.length >= 2 ? words.map(w => w[0]).join('') : words[0];
-  return (token || fallback).slice(0, 4);
+  return (token || fallback).slice(0, maxLength);
 };
 
-const generateTraceableTaskId = ({ location = '', client = '', bankerName = '', customerName = '', projects = [] } = {}) => {
-  // Format requested: LOCATION-BANK-CUSTOMER-NUMBER
-  // Short forms are generated automatically from the details entered in Add Case.
-  const loc = makeCodePart(location, 'LOC');
-  const bank = makeCodePart(client, 'BANK');
-  const person = makeCodePart(customerName, 'CASE');
+const makeLocationCode = (location = '') => {
+  const clean = normalizeCodeInput(location);
+  if (!clean) return 'LOC';
+  if (LOCATION_CODE_MAP[clean]) return LOCATION_CODE_MAP[clean];
+  const matchedKey = Object.keys(LOCATION_CODE_MAP).find(key => clean.includes(key) || key.includes(clean));
+  if (matchedKey) return LOCATION_CODE_MAP[matchedKey];
+  return makeCodePart(clean, 'LOC', 3);
+};
+
+const generateTraceableTaskId = ({ location = '', client = '', bankerName = '', customerName = '', projects = [], excludeId = '' } = {}) => {
+  // Format: STATION-BANK-CUSTOMER-NUMBER (example: LKO-PNB-SHUB-0001)
+  // Station codes use the fixed office code map requested by the team.
+  const loc = makeLocationCode(location);
+  const bank = makeCodePart(client, 'BANK', 4);
+  const person = makeCodePart(customerName || bankerName, 'CASE', 4);
   const prefix = `${loc}-${bank}-${person}`;
-  const count = (projects || []).filter(p => String(p.id || '').startsWith(`${prefix}-`)).length + 1;
-  return `${prefix}-${String(count).padStart(4, '0')}`;
+  const existing = new Set((projects || [])
+    .filter(p => String(p.id || '') !== String(excludeId || ''))
+    .map(p => String(p.id || '')));
+  let serial = 1;
+  let nextId = `${prefix}-${String(serial).padStart(4, '0')}`;
+  while (existing.has(nextId)) {
+    serial += 1;
+    nextId = `${prefix}-${String(serial).padStart(4, '0')}`;
+  }
+  return nextId;
 };
 
 const getCustomerDisplayName = (project = {}) => project.customerName || 'Customer not added';
@@ -1634,6 +1666,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const [newSubTask, setNewSubTask] = useState('');
   const [newNote, setNewNote] = useState('');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showEditCase, setShowEditCase] = useState(false);
   const [isUploadingFinal, setIsUploadingFinal] = useState(false);
   const [subTaskAttachments, setSubTaskAttachments] = useState([]);
   const [noteAttachments, setNoteAttachments] = useState([]);
@@ -1647,6 +1680,79 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const canRevertTask = (canManage || canDesignerRevertOwnTask) && project.status !== 'Lead Received';
   const showFinancials = user.role === ROLES.ADMIN;
   const activeDraftingForUser = (usersProjects = []) => (usersProjects || []).find(p => samePerson(p.assignedTo, project.assignedTo || user.name) && p.status === 'Drafting' && String(p.id) !== String(project.id));
+
+  const handleSaveCaseEdit = (event) => {
+    event.preventDefault();
+    if (!canManage) return;
+    const fd = new FormData(event.currentTarget);
+    const nextTypeRaw = String(fd.get('type') || '').trim();
+    const nextType = nextTypeRaw === 'Other' ? String(fd.get('otherType') || project.type || 'Other').trim() : nextTypeRaw;
+    const now = Date.now();
+    const changeReason = String(fd.get('changeReason') || '').trim();
+    const previousSnapshot = {
+      id: project.id,
+      type: project.type || '',
+      client: project.client || '',
+      customerName: project.customerName || '',
+      location: project.location || '',
+      description: project.description || '',
+      estimateDetails: project.estimateDetails || '',
+      estimate: project.estimate || '',
+      assignedTo: project.assignedTo || 'Unassigned',
+      priority: project.priority || 'Normal',
+      dueDate: project.dueDate || '',
+    };
+    const nextSnapshot = {
+      type: nextType || project.type,
+      client: String(fd.get('client') || '').trim(),
+      customerName: String(fd.get('customerName') || '').trim(),
+      location: String(fd.get('location') || '').trim(),
+      description: String(fd.get('description') || '').trim(),
+      estimateDetails: String(fd.get('estimateDetails') || '').trim(),
+      estimate: String(fd.get('estimate') || '').trim(),
+      assignedTo: String(fd.get('assignedTo') || 'Unassigned'),
+      priority: String(fd.get('priority') || project.priority || 'Normal'),
+      dueDate: String(fd.get('dueDate') || ''),
+    };
+    if (!nextSnapshot.type.toLowerCase().includes('estimate')) nextSnapshot.estimateDetails = '';
+    const changedFields = Object.keys(nextSnapshot).filter(k => String(previousSnapshot[k] || '') !== String(nextSnapshot[k] || ''));
+    if (changedFields.length === 0 && !changeReason) {
+      setShowEditCase(false);
+      return;
+    }
+    const idSourceChanged = ['client', 'customerName', 'location'].some(k => changedFields.includes(k));
+    const nextTaskId = idSourceChanged
+      ? generateTraceableTaskId({ location: nextSnapshot.location, client: nextSnapshot.client, customerName: nextSnapshot.customerName, projects, excludeId: project.id })
+      : project.id;
+    const reassignmentHistory = [...(project.reassignmentHistory || [])];
+    if (String(previousSnapshot.assignedTo || 'Unassigned') !== String(nextSnapshot.assignedTo || 'Unassigned')) {
+      reassignmentHistory.push({ from: previousSnapshot.assignedTo || 'Unassigned', to: nextSnapshot.assignedTo || 'Unassigned', by: user.name, time: new Date(now).toLocaleString(), reason: changeReason || 'Case edited' });
+    }
+    const updatedProject = {
+      ...project,
+      ...nextSnapshot,
+      id: nextTaskId,
+      previousTaskIds: nextTaskId !== project.id ? [...(project.previousTaskIds || []), project.id] : (project.previousTaskIds || []),
+      taskName: [nextSnapshot.type, nextSnapshot.customerName, nextSnapshot.location].filter(Boolean).join(' • '),
+      updatedAt: now,
+      syncVersion: now,
+      assignedBy: nextSnapshot.assignedTo !== previousSnapshot.assignedTo ? user.name : project.assignedBy,
+      assignedAt: nextSnapshot.assignedTo !== previousSnapshot.assignedTo ? now : project.assignedAt,
+      assignmentVersion: nextSnapshot.assignedTo !== previousSnapshot.assignedTo ? now : project.assignmentVersion,
+      ownership: { ...(project.ownership || {}), assignedTo: nextSnapshot.assignedTo, editedBy: user.name },
+      reassignmentHistory,
+      caseEditHistory: [
+        ...(project.caseEditHistory || []),
+        { id: now, by: user.name, editedBy: user.name, at: now, editedAt: now, time: new Date(now).toLocaleString(), reason: changeReason, changedFields: nextTaskId !== project.id ? [...changedFields, 'taskId'] : changedFields, before: previousSnapshot, after: { ...nextSnapshot, id: nextTaskId } }
+      ],
+      timeline: [
+        ...(project.timeline || []),
+        { id: now, text: `Case edited by ${user.name}${nextTaskId !== project.id ? ` • Task ID changed ${project.id} → ${nextTaskId}` : ''}${changeReason ? `: ${changeReason}` : ''}`, time: new Date(now).toLocaleString() }
+      ]
+    };
+    onUpdateProject(updatedProject, project);
+    setShowEditCase(false);
+  };
 
   const handlePauseDrafting = () => {
     if (project.status !== 'Drafting') return;
@@ -2149,7 +2255,13 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
             </button>
           )}
           
-          {user.role === ROLES.ADMIN && (
+          {canManage && (
+             <button type="button" onClick={() => setShowEditCase(true)} className="px-4 py-2.5 bg-indigo-50 text-indigo-700 rounded-xl hover:bg-indigo-100 transition-all flex items-center font-bold text-sm whitespace-nowrap border border-indigo-100">
+               <Edit3 className="w-4 h-4 mr-1.5" /> Edit Case
+             </button>
+          )}
+
+          {canManage && (
              showDeleteConfirm ? (
                 <div className="flex items-center gap-2 bg-red-50 p-1.5 rounded-xl border border-red-200 animate-in slide-in-from-right-4">
                    <span className="text-xs text-red-600 font-bold ml-2">Delete permanently?</span>
@@ -2183,6 +2295,44 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
           )}
         </div>
       </div>
+
+      {showEditCase && canManage && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm p-4 overflow-y-auto" style={{ zIndex: 9999 }}>
+          <div className="max-w-4xl mx-auto my-6 bg-white rounded-[2rem] shadow-2xl border border-slate-100 p-6 sm:p-8 relative" style={{ zIndex: 10000 }}>
+            <div className="flex items-center justify-between gap-4 mb-6 pb-5 border-b border-slate-100">
+              <div>
+                <h2 className="text-2xl font-black text-slate-900">Edit Case</h2>
+                <p className="text-sm font-bold text-slate-400 mt-1">Update scope, details, assignment, or estimate when customer requirements change.</p>
+              </div>
+              <button type="button" onClick={() => setShowEditCase(false)} className="p-2.5 bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-100"><X className="w-5 h-5" /></button>
+            </div>
+            <form onSubmit={handleSaveCaseEdit} className="space-y-5">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Bank Name</label><input name="client" defaultValue={project.client || ''} className="w-full border-2 border-slate-100 rounded-xl p-3 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none font-bold" /></div>
+                <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Customer Name</label><input name="customerName" defaultValue={project.customerName || ''} className="w-full border-2 border-slate-100 rounded-xl p-3 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none font-bold" /></div>
+                <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Location</label><input name="location" defaultValue={project.location || ''} className="w-full border-2 border-slate-100 rounded-xl p-3 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none font-bold" /></div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Case Type / Scope</label><select name="type" defaultValue={TASK_CATEGORIES.includes(project.type) ? project.type : 'Other'} className="w-full border-2 border-slate-100 rounded-xl p-3 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none font-bold">{TASK_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}</select></div>
+                <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Other Scope</label><input name="otherType" defaultValue={TASK_CATEGORIES.includes(project.type) ? '' : project.type} placeholder="Only if Other" className="w-full border-2 border-slate-100 rounded-xl p-3 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none font-bold" /></div>
+                <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Assign To</label><select name="assignedTo" defaultValue={project.assignedTo || 'Unassigned'} className="w-full border-2 border-slate-100 rounded-xl p-3 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none font-bold"><option value="Unassigned">Unassigned</option>{getAssignmentRecommendations(users, [project]).map(u => <option key={u.id} value={u.name}>{u.name}</option>)}</select></div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Priority</label><select name="priority" defaultValue={project.priority || 'Normal'} className="w-full border-2 border-slate-100 rounded-xl p-3 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none font-bold"><option>Normal</option><option>Urgent</option><option>High</option><option>Low</option></select></div>
+                <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Due Date</label><input type="date" name="dueDate" defaultValue={project.dueDate || ''} className="w-full border-2 border-slate-100 rounded-xl p-3 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none font-bold" /></div>
+                <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Estimate Amount</label><input name="estimate" defaultValue={project.estimate || ''} className="w-full border-2 border-slate-100 rounded-xl p-3 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none font-bold" /></div>
+              </div>
+              <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Estimate Details</label><input name="estimateDetails" defaultValue={project.estimateDetails || ''} className="w-full border-2 border-slate-100 rounded-xl p-3 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none font-bold" /></div>
+              <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Description</label><textarea name="description" defaultValue={project.description || ''} rows={4} className="w-full border-2 border-slate-100 rounded-xl p-3 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none font-bold resize-none" /></div>
+              <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Change Reason / Internal Remark</label><textarea name="changeReason" rows={2} placeholder="Example: Customer cancelled map estimate, continue with key plan only." className="w-full border-2 border-indigo-100 rounded-xl p-3 bg-indigo-50/50 focus:bg-white focus:border-indigo-500 outline-none font-bold resize-none" /></div>
+              <div className="flex flex-col sm:flex-row justify-end gap-3 pt-3">
+                <button type="button" onClick={() => setShowEditCase(false)} className="px-5 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-black">Cancel</button>
+                <button type="submit" className="px-5 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-black shadow-lg shadow-indigo-100 flex items-center justify-center"><Save className="w-4 h-4 mr-2" /> Save Case Changes</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {(isAwaitingInternalReview || isFinalApproved) && (
         <div className={`rounded-3xl border-2 p-5 shadow-sm ${isFinalApproved ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200'}`}>

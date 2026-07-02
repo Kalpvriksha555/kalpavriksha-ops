@@ -6,6 +6,18 @@ import { getTaskDescription, getEstimateDetails, getLatestCompletedFileName } fr
 import { getTaskBusySince, getUserActiveTasks, getDraftingElapsedMs } from '../../utils/presenceAttendanceUtils';
 import { getStatusColor } from '../../services/taskService';
 
+const CompactTextPill = ({ label, value, tone = 'indigo' }) => {
+  if (!value) return null;
+  const toneClass = tone === 'amber'
+    ? 'text-amber-700 bg-amber-50 border-amber-100'
+    : 'text-indigo-700 bg-indigo-50 border-indigo-100';
+  return (
+    <p className={`kalpa-ops-line-summary ${toneClass}`} title={value}>
+      <span className="font-black">{label}:</span> {value}
+    </p>
+  );
+};
+
 const OperationKanbanCard = ({ project, onSelectProject, getCustomerDisplayName }) => (
   <div onClick={() => onSelectProject(project)} className="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-200 hover:border-indigo-300 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 cursor-pointer group active:scale-[0.99]">
     <div className="flex justify-between items-start mb-2">
@@ -14,12 +26,8 @@ const OperationKanbanCard = ({ project, onSelectProject, getCustomerDisplayName 
     </div>
     <p className="text-sm font-bold text-slate-700 mb-1">{getCustomerDisplayName(project)}</p>
     <p className="text-xs text-slate-500 mb-3">{project.type} • {project.location}</p>
-    {getTaskDescription(project) && (
-      <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mb-2 line-clamp-2"><span className="font-black">Description:</span> {getTaskDescription(project)}</p>
-    )}
-    {getEstimateDetails(project) && (
-      <p className="text-xs font-bold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mb-3 line-clamp-2"><span className="font-black">Estimate:</span> {getEstimateDetails(project)}</p>
-    )}
+    <CompactTextPill label="Description" value={getTaskDescription(project)} />
+    <CompactTextPill label="Estimate" value={getEstimateDetails(project)} tone="amber" />
     {getLatestCompletedFileName(project) && (
       <p className="text-[10px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mb-3 truncate">Completed: {getLatestCompletedFileName(project)}</p>
     )}
@@ -45,55 +53,61 @@ const OperationsKanban = ({ projects, onSelectProject, getCustomerDisplayName })
   </div>
 );
 
-const OperationTableRow = ({ project, onSelectProject, getCustomerDisplayName, getDraftElapsed, nowTick }) => (
-  <tr onClick={() => onSelectProject(project)} className="hover:bg-slate-50 cursor-pointer transition-colors group">
-    <td className="px-6 py-5">
-      <div className="flex items-center gap-2">
-        <p className="font-extrabold text-slate-800 text-base">{project.id}</p>
-        {project.priority === 'Urgent' && <Flag className="w-4 h-4 text-red-500 animate-pulse" />}
+const OperationGridRow = ({ project, onSelectProject, getCustomerDisplayName, getDraftElapsed, nowTick }) => {
+  const assigned = project.assignedTo || 'Unassigned';
+  const elapsed = project.draftingStartedAt ? getDraftElapsed(project, nowTick) : '-';
+  return (
+    <button type="button" onClick={() => onSelectProject(project)} className="kalpa-ops-grid-row text-left group">
+      <div className="kalpa-ops-cell kalpa-ops-task-cell">
+        <div className="flex items-center gap-2 min-w-0">
+          <p className="font-extrabold text-slate-800 text-base truncate" title={project.id}>{project.id}</p>
+          {project.priority === 'Urgent' && <Flag className="w-4 h-4 text-red-500 animate-pulse flex-shrink-0" />}
+        </div>
+        <p className="text-slate-500 font-semibold text-xs mt-1 truncate">{getCustomerDisplayName(project)}</p>
+        <p className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded mt-1.5 w-fit font-bold">Created: {project.createdAt ? formatDateTime(project.createdAt) : '-'}</p>
+        {getLatestCompletedFileName(project) && <p className="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-100 px-1.5 py-0.5 rounded mt-1.5 max-w-full truncate font-black" title={getLatestCompletedFileName(project)}>Completed: {getLatestCompletedFileName(project)}</p>}
       </div>
-      <p className="text-slate-500 font-semibold text-xs mt-1">{getCustomerDisplayName(project)}</p>
-      <p className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded mt-1.5 w-fit font-bold">Created: {project.createdAt ? formatDateTime(project.createdAt) : '-'}</p>
-      {getLatestCompletedFileName(project) && <p className="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-100 px-1.5 py-0.5 rounded mt-1.5 w-fit font-black">Completed: {getLatestCompletedFileName(project)}</p>}
-    </td>
-    <td className="px-6 py-5">
-      <p className="font-bold text-slate-700">{project.type}</p>
-      <p className="text-slate-400 font-medium text-xs mt-1">{project.location}</p>
-      {getTaskDescription(project) && <p className="text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 font-semibold text-xs mt-2 max-w-xs whitespace-normal line-clamp-2"><span className="font-black">Description:</span> {getTaskDescription(project)}</p>}
-      {getEstimateDetails(project) && <p className="text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 font-semibold text-xs mt-1 max-w-xs whitespace-normal line-clamp-2"><span className="font-black">Estimate:</span> {getEstimateDetails(project)}</p>}
-    </td>
-    <td className="px-6 py-5">
-      <Badge colorClass={project.assignedTo === 'Unassigned' ? 'bg-red-50 text-red-600 border-red-200' : 'bg-slate-50 text-slate-700 border-slate-200'}>{project.assignedTo}</Badge>
-    </td>
-    <td className="px-6 py-5 font-bold text-slate-600">{project.draftingStartedAt ? getDraftElapsed(project, nowTick) : '-'}</td>
-    <td className="px-6 py-5">
-      <Badge colorClass={`border-transparent ${getStatusColor(project.status)}`}>{project.status}</Badge>
-    </td>
-  </tr>
-);
+
+      <div className="kalpa-ops-cell kalpa-ops-type-cell">
+        <p className="font-bold text-slate-700 truncate" title={project.type}>{project.type}</p>
+        <p className="text-slate-400 font-medium text-xs mt-1 truncate" title={project.location}>{project.location}</p>
+        <CompactTextPill label="Estimate" value={getEstimateDetails(project)} tone="amber" />
+      </div>
+
+      <div className="kalpa-ops-cell kalpa-ops-assigned-cell">
+        <span className="kalpa-mobile-label">Assigned</span>
+        <Badge colorClass={assigned === 'Unassigned' ? 'bg-red-50 text-red-600 border-red-200' : 'bg-slate-50 text-slate-700 border-slate-200'}>{assigned}</Badge>
+      </div>
+
+      <div className="kalpa-ops-cell kalpa-ops-elapsed-cell">
+        <span className="kalpa-mobile-label">Elapsed</span>
+        <span className="text-sm font-black text-slate-700 whitespace-nowrap">{elapsed}</span>
+      </div>
+
+      <div className="kalpa-ops-cell kalpa-ops-status-cell">
+        <span className="kalpa-mobile-label">Status</span>
+        <Badge colorClass={`border-transparent ${getStatusColor(project.status)}`}>{project.status}</Badge>
+      </div>
+    </button>
+  );
+};
 
 const OperationsTable = ({ projects, onSelectProject, getCustomerDisplayName, getDraftElapsed, nowTick }) => (
-  <div className="bg-white rounded-3xl shadow-sm border-2 border-slate-100 overflow-hidden transition-shadow duration-200 hover:shadow-md">
-    <div className="overflow-x-auto">
-      <table className="w-full text-left text-sm whitespace-nowrap">
-        <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
-          <tr>
-            <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Task ID</th>
-            <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Type & Location</th>
-            <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Assigned To</th>
-            <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Elapsed</th>
-            <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Status</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-100">
-          {projects.map(project => (
-            <OperationTableRow key={project.id} project={project} onSelectProject={onSelectProject} getCustomerDisplayName={getCustomerDisplayName} getDraftElapsed={getDraftElapsed} nowTick={nowTick} />
-          ))}
-          {projects.length === 0 && (
-            <tr><td colSpan={5} className="px-6 py-16 text-center text-slate-400 font-bold">No active projects found for this date.</td></tr>
-          )}
-        </tbody>
-      </table>
+  <div className="kalpa-ops-list bg-white rounded-3xl shadow-sm border-2 border-slate-100 overflow-hidden transition-shadow duration-200 hover:shadow-md">
+    <div className="kalpa-ops-grid-header bg-slate-50 text-slate-500 border-b-2 border-slate-100">
+      <div>Task ID</div>
+      <div>Type & Location</div>
+      <div>Assigned</div>
+      <div>Elapsed</div>
+      <div>Status</div>
+    </div>
+    <div className="divide-y divide-slate-100">
+      {projects.map(project => (
+        <OperationGridRow key={project.id} project={project} onSelectProject={onSelectProject} getCustomerDisplayName={getCustomerDisplayName} getDraftElapsed={getDraftElapsed} nowTick={nowTick} />
+      ))}
+      {projects.length === 0 && (
+        <div className="px-6 py-16 text-center text-slate-400 font-bold">No active projects found for this date.</div>
+      )}
     </div>
   </div>
 );
@@ -218,8 +232,8 @@ export const ActiveOperationsView = ({
       </div>
     </div>
 
-    <div className="grid grid-cols-1 lg:grid-cols-4 gap-5 sm:gap-8">
-      <div className="lg:col-span-3 w-full">
+    <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px] gap-5 sm:gap-8">
+      <div className="w-full min-w-0">
         {boardViewMode === 'kanban' ? (
           <OperationsKanban projects={displayedProjects} onSelectProject={setSelectedProject} getCustomerDisplayName={getCustomerDisplayName} />
         ) : (
