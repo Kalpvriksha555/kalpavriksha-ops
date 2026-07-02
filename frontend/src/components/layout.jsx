@@ -1,6 +1,7 @@
 import React from 'react';
 import { AlertCircle, Bell, Briefcase, Calendar, CheckCircle, Flag, LayoutDashboard, LogOut, MessageSquare, Search, User, Video, X } from 'lucide-react';
 import { getProfilePhotoVersion, profilePhotoUrl } from '../utils/profileUtils';
+import { isNotificationReadByUser } from '../services/notificationService';
 
 export const LocalModeBanner = ({ onClose }) => (
   <div className="bg-amber-100 border-b border-amber-200 text-amber-800 p-2.5 text-center text-xs font-bold flex flex-wrap justify-center items-center gap-2 shadow-sm z-50 relative">
@@ -128,7 +129,7 @@ export const TopNavigation = ({
               <div className="max-h-80 overflow-y-auto p-2 space-y-1 custom-scrollbar">
                 {(filteredNotifs || []).length === 0 && <p className="text-xs text-slate-400 font-bold text-center py-6">No notifications found.</p>}
                 {(filteredNotifs || []).map(n => {
-                  const unread = !(n.readBy || []).includes(currentUser.name);
+                  const unread = !isNotificationReadByUser(n, currentUser);
                   return (
                     <div key={n.id} className={`p-3.5 rounded-2xl flex items-start transition-colors group ${unread ? 'bg-indigo-50/50 border border-indigo-100' : 'bg-white hover:bg-slate-50 border border-transparent'}`}>
                       {getNotificationIcon(n)}

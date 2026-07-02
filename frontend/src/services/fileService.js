@@ -71,33 +71,18 @@ export const downloadProjectFile = async (doc = {}) => {
     alert('This file does not have a valid download link. Please re-upload it once.');
     return;
   }
-  try {
-    const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) {
-      const message = await res.text().catch(() => '');
-      if (res.status === 410 || /unavailable|missing/i.test(message)) {
-        alert(message || 'This file record exists, but the physical file is missing on the server. Please re-upload this file once.');
-        return;
-      }
-      throw new Error(message || `Download failed (${res.status})`);
-    }
-    const blob = await res.blob();
-    if (!blob || blob.size === 0) throw new Error('Downloaded file is empty');
-    const objectUrl = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = objectUrl;
-    a.download = doc.name || 'download';
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => {
-      URL.revokeObjectURL(objectUrl);
-      a.remove();
-    }, 1500);
-  } catch (error) {
-    console.error('File download failed:', error);
-    window.open(url, '_blank', 'noopener,noreferrer');
-  }
+
+  // Do not fetch the whole file into browser memory before saving it.
+  // Large PDFs/DWGs download much faster and more reliably when the browser is
+  // allowed to stream the backend's Content-Disposition response directly.
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = doc.name || 'download';
+  a.rel = 'noopener noreferrer';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => a.remove(), 1000);
 };
 
 export const deleteProjectFileFromServer = async (doc = {}) => {

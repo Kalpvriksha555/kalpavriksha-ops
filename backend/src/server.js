@@ -139,7 +139,15 @@ function db(){
 function save(d){
   const normalized = norm(d);
   memoryState = structuredClone(normalized);
-  fs.writeFileSync(DB_FILE, JSON.stringify(normalized,null,2));
+
+  // Production uses PostgreSQL as the source of truth. Avoid writing the full
+  // app_state JSON file on every upload/chat/task action because that synchronous
+  // disk write can make file uploads feel slow on a VPS. Keep JSON writes for
+  // local fallback mode, or enable WRITE_JSON_BACKUP=true explicitly.
+  if (!USE_POSTGRES || process.env.WRITE_JSON_BACKUP === 'true') {
+    fs.writeFileSync(DB_FILE, JSON.stringify(normalized,null,2));
+  }
+
   if (USE_POSTGRES) {
     ensurePostgres()
       .then(() => pool.query('INSERT INTO app_state(key,value,updated_at) VALUES($1,$2::jsonb,now()) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()', ['main', JSON.stringify(normalized)]))
@@ -617,16 +625,41 @@ app.use((req,res,next)=>{
 app.use(express.json({limit: process.env.JSON_BODY_LIMIT || '30mb'}));
 app.use('/uploads',express.static(UPLOAD_DIR));
 
+function sendProfilePhotoPlaceholder(res) {
+  res.status(200);
+  res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.send(`<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160"><rect width="160" height="160" rx="28" fill="#f1f5f9"/><circle cx="80" cy="60" r="28" fill="#cbd5e1"/><path d="M34 138c6-28 27-44 46-44s40 16 46 44" fill="#cbd5e1"/></svg>`);
+}
+
+function resolveProfilePhotoPath(requestedName = '') {
+  const requested = safeName(fileBaseName(requestedName || ''));
+  const d = db();
+  const candidates = [];
+  if (requested) candidates.push(requested);
+  for (const user of (d.users || [])) {
+    const photoBase = safeName(fileBaseName(user.profilePhoto || ''));
+    const storedBase = safeName(fileBaseName(user.profilePhotoFile || ''));
+    if (!requested || photoBase === requested || storedBase === requested) {
+      if (user.profilePhotoFile) candidates.push(fileBaseName(user.profilePhotoFile));
+      if (user.profilePhoto) candidates.push(fileBaseName(user.profilePhoto));
+    }
+  }
+  for (const candidate of [...new Set(candidates.filter(Boolean))]) {
+    const resolved = resolveStoredUploadFile({ storedName: candidate, name: candidate, url: `/uploads/${candidate}` });
+    if (resolved?.fp) return resolved.fp;
+  }
+  return '';
+}
+
 app.get('/api/profile/photo/:filename', (req, res) => {
   try {
-    const filename = safeName(req.params.filename || '');
-    if (!filename) return res.status(404).send('Photo not found');
-    const fp = path.resolve(UPLOAD_DIR, filename);
-    if (!fp.startsWith(path.resolve(UPLOAD_DIR)) || !fs.existsSync(fp)) return res.status(404).send('Photo not found');
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    const fp = resolveProfilePhotoPath(req.params.filename || '');
+    if (!fp) return sendProfilePhotoPlaceholder(res);
+    res.setHeader('Cache-Control', 'private, max-age=86400');
     res.sendFile(fp);
   } catch (err) {
-    res.status(500).send('Unable to load photo');
+    sendProfilePhotoPlaceholder(res);
   }
 });
 
@@ -876,7 +909,8 @@ app.get('/api/files/:id/download',(req,res)=>{
   const { stored, fp } = resolved;
   if(!fp.startsWith(path.resolve(UPLOAD_DIR))) return res.status(400).send('Invalid file path');
   res.setHeader('Access-Control-Expose-Headers','Content-Disposition, Content-Length, Content-Type');
-  res.setHeader('Cache-Control','no-store');
+  res.setHeader('Cache-Control','private, max-age=0, must-revalidate');
+  res.setHeader('Content-Length', String(fs.statSync(fp).size));
   res.download(fp, doc.name || doc.fileName || stored);
 });
 
@@ -934,7 +968,45 @@ app.delete('/api/files/:id',(req,res)=>{
   res.json({ ok: true, removed });
 });
 app.get('/api/cases/:id/share-whatsapp',(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const finalDocs=(c.documents||[]).filter(doc=>doc.purpose==='FINAL' || doc.purpose==='REVISION_FINAL'); if(!finalDocs.length) return res.status(400).json({error:'No completed document available to share'}); const latestOriginal=finalDocs.filter(x=>x.purpose==='FINAL').slice(-1); const docs=latestOriginal.length?latestOriginal:finalDocs.slice(-1); const links=docs.map(x=>`${publicUrl().replace(':5173',':8080')}/api/files/${x.id}/download`).join('\n'); const msg=`Kalpvriksha Designs completed document for ${c.caseId}\nCustomer: ${c.customerName}\n${links}`; res.json({message:msg,waLink:`https://wa.me/?text=${encodeURIComponent(msg)}`,documents:docs}); });
-app.post('/api/chat', uploadAny,(req,res)=>{ const d=db(); const ments=mentionTargets(req.body.text,d.users).concat(req.body.mentions?JSON.parse(req.body.mentions||'[]'):[]); const unique=[...new Set(ments)]; const msg={id:nanoid(8),by:req.body.by||'Team',role:req.body.role||'ADMIN',caseId:req.body.caseId||'',text:req.body.text||'',mentions:unique,files:(req.files||[]).map(f=>addFileRegistryEntry(d, docPayload(f,req.body.by||'Team',req.body.role||'ADMIN','CHAT'))),createdAt:now()}; d.teamChat.unshift(msg); if(unique.length){ unique.forEach(name=>notifyUser(d,name,`You were mentioned by ${msg.by} in team chat`,'mention','chat')); } else { notifyRole(d,'ADMIN','New normal chat message','normal','chat'); notifyRole(d,'MANAGER','New normal chat message','normal','chat'); notifyRole(d,'DESIGNER','New normal chat message','normal','chat'); } save(d); res.json(msg); });
+
+function normalizeTaskReferenceId(value='') { return String(value || '').replace(/^#/, '').trim().toUpperCase(); }
+function compactTaskReference(c={}) {
+  if (!c) return null;
+  return {
+    id: c.id || c.caseId || '',
+    caseId: c.caseId || c.id || '',
+    customerName: c.customerName || '',
+    location: c.location || c.city || c.propertyAddress || '',
+    bank: c.client || c.bankName || c.bank || '',
+    status: c.status || '',
+    assignedTo: c.assignedTo || c.assigneeName || ''
+  };
+}
+function resolveChatTaskReferences(text='', explicitRefs=[], cases=[]) {
+  const found = new Map();
+  const addCase = (c) => {
+    const ref = compactTaskReference(c);
+    const key = normalizeTaskReferenceId(ref?.id || ref?.caseId);
+    if (ref && key && !found.has(key)) found.set(key, ref);
+  };
+  const allCases = Array.isArray(cases) ? cases : [];
+  (Array.isArray(explicitRefs) ? explicitRefs : []).forEach(ref => {
+    const key = normalizeTaskReferenceId(ref?.id || ref?.caseId || ref?.taskId);
+    const match = allCases.find(c => [c.id, c.caseId].filter(Boolean).some(id => normalizeTaskReferenceId(id) === key));
+    if (match) addCase(match);
+    else if (key) found.set(key, { id: ref.id || ref.caseId || ref.taskId || '', caseId: ref.caseId || ref.id || ref.taskId || '' });
+  });
+  const haystack = ` ${String(text || '').toUpperCase()} `;
+  allCases.forEach(c => {
+    const ids = [c.id, c.caseId].filter(Boolean).map(normalizeTaskReferenceId);
+    if (ids.some(id => id && (haystack.includes(`#${id}`) || haystack.includes(` ${id} `) || haystack.includes(`
+${id} `) || haystack.includes(` ${id}
+`)))) addCase(c);
+  });
+  return Array.from(found.values()).slice(0, 5);
+}
+
+app.post('/api/chat', uploadAny,(req,res)=>{ const d=db(); const text=req.body.text||''; let explicitTaskRefs=[]; try { explicitTaskRefs=req.body.taskRefs?JSON.parse(req.body.taskRefs||'[]'):[]; } catch(e) { explicitTaskRefs=[]; } const taskRefs=resolveChatTaskReferences(text, explicitTaskRefs, d.cases||[]); const ments=mentionTargets(text,d.users).concat(req.body.mentions?JSON.parse(req.body.mentions||'[]'):[]); const unique=[...new Set(ments)]; const msg={id:nanoid(8),by:req.body.by||'Team',role:req.body.role||'ADMIN',caseId:req.body.caseId||'',text,mentions:unique,taskRefs,files:(req.files||[]).map(f=>addFileRegistryEntry(d, docPayload(f,req.body.by||'Team',req.body.role||'ADMIN','CHAT'))),createdAt:now()}; d.teamChat.unshift(msg); if(unique.length){ unique.forEach(name=>notifyUser(d,name,`You were mentioned by ${msg.by} in team chat`,'mention','chat')); } else if(taskRefs.length){ notifyRole(d,'ADMIN',`${msg.by} mentioned task ${taskRefs[0].id || taskRefs[0].caseId} in team chat`,'task','chat'); notifyRole(d,'MANAGER',`${msg.by} mentioned task ${taskRefs[0].id || taskRefs[0].caseId} in team chat`,'task','chat'); notifyRole(d,'DESIGNER',`${msg.by} mentioned task ${taskRefs[0].id || taskRefs[0].caseId} in team chat`,'task','chat'); } else { notifyRole(d,'ADMIN','New normal chat message','normal','chat'); notifyRole(d,'MANAGER','New normal chat message','normal','chat'); notifyRole(d,'DESIGNER','New normal chat message','normal','chat'); } save(d); res.json(msg); });
 app.post('/api/chat/read',(req,res)=>{ const d=db(); const role=req.body.role||'ADMIN'; d.chatReads ||= {}; d.chatReads[role]=(d.teamChat||[]).map(m=>m.id); d.notifications.forEach(n=>{ if(n.target==='chat' && (n.to===role || n.to===req.body.name || n.category==='mention')) n.status='READ'; }); save(d); res.json({ok:true}); });
 app.post('/api/notifications/:id/read',(req,res)=>{ const d=db(); const n=d.notifications.find(x=>x.id===req.params.id); if(n) n.status='READ'; save(d); res.json({ok:true}); });
 app.post('/whatsapp/mock/incoming', uploadAny,(req,res)=>{ const d=db(); const parsed=parseLead(req.body.text||''); const assignee=leastBusy(d); const c={id:nanoid(8),caseId:nextCaseNo(d,parsed.city),source:'WhatsApp',createdByRole:'BANKER',creatorName:req.body.fromName||req.body.from||'WhatsApp Banker',customerName:parsed.customerName,customerPhone:'',bankerName:req.body.fromName||'WhatsApp Banker',bank:req.body.bank||'',branch:req.body.branch||'',serviceType:parsed.serviceType,city:parsed.city,propertyAddress:parsed.propertyAddress,estimateAmount:Number(parsed.estimateAmount||0),priority:'Normal',status:'ASSIGNED',assigneeId:assignee?.id,assigneeName:assignee?.name,assigneeRole:assignee?.role,createdAt:now(),completedAt:null,paymentStatus:'PENDING',documents:(req.files||[]).map(f=>addFileRegistryEntry(d, docPayload(f,'WhatsApp','BANKER','SOURCE'))),comments:[],revisions:[],history:[{at:now(),by:'WhatsApp',action:'Lead created from WhatsApp'}]}; d.cases.unshift(c); d.whatsappInbox.unshift({id:nanoid(8),from:req.body.from,fromName:req.body.fromName,text:req.body.text,createdAt:now(),caseId:c.caseId}); notifyRole(d,'ADMIN',`New WhatsApp case ${c.caseId} from ${c.creatorName}`,'task',c.id); notifyRole(d,'MANAGER',`New WhatsApp case ${c.caseId} from ${c.creatorName}`,'task',c.id); notifyUser(d,c.assigneeName,`New WhatsApp task assigned: ${c.caseId}`,'task',c.id); save(d); res.json(c); });

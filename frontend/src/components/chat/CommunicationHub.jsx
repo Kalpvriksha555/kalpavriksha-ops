@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { MessageSquare, X, Phone, Video, Square, Mic, Smile, Paperclip, Send, Search, User, Star, Hash, AlertCircle, File as FileIcon } from 'lucide-react';
+import { MessageSquare, X, Phone, Video, Square, Mic, Smile, Paperclip, Send, Search, User, Star, Hash, AlertCircle, File as FileIcon, ExternalLink, ClipboardList } from 'lucide-react';
 import { formatLastSeenDateTime } from '../../utils/date';
 import { createSafeMeetingRoomName, buildJitsiUrl } from '../../utils/meeting';
 import { copyTextToClipboard } from '../../utils/clipboard';
@@ -7,7 +7,7 @@ import { MiniEmptyState } from '../shared';
 import { getVisibleNotifications } from '../../services/notificationService';
 import { CHAT_API_BASE, absoluteChatUrl, makeMessageId, QUICK_EMOJIS, isUserActuallyOnline, getOperationalUsers, identityKey, samePerson, readEntryName, ROLES, normalizeChannelKey, chatEmojiGroups, reactionEmojis } from '../../utils/chatUtils';
 
-export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onDeleteMessage, onUpdateMessage, onMarkMessagesRead, appId }) => {
+export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onDeleteMessage, onUpdateMessage, onMarkMessagesRead, appId, projects = [], onOpenTaskReference }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [presenceNow, setPresenceNow] = useState(Date.now());
   const [activeChannel, setActiveChannel] = useState('global');
@@ -74,6 +74,75 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const activePeerOnline = activePeer ? isUserActuallyOnline(activePeer, presenceNow) : false;
   const activeCallRoom = activePeer ? createSafeMeetingRoomName('KalpaVriksha_DM', appId || 'kalpavriksha_production_v1', ...[currentUser.name, activePeer.name].sort()) : '';
   const activeCallUrl = activePeer ? buildJitsiUrl(activeCallRoom, currentUser.name, { audioOnly: callAudioOnly, shareScreen: callShareScreen }) : '';
+
+  const normalizeTaskToken = (value = '') => String(value || '').replace(/^#/, '').trim().toUpperCase();
+  const getTaskDisplayId = (project = {}) => String(project.id || project.caseId || '').trim();
+  const taskLookup = React.useMemo(() => {
+    const map = new Map();
+    (projects || []).forEach(project => {
+      [project?.id, project?.caseId].filter(Boolean).forEach(key => map.set(normalizeTaskToken(key), project));
+    });
+    return map;
+  }, [projects]);
+
+  const resolveTaskReferences = (text = '', explicitRefs = []) => {
+    const found = new Map();
+    const addProject = (project) => {
+      if (!project) return;
+      const key = normalizeTaskToken(project.id || project.caseId);
+      if (key && !found.has(key)) found.set(key, project);
+    };
+
+    (explicitRefs || []).forEach(ref => {
+      const key = normalizeTaskToken(ref?.id || ref?.caseId || ref?.taskId);
+      addProject(taskLookup.get(key));
+    });
+
+    const haystack = ` ${String(text || '').toUpperCase()} `;
+    (projects || []).forEach(project => {
+      const ids = [project?.id, project?.caseId].filter(Boolean).map(normalizeTaskToken);
+      if (ids.some(id => id && (haystack.includes(`#${id}`) || haystack.includes(` ${id} `) || haystack.includes(`\n${id} `) || haystack.includes(` ${id}\n`)))) addProject(project);
+    });
+
+    return Array.from(found.values()).slice(0, 5);
+  };
+
+  const openTaskFromChat = (project) => {
+    if (!project) return;
+    if (typeof onOpenTaskReference === 'function') onOpenTaskReference(project);
+    else window.dispatchEvent(new CustomEvent('kalpa:open-task-reference', { detail: { projectId: project.id || project.caseId || '', project } }));
+    setActionMenu(null);
+    setReactionMenu(null);
+  };
+
+  const buildTaskRefsForMessage = (text = '') => resolveTaskReferences(text).map(project => ({
+    id: project.id || project.caseId || '',
+    caseId: project.caseId || project.id || '',
+    customerName: project.customerName || '',
+    location: project.location || project.city || '',
+    bank: project.client || project.bankName || project.bank || '',
+    status: project.status || '',
+    assignedTo: project.assignedTo || project.assigneeName || ''
+  }));
+
+  useEffect(() => {
+    const openTaskDiscussion = (event) => {
+      const detail = event?.detail || {};
+      const project = detail.project || taskLookup.get(normalizeTaskToken(detail.projectId));
+      const taskId = getTaskDisplayId(project) || String(detail.projectId || '').trim();
+      if (!taskId) return;
+      setActiveChannel('global');
+      setIsOpen(true);
+      setEditingMessage(null);
+      setReplyTo(null);
+      setForwardMessageData(null);
+      setChatSearch('');
+      setMsg(prev => prev?.trim() ? `${prev.trim()} #${taskId} ` : `#${taskId} `);
+      window.setTimeout(() => composerRef.current?.focus?.(), 80);
+    };
+    window.addEventListener('kalpa:discuss-task', openTaskDiscussion);
+    return () => window.removeEventListener('kalpa:discuss-task', openTaskDiscussion);
+  }, [taskLookup]);
 
   useEffect(() => {
     try { const saved = JSON.parse(localStorage.getItem(localReadKey) || '{}'); readThroughRef.current = saved; setLocalReadState(saved); } catch(e) { readThroughRef.current = {}; setLocalReadState({}); }
@@ -286,6 +355,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       time: nowText,
       sentAt: now,
       replyTo: replyTo ? { id: replyTo.id, sender: replyTo.sender, text: replyTo.text || replyTo.fileName || 'Attachment' } : null,
+      taskRefs: buildTaskRefsForMessage(text),
       reactions: {},
       readBy: [{ name: currentUser.name, time: nowText }]
     };
@@ -364,6 +434,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       files: [fileRecord],
       localPreviewOnly: !!extra.localPreviewOnly,
       uploadStatus: extra.uploadStatus || 'ready',
+      taskRefs: extra.taskRefs || buildTaskRefsForMessage(extra.text || ''),
       replyTo: replyTo ? { id: replyTo.id, sender: replyTo.sender, text: replyTo.text || replyTo.fileName || 'Attachment' } : null,
       ...extra
     });
@@ -482,10 +553,13 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const openActionMenu = (event, m) => {
     event.preventDefault();
     event.stopPropagation();
-    const x = Math.min(event.clientX || 0, window.innerWidth - 240);
-    const y = Math.min(event.clientY || 0, window.innerHeight - 320);
+    const menuWidth = 224;
+    const estimatedMenuHeight = 390;
+    const safeGap = 12;
+    const x = Math.min(Math.max(safeGap, event.clientX || safeGap), Math.max(safeGap, window.innerWidth - menuWidth - safeGap));
+    const y = Math.min(Math.max(safeGap, event.clientY || safeGap), Math.max(safeGap, window.innerHeight - estimatedMenuHeight - safeGap));
     setReactionMenu(null);
-    setActionMenu({ id: m.id, x: Math.max(12, x), y: Math.max(12, y) });
+    setActionMenu({ id: m.id, x, y });
   };
 
   const openReactionMenu = (event, m) => {
@@ -583,13 +657,84 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
 
   const renderMessageText = (text) => {
     if (!text) return null;
-    const parts = text.split(new RegExp(`(@${currentUser.name}|@all)`, 'gi'));
+    const knownTaskIds = Array.from(taskLookup.keys()).filter(Boolean).sort((a, b) => b.length - a.length);
+    const escapedTaskPattern = knownTaskIds.map(id => id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    const mentionPattern = `@${String(currentUser.name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}|@all`;
+    const pattern = escapedTaskPattern ? new RegExp(`(#?(?:${escapedTaskPattern})|${mentionPattern})`, 'gi') : new RegExp(`(${mentionPattern})`, 'gi');
+    const parts = String(text).split(pattern).filter(part => part !== '');
     return parts.map((part, i) => {
       const lower = part.toLowerCase();
+      const task = taskLookup.get(normalizeTaskToken(part));
+      if (task) return <button key={i} type="button" onClick={(e) => { e.stopPropagation(); openTaskFromChat(task); }} className="inline-flex items-center gap-1 px-2 py-0.5 mx-0.5 rounded-md font-extrabold align-baseline bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-100"><ClipboardList className="w-3 h-3" />#{getTaskDisplayId(task)}</button>;
       if (lower === `@${currentUser.name.toLowerCase()}`) return <strong key={i} className="text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded-md font-extrabold">{part}</strong>;
       if (lower === `@all`) return <strong key={i} className="text-red-700 bg-red-100 px-1.5 py-0.5 rounded-md font-extrabold">{part}</strong>;
       return part;
     });
+  };
+
+  const renderTaskReferenceCards = (message = {}, isMine = false) => {
+    const refs = resolveTaskReferences(message.text || '', message.taskRefs || []);
+    if (!refs.length) return null;
+    return (
+      <div className="mt-3 space-y-2">
+        {refs.map(task => {
+          const taskId = getTaskDisplayId(task);
+          return (
+            <button
+              key={`${message.id || 'msg'}-${taskId}`}
+              type="button"
+              onClick={(e) => { e.stopPropagation(); openTaskFromChat(task); }}
+              className={`w-full text-left rounded-2xl border p-3 transition-all shadow-sm ${isMine ? 'bg-white/10 border-white/20 hover:bg-white/20 text-white' : 'bg-indigo-50 border-indigo-100 hover:border-indigo-300 text-slate-800'}`}
+              title="Open this task"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className={`text-[10px] font-black uppercase tracking-widest ${isMine ? 'text-indigo-100' : 'text-indigo-600'}`}>Task reference</p>
+                  <p className="text-sm font-black truncate">#{taskId}</p>
+                  <p className={`text-xs font-bold truncate mt-1 ${isMine ? 'text-white/80' : 'text-slate-500'}`}>{task.customerName || 'Customer'}{task.location || task.city ? ` • ${task.location || task.city}` : ''}</p>
+                  <p className={`text-[10px] font-bold uppercase tracking-wider mt-1 ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>{task.client || task.bankName || task.bank || 'Bank not added'} • {task.status || 'Status not set'}</p>
+                </div>
+                <ExternalLink className={`w-4 h-4 shrink-0 mt-1 ${isMine ? 'text-white/80' : 'text-indigo-500'}`} />
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
+
+
+  const renderComposerTaskPreview = () => {
+    const refs = resolveTaskReferences(msg || '');
+    if (!refs.length) return null;
+    return (
+      <div className="rounded-2xl border border-indigo-100 bg-indigo-50/80 p-3 space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Task reference ready</p>
+          <span className="text-[10px] font-black text-indigo-400">Will become clickable after send</span>
+        </div>
+        {refs.map(task => {
+          const taskId = getTaskDisplayId(task);
+          return (
+            <button
+              key={`composer-${taskId}`}
+              type="button"
+              onClick={() => openTaskFromChat(task)}
+              className="w-full text-left rounded-xl bg-white border border-indigo-100 hover:border-indigo-300 px-3 py-2 shadow-sm transition-all"
+              title="Open this task now"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-black text-slate-800 truncate">#{taskId}</p>
+                  <p className="text-xs font-bold text-slate-500 truncate">{task.customerName || 'Customer'}{task.location || task.city ? ` • ${task.location || task.city}` : ''}</p>
+                </div>
+                <ExternalLink className="w-4 h-4 shrink-0 text-indigo-500" />
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    );
   };
 
   const getReadableFileSize = (bytes) => {
@@ -766,6 +911,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
                             {m.replyTo && <button type="button" onClick={() => jumpToPinnedMessage(m.replyTo.id)} className={`w-full text-left mb-2 border-l-4 pl-2 py-1 rounded ${isMine ? 'border-white/70 bg-indigo-500/30' : 'border-indigo-300 bg-indigo-50'}`}><p className={`text-[10px] font-black ${isMine ? 'text-indigo-100' : 'text-indigo-600'}`}>Replying to {m.replyTo.sender}</p><p className={`text-xs truncate ${isMine ? 'text-white/90' : 'text-slate-500'}`}>{m.replyTo.text}</p></button>}
                             {m.forwardedFrom && <div className={`mb-2 border-l-4 pl-2 py-1 rounded ${isMine ? 'border-white/70 bg-indigo-500/30' : 'border-amber-300 bg-amber-50'}`}><p className={`text-[10px] font-black ${isMine ? 'text-indigo-100' : 'text-amber-700'}`}>Forwarded from {m.forwardedFrom.sender}</p><p className={`text-xs truncate ${isMine ? 'text-white/90' : 'text-slate-500'}`}>{m.forwardedFrom.text}</p></div>}
                             <div className={m.deleted ? 'italic opacity-75' : ''}>{renderMessageText(m.text)} {m.edited && !m.deleted && <span className={`text-[10px] ml-1 ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>(edited)</span>}</div>
+                            {!m.deleted && renderTaskReferenceCards(m, isMine)}
                             {m.roomUrl && (
                               <div className={`mt-3 rounded-xl p-3 border ${isMine ? 'bg-indigo-500/30 border-indigo-300' : 'bg-indigo-50 border-indigo-100'}`}>
                                 <p className={`text-xs font-black mb-2 ${isMine ? 'text-white' : 'text-indigo-800'}`}>{m.callType === 'audio' ? 'Audio call invite' : m.callType === 'screen' ? 'Screen sharing invite' : 'Video call invite'}</p>
@@ -840,6 +986,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
                 <div className="kalpa-chat-composer flex flex-col gap-2">
                   <div className="kalpa-chat-quick-emojis flex items-center gap-1 overflow-x-auto custom-scrollbar pb-0.5">{QUICK_EMOJIS.map(emoji => <button type="button" key={emoji} onClick={() => addEmojiToMessage(emoji)} className="shrink-0 w-9 h-8 rounded-xl bg-slate-50 hover:bg-indigo-50 text-lg border border-slate-100 hover:border-indigo-100 transition-all">{emoji}</button>)}</div>
                   <textarea ref={composerRef} rows={2} value={msg} onChange={handleInputChange} onKeyDown={handleMessageKeyDown} placeholder={editingMessage ? 'Edit your message...' : activeChannel === 'global' ? 'Message team or @mention...' : `Message ${activeChannel}...`} className="kalpa-chat-textarea w-full bg-slate-50 border border-slate-100 rounded-xl px-4 py-3 text-base font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all resize-none" style={{ minHeight: 58, maxHeight: 132, overflowY: 'auto' }} />
+                  {renderComposerTaskPreview()}
                   <div className="kalpa-chat-actions-row flex items-center gap-2">
                     <label title="Attach file" className="kalpa-chat-tool-btn p-2.5 text-slate-400 hover:text-indigo-600 bg-slate-50 hover:bg-indigo-50 rounded-xl transition-colors cursor-pointer"><Paperclip className="w-5 h-5" /><input type="file" className="hidden" accept="image/*,video/*,audio/*,.pdf,.dwg,.dxf,.xls,.xlsx,.csv,.doc,.docx,.ppt,.pptx,.zip,.rar" onChange={handleChatFileUpload} /></label>
                     <button type="button" title="Add emoji" onClick={() => setShowEmojiPicker(v => !v)} className={`kalpa-chat-tool-btn p-2.5 rounded-xl transition-colors ${showEmojiPicker ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}><Smile className="w-5 h-5" /></button>
@@ -871,7 +1018,17 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       )}
 
       {actionMenu && activeActionMessage && (
-        <div className="fixed z-[99999] bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden w-56" style={{ left: actionMenu.x, top: actionMenu.y }} onClick={(e) => e.stopPropagation()}>
+        <div
+          className="fixed z-[99999] bg-white border border-slate-200 rounded-2xl shadow-2xl w-56 custom-scrollbar"
+          style={{
+            left: Math.min(Math.max(12, actionMenu.x), Math.max(12, window.innerWidth - 236)),
+            top: Math.min(Math.max(12, actionMenu.y), Math.max(12, window.innerHeight - 402)),
+            maxHeight: 'calc(100vh - 24px)',
+            overflowY: 'auto',
+            overflowX: 'hidden'
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
           <button type="button" onClick={() => replyToMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">↩ Reply</button>
           <button type="button" onClick={() => togglePinMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">{isPinnedMessage(activeActionMessage) ? '★ Unpin' : '☆ Pin'}</button>
           <button type="button" onClick={(e) => openReactionMenu(e, activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">😊 React</button>

@@ -19,7 +19,7 @@ import { API_BASE, USE_BACKEND_STATE, ONLINE_STALE_MS, MAX_INLINE_DATA_URL_CHARS
 import { fileToBase64, cleanFileName } from './utils/fileUtils';
 import { absoluteApiUrl, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile } from './services/fileService';
 import { sendRealOtp, verifyRealOtp } from './services/otpService';
-import { buildNotification, getVisibleNotifications, NOTIFICATION_CATEGORIES, getNotificationCategory, getNotificationPriority, buildActivityTimeline, isNotificationForUser } from './services/notificationService';
+import { buildNotification, getVisibleNotifications, NOTIFICATION_CATEGORIES, getNotificationCategory, getNotificationPriority, buildActivityTimeline, isNotificationForUser, isNotificationReadByUser, addNotificationReadUser, mergeNotificationsByStability } from './services/notificationService';
 import { 
   Briefcase, CheckCircle, Clock, FileText, LayoutDashboard, LogOut, 
   MapPin, Plus, Search, User, Users, Wallet, ArrowRight, Upload, 
@@ -1662,7 +1662,7 @@ const LedgerView = ({ projects, onSelectProject }) => {
   );
 };
 
-const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, projects = [], onDeleteTask }) => {
+const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, projects = [], onDeleteTask, onDiscussTask }) => {
   const [newSubTask, setNewSubTask] = useState('');
   const [newNote, setNewNote] = useState('');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -2220,6 +2220,10 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
         ? (canManage ? 'Approve Final' : 'Awaiting Approval')
         : 'Advance Status';
 
+  const discussThisTaskInChat = () => {
+    if (typeof onDiscussTask === 'function') onDiscussTask(project);
+  };
+
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-5 bg-white p-5 rounded-3xl border-2 border-slate-100 shadow-sm">
@@ -2240,6 +2244,11 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
           </div>
         </div>
         <div className="flex flex-wrap gap-3">
+          
+
+          <button type="button" onClick={discussThisTaskInChat} className="px-4 py-2.5 bg-indigo-50 text-indigo-700 rounded-xl hover:bg-indigo-100 transition-all flex items-center font-bold text-sm whitespace-nowrap border border-indigo-100">
+             <MessageSquare className="w-4 h-4 mr-1.5" /> Discuss in Chat
+          </button>
           
           <button id="client-link-btn" type="button" onClick={copyClientLink} className={`px-4 py-2.5 bg-slate-100 text-slate-700 rounded-xl hover:bg-slate-200 transition-all flex items-center font-bold text-sm whitespace-nowrap`}>
              <LinkIcon className="w-4 h-4 mr-1.5" /> Client Link
@@ -2869,7 +2878,7 @@ function AppShell() {
           setChatMessages(incomingChats);
           try { localStorage.setItem('kalpa_chats', JSON.stringify(incomingChats)); } catch(e) {}
         }
-        if (Array.isArray(data.notifications)) setNotifications(data.notifications);
+        if (Array.isArray(data.notifications)) setNotifications(prev => mergeNotificationsByStability(prev, data.notifications));
         if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(data.attendanceLogs);
         setBackendStateReady(true);
         setIsDbReady(true);
@@ -2908,11 +2917,7 @@ function AppShell() {
           });
         }
         if (Array.isArray(data.notifications)) {
-          setNotifications(prev => {
-            const byId = new Map();
-            [...(prev || []), ...data.notifications].forEach(n => { if (n?.id) byId.set(String(n.id), { ...(byId.get(String(n.id)) || {}), ...n }); });
-            return Array.from(byId.values()).sort((a,b) => Number(b.id || 0) - Number(a.id || 0));
-          });
+          setNotifications(prev => mergeNotificationsByStability(prev, data.notifications));
         }
         if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(data.attendanceLogs);
       } catch (e) {}
@@ -3360,7 +3365,35 @@ function AppShell() {
 
   const handleSendMessage = async (msg) => {
     if (!firebaseUser) return;
-    const normalizedMsg = { ...msg, readBy: msg.readBy || [{ name: msg.sender, time: msg.time }] };
+    const resolveChatTaskRefs = (text = '', existingRefs = []) => {
+      const found = new Map();
+      const add = (p) => {
+        if (!p) return;
+        const key = String(p.id || p.caseId || '').trim().toUpperCase();
+        if (!key || found.has(key)) return;
+        found.set(key, {
+          id: p.id || p.caseId || '',
+          caseId: p.caseId || p.id || '',
+          customerName: p.customerName || '',
+          location: p.location || p.city || '',
+          bank: p.client || p.bankName || p.bank || '',
+          status: p.status || '',
+          assignedTo: p.assignedTo || p.assigneeName || ''
+        });
+      };
+      (existingRefs || []).forEach(ref => {
+        const refId = String(ref?.id || ref?.caseId || ref?.taskId || '').replace(/^#/, '').trim().toUpperCase();
+        const match = (projects || []).find(p => [p.id, p.caseId].filter(Boolean).some(v => String(v).trim().toUpperCase() === refId));
+        add(match || ref);
+      });
+      const haystack = ` ${String(text || '').toUpperCase()} `;
+      (projects || []).forEach(p => {
+        const ids = [p.id, p.caseId].filter(Boolean).map(v => String(v).trim().toUpperCase());
+        if (ids.some(id => id && (haystack.includes(`#${id}`) || haystack.includes(` ${id} `) || haystack.includes(`\n${id} `) || haystack.includes(` ${id}\n`)))) add(p);
+      });
+      return Array.from(found.values()).slice(0, 5);
+    };
+    const normalizedMsg = { ...msg, taskRefs: msg.taskRefs?.length ? msg.taskRefs : resolveChatTaskRefs(msg.text, msg.taskRefs), readBy: msg.readBy || [{ name: msg.sender, time: msg.time }] };
     setChatMessages(prev => {
       const next = [...prev, normalizedMsg].sort((a,b) => a.id - b.id);
       if (isLocalMock) localStorage.setItem('kalpa_chats', JSON.stringify(sanitizeChatsForCache(next)));
@@ -3425,8 +3458,8 @@ function AppShell() {
       const next = prev.map(n => {
         const belongsToMe = (!n.targetUser && n.targetRole === currentUser.role) || samePerson(n.targetUser, currentUser.name) || samePerson(n.targetUser, currentUser.username) || (!!currentUser.id && String(n.targetUser || '').toLowerCase() === String(currentUser.id || '').toLowerCase());
         const isChatNotice = ['mention', 'chat', 'message'].includes(String(n.type || '').toLowerCase()) || /mention|message|chat/i.test(String(n.title || ''));
-        if (!belongsToMe || !isChatNotice || (n.readBy || []).includes(currentUser.name)) return n;
-        const updated = { ...n, readBy: [...(n.readBy || []), currentUser.name] };
+        if (!belongsToMe || !isChatNotice || isNotificationReadByUser(n, currentUser)) return n;
+        const updated = addNotificationReadUser(n, currentUser);
         readRelevantNotifications.push(updated);
         return updated;
       });
@@ -3460,8 +3493,8 @@ function AppShell() {
     const changed = [];
     setNotifications(prev => {
       const next = (prev || []).map(n => {
-        if (String(n.id) !== String(notifId) || (n.readBy || []).includes(currentUser.name)) return n;
-        const updated = { ...n, readBy: [...(n.readBy || []), currentUser.name] };
+        if (String(n.id) !== String(notifId) || isNotificationReadByUser(n, currentUser)) return n;
+        const updated = addNotificationReadUser(n, currentUser);
         changed.push(updated);
         return updated;
       });
@@ -3476,8 +3509,8 @@ function AppShell() {
     const changed = [];
     setNotifications(prev => {
       const next = (prev || []).map(n => {
-        if (!isNotificationForUser(n, currentUser) || (n.readBy || []).includes(currentUser.name)) return n;
-        const updated = { ...n, readBy: [...(n.readBy || []), currentUser.name] };
+        if (!isNotificationForUser(n, currentUser) || isNotificationReadByUser(n, currentUser)) return n;
+        const updated = addNotificationReadUser(n, currentUser);
         changed.push(updated);
         return updated;
       });
@@ -3687,7 +3720,7 @@ function AppShell() {
   if (currentUser.role === ROLES.DESIGNER && activeTab === 'board') setTimeout(() => setActiveTab('command'), 0);
   const myNotifs = getVisibleNotifications(notifications, currentUser)
     .map(n => ({ ...n, category: n.category || getNotificationCategory(n), priority: n.priority || getNotificationPriority(n) }));
-  const unreadNotifs = myNotifs.filter(n => !(n.readBy||[]).includes(currentUser.name)).length;
+  const unreadNotifs = myNotifs.filter(n => !isNotificationReadByUser(n, currentUser)).length;
   const notificationCounts = NOTIFICATION_CATEGORIES.reduce((acc, label) => {
     acc[label] = label === 'All' ? myNotifs.length : myNotifs.filter(n => n.category === label).length;
     return acc;
@@ -3699,6 +3732,26 @@ function AppShell() {
     return [n.title, n.category, n.priority, n.type, n.time].filter(Boolean).join(' ').toLowerCase().includes(q);
   });
   const activityTimeline = buildActivityTimeline(projects, chatMessages, notifications);
+
+  const handleDiscussTaskInGlobalChat = (project = {}) => {
+    const taskId = project.id || project.caseId || '';
+    if (!taskId) return;
+    try {
+      window.dispatchEvent(new CustomEvent('kalpa:discuss-task', {
+        detail: { projectId: taskId, project }
+      }));
+    } catch (e) {
+      console.warn('Could not open task reference in chat:', e);
+    }
+  };
+
+  const handleOpenTaskFromChat = (project = {}) => {
+    const id = String(project.id || project.caseId || '').trim();
+    if (!id) return;
+    const latest = (projects || []).find(p => String(p.id || '') === id || String(p.caseId || '') === id) || project;
+    setActiveTab('board');
+    setSelectedProject(latest);
+  };
 
   const displayedProjects = projects
     .filter(p => {
@@ -3795,7 +3848,7 @@ function AppShell() {
         )}
 
         {selectedProject ? (
-          <TaskDetailView project={selectedProject} user={currentUser} onBack={() => setSelectedProject(null)} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} />
+          <TaskDetailView project={selectedProject} user={currentUser} onBack={() => setSelectedProject(null)} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} onDiscussTask={handleDiscussTaskInGlobalChat} />
         ) : activeTab === 'command' ? (
           <CommandCentreView projects={projects} users={activeUsers} currentUser={currentUser} onSelectProject={(p) => { setActiveTab('board'); setSelectedProject(p); }} />
         ) : activeTab === 'productivity' ? (
@@ -3836,11 +3889,12 @@ function AppShell() {
             getDraftElapsed={getDraftElapsed}
             getOperationalUsers={getOperationalUsers}
             isUserActuallyOnline={isUserActuallyOnline}
+            onDiscussTask={handleDiscussTaskInGlobalChat}
           />
         )}
       </main>
 
-      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} />}
+      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} projects={projects} onOpenTaskReference={handleOpenTaskFromChat} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} />}
 
       {showNewLead && (
         <div className="kalpa-lead-modal fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[80] flex justify-center items-center p-4">

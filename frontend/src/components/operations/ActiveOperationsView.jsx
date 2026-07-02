@@ -1,5 +1,5 @@
 import React from 'react';
-import { Calendar, List, KanbanSquare, Plus, Flag, Users, Clock } from 'lucide-react';
+import { Calendar, List, KanbanSquare, Plus, Flag, Users, Clock, MessageSquare } from 'lucide-react';
 import { Badge } from '../shared';
 import { formatDateTime, formatLastSeenDateTime, formatDuration, formatMinutes } from '../../utils/date';
 import { getTaskDescription, getEstimateDetails, getLatestCompletedFileName } from '../../utils/taskDisplayUtils';
@@ -18,7 +18,7 @@ const CompactTextPill = ({ label, value, tone = 'indigo' }) => {
   );
 };
 
-const OperationKanbanCard = ({ project, onSelectProject, getCustomerDisplayName }) => (
+const OperationKanbanCard = ({ project, onSelectProject, getCustomerDisplayName, onDiscussTask }) => (
   <div onClick={() => onSelectProject(project)} className="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-200 hover:border-indigo-300 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 cursor-pointer group active:scale-[0.99]">
     <div className="flex justify-between items-start mb-2">
       <p className="font-extrabold text-slate-800 group-hover:text-indigo-600 transition-colors">{project.id}</p>
@@ -31,21 +31,24 @@ const OperationKanbanCard = ({ project, onSelectProject, getCustomerDisplayName 
     {getLatestCompletedFileName(project) && (
       <p className="text-[10px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mb-3 truncate">Completed: {getLatestCompletedFileName(project)}</p>
     )}
-    <div className="flex justify-between items-center pt-3 border-t border-slate-100">
+    <div className="flex justify-between items-center gap-2 pt-3 border-t border-slate-100">
       <Badge colorClass={project.assignedTo === 'Unassigned' ? 'bg-red-50 text-red-600 border-red-200' : 'bg-slate-50 text-slate-700 border-slate-200'}>{project.assignedTo}</Badge>
-      {project.subTasks?.length > 0 && <span className="text-[10px] text-red-600 bg-red-50 px-2 py-0.5 rounded font-black">{project.subTasks.length} Revs</span>}
+      <div className="flex items-center gap-2">
+        {project.subTasks?.length > 0 && <span className="text-[10px] text-red-600 bg-red-50 px-2 py-0.5 rounded font-black">{project.subTasks.length} Revs</span>}
+        <button type="button" onClick={(e) => { e.stopPropagation(); if (typeof onDiscussTask === 'function') onDiscussTask(project); }} className="text-[10px] font-black text-indigo-700 bg-indigo-50 border border-indigo-100 px-2 py-1 rounded-lg hover:bg-indigo-100 flex items-center gap-1"><MessageSquare className="w-3 h-3" /> Chat</button>
+      </div>
     </div>
   </div>
 );
 
-const OperationsKanban = ({ projects, onSelectProject, getCustomerDisplayName }) => (
+const OperationsKanban = ({ projects, onSelectProject, getCustomerDisplayName, onDiscussTask }) => (
   <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-6">
     {['Lead Received', 'Drafting', 'Drafting Paused', 'Completed'].map(statusCol => (
       <div key={statusCol} className="bg-slate-100/50 rounded-3xl p-3 sm:p-4 border-2 border-slate-100/50 min-h-[420px] sm:min-h-[500px] transition-colors duration-200">
         <h3 className="font-black text-slate-500 uppercase tracking-widest text-xs mb-4 px-2">{statusCol} <span className="ml-2 bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full">{projects.filter(p => p.status === statusCol).length}</span></h3>
         <div className="space-y-4">
           {projects.filter(p => p.status === statusCol).map(project => (
-            <OperationKanbanCard key={project.id} project={project} onSelectProject={onSelectProject} getCustomerDisplayName={getCustomerDisplayName} />
+            <OperationKanbanCard key={project.id} project={project} onSelectProject={onSelectProject} getCustomerDisplayName={getCustomerDisplayName} onDiscussTask={onDiscussTask} />
           ))}
         </div>
       </div>
@@ -53,11 +56,11 @@ const OperationsKanban = ({ projects, onSelectProject, getCustomerDisplayName })
   </div>
 );
 
-const OperationGridRow = ({ project, onSelectProject, getCustomerDisplayName, getDraftElapsed, nowTick }) => {
+const OperationGridRow = ({ project, onSelectProject, getCustomerDisplayName, getDraftElapsed, nowTick, onDiscussTask }) => {
   const assigned = project.assignedTo || 'Unassigned';
   const elapsed = project.draftingStartedAt ? getDraftElapsed(project, nowTick) : '-';
   return (
-    <button type="button" onClick={() => onSelectProject(project)} className="kalpa-ops-grid-row text-left group">
+    <div role="button" tabIndex={0} onClick={() => onSelectProject(project)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onSelectProject(project); }} className="kalpa-ops-grid-row text-left group cursor-pointer">
       <div className="kalpa-ops-cell kalpa-ops-task-cell">
         <div className="flex items-center gap-2 min-w-0">
           <p className="font-extrabold text-slate-800 text-base truncate" title={project.id}>{project.id}</p>
@@ -86,13 +89,16 @@ const OperationGridRow = ({ project, onSelectProject, getCustomerDisplayName, ge
 
       <div className="kalpa-ops-cell kalpa-ops-status-cell">
         <span className="kalpa-mobile-label">Status</span>
-        <Badge colorClass={`border-transparent ${getStatusColor(project.status)}`}>{project.status}</Badge>
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+          <Badge colorClass={`border-transparent ${getStatusColor(project.status)}`}>{project.status}</Badge>
+          <button type="button" onClick={(e) => { e.stopPropagation(); if (typeof onDiscussTask === 'function') onDiscussTask(project); }} className="text-[10px] font-black text-indigo-700 bg-indigo-50 border border-indigo-100 px-2 py-1 rounded-lg hover:bg-indigo-100 flex items-center gap-1 w-fit"><MessageSquare className="w-3 h-3" /> Chat</button>
+        </div>
       </div>
-    </button>
+    </div>
   );
 };
 
-const OperationsTable = ({ projects, onSelectProject, getCustomerDisplayName, getDraftElapsed, nowTick }) => (
+const OperationsTable = ({ projects, onSelectProject, getCustomerDisplayName, getDraftElapsed, nowTick, onDiscussTask }) => (
   <div className="kalpa-ops-list bg-white rounded-3xl shadow-sm border-2 border-slate-100 overflow-hidden transition-shadow duration-200 hover:shadow-md">
     <div className="kalpa-ops-grid-header bg-slate-50 text-slate-500 border-b-2 border-slate-100">
       <div>Task ID</div>
@@ -103,7 +109,7 @@ const OperationsTable = ({ projects, onSelectProject, getCustomerDisplayName, ge
     </div>
     <div className="divide-y divide-slate-100">
       {projects.map(project => (
-        <OperationGridRow key={project.id} project={project} onSelectProject={onSelectProject} getCustomerDisplayName={getCustomerDisplayName} getDraftElapsed={getDraftElapsed} nowTick={nowTick} />
+        <OperationGridRow key={project.id} project={project} onSelectProject={onSelectProject} getCustomerDisplayName={getCustomerDisplayName} getDraftElapsed={getDraftElapsed} nowTick={nowTick} onDiscussTask={onDiscussTask} />
       ))}
       {projects.length === 0 && (
         <div className="px-6 py-16 text-center text-slate-400 font-bold">No active projects found for this date.</div>
@@ -205,6 +211,7 @@ export const ActiveOperationsView = ({
   getDraftElapsed,
   getOperationalUsers,
   isUserActuallyOnline,
+  onDiscussTask,
 }) => (
   <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
     <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-6">
@@ -235,9 +242,9 @@ export const ActiveOperationsView = ({
     <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px] gap-5 sm:gap-8">
       <div className="w-full min-w-0">
         {boardViewMode === 'kanban' ? (
-          <OperationsKanban projects={displayedProjects} onSelectProject={setSelectedProject} getCustomerDisplayName={getCustomerDisplayName} />
+          <OperationsKanban projects={displayedProjects} onSelectProject={setSelectedProject} getCustomerDisplayName={getCustomerDisplayName} onDiscussTask={onDiscussTask} />
         ) : (
-          <OperationsTable projects={displayedProjects} onSelectProject={setSelectedProject} getCustomerDisplayName={getCustomerDisplayName} getDraftElapsed={getDraftElapsed} nowTick={nowTick} />
+          <OperationsTable projects={displayedProjects} onSelectProject={setSelectedProject} getCustomerDisplayName={getCustomerDisplayName} getDraftElapsed={getDraftElapsed} nowTick={nowTick} onDiscussTask={onDiscussTask} />
         )}
       </div>
 
