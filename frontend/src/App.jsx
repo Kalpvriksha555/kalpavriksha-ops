@@ -3345,11 +3345,28 @@ function AppShell() {
     updatedProject = normalizeProjectRecord({ ...updatedProject, updatedAt: Date.now(), syncVersion: Date.now() });
     if (isAssignedValue(updatedProject.assignedTo)) recordAssignmentLedger(updatedProject);
     oldProject = oldProject ? normalizeProjectRecord(oldProject) : oldProject;
-    // Update the screen immediately. Previously the app waited for Firestore;
-    // if a completed file was large or Firebase rejected it, the upload looked like nothing happened.
+
+    const updatedId = String(updatedProject.id || '').trim();
+    const oldId = String(oldProject?.id || oldProject?.caseId || '').trim();
+    const relatedOldIds = new Set([
+      updatedId,
+      oldId,
+      ...(Array.isArray(updatedProject.previousTaskIds) ? updatedProject.previousTaskIds : []),
+      ...(Array.isArray(oldProject?.previousTaskIds) ? oldProject.previousTaskIds : []),
+    ].map(x => String(x || '').trim()).filter(Boolean));
+
+    // Update the screen immediately and replace the original task even if the edit
+    // changed fields used for generating the task ID. This prevents mobile edit
+    // submissions from leaving the old task behind as a duplicate.
     setSelectedProject(updatedProject);
     setProjects(prev => {
-      const next = mergeProjectsByFreshness(prev.filter(p => String(p.id) !== String(updatedProject.id)), [updatedProject]);
+      const withoutOldVersions = (prev || []).filter(p => {
+        const ids = [p.id, p.caseId, ...(Array.isArray(p.previousTaskIds) ? p.previousTaskIds : [])]
+          .map(x => String(x || '').trim())
+          .filter(Boolean);
+        return !ids.some(id => relatedOldIds.has(id));
+      });
+      const next = mergeProjectsByFreshness(withoutOldVersions, [updatedProject]);
       persistAndBroadcastProjects(next);
       return next;
     });
@@ -3360,6 +3377,9 @@ function AppShell() {
             doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', updatedProject.id.toString()),
             stripLargeLocalFilesForCloud(updatedProject)
           );
+          if (oldId && updatedId && oldId !== updatedId) {
+            await deleteDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', oldId));
+          }
         } catch(e){
           console.warn('Project cloud save failed, but local screen has been updated.', e);
         }

@@ -191,6 +191,63 @@ function filterDeletedCases(cases = [], deletedProjectIds = []){
   return (Array.isArray(cases) ? cases : []).filter(c => c && !deletedSet.has(String(c.id || '')) && !deletedSet.has(String(c.caseId || '')));
 }
 
+function caseFreshness(c = {}) {
+  const candidates = [c.syncVersion, c.updatedAt, c.assignmentVersion, c.assignedAt, c.completedAt, c.createdAt];
+  for (const value of candidates) {
+    if (!value) continue;
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+    const parsed = new Date(value).getTime();
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return 0;
+}
+
+function getCaseIdentitySet(c = {}) {
+  return [c.id, c.caseId, ...(Array.isArray(c.previousTaskIds) ? c.previousTaskIds : [])]
+    .map(x => String(x || '').trim())
+    .filter(Boolean);
+}
+
+function dedupeRenamedCases(cases = [], deletedProjectIds = []) {
+  const deletedSet = new Set((deletedProjectIds || []).map(x => String(x || '').trim()).filter(Boolean));
+  const sorted = (Array.isArray(cases) ? cases : [])
+    .filter(Boolean)
+    .sort((a, b) => caseFreshness(b) - caseFreshness(a));
+  const usedIds = new Set();
+  const result = [];
+  for (const c of sorted) {
+    const ids = getCaseIdentitySet(c);
+    if (!ids.length) continue;
+    if (ids.some(id => deletedSet.has(id) || usedIds.has(id))) continue;
+    ids.forEach(id => usedIds.add(id));
+    result.push(c);
+  }
+  return result.sort((a, b) => caseFreshness(b) - caseFreshness(a));
+}
+
+
+function mergeCasesPreservingFreshest(existingCases = [], incomingCases = [], deletedProjectIds = []) {
+  // Never trust a full /api/state payload as the only source of truth. Different
+  // browsers/users may save stale cached state later. Merge current DB cases with
+  // incoming cases, then let dedupeRenamedCases choose the freshest version across
+  // id, caseId and previousTaskIds. This prevents an edited/renamed task from
+  // reverting back to an older version for managers/designers after another client
+  // saves its stale local copy.
+  const merged = [
+    ...(Array.isArray(existingCases) ? existingCases : []),
+    ...(Array.isArray(incomingCases) ? incomingCases : [])
+  ].filter(Boolean).map(c => {
+    const nowStamp = Date.now();
+    return {
+      ...c,
+      updatedAt: c.updatedAt || c.syncVersion || c.assignmentVersion || c.assignedAt || c.completedAt || c.createdAt || nowStamp,
+      syncVersion: c.syncVersion || c.updatedAt || nowStamp
+    };
+  });
+  return dedupeRenamedCases(filterDeletedCases(merged, deletedProjectIds || []), deletedProjectIds || []);
+}
+
 function rememberDeletedProject(d, id){
   const value = String(id || '').trim();
   if (!value) return;
@@ -890,8 +947,10 @@ app.post('/api/state',(req,res)=>{
   d.users = Array.isArray(body.users) ? mergeUsersPreservingLatestPresence(d.users || [], body.users) : sanitizePresenceUsers(d.users || []);
   const incomingDeleted = Array.isArray(body.deletedProjectIds) ? body.deletedProjectIds : [];
   d.deletedProjectIds = [...new Set([...(d.deletedProjectIds || []), ...incomingDeleted].map(x => String(x)).filter(Boolean))];
-  const incomingCases = Array.isArray(body.projects) ? body.projects : (Array.isArray(body.cases) ? body.cases : d.cases);
-  d.cases = filterDeletedCases(incomingCases, d.deletedProjectIds || []);
+  const incomingCases = Array.isArray(body.projects) ? body.projects : (Array.isArray(body.cases) ? body.cases : []);
+  d.cases = Array.isArray(body.projects) || Array.isArray(body.cases)
+    ? mergeCasesPreservingFreshest(d.cases || [], incomingCases, d.deletedProjectIds || [])
+    : dedupeRenamedCases(filterDeletedCases(d.cases || [], d.deletedProjectIds || []), d.deletedProjectIds || []);
   d.teamChat = Array.isArray(body.chatMessages) ? body.chatMessages : (Array.isArray(body.teamChat) ? body.teamChat : d.teamChat);
   d.notifications = Array.isArray(body.notifications) ? body.notifications : d.notifications;
   d.attendanceLogs = Array.isArray(body.attendanceLogs) ? body.attendanceLogs : d.attendanceLogs;
