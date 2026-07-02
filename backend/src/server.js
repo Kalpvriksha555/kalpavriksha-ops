@@ -139,7 +139,9 @@ function norm(d){
   d.deletedProjectIds = [...new Set((d.deletedProjectIds || []).map(x => String(x)).filter(Boolean))];
   const deletedSet = new Set(d.deletedProjectIds);
   d.cases = (d.cases || []).filter(c => c && !deletedSet.has(String(c.id || '')) && !deletedSet.has(String(c.caseId || '')));
-  d.cases.forEach(c=>{ c.documents ||= []; c.history ||= []; c.comments ||= []; c.revisions ||= []; c.creatorName ||= c.createdBy || 'Admin'; c.createdAt ||= new Date().toISOString(); });
+  d.files ||= [];
+  d.cases.forEach(c=>{ c.documents ||= []; c.completedFiles ||= c.completedFiles || []; c.history ||= []; c.comments ||= []; c.revisions ||= []; c.creatorName ||= c.createdBy || 'Admin'; c.createdAt ||= new Date().toISOString(); });
+  normalizePersistedFileLinks(d);
   return d;
 }
 
@@ -434,7 +436,102 @@ function classify(name='', mime=''){
   if(/\.pdf$/i.test(name)||s.includes('pdf')) return 'PDF'; return 'Other';
 }
 function docPayload(file, uploadedBy, role, purpose='SOURCE', caseId=''){
-  return {id:nanoid(8),caseId,name:file.originalname,storedName:file.filename,mime:file.mimetype,size:file.size,type:classify(file.originalname,file.mimetype),purpose,uploadedBy,uploadedByRole:role,uploadedAt:now(),url:`/uploads/${file.filename}`};
+  return {id:nanoid(8),caseId,name:file.originalname,storedName:file.filename,mime:file.mimetype,size:file.size,type:classify(file.originalname,file.mimetype),purpose,uploadedBy,uploadedByRole:role,uploadedAt:now(),url:`/uploads/${file.filename}`,downloadUrl:''};
+}
+
+function fileBaseName(value=''){
+  try { return path.basename(decodeURIComponent(String(value || '').split('?')[0])); }
+  catch { return path.basename(String(value || '').split('?')[0]); }
+}
+function normalizeFileName(value=''){
+  return String(value || '').trim().toLowerCase().replace(/\s+/g,'_');
+}
+function listUploadFiles(){
+  try { return fs.readdirSync(UPLOAD_DIR).filter(name => fs.statSync(path.join(UPLOAD_DIR, name)).isFile()); }
+  catch { return []; }
+}
+function addFileRegistryEntry(d, doc={}){
+  if (!doc || !doc.id) return doc;
+  d.files ||= [];
+  const existing = d.files.find(f => String(f.id) === String(doc.id));
+  const entry = {
+    id: String(doc.id),
+    caseId: doc.caseId || doc.projectId || '',
+    name: doc.name || doc.fileName || doc.originalName || doc.storedName || 'file',
+    storedName: doc.storedName || fileBaseName(doc.url || doc.fileUrl || ''),
+    mime: doc.mime || doc.mimeType || 'application/octet-stream',
+    size: Number(doc.size || 0),
+    purpose: doc.purpose || doc.type || 'FILE',
+    uploadedBy: doc.uploadedBy || doc.by || 'Team',
+    uploadedAt: doc.uploadedAt || now(),
+    url: doc.url || (doc.storedName ? `/uploads/${doc.storedName}` : ''),
+    downloadUrl: `/api/files/${doc.id}/download`
+  };
+  if (existing) Object.assign(existing, entry);
+  else d.files.unshift(entry);
+  doc.downloadUrl = entry.downloadUrl;
+  if (!doc.url && entry.url) doc.url = entry.url;
+  if (!doc.storedName && entry.storedName) doc.storedName = entry.storedName;
+  return doc;
+}
+function allKnownFileDocs(d={}){
+  const caseDocs = (d.cases || []).flatMap(c => [
+    ...(c.documents || []),
+    ...(c.completedFiles || []),
+    ...(c.sourceFiles || []),
+    ...(c.workFiles || []),
+    ...(c.files || [])
+  ].filter(Boolean));
+  const chatDocs = (d.teamChat || []).flatMap(m => [
+    ...(m.files || []),
+    ...(m.attachments || []),
+    ...(m.file ? [m.file] : [])
+  ].filter(Boolean));
+  return [...(d.files || []), ...caseDocs, ...chatDocs].filter(Boolean);
+}
+function resolveStoredUploadFile(doc={}){
+  const candidates = [
+    doc.storedName,
+    doc.stored_name,
+    fileBaseName(doc.url || ''),
+    fileBaseName(doc.fileUrl || ''),
+    fileBaseName(doc.downloadUrl || ''),
+  ].filter(Boolean);
+  for (const stored of candidates) {
+    const fp = path.resolve(UPLOAD_DIR, stored);
+    if (fp.startsWith(path.resolve(UPLOAD_DIR)) && fs.existsSync(fp)) return { stored, fp };
+  }
+  // Backward compatibility: older records often saved only the original filename.
+  const uploadFiles = listUploadFiles();
+  const wanted = normalizeFileName(doc.name || doc.fileName || doc.originalName || '');
+  if (wanted) {
+    const exact = uploadFiles.find(name => normalizeFileName(name) === wanted);
+    if (exact) return { stored: exact, fp: path.resolve(UPLOAD_DIR, exact) };
+    const suffix = uploadFiles.find(name => normalizeFileName(name).endsWith(wanted));
+    if (suffix) return { stored: suffix, fp: path.resolve(UPLOAD_DIR, suffix) };
+  }
+  return null;
+}
+function resolveFileById(d, id){
+  const docs = allKnownFileDocs(d);
+  let doc = docs.find(x => String(x.id || x.fileId || '') === String(id));
+  if (!doc) {
+    // Some legacy frontend records used the stored file name itself as the id.
+    const uploadFiles = listUploadFiles();
+    const stored = uploadFiles.find(name => String(name) === String(id) || normalizeFileName(name) === normalizeFileName(id));
+    if (stored) doc = { id, name: stored, storedName: stored, url: `/uploads/${stored}` };
+  }
+  if (!doc) return { doc:null, resolved:null };
+  return { doc, resolved: resolveStoredUploadFile(doc) };
+}
+function normalizePersistedFileLinks(d){
+  d.files ||= [];
+  for (const doc of allKnownFileDocs(d)) {
+    if (!doc || !doc.id) continue;
+    doc.downloadUrl = `/api/files/${doc.id}/download`;
+    addFileRegistryEntry(d, doc);
+  }
+  return d;
 }
 function sanitize(d, role){
   const out=structuredClone(d);
@@ -708,30 +805,42 @@ app.post('/api/profile/photo', upload.single('photo'), (req, res) => {
 
 app.post('/api/files/upload', upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  const d = db();
   const type = String(req.body.type || 'source').toLowerCase();
   const purpose = type === 'completed' ? 'FINAL' : (type === 'working' ? 'WORKING' : 'SOURCE');
   const file = docPayload(req.file, req.body.by || 'Team', req.body.role || 'USER', purpose, req.body.projectId || req.body.caseId || '');
   file.type = type;
   file.folder = type;
-  file.downloadUrl = `/api/files/${file.id}/download`;
+  addFileRegistryEntry(d, file);
+  save(d);
   res.json({ ok: true, file });
+});
+app.get('/api/files/:id/status',(req,res)=>{
+  const d = db();
+  const { doc, resolved } = resolveFileById(d, req.params.id);
+  res.json({
+    ok: true,
+    found: !!doc,
+    available: !!resolved,
+    id: req.params.id,
+    name: doc?.name || doc?.fileName || doc?.storedName || '',
+    downloadUrl: doc ? `/api/files/${doc.id || req.params.id}/download` : ''
+  });
 });
 app.get('/api/files/:id/download',(req,res)=>{
   const d=db();
-  const docs=d.cases.flatMap(c=>[...(c.documents||[]),...(c.completedFiles||[])]).concat(d.teamChat.flatMap(m=>m.files||[]));
-  let doc=docs.find(x=>String(x.id)===String(req.params.id));
+  const { doc, resolved } = resolveFileById(d, req.params.id);
   if(!doc) {
-    // Generic uploads are returned to the frontend before the case state is saved.
-    // During that small window, resolve by matching the stored filename in /uploads if possible.
-    return res.status(404).send('File not found in saved state. Please save/reload the task or re-upload the file.');
+    return res.status(404).send('File record not found. It may be an older unsaved upload. Please refresh the page or re-upload the file.');
   }
-  const stored = doc.storedName || String(doc.url || '').split('/').pop();
-  if(!stored) return res.status(404).send('Stored file name missing');
-  const fp=path.resolve(UPLOAD_DIR, stored);
+  if(!resolved) {
+    return res.status(410).send('File unavailable on server. The record exists, but the physical file is missing. Please re-upload this file once.');
+  }
+  const { stored, fp } = resolved;
   if(!fp.startsWith(path.resolve(UPLOAD_DIR))) return res.status(400).send('Invalid file path');
-  if(!fs.existsSync(fp)) return res.status(404).send('File missing on server');
   res.setHeader('Access-Control-Expose-Headers','Content-Disposition, Content-Length, Content-Type');
-  res.download(fp, doc.name || stored);
+  res.setHeader('Cache-Control','no-store');
+  res.download(fp, doc.name || doc.fileName || stored);
 });
 
 app.delete('/api/files/:id',(req,res)=>{
@@ -744,7 +853,8 @@ app.delete('/api/files/:id',(req,res)=>{
     const docs = c.documents || [];
     const completed = c.completedFiles || [];
     [...docs, ...completed].filter(matches).forEach(doc => {
-      const stored = doc.storedName || String(doc.url || '').split('/').pop();
+      const resolved = resolveStoredUploadFile(doc);
+      const stored = resolved?.stored || doc.storedName || fileBaseName(doc.url || '');
       if (stored) storedNames.push(stored);
     });
     c.documents = docs.filter(doc => !matches(doc));
@@ -759,12 +869,22 @@ app.delete('/api/files/:id',(req,res)=>{
   for (const m of d.teamChat || []) {
     const files = m.files || [];
     files.filter(matches).forEach(doc => {
-      const stored = doc.storedName || String(doc.url || '').split('/').pop();
+      const resolved = resolveStoredUploadFile(doc);
+      const stored = resolved?.stored || doc.storedName || fileBaseName(doc.url || '');
       if (stored) storedNames.push(stored);
     });
     m.files = files.filter(doc => !matches(doc));
     if (m.files.length !== files.length) removed = true;
   }
+
+  const registryBefore = d.files || [];
+  registryBefore.filter(matches).forEach(doc => {
+    const resolved = resolveStoredUploadFile(doc);
+    const stored = resolved?.stored || doc.storedName || fileBaseName(doc.url || '');
+    if (stored) storedNames.push(stored);
+  });
+  d.files = registryBefore.filter(doc => !matches(doc));
+  if (d.files.length !== registryBefore.length) removed = true;
 
   [...new Set(storedNames)].forEach(stored => {
     const fp = path.resolve(UPLOAD_DIR, stored);

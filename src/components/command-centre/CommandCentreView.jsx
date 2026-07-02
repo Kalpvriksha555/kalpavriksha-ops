@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { BarChart3, Bell, Clock, Download, Star, User, Users } from 'lucide-react';
 import { Badge, MiniEmptyState } from '../shared';
 import { ONLINE_STALE_MS } from '../../config/appConfig';
@@ -151,13 +151,16 @@ const getTodayMetrics = (projects = [], dateKey = formatDateKey()) => {
 export const CommandCentreView = ({ projects = [], users = [], onSelectProject, currentUser }) => {
   const [dateKey, setDateKey] = useState(formatDateKey());
   const [availabilityFilter, setAvailabilityFilter] = useState('Available');
+  const [dashboardFilter, setDashboardFilter] = useState('all');
+  const operationsBoardRef = useRef(null);
+  const teamAvailabilityRef = useRef(null);
   const [availabilityNow, setAvailabilityNow] = useState(Date.now());
   const [presenceTimes, setPresenceTimes] = useState(() => {
     try { return JSON.parse(localStorage.getItem('kalpa_presence_times') || '{}'); } catch (e) { return {}; }
   });
   useEffect(() => { const timer = setInterval(() => setAvailabilityNow(Date.now()), 30000); return () => clearInterval(timer); }, []);
   const metrics = getTodayMetrics(projects, dateKey);
-  const activeBoard = metrics.activeToday.slice().sort((a,b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const rawActiveBoard = metrics.activeToday.slice().sort((a,b) => (b.createdAt || 0) - (a.createdAt || 0));
   const people = getOperationalUsers(users || [], { includeAdmins: true });
   const workingTeam = people.filter(u => u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER);
   const activeTasksFor = (userName) => getUserActiveTasks(projects, userName);
@@ -218,19 +221,19 @@ export const CommandCentreView = ({ projects = [], users = [], onSelectProject, 
   const availabilityGroups = { Available: availablePeople, Busy: busyPeople, Break: breakPeople, Offline: offlinePeople };
   const selectedAvailabilityPeople = availabilityGroups[availabilityFilter] || [];
   const completionRate = metrics.received ? Math.round((metrics.completed / metrics.received) * 100) : 0;
-  const pendingNow = activeBoard.filter(p => p.status !== 'Completed').length;
-  const delayedCount = activeBoard.filter(p => getSlaInfo(p).label === 'Delayed').length;
-  const nearSlaCount = activeBoard.filter(p => getSlaInfo(p).label === 'Near SLA').length;
+  const pendingNow = rawActiveBoard.filter(p => p.status !== 'Completed').length;
+  const delayedCount = rawActiveBoard.filter(p => getSlaInfo(p).label === 'Delayed').length;
+  const nearSlaCount = rawActiveBoard.filter(p => getSlaInfo(p).label === 'Near SLA').length;
   const activeCapacity = workingTeam.reduce((sum, u) => sum + activeTasksFor(u.name).length, 0);
   const capacityLimit = workingTeam.reduce((sum, u) => sum + Number(u.dailyLimit || u.taskLimit || 10), 0) || Math.max(workingTeam.length * 10, 1);
   const capacityPct = Math.min(100, Math.round((activeCapacity / capacityLimit) * 100));
   const statusFlow = [
-    ['Received', metrics.received, 'bg-blue-500'],
-    ['Carried', metrics.carriedCount, 'bg-orange-500'],
-    ['Drafting', metrics.drafting, 'bg-indigo-500'],
-    ['Review', metrics.review, 'bg-purple-500'],
-    ['Completed', metrics.completed, 'bg-emerald-500'],
-    ['Revisions', metrics.revisions.length, 'bg-red-500']
+    ['Received', metrics.received, 'bg-blue-500', 'received'],
+    ['Carried', metrics.carriedCount, 'bg-orange-500', 'carried'],
+    ['Drafting', metrics.drafting, 'bg-indigo-500', 'drafting'],
+    ['Review', metrics.review, 'bg-purple-500', 'review'],
+    ['Completed', metrics.completed, 'bg-emerald-500', 'completed'],
+    ['Revisions', metrics.revisions.length, 'bg-red-500', 'revisions']
   ];
   const maxFlow = Math.max(...statusFlow.map(([, value]) => Number(value) || 0), 1);
   const workloadCards = workingTeam.map(u => {
@@ -242,13 +245,46 @@ export const CommandCentreView = ({ projects = [], users = [], onSelectProject, 
     return { ...u, active, completedToday, revisions, limit, loadPct };
   }).sort((a,b) => b.active.length - a.active.length || b.completedToday - a.completedToday || a.name.localeCompare(b.name));
   const topPerformers = workloadCards.slice().sort((a,b) => b.completedToday - a.completedToday || a.active.length - b.active.length).slice(0, 4);
+  const filterLabels = {
+    all: 'All active operations',
+    received: 'Cases received today',
+    pending: 'Active pending cases',
+    completed: 'Completed today',
+    delayed: 'Delayed SLA cases',
+    near: 'Near SLA cases',
+    revisions: 'Urgent revisions',
+    carried: 'Carried forward cases',
+    drafting: 'Drafting cases',
+    review: 'Internal review cases'
+  };
+  const filterOperations = (filterKey) => {
+    if (filterKey === 'received') return metrics.todays.slice().sort((a,b) => (b.createdAt || 0) - (a.createdAt || 0));
+    if (filterKey === 'pending') return rawActiveBoard.filter(p => p.status !== 'Completed');
+    if (filterKey === 'completed') return metrics.completedToday.slice().sort((a,b) => (b.completedAt || b.createdAt || 0) - (a.completedAt || a.createdAt || 0));
+    if (filterKey === 'delayed') return rawActiveBoard.filter(p => getSlaInfo(p).label === 'Delayed');
+    if (filterKey === 'near') return rawActiveBoard.filter(p => getSlaInfo(p).label === 'Near SLA');
+    if (filterKey === 'revisions') return metrics.revisions.slice();
+    if (filterKey === 'carried') return metrics.carried.slice();
+    if (filterKey === 'drafting') return rawActiveBoard.filter(p => p.status === 'Drafting');
+    if (filterKey === 'review') return rawActiveBoard.filter(p => p.status === 'Internal Review');
+    return rawActiveBoard;
+  };
+  const activeBoard = filterOperations(dashboardFilter);
+  const applyDashboardFilter = (filterKey) => {
+    setDashboardFilter(filterKey);
+    setTimeout(() => operationsBoardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 30);
+  };
+  const applyAvailabilityFilter = (filterKey) => {
+    setAvailabilityFilter(filterKey);
+    setTimeout(() => teamAvailabilityRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 30);
+  };
   const stats = [
-    ['Cases Received', metrics.received, 'bg-blue-50 text-blue-700 border-blue-100'],
-    ['Active Pending', pendingNow, 'bg-orange-50 text-orange-700 border-orange-100'],
-    ['Completion Rate', `${completionRate}%`, 'bg-emerald-50 text-emerald-700 border-emerald-100'],
-    ['Delayed SLA', delayedCount, 'bg-red-50 text-red-700 border-red-100'],
-    ['Near SLA', nearSlaCount, 'bg-amber-50 text-amber-700 border-amber-100'],
-    ['Urgent Revisions', metrics.revisions.length, 'bg-purple-50 text-purple-700 border-purple-100']
+    ['Cases Received', metrics.received, 'bg-blue-50 text-blue-700 border-blue-100', 'received', 'View all cases received on this date'],
+    ['Active Pending', pendingNow, 'bg-orange-50 text-orange-700 border-orange-100', 'pending', 'View assigned, drafting and review cases still pending'],
+    ['Completion Rate', `${completionRate}%`, 'bg-emerald-50 text-emerald-700 border-emerald-100', 'completed', 'View completed cases for this date'],
+    ['Delayed SLA', delayedCount, 'bg-red-50 text-red-700 border-red-100', 'delayed', 'View overdue SLA cases'],
+    ['Near SLA', nearSlaCount, 'bg-amber-50 text-amber-700 border-amber-100', 'near', 'View cases approaching SLA'],
+    ['Urgent Revisions', metrics.revisions.length, 'bg-purple-50 text-purple-700 border-purple-100', 'revisions', 'View urgent revision queue']
   ];
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -257,7 +293,19 @@ export const CommandCentreView = ({ projects = [], users = [], onSelectProject, 
         <input type="date" value={dateKey} onChange={e => setDateKey(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none" />
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">{stats.map(([label, value, cls]) => <div key={label} className={`kalpa-stat-card ${cls} border-2 rounded-3xl p-5 shadow-sm`}><p className="text-[10px] font-black uppercase tracking-widest opacity-80">{label}</p><p className="text-3xl font-black mt-2">{value}</p></div>)}</div>
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">{stats.map(([label, value, cls, filterKey, hint]) => (
+        <button
+          key={label}
+          type="button"
+          onClick={() => applyDashboardFilter(filterKey)}
+          title={hint}
+          className={`kalpa-stat-card ${cls} border-2 rounded-3xl p-5 shadow-sm text-left transition-all hover:-translate-y-0.5 hover:shadow-lg active:scale-[0.98] focus:outline-none focus:ring-4 focus:ring-indigo-100 ${dashboardFilter === filterKey ? 'ring-4 ring-indigo-100 scale-[1.01]' : ''}`}
+        >
+          <p className="text-[10px] font-black uppercase tracking-widest opacity-80">{label}</p>
+          <p className="text-3xl font-black mt-2">{value}</p>
+          <p className="mt-3 text-[10px] font-black uppercase tracking-widest opacity-60">Click to view</p>
+        </button>
+      ))}</div>
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
         <div className="kalpa-panel xl:col-span-2 bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
@@ -266,14 +314,14 @@ export const CommandCentreView = ({ projects = [], users = [], onSelectProject, 
             <Badge colorClass={completionRate >= 70 ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : completionRate >= 40 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}>{completionRate}% Done</Badge>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-            {statusFlow.map(([label, value, color]) => (
-              <div key={label} className="bg-slate-50 border border-slate-100 rounded-2xl p-4">
+            {statusFlow.map(([label, value, color, filterKey]) => (
+              <button key={label} type="button" onClick={() => applyDashboardFilter(filterKey)} className={`bg-slate-50 border border-slate-100 rounded-2xl p-4 text-left transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98] ${dashboardFilter === filterKey ? 'ring-2 ring-indigo-200 bg-indigo-50/50' : ''}`}>
                 <div className="h-28 flex items-end justify-center">
                   <div className={`${color} rounded-t-xl w-full max-w-[42px] transition-all`} style={{ height: `${Math.max(8, (Number(value || 0) / maxFlow) * 100)}%` }}></div>
                 </div>
                 <p className="text-center text-2xl font-black text-slate-800 mt-3">{value}</p>
                 <p className="text-center text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</p>
-              </div>
+              </button>
             ))}
           </div>
         </div>
@@ -283,23 +331,23 @@ export const CommandCentreView = ({ projects = [], users = [], onSelectProject, 
           <div className="flex items-end justify-between mb-3"><p className="text-4xl font-black text-slate-800">{activeCapacity}</p><p className="text-xs font-black text-slate-400 uppercase tracking-widest">of {capacityLimit} capacity</p></div>
           <div className="h-4 bg-slate-100 rounded-full overflow-hidden mb-4"><div className="h-full bg-indigo-500 rounded-full transition-all" style={{ width: `${capacityPct}%` }}></div></div>
           <div className="grid grid-cols-3 gap-2 text-center">
-            <div className="bg-blue-50 border border-blue-100 rounded-2xl p-3"><p className="font-black text-blue-700">{free}</p><p className="text-[9px] font-black uppercase text-blue-500">Available</p></div>
-            <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-3"><p className="font-black text-emerald-700">{busy}</p><p className="text-[9px] font-black uppercase text-emerald-500">Busy</p></div>
-            <div className="bg-amber-50 border border-amber-100 rounded-2xl p-3"><p className="font-black text-amber-700">{breaks}</p><p className="text-[9px] font-black uppercase text-amber-500">Break</p></div>
+            <button type="button" onClick={() => applyAvailabilityFilter('Available')} className="bg-blue-50 border border-blue-100 rounded-2xl p-3 transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98]"><p className="font-black text-blue-700">{free}</p><p className="text-[9px] font-black uppercase text-blue-500">Available</p></button>
+            <button type="button" onClick={() => applyAvailabilityFilter('Busy')} className="bg-emerald-50 border border-emerald-100 rounded-2xl p-3 transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98]"><p className="font-black text-emerald-700">{busy}</p><p className="text-[9px] font-black uppercase text-emerald-500">Busy</p></button>
+            <button type="button" onClick={() => applyAvailabilityFilter('Break')} className="bg-amber-50 border border-amber-100 rounded-2xl p-3 transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98]"><p className="font-black text-amber-700">{breaks}</p><p className="text-[9px] font-black uppercase text-amber-500">Break</p></button>
           </div>
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="kalpa-panel lg:col-span-2 bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
-          <div className="p-5 border-b-2 border-slate-100"><h2 className="font-black text-slate-800 text-xl">Daily Operations Board</h2><p className="text-xs font-bold text-slate-400 mt-1">Includes today's tasks plus older pending tasks carried forward.</p></div>
+        <div ref={operationsBoardRef} className="kalpa-panel lg:col-span-2 bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden scroll-mt-24">
+          <div className="p-5 border-b-2 border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"><div><h2 className="font-black text-slate-800 text-xl">Daily Operations Board</h2><p className="text-xs font-bold text-slate-400 mt-1">{filterLabels[dashboardFilter] || 'All active operations'} • {activeBoard.length} record{activeBoard.length === 1 ? '' : 's'}</p></div>{dashboardFilter !== 'all' && <button type="button" onClick={() => setDashboardFilter('all')} className="text-xs font-black uppercase tracking-widest bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-2 rounded-xl transition">Clear filter</button>}</div>
           <div className="divide-y divide-slate-100 max-h-[520px] overflow-y-auto custom-scrollbar">
             {activeBoard.map(p => <div key={p.id} onClick={() => onSelectProject(p)} className="kalpa-task-row p-5 hover:bg-slate-50 cursor-pointer flex justify-between items-center gap-4"><div><p className="font-black text-slate-800">{p.id} <span className="text-xs font-bold text-slate-400 ml-2">{getCustomerDisplayName(p)}</span></p><p className="text-sm font-extrabold text-slate-700 mt-1">{p.taskName || makeTaskDisplayName(p)}</p><p className="text-xs font-bold text-slate-500 mt-1">{p.type} • {p.location} • {p.assignedTo || 'Unassigned'}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mt-2 line-clamp-2 max-w-2xl"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1 line-clamp-2 max-w-2xl"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}{getLatestCompletedFileName(p) && <p className="text-[11px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mt-2 w-fit">Completed: {getLatestCompletedFileName(p)}</p>}{isCarriedForwardProject(p, dateKey) && <span className="inline-flex mt-2 text-[10px] bg-orange-50 text-orange-700 border border-orange-100 px-2 py-1 rounded-lg font-black uppercase">Carried Forward</span>}</div><Badge colorClass={getStatusColor(p.status)}>{p.status}</Badge></div>)}
             {activeBoard.length === 0 && <div className="p-10 text-center text-slate-400 font-bold">No operations for this date.</div>}
           </div>
         </div>
         <div className="space-y-6">
-          <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
+          <div ref={teamAvailabilityRef} className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm scroll-mt-24">
             <h3 className="font-black text-slate-800 mb-1">Team Availability</h3><p className="text-xs font-bold text-slate-400 mb-4">Click Available, Busy, Break, or Offline to see the members in that status.</p>
             <div className="grid grid-cols-4 gap-2 mb-4">
               {[["Available", free, "bg-blue-50 text-blue-700 border-blue-100"], ["Busy", busy, "bg-emerald-50 text-emerald-700 border-emerald-100"], ["Break", breaks, "bg-amber-50 text-amber-700 border-amber-100"], ["Offline", offlinePeople.length, "bg-slate-50 text-slate-600 border-slate-100"]].map(([label, count, cls]) => (

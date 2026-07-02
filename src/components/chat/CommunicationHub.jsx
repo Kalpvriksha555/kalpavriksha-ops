@@ -671,7 +671,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     <div className="kalpa-chat-shell fixed bottom-6 right-6 z-50 flex flex-col items-end" style={{ maxWidth: 'calc(100vw - 24px)' }}>
       {isOpen && (
         <div
-          className="kalpa-chat-panel bg-white rounded-3xl shadow-2xl border-2 border-slate-100 mb-4 overflow-hidden flex flex-row animate-in slide-in-from-bottom-5"
+          className="kalpa-chat-panel bg-white rounded-3xl shadow-2xl border-2 border-slate-100 mb-4 overflow-hidden flex flex-row animate-in slide-in-from-bottom-5" role="dialog" aria-label="Team chat"
           style={{ width: 'min(1080px, calc(100vw - 48px))', height: 'min(620px, calc(100vh - 96px))', maxWidth: 'calc(100vw - 48px)', maxHeight: 'calc(100vh - 96px)' }}
         >
           <div className="kalpa-chat-sidebar shrink-0 bg-slate-50 border-r border-slate-100 flex flex-col" style={{ width: 300, minWidth: 280, maxWidth: 320 }}>
@@ -717,7 +717,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
                   <button type="button" onClick={() => startCall(false)} className="p-2 rounded-xl bg-slate-50 hover:bg-indigo-50 text-slate-500 hover:text-indigo-600" title="Video call"><Video className="w-4 h-4" /></button>
                   <button type="button" onClick={() => startCall(false, true)} className="px-3 py-2 rounded-xl bg-slate-50 hover:bg-indigo-50 text-xs font-black text-slate-500 hover:text-indigo-600">Share screen</button>
                 </>}
-                <button type="button" onClick={() => { setIsOpen(false); markCurrentChannelReadNow(activeChannel); currentUser.lastChatRead = Date.now(); }} className="text-slate-400 hover:text-slate-600 p-1.5 bg-slate-50 rounded-full transition-colors ml-2"><X className="w-5 h-5" /></button>
+                <button type="button" onClick={() => { setIsOpen(false); markCurrentChannelReadNow(activeChannel); currentUser.lastChatRead = Date.now(); }} className="kalpa-chat-close-btn text-slate-500 hover:text-slate-700 p-2 bg-slate-50 rounded-full transition-colors ml-2" aria-label="Close chat"><X className="w-5 h-5" /></button>
               </div>
             </div>
 

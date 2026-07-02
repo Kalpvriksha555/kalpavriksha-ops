@@ -1636,25 +1636,65 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
       updatedProject.draftingStartedAt = updatedProject.draftingStartedAt || Date.now();
     }
     else if (project.status === 'Drafting') {
-      updatedProject.status = 'Completed';
-      updatedProject.draftingCompletedAt = Date.now();
-      updatedProject.completedAt = Date.now();
-      updatedProject.reviewedBy = user.name;
-      updatedProject.completedBy = user.name;
-      updatedProject.ownership = { ...(updatedProject.ownership || {}), reviewedBy: user.name, completedBy: user.name };
+      if (getCompletedDocuments(project).length === 0) {
+        alert('Upload the completed work file first, then send it for internal review.');
+        return;
+      }
+      updatedProject.status = 'Internal Review';
+      updatedProject.submittedAt = updatedProject.submittedAt || Date.now();
+      updatedProject.draftingCompletedAt = updatedProject.draftingCompletedAt || Date.now();
+      updatedProject.internalReviewStartedAt = updatedProject.internalReviewStartedAt || Date.now();
+      updatedProject.finalConclusion = 'Pending Internal Review';
+      updatedProject.reviewStatus = 'Pending';
     }
     else if (project.status === 'Internal Review') {
+      if (!canManage) {
+        alert('Only Admin or Manager can approve the final file after internal review.');
+        return;
+      }
       updatedProject.status = 'Completed';
       updatedProject.completedAt = Date.now();
+      updatedProject.approvedAt = Date.now();
       updatedProject.reviewedBy = user.name;
       updatedProject.completedBy = user.name;
-      updatedProject.ownership = { ...(updatedProject.ownership || {}), reviewedBy: user.name, completedBy: user.name };
+      updatedProject.approvedBy = user.name;
+      updatedProject.finalConclusion = 'Approved';
+      updatedProject.reviewStatus = 'Approved';
+      updatedProject.ownership = { ...(updatedProject.ownership || {}), reviewedBy: user.name, completedBy: user.name, approvedBy: user.name };
     }
     
     updatedProject.timeline = [
       ...(updatedProject.timeline || []), 
       { id: Date.now(), text: `Status advanced to ${updatedProject.status}`, time: new Date().toLocaleString() }
     ];
+    onUpdateProject(updatedProject, project);
+  };
+
+  const handleApproveFinal = () => {
+    if (!canManage) {
+      alert('Only Admin or Manager can approve the final file.');
+      return;
+    }
+    if (getCompletedDocuments(project).length === 0) {
+      alert('No completed work file found for approval.');
+      return;
+    }
+    const updatedProject = {
+      ...project,
+      status: 'Completed',
+      completedAt: Date.now(),
+      approvedAt: Date.now(),
+      reviewedBy: user.name,
+      completedBy: user.name,
+      approvedBy: user.name,
+      finalConclusion: 'Approved',
+      reviewStatus: 'Approved',
+      ownership: { ...(project.ownership || {}), reviewedBy: user.name, completedBy: user.name, approvedBy: user.name },
+      timeline: [
+        ...(project.timeline || []),
+        { id: Date.now(), text: `Final file approved after internal review by ${user.name}`, time: new Date().toLocaleString() }
+      ]
+    };
     onUpdateProject(updatedProject, project);
   };
 
@@ -1666,7 +1706,10 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
     else if (project.status === 'Internal Review') revertedTo = 'Drafting';
     else if (project.status === 'Completed') {
       revertedTo = 'Internal Review';
-      updatedProject.completedAt = null; 
+      updatedProject.completedAt = null;
+      updatedProject.approvedAt = null;
+      updatedProject.finalConclusion = 'Pending Internal Review';
+      updatedProject.reviewStatus = 'Pending';
       updatedProject.reportSent = false;
     }
     
@@ -1706,11 +1749,14 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
     }
 
     if (type === 'completed') {
-      updatedProject.status = 'Completed';
+      updatedProject.status = 'Internal Review';
       updatedProject.submittedAt = updatedProject.submittedAt || Date.now();
       updatedProject.draftingCompletedAt = updatedProject.draftingCompletedAt || Date.now();
-      updatedProject.completedAt = updatedProject.completedAt || Date.now();
-      updatedProject.timeline.push({ id: Date.now()+3, text: 'Completed file uploaded. Task marked Completed.', time: new Date().toLocaleString() });
+      updatedProject.internalReviewStartedAt = updatedProject.internalReviewStartedAt || Date.now();
+      updatedProject.completedAt = null;
+      updatedProject.finalConclusion = 'Pending Internal Review';
+      updatedProject.reviewStatus = 'Pending';
+      updatedProject.timeline.push({ id: Date.now()+3, text: 'Completed work file uploaded. Sent for internal review before final approval.', time: new Date().toLocaleString() });
     }
 
     if (e?.target) e.target.value = '';
@@ -1909,6 +1955,16 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
   };
 
   const completedDocsCount = getCompletedDocuments(project).length;
+  const isAwaitingInternalReview = project.status === 'Internal Review' && completedDocsCount > 0;
+  const isFinalApproved = project.status === 'Completed' && (project.finalConclusion === 'Approved' || project.reviewStatus === 'Approved' || project.approvedAt);
+  const canApproveFinal = canManage && isAwaitingInternalReview;
+  const advanceLabel = project.status === 'Lead Received'
+    ? 'Start Drafting'
+    : project.status === 'Drafting'
+      ? 'Send for Internal Review'
+      : project.status === 'Internal Review'
+        ? (canManage ? 'Approve Final' : 'Awaiting Approval')
+        : 'Advance Status';
 
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -1935,9 +1991,15 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
              <LinkIcon className="w-4 h-4 mr-1.5" /> Client Link
           </button>
           
-          <button type="button" onClick={shareCompletedFileOnWhatsApp} disabled={completedDocsCount === 0} className={`px-4 py-2.5 rounded-xl transition-all flex items-center font-bold text-sm whitespace-nowrap ${completedDocsCount > 0 ? 'bg-green-500 text-white hover:bg-green-600 shadow-md shadow-green-100' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}>
+          <button type="button" onClick={shareCompletedFileOnWhatsApp} disabled={!isFinalApproved || completedDocsCount === 0} className={`px-4 py-2.5 rounded-xl transition-all flex items-center font-bold text-sm whitespace-nowrap ${isFinalApproved && completedDocsCount > 0 ? 'bg-green-500 text-white hover:bg-green-600 shadow-md shadow-green-100' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`} title={!isFinalApproved ? 'Final file can be shared only after internal review approval' : 'Share approved final file'}>
              <Send className="w-4 h-4 mr-1.5" /> Share PDF on WhatsApp
           </button>
+
+          {canApproveFinal && (
+            <button type="button" onClick={handleApproveFinal} className="px-5 py-2.5 bg-emerald-600 text-white rounded-xl shadow-lg shadow-emerald-200 hover:bg-emerald-700 transition-all flex items-center font-bold text-sm whitespace-nowrap">
+              <CheckCircle className="w-4 h-4 mr-2" /> Approve Final
+            </button>
+          )}
           
           {user.role === ROLES.ADMIN && (
              showDeleteConfirm ? (
@@ -1959,14 +2021,35 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, onDelet
               </button>
           )}
 
-          {project.status !== 'Completed' && (isAssignedToMe || canManage) && (
-             <button type="button" onClick={handleAdvanceStatus} className="px-5 py-2.5 bg-indigo-600 text-white rounded-xl shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-all flex items-center font-bold text-sm whitespace-nowrap">
+          {project.status !== 'Completed' && !canApproveFinal && (isAssignedToMe || canManage) && (
+             <button type="button" onClick={handleAdvanceStatus} disabled={project.status === 'Internal Review' && !canManage} className={`px-5 py-2.5 rounded-xl shadow-lg transition-all flex items-center font-bold text-sm whitespace-nowrap ${project.status === 'Internal Review' && !canManage ? 'bg-slate-100 text-slate-400 cursor-not-allowed shadow-none' : 'bg-indigo-600 text-white shadow-indigo-200 hover:bg-indigo-700'}`}>
                <CheckCircle className="w-4 h-4 mr-2" />
-               Advance Status
+               {advanceLabel}
              </button>
           )}
         </div>
       </div>
+
+      {(isAwaitingInternalReview || isFinalApproved) && (
+        <div className={`rounded-3xl border-2 p-5 shadow-sm ${isFinalApproved ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200'}`}>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <p className={`text-xs font-black uppercase tracking-widest mb-1 ${isFinalApproved ? 'text-emerald-700' : 'text-amber-700'}`}>Internal Review</p>
+              <h2 className="text-xl font-black text-slate-900">{isFinalApproved ? 'Final Conclusion: Approved' : 'Completed file submitted for internal review'}</h2>
+              <p className="text-sm font-semibold text-slate-600 mt-1">
+                {isFinalApproved
+                  ? `Checked and approved by ${project.approvedBy || project.reviewedBy || project.completedBy || '-'}${project.approvedAt ? ` on ${formatDateTime(project.approvedAt)}` : ''}.`
+                  : 'Admin/Manager should check the uploaded work file. If revision is needed, use Revert; if correct, approve the final conclusion.'}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {isAwaitingInternalReview && <Badge colorClass="bg-amber-100 text-amber-700 border-amber-200">Pending Review</Badge>}
+              {isFinalApproved && <Badge colorClass="bg-emerald-100 text-emerald-700 border-emerald-200">Approved</Badge>}
+              {completedDocsCount > 0 && <Badge colorClass="bg-indigo-100 text-indigo-700 border-indigo-200">{completedDocsCount} File{completedDocsCount > 1 ? 's' : ''}</Badge>}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">

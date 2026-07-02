@@ -63,7 +63,14 @@ export const downloadProjectFile = async (doc = {}) => {
   }
   try {
     const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) throw new Error(`Download failed (${res.status})`);
+    if (!res.ok) {
+      const message = await res.text().catch(() => '');
+      if (res.status === 410 || /unavailable|missing/i.test(message)) {
+        alert(message || 'This file record exists, but the physical file is missing on the server. Please re-upload this file once.');
+        return;
+      }
+      throw new Error(message || `Download failed (${res.status})`);
+    }
     const blob = await res.blob();
     if (!blob || blob.size === 0) throw new Error('Downloaded file is empty');
     const objectUrl = URL.createObjectURL(blob);
