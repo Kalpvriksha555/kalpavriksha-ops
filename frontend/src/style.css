@@ -2483,3 +2483,424 @@ button:disabled {
     border-top-color: rgba(148, 163, 184, 0.22) !important;
   }
 }
+
+/* Kalpvriksha mobile UX stabilization sprint — frontend-only polish.
+   Desktop stays unchanged; these rules activate only on phones/tablets. */
+@media (max-width: 768px) {
+  html,
+  body,
+  #root {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    overscroll-behavior-y: contain;
+  }
+
+  /* Keep the main app from creating accidental side scroll on mobile. */
+  .kalpa-production-polish,
+  .kalpa-production-polish > *,
+  .kalpa-production-polish .rounded-3xl,
+  .kalpa-production-polish .rounded-2xl {
+    max-width: 100%;
+  }
+
+  .kalpa-production-polish {
+    padding-inline: max(0px, env(safe-area-inset-left));
+    overflow-x: hidden;
+  }
+
+  /* Header/filter rows should stack cleanly instead of squeezing controls. */
+  .kalpa-production-polish .flex.items-center.justify-between,
+  .kalpa-production-polish .flex.justify-between,
+  .kalpa-production-polish .flex.items-end.justify-between {
+    gap: 0.75rem;
+  }
+
+  .kalpa-production-polish input,
+  .kalpa-production-polish select,
+  .kalpa-production-polish textarea,
+  .kalpa-production-polish button,
+  .kalpa-production-polish a[role="button"] {
+    min-height: 44px;
+  }
+
+  .kalpa-production-polish input,
+  .kalpa-production-polish select,
+  .kalpa-production-polish textarea {
+    font-size: 16px !important; /* Prevent iOS zoom on focus. */
+    max-width: 100%;
+  }
+
+  .kalpa-production-polish button {
+    touch-action: manipulation;
+  }
+
+  /* Tables: keep data accessible without breaking page width. */
+  .kalpa-production-polish .overflow-x-auto {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+    border-radius: 1rem;
+  }
+
+  .kalpa-production-polish table {
+    min-width: 680px;
+  }
+
+  .kalpa-production-polish th,
+  .kalpa-production-polish td {
+    padding-inline: 0.85rem !important;
+    padding-block: 0.85rem !important;
+    vertical-align: middle;
+  }
+
+  /* Large statistic/grid sections become compact phone cards. */
+  .kalpa-production-polish .grid {
+    gap: 0.75rem !important;
+  }
+
+  .kalpa-production-polish .p-8,
+  .kalpa-production-polish .p-7,
+  .kalpa-production-polish .p-6 {
+    padding: 1rem !important;
+  }
+
+  .kalpa-production-polish .px-8,
+  .kalpa-production-polish .px-7,
+  .kalpa-production-polish .px-6 {
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+  }
+
+  .kalpa-production-polish .py-6,
+  .kalpa-production-polish .py-5 {
+    padding-top: 1rem !important;
+    padding-bottom: 1rem !important;
+  }
+
+  .kalpa-production-polish h1,
+  .kalpa-production-polish .text-4xl,
+  .kalpa-production-polish .text-3xl {
+    font-size: clamp(1.55rem, 6vw, 2rem) !important;
+    line-height: 1.15 !important;
+  }
+
+  .kalpa-production-polish h2,
+  .kalpa-production-polish .text-2xl {
+    font-size: clamp(1.25rem, 5vw, 1.55rem) !important;
+    line-height: 1.2 !important;
+  }
+
+  .kalpa-production-polish .text-xl {
+    font-size: 1.1rem !important;
+  }
+
+  .kalpa-production-polish .rounded-3xl {
+    border-radius: 1.25rem !important;
+  }
+
+  .kalpa-production-polish .rounded-2xl {
+    border-radius: 1rem !important;
+  }
+
+  .kalpa-production-polish .shadow-2xl,
+  .kalpa-production-polish .shadow-xl {
+    box-shadow: 0 12px 28px rgba(15, 23, 42, 0.12) !important;
+  }
+
+  /* Main top tabs stay usable and do not cover content. */
+  .kalpa-main-tabs {
+    position: sticky;
+    top: 0.5rem;
+    z-index: 80;
+    width: 100% !important;
+    overflow-x: auto !important;
+    flex-wrap: nowrap !important;
+    -webkit-overflow-scrolling: touch;
+    padding: 0.4rem !important;
+    border-radius: 1rem !important;
+  }
+
+  .kalpa-main-tabs button,
+  .kalpa-main-tabs a {
+    white-space: nowrap;
+    min-height: 42px;
+    flex: 0 0 auto;
+  }
+
+  /* Chat becomes a true mobile sheet. */
+  .kalpa-chat-shell {
+    right: max(0.75rem, env(safe-area-inset-right)) !important;
+    bottom: max(0.75rem, env(safe-area-inset-bottom)) !important;
+    max-width: calc(100vw - 1.5rem) !important;
+  }
+
+  .kalpa-chat-panel {
+    position: fixed !important;
+    left: max(0.5rem, env(safe-area-inset-left)) !important;
+    right: max(0.5rem, env(safe-area-inset-right)) !important;
+    bottom: max(0.5rem, env(safe-area-inset-bottom)) !important;
+    top: max(0.75rem, env(safe-area-inset-top)) !important;
+    width: auto !important;
+    height: auto !important;
+    max-width: none !important;
+    max-height: none !important;
+    margin: 0 !important;
+    border-radius: 1.25rem !important;
+    flex-direction: column !important;
+    overflow: hidden !important;
+  }
+
+  .kalpa-chat-sidebar {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    max-height: 38vh;
+    border-right: 0 !important;
+    border-bottom: 1px solid #e2e8f0 !important;
+  }
+
+  .kalpa-chat-sidebar > .flex-1 {
+    max-height: 26vh;
+  }
+
+  .kalpa-chat-panel > .flex-1 {
+    min-height: 0 !important;
+    flex: 1 1 auto !important;
+  }
+
+  .kalpa-chat-messages {
+    padding: 0.85rem !important;
+    gap: 0.75rem !important;
+  }
+
+  .kalpa-chat-bubble {
+    max-width: min(88vw, 560px) !important;
+    font-size: 0.92rem !important;
+    line-height: 1.45 !important;
+  }
+
+  .kalpa-chat-inputbar {
+    padding: 0.75rem !important;
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom)) !important;
+  }
+
+  .kalpa-chat-textarea {
+    min-height: 52px !important;
+    max-height: 116px !important;
+  }
+
+  .kalpa-chat-actions-row,
+  .kalpa-chat-composer {
+    width: 100%;
+  }
+
+  .kalpa-chat-tool-btn,
+  .kalpa-chat-send-btn,
+  .kalpa-chat-close-btn {
+    min-width: 44px;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .kalpa-chat-launcher {
+    border-radius: 1.25rem !important;
+    padding: 0.85rem !important;
+  }
+
+  .kalpa-chat-unread-preview {
+    width: calc(100vw - 1.5rem) !important;
+  }
+
+  .kalpa-chat-attachment,
+  .kalpa-chat-attachment img,
+  .kalpa-chat-attachment object {
+    max-width: 100% !important;
+  }
+
+  /* Menus/popups should remain visible on phones. */
+  [role="dialog"],
+  .fixed.z-\[99999\],
+  .fixed.z-\[99998\] {
+    max-width: calc(100vw - 1rem);
+  }
+
+  /* Notification/toast cards should not overflow the screen. */
+  .fixed.top-24.right-5 {
+    left: 0.75rem !important;
+    right: 0.75rem !important;
+    top: 5rem !important;
+  }
+
+  .fixed.top-24.right-5 > * {
+    max-width: 100% !important;
+  }
+
+  /* Operation rows/cards: mobile layout stays readable and tappable. */
+  .kalpa-ops-grid-row {
+    border-radius: 1rem !important;
+    margin: 0.65rem !important;
+  }
+
+  .kalpa-ops-cell,
+  .kalpa-ops-cell * {
+    min-width: 0;
+  }
+
+  .kalpa-ops-grid-row button,
+  .kalpa-ops-grid-row a {
+    min-height: 40px;
+  }
+}
+
+@media (max-width: 520px) {
+  .kalpa-production-polish {
+    gap: 0.85rem !important;
+  }
+
+  .kalpa-production-polish .flex:not(.kalpa-chat-actions-row):not(.kalpa-main-tabs):not(.kalpa-chat-composer):not(.kalpa-chat-quick-emojis) {
+    max-width: 100%;
+  }
+
+  .kalpa-production-polish .gap-4,
+  .kalpa-production-polish .gap-5,
+  .kalpa-production-polish .gap-6 {
+    gap: 0.75rem !important;
+  }
+
+  .kalpa-production-polish .space-y-6 > :not([hidden]) ~ :not([hidden]) {
+    margin-top: 1rem !important;
+  }
+
+  .kalpa-production-polish .text-sm {
+    font-size: 0.82rem !important;
+  }
+
+  .kalpa-production-polish .text-xs {
+    font-size: 0.72rem !important;
+  }
+
+  .kalpa-production-polish .text-\[10px\] {
+    font-size: 0.66rem !important;
+  }
+
+  .kalpa-production-polish .grid-cols-2,
+  .kalpa-production-polish .grid-cols-3,
+  .kalpa-production-polish .grid-cols-4,
+  .kalpa-production-polish .grid-cols-5,
+  .kalpa-production-polish .grid-cols-6 {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .kalpa-production-polish .sm\:grid-cols-2,
+  .kalpa-production-polish .md\:grid-cols-2,
+  .kalpa-production-polish .md\:grid-cols-3,
+  .kalpa-production-polish .lg\:grid-cols-2,
+  .kalpa-production-polish .lg\:grid-cols-3,
+  .kalpa-production-polish .lg\:grid-cols-4,
+  .kalpa-production-polish .xl\:grid-cols-4,
+  .kalpa-production-polish .xl\:grid-cols-5 {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .kalpa-chat-panel {
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    top: 0 !important;
+    border-radius: 0 !important;
+    border-left: 0 !important;
+    border-right: 0 !important;
+  }
+
+  .kalpa-chat-sidebar {
+    max-height: 34vh;
+  }
+
+  .kalpa-chat-sidebar > .flex-1 {
+    max-height: 22vh;
+  }
+
+  .kalpa-chat-bubble {
+    max-width: 92vw !important;
+    padding: 0.7rem 0.85rem !important;
+  }
+
+  .kalpa-chat-quick-emojis {
+    max-width: 100%;
+  }
+
+  .kalpa-chat-actions-row {
+    gap: 0.4rem !important;
+  }
+
+  .kalpa-chat-tool-btn,
+  .kalpa-chat-send-btn {
+    padding: 0.65rem !important;
+  }
+
+  .kalpa-chat-launcher svg {
+    width: 1.45rem !important;
+    height: 1.45rem !important;
+  }
+}
+
+@media (max-width: 768px) and (orientation: landscape) {
+  .kalpa-chat-panel {
+    top: 0.35rem !important;
+    bottom: 0.35rem !important;
+  }
+
+  .kalpa-chat-sidebar {
+    max-height: 32vh;
+  }
+
+  .kalpa-chat-sidebar > .flex-1 {
+    max-height: 18vh;
+  }
+}
+
+@media (max-width: 768px) {
+  .kd-dark .kalpa-main-tabs,
+  .kd-dark .kalpa-chat-panel,
+  .kd-dark .kalpa-chat-sidebar,
+  .kd-dark .kalpa-chat-inputbar,
+  .kd-dark .kalpa-production-polish .rounded-3xl,
+  .kd-dark .kalpa-production-polish .rounded-2xl {
+    border-color: rgba(148, 163, 184, 0.22) !important;
+  }
+
+  .kd-dark .kalpa-chat-panel,
+  .kd-dark .kalpa-chat-panel .bg-white,
+  .kd-dark .kalpa-chat-inputbar {
+    background-color: rgba(15, 23, 42, 0.98) !important;
+    color: #f8fafc !important;
+  }
+
+  .kd-dark .kalpa-chat-sidebar,
+  .kd-dark .kalpa-chat-messages,
+  .kd-dark .kalpa-chat-textarea,
+  .kd-dark .kalpa-chat-tool-btn {
+    background-color: rgba(2, 6, 23, 0.72) !important;
+    color: #e2e8f0 !important;
+  }
+
+  .kd-dark .kalpa-chat-bubble.bg-white,
+  .kd-dark .kalpa-chat-attachment.bg-slate-50 {
+    background-color: rgba(30, 41, 59, 0.94) !important;
+    color: #f8fafc !important;
+    border-color: rgba(148, 163, 184, 0.24) !important;
+  }
+
+  .kd-dark .kalpa-chat-textarea::placeholder {
+    color: #94a3b8 !important;
+  }
+}
