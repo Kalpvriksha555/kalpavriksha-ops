@@ -4,8 +4,8 @@ export const absoluteApiUrl = (url = '', version = '') => {
   let value = String(url || '').trim();
   if (!value) return '';
   if (/^(blob:|data:|https?:)/i.test(value)) return value;
-  if (value.startsWith('/uploads/')) value = value.replace('/uploads/', '/api/profile/photo/');
-  if (value.startsWith('uploads/')) value = value.replace('uploads/', '/api/profile/photo/');
+  if (value.startsWith('/uploads/')) value = value.replace('/uploads/', '/api/uploads/');
+  if (value.startsWith('uploads/')) value = value.replace('uploads/', '/api/uploads/');
   const full = value.startsWith('/') ? `${API_BASE}${value}` : `${API_BASE}/${value.replace(/^\/+/, '')}`;
   return version ? `${full}${full.includes('?') ? '&' : '?'}v=${encodeURIComponent(version)}` : full;
 };
@@ -18,7 +18,17 @@ export const getProjectFileDownloadUrl = (doc = {}) => {
   return '';
 };
 
-export const uploadProjectFile = async (file, projectId, type, uploadedBy) => {
+const readServerMessage = async (res) => {
+  const raw = await res.text().catch(() => '');
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed.error || parsed.message || raw || `Request failed (${res.status})`;
+  } catch {
+    return raw || `Request failed (${res.status})`;
+  }
+};
+
+export const uploadProjectFile = async (file, projectId, type, uploadedBy, onProgress) => {
   const baseDoc = {
     id: Date.now() + Math.random(),
     name: file.name,
@@ -37,7 +47,7 @@ export const uploadProjectFile = async (file, projectId, type, uploadedBy) => {
 
   try {
     const res = await fetch(`${API_BASE}/api/files/upload`, { method: 'POST', body: form });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw new Error(await readServerMessage(res));
     const payload = await res.json();
     return {
       ...baseDoc,
@@ -46,8 +56,8 @@ export const uploadProjectFile = async (file, projectId, type, uploadedBy) => {
       folder: type,
       uploadedBy,
       date: new Date().toLocaleDateString(),
-      url: payload.file?.downloadUrl || payload.file?.url || '',
-      downloadUrl: payload.file?.downloadUrl || ''
+      url: payload.file?.url || payload.file?.downloadUrl || '',
+      downloadUrl: payload.file?.downloadUrl || (payload.file?.id ? `/api/files/${payload.file.id}/download` : '')
     };
   } catch (error) {
     console.error('Backend file upload failed:', error);

@@ -1819,7 +1819,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     onUpdateProject(updatedProject, project);
     } catch (error) {
       console.error('File upload failed:', error);
-      alert('File upload failed. Please try again with a smaller file or different format.');
+      alert(`File upload failed: ${error?.message || 'Please check your internet connection and try again.'}`);
     } finally {
       if (type === 'completed') setIsUploadingFinal(false);
       if (e?.target) e.target.value = '';
@@ -1847,7 +1847,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
       setAttachments(prev => [...prev, ...uploadedDocs]);
     } catch (error) {
       console.error(`${attachmentType} attachment upload failed:`, error);
-      alert('Attachment upload failed. Please try again.');
+      alert(`Attachment upload failed: ${error?.message || 'Please check your internet connection and try again.'}`);
     } finally {
       setUploading(false);
       if (event?.target) event.target.value = '';

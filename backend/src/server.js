@@ -29,13 +29,46 @@ let memoryState = null;
 let postgresReady = false;
 
 const safeName = (name='file') => String(name).replace(/[^a-zA-Z0-9.\-_]/g, '_');
+const MAX_UPLOAD_SIZE_MB = Number(process.env.MAX_UPLOAD_SIZE_MB || 1024);
 const upload = multer({
   storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+    destination: (_req, _file, cb) => {
+      fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+      cb(null, UPLOAD_DIR);
+    },
     filename: (_req, file, cb) => cb(null, `${Date.now()}-${nanoid(6)}-${safeName(file.originalname)}`)
   }),
-  limits: { fileSize: 200 * 1024 * 1024 }
+  // Practical production safety limit. Number of files is intentionally not capped.
+  limits: { fileSize: MAX_UPLOAD_SIZE_MB * 1024 * 1024 }
 });
+
+function uploadErrorPayload(err) {
+  const code = err?.code || '';
+  if (code === 'LIMIT_FILE_SIZE') return { status: 413, error: `File is larger than the configured ${MAX_UPLOAD_SIZE_MB} MB upload limit.` };
+  if (code === 'LIMIT_UNEXPECTED_FILE') return { status: 400, error: 'Upload field mismatch. Please refresh the page and try again.' };
+  return { status: 400, error: err?.message || 'Upload failed before the file reached the server.' };
+}
+function uploadAny(req, res, next) {
+  upload.any()(req, res, (err) => {
+    if (err) {
+      const payload = uploadErrorPayload(err);
+      return res.status(payload.status).json({ ok:false, error:payload.error, code:err.code || 'UPLOAD_ERROR' });
+    }
+    req.files = Array.isArray(req.files) ? req.files : [];
+    next();
+  });
+}
+function uploadSingle(fieldName) {
+  return (req, res, next) => {
+    upload.single(fieldName)(req, res, (err) => {
+      if (err) {
+        const payload = uploadErrorPayload(err);
+        return res.status(payload.status).json({ ok:false, error:payload.error, code:err.code || 'UPLOAD_ERROR' });
+      }
+      next();
+    });
+  };
+}
 
 const roles = ['ADMIN','MANAGER','DESIGNER'];
 const serviceTypes = ['Map Estimate','Key Route + Estimate','Key Layout','Colony Layout','Builder Layout','Sub Division','Floor Plan','Site Plan','Bank Technical Drawing','Other'];
@@ -436,7 +469,8 @@ function classify(name='', mime=''){
   if(/\.pdf$/i.test(name)||s.includes('pdf')) return 'PDF'; return 'Other';
 }
 function docPayload(file, uploadedBy, role, purpose='SOURCE', caseId=''){
-  return {id:nanoid(8),caseId,name:file.originalname,storedName:file.filename,mime:file.mimetype,size:file.size,type:classify(file.originalname,file.mimetype),purpose,uploadedBy,uploadedByRole:role,uploadedAt:now(),url:`/uploads/${file.filename}`,downloadUrl:''};
+  const id = nanoid(8);
+  return {id,caseId,name:file.originalname,storedName:file.filename,mime:file.mimetype,size:file.size,type:classify(file.originalname,file.mimetype),purpose,uploadedBy,uploadedByRole:role,uploadedAt:now(),url:`/api/uploads/${file.filename}`,downloadUrl:`/api/files/${id}/download`};
 }
 
 function fileBaseName(value=''){
@@ -760,25 +794,25 @@ app.post('/api/state',(req,res)=>{
 });
 
 
-app.post('/api/cases', upload.array('files',20), async (req,res)=>{
+app.post('/api/cases', uploadAny, async (req,res)=>{
   const d=db(); const body=req.body; const creatorName=body.creatorName||body.createdBy||'Admin';
   let assignee=d.users.find(u=>u.id===body.assigneeId); if(!assignee) assignee=leastBusy(d);
   const manager=sanitizePresenceUsers(d.users).find(u=>normalizeRole(u.role)==='Manager');
   const c={id:nanoid(8),caseId:nextCaseNo(d,body.city),source:body.source||'Manual',createdByRole:body.createdByRole||'ADMIN',creatorName,customerName:body.customerName||'New Customer',customerPhone:body.customerPhone||'',bankerName:body.bankerName||'',bank:body.bank||'',branch:body.branch||'',serviceType:body.serviceType||'Map Estimate',otherDescription:body.otherDescription||'',city:body.city||'Lucknow',propertyAddress:body.propertyAddress||'',estimateAmount:body.serviceType==='Map Estimate'||body.serviceType?.includes('Estimate')?Number(body.estimateAmount||0):Number(body.estimateAmount||0),priority:body.priority||'Normal',status:'ASSIGNED',assigneeId:assignee?.id,assigneeName:assignee?.name,assigneeRole:assignee?.role,managerId:manager?.id,managerName:manager?.name,createdAt:now(),startedAt:null,completedAt:null,dueAt:body.dueAt||'',paymentStatus:'PENDING',documents:[],comments:[],revisions:[],history:[{at:now(),by:creatorName,action:'Lead created and task assigned'}]};
-  for(const f of (req.files||[])) c.documents.push(docPayload(f,creatorName,body.createdByRole||'ADMIN','SOURCE',c.id));
+  for(const f of (req.files||[])) c.documents.push(addFileRegistryEntry(d, docPayload(f,creatorName,body.createdByRole||'ADMIN','SOURCE',c.id)));
   d.cases.unshift(c); notifyRole(d,'ADMIN',`New case ${c.caseId} created by ${creatorName}`,'task',c.id); notifyRole(d,'MANAGER',`New case ${c.caseId} created by ${creatorName}`,'task',c.id); if(assignee) notifyUser(d,assignee.name,`New task assigned: ${c.caseId}`,'task',c.id); addAudit(d,creatorName,'Case created',c.caseId); save(d); res.json(c);
 });
 app.post('/api/cases/:id/assign',(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const u=d.users.find(x=>x.id===req.body.assigneeId); if(!u) return res.status(400).json({error:'Assignee not found'}); c.assigneeId=u.id; c.assigneeName=u.name; c.assigneeRole=u.role; c.status='ASSIGNED'; c.history.unshift({at:now(),by:req.body.by||'Manager',action:`Assigned to ${u.name}`}); notifyUser(d,u.name,`Task assigned to you: ${c.caseId}`,'task',c.id); addAudit(d,req.body.by||'Manager','Task assigned',c.caseId); save(d); res.json(c); });
 app.post('/api/cases/:id/start',(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); c.status='IN_PROGRESS'; c.startedAt ||= now(); c.history.unshift({at:now(),by:req.body.by||c.assigneeName,action:'Work started'}); save(d); res.json(c); });
-app.post('/api/cases/:id/upload-source', upload.array('files',20),(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); for(const f of req.files||[]) c.documents.push(docPayload(f,req.body.by||'Admin',req.body.role||'ADMIN','SOURCE',c.id)); c.history.unshift({at:now(),by:req.body.by||'Admin',action:`Uploaded ${req.files?.length||0} source file(s)`}); notifyUser(d,c.assigneeName,`New source files added for ${c.caseId}`,'task',c.id); save(d); res.json(c); });
-app.post('/api/cases/:id/upload-final', upload.array('files',20),(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const isRevision=String(req.body.isRevision||'false')==='true' || c.status==='REOPENED_FOR_REVISION'; for(const f of req.files||[]) { const doc=docPayload(f,req.body.by||c.assigneeName,req.body.role||'DESIGNER',isRevision?'REVISION_FINAL':'FINAL',c.id); doc.type = isRevision ? 'Revised File' : 'Completed File'; c.documents.push(doc); }
+app.post('/api/cases/:id/upload-source', uploadAny,(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); for(const f of req.files||[]) c.documents.push(addFileRegistryEntry(d, docPayload(f,req.body.by||'Admin',req.body.role||'ADMIN','SOURCE',c.id))); c.history.unshift({at:now(),by:req.body.by||'Admin',action:`Uploaded ${req.files?.length||0} source file(s)`}); notifyUser(d,c.assigneeName,`New source files added for ${c.caseId}`,'task',c.id); save(d); res.json(c); });
+app.post('/api/cases/:id/upload-final', uploadAny,(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const isRevision=String(req.body.isRevision||'false')==='true' || c.status==='REOPENED_FOR_REVISION'; for(const f of req.files||[]) { const doc=addFileRegistryEntry(d, docPayload(f,req.body.by||c.assigneeName,req.body.role||'DESIGNER',isRevision?'REVISION_FINAL':'FINAL',c.id)); doc.type = isRevision ? 'Revised File' : 'Completed File'; doc.folder = isRevision ? 'revised-completed' : 'completed'; c.documents.push(doc); }
   c.status='MANAGER_REVIEW'; c.history.unshift({at:now(),by:req.body.by||c.assigneeName,action:isRevision?'Revised file uploaded':'Completed file uploaded for manager review'}); notifyRole(d,'MANAGER',`${isRevision?'Revised':'Completed'} file uploaded: ${c.caseId}`,'completed',c.id); notifyRole(d,'ADMIN',`${isRevision?'Revised':'Completed'} file uploaded: ${c.caseId}`,'completed',c.id); addAudit(d,req.body.by||c.assigneeName,'Final upload',c.caseId); save(d); res.json(c); });
 app.post('/api/cases/:id/manager-complete', async (req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); c.status='COMPLETED'; c.completedAt=now(); c.history.unshift({at:now(),by:req.body.by||'Manager',action:'Reviewed by manager and marked complete'}); notifyRole(d,'ADMIN',`Case completed after manager review: ${c.caseId}`,'completed',c.id); notifyUser(d,c.assigneeName,`Case marked complete: ${c.caseId}`,'completed',c.id); addAudit(d,req.body.by||'Manager','Case completed',c.caseId); save(d); res.json(c); });
 app.post('/api/cases/:id/revision',(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); c.status='REOPENED_FOR_REVISION'; c.priority='Urgent'; const rev={id:nanoid(8),note:req.body.note||'Banker revision requested',by:req.body.by||'Admin/Manager',createdAt:now()}; c.revisions.unshift(rev); c.history.unshift({at:now(),by:rev.by,action:'Revision opened as urgent'}); notifyUser(d,c.assigneeName,`URGENT revision task: ${c.caseId} - ${rev.note}`,'task',c.id); notifyRole(d,'MANAGER',`URGENT revision opened: ${c.caseId}`,'task',c.id); save(d); res.json(c); });
 app.post('/api/cases/:id/payment',(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const received=String(req.body.paymentReceived||'').toUpperCase(); if(!['YES','NO','PARTIAL','REFUND'].includes(received)) return res.status(400).json({error:'paymentReceived is mandatory: YES, NO, PARTIAL or REFUND'}); const p={id:nanoid(8),caseId:c.id,caseNo:c.caseId,location:c.city,bankerName:c.bankerName,bank:c.bank,branch:c.branch,paymentReceived:received,paymentAmountIn:Number(req.body.paymentAmountIn||0),refundAmount:Number(req.body.refundAmount||0),paymentDate:req.body.paymentDate||new Date().toISOString().slice(0,10),paymentTime:req.body.paymentTime||new Date().toTimeString().slice(0,5),payerName:req.body.payerName||'',transactionId:req.body.transactionId||'',mode:req.body.mode||'',note:req.body.note||'',createdAt:now(),createdBy:req.body.by||'Admin'}; d.payments.unshift(p); Object.assign(c,{paymentStatus:received,paymentAmountIn:p.paymentAmountIn,refundAmount:p.refundAmount,payerName:p.payerName,transactionId:p.transactionId,paymentDate:p.paymentDate,paymentTime:p.paymentTime}); c.history.unshift({at:now(),by:p.createdBy,action:`Payment ledger updated: ${received}`}); addAudit(d,p.createdBy,'Payment ledger updated',c.caseId); save(d); res.json(p); });
 
 
-app.post('/api/profile/photo', upload.single('photo'), (req, res) => {
+app.post('/api/profile/photo', uploadSingle('photo'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok:false, error:'No photo uploaded' });
     if (!String(req.file.mimetype || '').startsWith('image/')) {
@@ -803,8 +837,11 @@ app.post('/api/profile/photo', upload.single('photo'), (req, res) => {
   }
 });
 
-app.post('/api/files/upload', upload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+app.post('/api/files/upload', uploadAny, (req, res) => {
+  const incomingFiles = req.files || [];
+  const fileFromAnyField = incomingFiles[0];
+  if (!fileFromAnyField) return res.status(400).json({ ok:false, error: 'No file uploaded' });
+  req.file = fileFromAnyField;
   const d = db();
   const type = String(req.body.type || 'source').toLowerCase();
   const purpose = type === 'completed' ? 'FINAL' : (type === 'working' ? 'WORKING' : 'SOURCE');
@@ -897,10 +934,10 @@ app.delete('/api/files/:id',(req,res)=>{
   res.json({ ok: true, removed });
 });
 app.get('/api/cases/:id/share-whatsapp',(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const finalDocs=(c.documents||[]).filter(doc=>doc.purpose==='FINAL' || doc.purpose==='REVISION_FINAL'); if(!finalDocs.length) return res.status(400).json({error:'No completed document available to share'}); const latestOriginal=finalDocs.filter(x=>x.purpose==='FINAL').slice(-1); const docs=latestOriginal.length?latestOriginal:finalDocs.slice(-1); const links=docs.map(x=>`${publicUrl().replace(':5173',':8080')}/api/files/${x.id}/download`).join('\n'); const msg=`Kalpvriksha Designs completed document for ${c.caseId}\nCustomer: ${c.customerName}\n${links}`; res.json({message:msg,waLink:`https://wa.me/?text=${encodeURIComponent(msg)}`,documents:docs}); });
-app.post('/api/chat', upload.array('files',10),(req,res)=>{ const d=db(); const ments=mentionTargets(req.body.text,d.users).concat(req.body.mentions?JSON.parse(req.body.mentions||'[]'):[]); const unique=[...new Set(ments)]; const msg={id:nanoid(8),by:req.body.by||'Team',role:req.body.role||'ADMIN',caseId:req.body.caseId||'',text:req.body.text||'',mentions:unique,files:(req.files||[]).map(f=>docPayload(f,req.body.by||'Team',req.body.role||'ADMIN','CHAT')),createdAt:now()}; d.teamChat.unshift(msg); if(unique.length){ unique.forEach(name=>notifyUser(d,name,`You were mentioned by ${msg.by} in team chat`,'mention','chat')); } else { notifyRole(d,'ADMIN','New normal chat message','normal','chat'); notifyRole(d,'MANAGER','New normal chat message','normal','chat'); notifyRole(d,'DESIGNER','New normal chat message','normal','chat'); } save(d); res.json(msg); });
+app.post('/api/chat', uploadAny,(req,res)=>{ const d=db(); const ments=mentionTargets(req.body.text,d.users).concat(req.body.mentions?JSON.parse(req.body.mentions||'[]'):[]); const unique=[...new Set(ments)]; const msg={id:nanoid(8),by:req.body.by||'Team',role:req.body.role||'ADMIN',caseId:req.body.caseId||'',text:req.body.text||'',mentions:unique,files:(req.files||[]).map(f=>addFileRegistryEntry(d, docPayload(f,req.body.by||'Team',req.body.role||'ADMIN','CHAT'))),createdAt:now()}; d.teamChat.unshift(msg); if(unique.length){ unique.forEach(name=>notifyUser(d,name,`You were mentioned by ${msg.by} in team chat`,'mention','chat')); } else { notifyRole(d,'ADMIN','New normal chat message','normal','chat'); notifyRole(d,'MANAGER','New normal chat message','normal','chat'); notifyRole(d,'DESIGNER','New normal chat message','normal','chat'); } save(d); res.json(msg); });
 app.post('/api/chat/read',(req,res)=>{ const d=db(); const role=req.body.role||'ADMIN'; d.chatReads ||= {}; d.chatReads[role]=(d.teamChat||[]).map(m=>m.id); d.notifications.forEach(n=>{ if(n.target==='chat' && (n.to===role || n.to===req.body.name || n.category==='mention')) n.status='READ'; }); save(d); res.json({ok:true}); });
 app.post('/api/notifications/:id/read',(req,res)=>{ const d=db(); const n=d.notifications.find(x=>x.id===req.params.id); if(n) n.status='READ'; save(d); res.json({ok:true}); });
-app.post('/whatsapp/mock/incoming', upload.array('files',20),(req,res)=>{ const d=db(); const parsed=parseLead(req.body.text||''); const assignee=leastBusy(d); const c={id:nanoid(8),caseId:nextCaseNo(d,parsed.city),source:'WhatsApp',createdByRole:'BANKER',creatorName:req.body.fromName||req.body.from||'WhatsApp Banker',customerName:parsed.customerName,customerPhone:'',bankerName:req.body.fromName||'WhatsApp Banker',bank:req.body.bank||'',branch:req.body.branch||'',serviceType:parsed.serviceType,city:parsed.city,propertyAddress:parsed.propertyAddress,estimateAmount:Number(parsed.estimateAmount||0),priority:'Normal',status:'ASSIGNED',assigneeId:assignee?.id,assigneeName:assignee?.name,assigneeRole:assignee?.role,createdAt:now(),completedAt:null,paymentStatus:'PENDING',documents:(req.files||[]).map(f=>docPayload(f,'WhatsApp','BANKER','SOURCE')),comments:[],revisions:[],history:[{at:now(),by:'WhatsApp',action:'Lead created from WhatsApp'}]}; d.cases.unshift(c); d.whatsappInbox.unshift({id:nanoid(8),from:req.body.from,fromName:req.body.fromName,text:req.body.text,createdAt:now(),caseId:c.caseId}); notifyRole(d,'ADMIN',`New WhatsApp case ${c.caseId} from ${c.creatorName}`,'task',c.id); notifyRole(d,'MANAGER',`New WhatsApp case ${c.caseId} from ${c.creatorName}`,'task',c.id); notifyUser(d,c.assigneeName,`New WhatsApp task assigned: ${c.caseId}`,'task',c.id); save(d); res.json(c); });
+app.post('/whatsapp/mock/incoming', uploadAny,(req,res)=>{ const d=db(); const parsed=parseLead(req.body.text||''); const assignee=leastBusy(d); const c={id:nanoid(8),caseId:nextCaseNo(d,parsed.city),source:'WhatsApp',createdByRole:'BANKER',creatorName:req.body.fromName||req.body.from||'WhatsApp Banker',customerName:parsed.customerName,customerPhone:'',bankerName:req.body.fromName||'WhatsApp Banker',bank:req.body.bank||'',branch:req.body.branch||'',serviceType:parsed.serviceType,city:parsed.city,propertyAddress:parsed.propertyAddress,estimateAmount:Number(parsed.estimateAmount||0),priority:'Normal',status:'ASSIGNED',assigneeId:assignee?.id,assigneeName:assignee?.name,assigneeRole:assignee?.role,createdAt:now(),completedAt:null,paymentStatus:'PENDING',documents:(req.files||[]).map(f=>addFileRegistryEntry(d, docPayload(f,'WhatsApp','BANKER','SOURCE'))),comments:[],revisions:[],history:[{at:now(),by:'WhatsApp',action:'Lead created from WhatsApp'}]}; d.cases.unshift(c); d.whatsappInbox.unshift({id:nanoid(8),from:req.body.from,fromName:req.body.fromName,text:req.body.text,createdAt:now(),caseId:c.caseId}); notifyRole(d,'ADMIN',`New WhatsApp case ${c.caseId} from ${c.creatorName}`,'task',c.id); notifyRole(d,'MANAGER',`New WhatsApp case ${c.caseId} from ${c.creatorName}`,'task',c.id); notifyUser(d,c.assigneeName,`New WhatsApp task assigned: ${c.caseId}`,'task',c.id); save(d); res.json(c); });
 app.get('/api/qr/:caseId', async (req,res)=>{ const data=await QRCode.toDataURL(`${publicUrl()}/case/${req.params.caseId}`); res.json({qr:data}); });
 
 app.get('/api/db/health', async (_req,res)=>{
