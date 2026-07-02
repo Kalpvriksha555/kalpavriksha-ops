@@ -3,10 +3,22 @@
 // same labels/metadata without duplicating fallback logic.
 
 export const allProjectDocs = (project = {}) => {
-  const docs = [...(project?.documents || []), ...(project?.completedFiles || [])];
+  const singleCompletedFields = [
+    project?.completedFile,
+    project?.completedDocument,
+    project?.finalFile,
+    project?.finalDocument,
+  ].filter(Boolean);
+  const docs = [
+    ...(project?.documents || []),
+    ...(project?.completedFiles || []),
+    ...(project?.finalFiles || []),
+    ...singleCompletedFields,
+  ];
   const seen = new Set();
   return docs.filter((doc) => {
-    const key = doc?.id || doc?.url || `${doc?.name}-${doc?.type}-${doc?.uploadedBy}`;
+    if (!doc) return false;
+    const key = doc?.id || doc?.fileId || doc?.url || doc?.downloadUrl || `${doc?.name || doc?.fileName}-${doc?.type}-${doc?.uploadedBy}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -14,15 +26,47 @@ export const allProjectDocs = (project = {}) => {
 };
 
 export const isCompletedDocument = (doc = {}) => {
-  const value = String(doc?.type || doc?.folder || doc?.category || doc?.documentType || doc?.status || '').toLowerCase();
-  return ['completed', 'final', 'finished', 'submitted'].includes(value) && !String(doc?.name || '').toLowerCase().includes('qr');
+  const name = String(doc?.name || doc?.fileName || '').toLowerCase();
+  if (!doc || name.includes('qr')) return false;
+  const markers = [
+    doc?.purpose,
+    doc?.type,
+    doc?.folder,
+    doc?.category,
+    doc?.documentType,
+    doc?.status,
+    doc?.label,
+  ].map(v => String(v || '').toLowerCase());
+
+  return markers.some(value => (
+    value === 'final'
+    || value === 'revision_final'
+    || value === 'completed'
+    || value === 'submitted'
+    || value === 'finished'
+    || value.includes('completed file')
+    || value.includes('completed work')
+    || value.includes('final file')
+    || value.includes('revised file')
+  ));
 };
 
-export const getCompletedDocuments = (project = {}) => allProjectDocs(project).filter(isCompletedDocument);
+const fileTime = (doc = {}) => {
+  const raw = doc.uploadedAt || doc.createdAt || doc.updatedAt || doc.at || doc.time || doc.id || 0;
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  const parsed = new Date(raw).getTime();
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+
+export const getCompletedDocuments = (project = {}) => allProjectDocs(project)
+  .filter(isCompletedDocument)
+  .sort((a, b) => fileTime(a) - fileTime(b));
 
 export const getLatestCompletedFileName = (project = {}) => {
   const completed = getCompletedDocuments(project);
-  return completed.length ? completed[completed.length - 1].name : '';
+  const latest = completed.length ? completed[completed.length - 1] : null;
+  return latest ? (latest.name || latest.fileName || latest.originalName || '') : '';
 };
 
 export const getTaskDescription = (project = {}) => {

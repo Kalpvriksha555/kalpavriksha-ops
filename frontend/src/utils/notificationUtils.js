@@ -31,15 +31,48 @@ export const buildNotification = ({ targetRole, targetUser, title, type = 'info'
 };
 
 const norm = (value = '') => String(value || '').trim().toLowerCase();
+const identityKey = (value = '') => norm(value).replace(/[^a-z0-9]/g, '');
 const readName = (entry) => typeof entry === 'string' ? entry : (entry?.name || '');
+
+const userAliases = (user = {}) => [user?.name, user?.username, user?.id]
+  .filter(Boolean)
+  .flatMap(value => [norm(value), identityKey(value)])
+  .filter(Boolean);
+
+const notificationTargetMatchesUser = (targetUser = '', user = {}) => {
+  const target = norm(targetUser);
+  const targetKey = identityKey(targetUser);
+  if (!target && !targetKey) return false;
+  return userAliases(user).some(alias => alias && (alias === target || alias === targetKey));
+};
+
+const isChatLikeNotification = (notification = {}) => {
+  const category = norm(notification.category);
+  const type = norm(notification.type);
+  const title = norm(notification.title || notification.message || notification.text);
+  return category === 'chat' || ['chat', 'message', 'mention'].includes(type) || /new message|chat message|mentioned|@all/.test(title);
+};
+
+const isBroadcastChatNotification = (notification = {}) => {
+  const type = norm(notification.type);
+  const title = norm(notification.title || notification.message || notification.text);
+  return type === 'mention' || /@all|mentioned/.test(title);
+};
 
 export const isNotificationForUser = (notification = {}, user = {}) => {
   if (!notification || !user) return false;
   const targetUser = norm(notification.targetUser);
-  const userName = norm(user.name);
   const targetRole = norm(notification.targetRole);
   const userRole = norm(user.role);
-  if (targetUser) return targetUser === userName;
+
+  // Direct chat notifications must have an explicit target user.
+  // Older role-wide chat notices caused users to see personal DMs between other people.
+  if (isChatLikeNotification(notification)) {
+    if (targetUser) return notificationTargetMatchesUser(notification.targetUser, user);
+    if (!isBroadcastChatNotification(notification)) return false;
+  }
+
+  if (targetUser) return notificationTargetMatchesUser(notification.targetUser, user);
   return !!targetRole && targetRole === userRole;
 };
 

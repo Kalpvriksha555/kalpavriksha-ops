@@ -5,7 +5,7 @@ import { createSafeMeetingRoomName, buildJitsiUrl } from '../../utils/meeting';
 import { copyTextToClipboard } from '../../utils/clipboard';
 import { MiniEmptyState } from '../shared';
 import { getVisibleNotifications } from '../../services/notificationService';
-import { CHAT_API_BASE, absoluteChatUrl, makeMessageId, QUICK_EMOJIS, isUserActuallyOnline, getOperationalUsers, identityKey, samePerson, readEntryName, hasReadBy, ROLES, normalizeChannelKey, chatEmojiGroups, reactionEmojis } from '../../utils/chatUtils';
+import { CHAT_API_BASE, absoluteChatUrl, makeMessageId, QUICK_EMOJIS, isUserActuallyOnline, getOperationalUsers, identityKey, samePerson, readEntryName, ROLES, normalizeChannelKey, chatEmojiGroups, reactionEmojis } from '../../utils/chatUtils';
 
 export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onDeleteMessage, onUpdateMessage, onMarkMessagesRead, appId }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -52,7 +52,25 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const chatUsers = getOperationalUsers(users || [], { includeAdmins: true }).filter(u => !samePerson(u.name, currentUser.name));
   const liveCurrentUser = getOperationalUsers(users || [], { includeAdmins: true }).find(u => samePerson(u.name, currentUser.name)) || currentUser;
   const currentUserOnline = isUserActuallyOnline(liveCurrentUser, presenceNow);
-  const activePeer = activeChannel === 'global' ? null : chatUsers.find(u => samePerson(u.name, activeChannel));
+  const currentUserAliases = [currentUser?.name, currentUser?.username, currentUser?.id].filter(Boolean);
+  const currentUserAliasKeys = currentUserAliases.flatMap(alias => [identityKey(alias), String(alias || '').trim().toLowerCase()]).filter(Boolean);
+  const sameCurrentUser = (value = '') => {
+    const key = identityKey(value);
+    const raw = String(value || '').trim().toLowerCase();
+    return !!(key || raw) && currentUserAliasKeys.some(alias => alias === key || alias === raw);
+  };
+  const sameChatIdentity = (value = '', user = {}) => {
+    const key = identityKey(value);
+    const raw = String(value || '').trim().toLowerCase();
+    return [user?.name, user?.username, user?.id].filter(Boolean).some(alias => identityKey(alias) === key || String(alias || '').trim().toLowerCase() === raw);
+  };
+  const hasReadByCurrentUser = (message = {}) => (message?.readBy || []).some(entry => sameCurrentUser(readEntryName(entry)));
+  const sameChannelIdentity = (value = '', channel = activeChannel) => {
+    if (channel === 'global') return String(value || 'global') === 'global' || !value;
+    const user = chatUsers.find(u => sameChatIdentity(channel, u));
+    return samePerson(value, channel) || (!!user && sameChatIdentity(value, user));
+  };
+  const activePeer = activeChannel === 'global' ? null : chatUsers.find(u => sameChatIdentity(activeChannel, u));
   const activePeerOnline = activePeer ? isUserActuallyOnline(activePeer, presenceNow) : false;
   const activeCallRoom = activePeer ? createSafeMeetingRoomName('KalpaVriksha_DM', appId || 'kalpavriksha_production_v1', ...[currentUser.name, activePeer.name].sort()) : '';
   const activeCallUrl = activePeer ? buildJitsiUrl(activeCallRoom, currentUser.name, { audioOnly: callAudioOnly, shareScreen: callShareScreen }) : '';
@@ -128,21 +146,44 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
 
   const isMessageInActiveChannel = (m) => {
     if (activeChannel === 'global') return m.recipient === 'global' || !m.recipient;
-    return (samePerson(m.sender, activeChannel) && samePerson(m.recipient, currentUser.name)) || (samePerson(m.sender, currentUser.name) && samePerson(m.recipient, activeChannel));
+    return (sameChannelIdentity(m.sender, activeChannel) && sameCurrentUser(m.recipient)) || (sameCurrentUser(m.sender) && sameChannelIdentity(m.recipient, activeChannel));
   };
 
   useEffect(() => {
     if (isOpen) markCurrentChannelReadNow(activeChannel);
   }, [isOpen, activeChannel, chatMessages.length]);
 
-  const unreadMessages = (chatMessages || []).filter(m => {
+  const isGlobalMessage = (m = {}) => String(m.recipient || '').trim().toLowerCase() === 'global' || !String(m.recipient || '').trim();
+  const isDirectMessageForCurrentUser = (m = {}) => {
+    if (!m || isGlobalMessage(m)) return false;
+    return sameCurrentUser(m.sender) || sameCurrentUser(m.recipient);
+  };
+  const isIncomingDirectToCurrentUser = (m = {}) => {
+    if (!m || isGlobalMessage(m)) return false;
+    return !sameCurrentUser(m.sender) && sameCurrentUser(m.recipient);
+  };
+  const isMessageForCurrentUser = (m = {}) => {
     if (!m || m.deleted || hiddenMessageIds.includes(String(m.id))) return false;
-    if (samePerson(m.sender, currentUser.name)) return false;
-    const channelKey = (m.recipient === 'global' || !m.recipient) ? 'global' : identityKey(m.sender);
+    if (isGlobalMessage(m)) return true;
+    return isDirectMessageForCurrentUser(m);
+  };
+  const getMessageChannelForCurrentUser = (m = {}) => {
+    if (isGlobalMessage(m)) return 'global';
+    if (!isDirectMessageForCurrentUser(m)) return 'global';
+    if (sameCurrentUser(m.sender)) return m.recipient || 'global';
+    return m.sender || 'global';
+  };
+
+  const unreadMessages = (chatMessages || []).filter(m => {
+    if (!isMessageForCurrentUser(m)) return false;
+    if (m.callType || m.roomUrl) return false;
+    if (sameCurrentUser(m.sender)) return false;
+    if (!isGlobalMessage(m) && !isIncomingDirectToCurrentUser(m)) return false;
+    const channelKey = isGlobalMessage(m) ? 'global' : identityKey(m.sender);
     const cutoff = Math.max(Number(localReadState[channelKey] || 0), Number(readThroughRef.current?.[channelKey] || 0));
     const sentAt = Number(m.sentAt || m.id || 0);
     if (sentAt && cutoff && sentAt <= cutoff) return false;
-    if (hasReadBy(m, currentUser.name)) return false;
+    if (hasReadByCurrentUser(m)) return false;
     if (isOpen && isMessageInActiveChannel(m)) return false;
     return true;
   });
@@ -153,11 +194,12 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     const cutoff = Math.max(Number(localReadState[channelKey] || 0), Number(readThroughRef.current?.[channelKey] || 0));
     return (chatMessages || []).filter(m => {
       if (!m || m.deleted || hiddenMessageIds.includes(String(m.id))) return false;
-      if (!samePerson(m.sender, userName) || !samePerson(m.recipient, currentUser.name)) return false;
+      if (m.callType || m.roomUrl) return false;
+      if (!sameChatIdentity(m.sender, { name: userName, username: userName }) || !isIncomingDirectToCurrentUser(m)) return false;
       const sentAt = Number(m.sentAt || m.id || 0);
       if (sentAt && cutoff && sentAt <= cutoff) return false;
-      if (isOpen && samePerson(activeChannel, userName)) return false;
-      if (hasReadBy(m, currentUser.name)) return false;
+      if (isOpen && sameChannelIdentity(userName, activeChannel)) return false;
+      if (hasReadByCurrentUser(m)) return false;
       return true;
     }).length;
   };
@@ -165,6 +207,38 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const unreadDirectTotal = chatUsers.reduce((sum, u) => sum + getDirectUnreadCountForUser(u.name), 0);
   const totalUnreadCount = unreadMessages.length;
   const latestUnreadMessage = unreadMessages.slice().sort((a, b) => Number(b.sentAt || b.id || 0) - Number(a.sentAt || a.id || 0))[0];
+
+  const getConversationLabel = (channel = activeChannel) => {
+    if (channel === 'global') return 'Global Chat';
+    const user = chatUsers.find(u => sameChatIdentity(channel, u));
+    return user?.name || channel || 'Direct Chat';
+  };
+
+  const getMessagePreviewText = (m = {}) => {
+    if (!m) return '';
+    if (m.deleted) return 'Message was deleted';
+    if (m.isVoiceNote) return '🎙️ Voice note';
+    if (m.fileName) return `📎 ${m.fileName}`;
+    return String(m.text || 'Message').replace(/\s+/g, ' ').trim();
+  };
+
+  const openConversationForMessage = (m) => {
+    if (!m) return;
+    const target = getMessageChannelForCurrentUser(m);
+    setActiveChannel(target || 'global');
+    setIsCalling(false);
+    setIsOpen(true);
+    setShowEmojiPicker(false);
+    setActionMenu(null);
+    setReactionMenu(null);
+    window.setTimeout(() => {
+      markCurrentChannelReadNow(target || 'global');
+      const safeId = String(m.id || '').replace(/"/g, '\"');
+      const targetEl = chatScrollRef.current?.querySelector?.(`[data-message-id="${safeId}"]`);
+      if (targetEl) targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      else chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }, 200);
+  };
   const hasUnreadGlobalMention = unreadMessages.some(m => (m.recipient === 'global' || !m.recipient) && (m.text?.includes(`@${currentUser.name}`) || m.text?.includes('@all')));
 
   useEffect(() => {
@@ -434,7 +508,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   };
 
   const editMessage = (m) => {
-    if (!samePerson(m.sender, currentUser.name)) return;
+    if (!sameCurrentUser(m.sender)) return;
     setEditingMessage(m);
     setReplyTo(null);
     setMsg(m.text || '');
@@ -458,7 +532,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       id: now,
       recipient: target,
       sentAt: now,
-      text: `↗ Forward to...ed from ${source.sender}: ${summary}`,
+      text: `↗ Forwarded from ${source.sender}: ${summary}`,
       forwardedFrom: { id: source.id, sender: source.sender, text: summary },
       fileName: source.fileName || '',
       fileUrl: source.fileUrl || '',
@@ -487,7 +561,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   };
 
   const deleteForEveryone = (m) => {
-    if (!(samePerson(m.sender, currentUser.name) || currentUser.role === ROLES.ADMIN)) return;
+    if (!(sameCurrentUser(m.sender) || currentUser.role === ROLES.ADMIN)) return;
     if (!window.confirm('Delete this message for everyone?')) return;
     if (typeof onUpdateMessage === 'function') {
       updateMessage({ ...m, deleted: true, text: 'This message was deleted.', fileUrl: '', fileName: '', fileType: '', roomUrl: '', deletedBy: currentUser.name, deletedAt: Date.now() });
@@ -583,9 +657,9 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   };
 
   const channelMessages = (chatMessages || []).filter(m => {
-    if (!m || hiddenMessageIds.includes(String(m.id))) return false;
-    if (activeChannel === 'global') return m.recipient === 'global' || !m.recipient;
-    return (samePerson(m.sender, currentUser.name) && samePerson(m.recipient, activeChannel)) || (samePerson(m.sender, activeChannel) && samePerson(m.recipient, currentUser.name));
+    if (!isMessageForCurrentUser(m)) return false;
+    if (activeChannel === 'global') return isGlobalMessage(m);
+    return (sameCurrentUser(m.sender) && sameChannelIdentity(m.recipient, activeChannel)) || (sameChannelIdentity(m.sender, activeChannel) && sameCurrentUser(m.recipient));
   }).sort((a, b) => Number(a.sentAt || a.id || 0) - Number(b.sentAt || b.id || 0));
   const searchKey = chatSearch.trim().toLowerCase();
   const displayMessages = searchKey
@@ -606,7 +680,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
               <p className="text-indigo-100 text-[10px] font-bold mt-1 uppercase tracking-widest">Global • Direct • Files • Voice</p>
             </div>
             <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
-              <button type="button" onClick={() => { setActiveChannel('global'); setIsCalling(false); currentUser.lastChatRead = Date.now(); markCurrentChannelReadNow('global'); }} className={`w-full text-left px-4 py-3 rounded-xl font-bold flex items-center justify-between transition-colors ${activeChannel === 'global' ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>
+              <button type="button" onClick={() => { setActiveChannel('global'); setIsCalling(false); setShowEmojiPicker(false); setActionMenu(null); setReactionMenu(null); currentUser.lastChatRead = Date.now(); markCurrentChannelReadNow('global'); }} className={`w-full text-left px-4 py-3 rounded-xl font-bold flex items-center justify-between transition-colors ${activeChannel === 'global' ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>
                 <span className="flex items-center"><Hash className="w-4 h-4 mr-2"/> Global Chat</span>
                 {unreadGlobalCount > 0 && <span className="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full">{unreadGlobalCount}</span>}
               </button>
@@ -615,7 +689,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
               {chatUsers.map(u => {
                 const unreadDMCount = getDirectUnreadCountForUser(u.name);
                 return (
-                  <button type="button" key={u.id} onClick={() => { setActiveChannel(u.name); setIsCalling(false); currentUser.lastChatRead = Date.now(); markCurrentChannelReadNow(u.name); }} className={`w-full text-left px-4 py-3 rounded-xl font-bold flex items-center justify-between transition-colors ${samePerson(activeChannel, u.name) ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>
+                  <button type="button" key={u.id} onClick={() => { setActiveChannel(u.name); setIsCalling(false); setShowEmojiPicker(false); setActionMenu(null); setReactionMenu(null); currentUser.lastChatRead = Date.now(); markCurrentChannelReadNow(u.name); }} className={`w-full text-left px-4 py-3 rounded-xl font-bold flex items-center justify-between transition-colors ${samePerson(activeChannel, u.name) ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>
                     <div className="flex flex-col min-w-0 pr-2">
                       <span className="truncate flex items-center gap-2"><span className={`w-2 h-2 rounded-full ${isUserActuallyOnline(u, presenceNow) ? (u.availability === 'Break' ? 'bg-amber-400' : 'bg-emerald-500') : 'bg-slate-300'}`}></span>{u.name}</span>
                       <span className="text-[10px] text-slate-400 uppercase truncate">{isUserActuallyOnline(u, presenceNow) ? (u.availability === 'Break' ? 'On break' : 'Available to chat') : `Offline${u.lastSeenAt || u.lastLogoutAt || u.lastHeartbeatAt ? ` • ${formatLastSeenDateTime(u.lastSeenAt || u.lastLogoutAt || u.lastHeartbeatAt)}` : ''}`} • {u.role}</span>
@@ -678,7 +752,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
                 <div ref={chatScrollRef} className="kalpa-chat-messages flex-1 overflow-y-auto p-5 space-y-4 bg-slate-50/50 custom-scrollbar relative" style={{ minHeight: 0, overflowX: 'hidden' }} onClick={() => { setActionMenu(null); setReactionMenu(null); }}>
                   {displayMessages.length === 0 && <p className="text-center text-sm text-slate-400 mt-10 font-medium">Say hello to {activeChannel === 'global' ? 'the team' : activeChannel}!</p>}
                   {displayMessages.map((m, idx) => {
-                    const isMine = samePerson(m.sender, currentUser.name);
+                    const isMine = sameCurrentUser(m.sender);
                     const showName = idx === 0 || !samePerson(displayMessages[idx-1].sender, m.sender);
                     const reactions = Object.entries(m.reactions || {}).filter(([, names]) => Array.isArray(names) && names.length);
                     const pinned = isPinnedMessage(m);
@@ -695,7 +769,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
                             {m.roomUrl && (
                               <div className={`mt-3 rounded-xl p-3 border ${isMine ? 'bg-indigo-500/30 border-indigo-300' : 'bg-indigo-50 border-indigo-100'}`}>
                                 <p className={`text-xs font-black mb-2 ${isMine ? 'text-white' : 'text-indigo-800'}`}>{m.callType === 'audio' ? 'Audio call invite' : m.callType === 'screen' ? 'Screen sharing invite' : 'Video call invite'}</p>
-                                <div className="flex flex-wrap gap-2"><button type="button" onClick={() => { setCallAudioOnly(m.callType === 'audio'); setActiveChannel(samePerson(m.sender, currentUser.name) ? m.recipient : m.sender); setIsCalling(true); }} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white text-indigo-700' : 'bg-indigo-600 text-white'}`}>Join</button><button type="button" onClick={() => window.open(m.roomUrl, '_blank', 'noopener,noreferrer')} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white/80 text-slate-700' : 'bg-white text-indigo-700 border border-indigo-100'}`}>Open</button></div>
+                                <div className="flex flex-wrap gap-2"><button type="button" onClick={() => { setCallAudioOnly(m.callType === 'audio'); setActiveChannel(sameCurrentUser(m.sender) ? m.recipient : m.sender); setIsCalling(true); }} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white text-indigo-700' : 'bg-indigo-600 text-white'}`}>Join</button><button type="button" onClick={() => window.open(m.roomUrl, '_blank', 'noopener,noreferrer')} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white/80 text-slate-700' : 'bg-white text-indigo-700 border border-indigo-100'}`}>Open</button></div>
                               </div>
                             )}
                             {!m.deleted && renderAttachmentPreview(m, isMine)}
@@ -816,24 +890,19 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       )}
 
       {latestUnreadMessage && !isOpen && (
-        <button type="button" onClick={() => {
-          const target = (latestUnreadMessage.recipient === 'global' || !latestUnreadMessage.recipient) ? 'global' : latestUnreadMessage.sender;
-          setActiveChannel(target);
-          setIsOpen(true);
-          window.setTimeout(() => markCurrentChannelReadNow(target), 100);
-        }} className="mb-3 w-[320px] max-w-[calc(100vw-2rem)] text-left bg-white border border-indigo-100 rounded-2xl shadow-xl p-3 animate-in slide-in-from-bottom-2 hover:shadow-2xl transition-shadow">
+        <button type="button" onClick={() => openConversationForMessage(latestUnreadMessage)} className="kalpa-chat-unread-preview mb-3 w-[320px] max-w-[calc(100vw-2rem)] text-left bg-white border border-indigo-100 rounded-2xl shadow-xl p-3 animate-in slide-in-from-bottom-2 hover:shadow-2xl transition-shadow">
           <div className="flex items-start gap-3">
             <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0"><MessageSquare className="w-5 h-5" /></div>
             <div className="min-w-0 flex-1">
-              <p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">New chat message</p>
+              <p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">New chat message • {getConversationLabel(getMessageChannelForCurrentUser(latestUnreadMessage))}</p>
               <p className="text-sm font-black text-slate-800 truncate">{latestUnreadMessage.sender || 'Team'}</p>
-              <p className="text-xs font-semibold text-slate-500 truncate">{latestUnreadMessage.text || latestUnreadMessage.fileName || 'Attachment'}</p>
+              <p className="text-xs font-semibold text-slate-500 truncate">{getMessagePreviewText(latestUnreadMessage)}</p>
             </div>
           </div>
         </button>
       )}
 
-      <button type="button" onClick={() => { const nextOpen = !isOpen; setIsOpen(nextOpen); if (nextOpen) markCurrentChannelReadNow(activeChannel); }} className="bg-slate-800 hover:bg-slate-700 text-white p-4 rounded-2xl shadow-xl shadow-slate-300 transition-all hover:scale-105 relative">
+      <button type="button" onClick={() => { const nextOpen = !isOpen; setIsOpen(nextOpen); setShowEmojiPicker(false); setActionMenu(null); setReactionMenu(null); if (nextOpen) markCurrentChannelReadNow(activeChannel); }} className={`kalpa-chat-launcher bg-slate-800 hover:bg-slate-700 text-white p-4 rounded-2xl shadow-xl shadow-slate-300 transition-all hover:scale-105 relative ${isOpen ? 'kalpa-chat-launcher-open' : ''}`}>
         <MessageSquare className="w-7 h-7" />
         {totalUnreadCount > 0 && !isOpen && <span className="absolute -top-2 -right-2 bg-red-500 text-white text-[11px] font-black px-2.5 py-1 rounded-full border-2 border-white shadow-sm animate-pulse">{totalUnreadCount > 99 ? '99+' : totalUnreadCount}</span>}
       </button>

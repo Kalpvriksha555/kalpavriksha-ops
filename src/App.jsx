@@ -164,6 +164,37 @@ const applyAssignmentLedgerToProjects = (projects = []) => (Array.isArray(projec
 const sanitizeChatMessageForCache = (message) => sanitizeFileLikeObjectForCache(message);
 const sanitizeChatsForCache = (messages) => (Array.isArray(messages) ? messages.map(sanitizeChatMessageForCache) : []);
 
+const chatTimeValue = (message = {}) => {
+  const raw = message.sentAt || message.createdAt || message.updatedAt || message.id || 0;
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  const parsed = new Date(raw).getTime();
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+
+const mergeChatMessagesByFreshness = (current = [], incoming = []) => {
+  const byId = new Map();
+  [...sanitizeChatsForCache(current), ...sanitizeChatsForCache(incoming)].forEach((message) => {
+    if (!message) return;
+    const key = String(message.id || `${message.sender || message.by || ''}-${message.recipient || ''}-${message.sentAt || message.createdAt || ''}-${message.text || message.fileName || ''}`);
+    const existing = byId.get(key);
+    if (!existing) { byId.set(key, message); return; }
+    const readBy = [...(existing.readBy || []), ...(message.readBy || [])].filter(Boolean);
+    const reactions = { ...(existing.reactions || {}), ...(message.reactions || {}) };
+    byId.set(key, {
+      ...existing,
+      ...message,
+      readBy: Array.from(new Map(readBy.map((entry) => {
+        const name = typeof entry === 'string' ? entry : (entry?.name || JSON.stringify(entry));
+        return [String(name).toLowerCase(), entry];
+      })).values()),
+      reactions,
+      updatedAt: Math.max(chatTimeValue(existing), chatTimeValue(message)),
+    });
+  });
+  return Array.from(byId.values()).sort((a, b) => chatTimeValue(a) - chatTimeValue(b));
+};
+
 const compactLargeLocalStoragePayloads = () => {
   if (typeof localStorage === 'undefined') return;
   ['kalpa_projects', 'kalpa_projects_backup', 'kalpa_chats'].forEach((key) => {
@@ -2385,7 +2416,11 @@ function AppShell() {
           setProjects(prev => filterDeletedProjects(mergeProjectsByFreshness(incoming, prev)));
           try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(incoming)); localStorage.setItem('kalpa_projects', JSON.stringify(incoming)); } catch(e) {}
         }
-        if (Array.isArray(data.chatMessages)) setChatMessages(sanitizeChatsForCache(data.chatMessages));
+        if (Array.isArray(data.chatMessages)) {
+          const incomingChats = sanitizeChatsForCache(data.chatMessages);
+          setChatMessages(incomingChats);
+          try { localStorage.setItem('kalpa_chats', JSON.stringify(incomingChats)); } catch(e) {}
+        }
         if (Array.isArray(data.notifications)) setNotifications(data.notifications);
         if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(data.attendanceLogs);
         setBackendStateReady(true);
@@ -2416,6 +2451,20 @@ function AppShell() {
           const incomingProjects = filterDeletedProjects(sanitizeProjectsForCache(data.projects));
           setProjects(prev => filterDeletedProjects(mergeProjectsByFreshness(incomingProjects, prev)));
           try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(incomingProjects)); localStorage.setItem('kalpa_projects', JSON.stringify(incomingProjects)); } catch(e) {}
+        }
+        if (Array.isArray(data.chatMessages)) {
+          setChatMessages(prev => {
+            const merged = mergeChatMessagesByFreshness(prev, data.chatMessages);
+            try { localStorage.setItem('kalpa_chats', JSON.stringify(sanitizeChatsForCache(merged))); } catch(e) {}
+            return merged;
+          });
+        }
+        if (Array.isArray(data.notifications)) {
+          setNotifications(prev => {
+            const byId = new Map();
+            [...(prev || []), ...data.notifications].forEach(n => { if (n?.id) byId.set(String(n.id), { ...(byId.get(String(n.id)) || {}), ...n }); });
+            return Array.from(byId.values()).sort((a,b) => Number(b.id || 0) - Number(a.id || 0));
+          });
         }
         if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(data.attendanceLogs);
       } catch (e) {}
@@ -2887,7 +2936,7 @@ function AppShell() {
       }
     });
     if (!isGlobalChat && !samePerson(recipient, normalizedMsg.sender)) {
-      const target = (activeUsers || []).find(u => samePerson(u.name, recipient));
+      const target = (activeUsers || []).find(u => samePerson(u.name, recipient) || samePerson(u.username, recipient) || String(u.id || '').toLowerCase() === String(recipient || '').toLowerCase());
       if (target && !notifiedUsers.has(String(target.name).toLowerCase())) {
         const preview = text || normalizedMsg.fileName || 'Attachment';
         addNotification(target.role, target.name, `New message from ${normalizedMsg.sender}: ${preview.length > 60 ? `${preview.slice(0, 57)}...` : preview}`, 'chat', { category: 'Chat', priority: 'Normal' });
@@ -2903,10 +2952,14 @@ function AppShell() {
       const next = prev.map(m => {
         const markAll = activeChannel === '__all__';
         const isGlobal = activeChannel === 'global' && (m.recipient === 'global' || !m.recipient);
-        const isDM = activeChannel !== 'global' && activeChannel !== '__all__' && samePerson(m.sender, activeChannel) && samePerson(m.recipient, currentUser.name);
-        const isIncomingToMe = !samePerson(m.sender, currentUser.name) && (markAll || isGlobal || isDM || samePerson(m.recipient, currentUser.name) || m.recipient === 'global' || !m.recipient);
+        const sameCurrentUser = (value = '') => !!String(value || '').trim() && (samePerson(value, currentUser.name) || samePerson(value, currentUser.username) || (!!currentUser.id && String(value || '').toLowerCase() === String(currentUser.id || '').toLowerCase()));
+        const isDM = activeChannel !== 'global' && activeChannel !== '__all__' && samePerson(m.sender, activeChannel) && sameCurrentUser(m.recipient);
+        const isIncomingToMe = !sameCurrentUser(m.sender) && (markAll ? (sameCurrentUser(m.recipient) || m.recipient === 'global' || !m.recipient) : (isGlobal || isDM));
         if (!isIncomingToMe) return m;
-        const alreadyRead = hasReadBy(m, currentUser.name);
+        const alreadyRead = (m.readBy || []).some(entry => {
+          const name = typeof entry === 'string' ? entry : entry?.name;
+          return sameCurrentUser(name);
+        });
         if (alreadyRead) return m;
         const updated = { ...m, readBy: [...(m.readBy || []), { name: currentUser.name, time: nowText }] };
         updates.push(updated);
@@ -2922,7 +2975,7 @@ function AppShell() {
     const readRelevantNotifications = [];
     setNotifications(prev => {
       const next = prev.map(n => {
-        const belongsToMe = (!n.targetUser && n.targetRole === currentUser.role) || n.targetUser === currentUser.name;
+        const belongsToMe = (!n.targetUser && n.targetRole === currentUser.role) || samePerson(n.targetUser, currentUser.name) || samePerson(n.targetUser, currentUser.username) || (!!currentUser.id && String(n.targetUser || '').toLowerCase() === String(currentUser.id || '').toLowerCase());
         const isChatNotice = ['mention', 'chat', 'message'].includes(String(n.type || '').toLowerCase()) || /mention|message|chat/i.test(String(n.title || ''));
         if (!belongsToMe || !isChatNotice || (n.readBy || []).includes(currentUser.name)) return n;
         const updated = { ...n, readBy: [...(n.readBy || []), currentUser.name] };

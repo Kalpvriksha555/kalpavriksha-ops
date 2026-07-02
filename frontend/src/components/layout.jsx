@@ -195,25 +195,40 @@ export const MobileSearchBar = ({ globalSearch, setGlobalSearch }) => (
   </div>
 );
 
-export const MainTabNavigation = ({ currentUser, ROLES, activeTab, setActiveTab }) => (
-  <div className="flex gap-2 mb-6 sm:mb-8 bg-white p-1.5 rounded-2xl shadow-sm border-2 border-slate-100 w-full sm:w-fit max-w-full overflow-x-auto sm:flex-wrap custom-scrollbar">
-    <button type="button" onClick={() => setActiveTab('command')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'command' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Command Centre</button>
+export const MainTabNavigation = ({ currentUser, ROLES, activeTab, setActiveTab }) => {
+  const selectTab = (tab, event) => {
+    if (event) {
+      event.preventDefault?.();
+      event.stopPropagation?.();
+    }
+    setActiveTab(tab);
+  };
+  const tabButtonProps = (tab) => ({
+    type: 'button',
+    onClick: () => setActiveTab(tab),
+    onTouchEnd: (event) => selectTab(tab, event),
+  });
+
+  return (
+  <div className="kalpa-main-tabs flex gap-2 mb-6 sm:mb-8 bg-white p-1.5 rounded-2xl shadow-sm border-2 border-slate-100 w-full sm:w-fit max-w-full overflow-x-auto sm:flex-wrap custom-scrollbar relative z-[90] pointer-events-auto touch-pan-x">
+    <button {...tabButtonProps('command')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'command' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Command Centre</button>
     {currentUser.role === ROLES.DESIGNER && (
-      <button type="button" onClick={() => setActiveTab('my_tasks')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 flex items-center ${activeTab === 'my_tasks' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}><User className="w-4 h-4 mr-1.5" /> My Tasks</button>
+      <button {...tabButtonProps('my_tasks')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 flex items-center pointer-events-auto ${activeTab === 'my_tasks' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}><User className="w-4 h-4 mr-1.5" /> My Tasks</button>
     )}
-    {currentUser.role !== ROLES.DESIGNER && <button type="button" onClick={() => setActiveTab('board')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'board' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Operations</button>}
+    {currentUser.role !== ROLES.DESIGNER && <button {...tabButtonProps('board')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'board' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Operations</button>}
     {currentUser.role === ROLES.MANAGER && (
-      <button type="button" onClick={() => setActiveTab('my_tasks')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 flex items-center ${activeTab === 'my_tasks' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}><User className="w-4 h-4 mr-1.5" /> My Tasks</button>
+      <button {...tabButtonProps('my_tasks')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 flex items-center pointer-events-auto ${activeTab === 'my_tasks' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}><User className="w-4 h-4 mr-1.5" /> My Tasks</button>
     )}
-    <button type="button" onClick={() => setActiveTab('productivity')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'productivity' ? 'bg-emerald-100 text-emerald-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Performance</button>
-    {currentUser.role === ROLES.ADMIN && <button type="button" onClick={() => setActiveTab('closing')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'closing' ? 'bg-slate-800 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Daily Closing</button>}
+    <button {...tabButtonProps('productivity')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'productivity' ? 'bg-emerald-100 text-emerald-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Performance</button>
+    {currentUser.role === ROLES.ADMIN && <button {...tabButtonProps('closing')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'closing' ? 'bg-slate-800 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Daily Closing</button>}
     {currentUser.role === ROLES.ADMIN && (
-      <button type="button" onClick={() => setActiveTab('ledger')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'ledger' ? 'bg-amber-100 text-amber-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Finance</button>
+      <button {...tabButtonProps('ledger')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'ledger' ? 'bg-amber-100 text-amber-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Finance</button>
     )}
-    <button type="button" onClick={() => setActiveTab('team')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'team' ? 'bg-emerald-100 text-emerald-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Team</button>
-    <button type="button" onClick={() => setActiveTab('attendance')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'attendance' ? 'bg-indigo-100 text-indigo-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Attendance</button>
-    <button type="button" onClick={() => setActiveTab('calculator')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'calculator' ? 'bg-blue-100 text-blue-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Tools</button>
-    <button type="button" onClick={() => setActiveTab('archive')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 ${activeTab === 'archive' ? 'bg-slate-800 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Archive</button>
-    <button type="button" onClick={() => setActiveTab('meeting')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 flex items-center ${activeTab === 'meeting' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}><Video className="w-4 h-4 mr-1.5" /> Team Meeting</button>
+    <button {...tabButtonProps('team')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'team' ? 'bg-emerald-100 text-emerald-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Team</button>
+    <button {...tabButtonProps('attendance')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'attendance' ? 'bg-indigo-100 text-indigo-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Attendance</button>
+    <button {...tabButtonProps('calculator')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'calculator' ? 'bg-blue-100 text-blue-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Tools</button>
+    <button {...tabButtonProps('archive')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'archive' ? 'bg-slate-800 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Archive</button>
+    <button {...tabButtonProps('meeting')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 flex items-center pointer-events-auto ${activeTab === 'meeting' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}><Video className="w-4 h-4 mr-1.5" /> Team Meeting</button>
   </div>
-);
+  );
+};
