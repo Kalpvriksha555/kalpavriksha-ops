@@ -216,15 +216,29 @@ export const getUserFreeSince = (projects = [], userName = '', presenceTimes = {
   if (normalizeRole(user?.role) === PRESENCE_ROLES.ADMIN) return 0;
   const active = getUserActiveTasks(projects, userName);
   if (active.length > 0) return 0;
+
   const key = normalizePersonName(userName);
-  return (
-    toMs(presenceTimes?.[key]?.freeSince)
-    || getUserLastCompletedAt(projects, userName)
-    || toMs(user?.freeSinceAt)
-    || toMs(user?.availableSinceAt)
-    || toMs(user?.availabilityUpdatedAt)
-    || 0
+  const sessionStart = Math.max(
+    toMs(user?.lastLoginAt),
+    toMs(user?.loginAt),
+    toMs(user?.sessionStartedAt)
   );
+
+  // Free-since must belong to the current online session. Old availabilityUpdatedAt
+  // values were causing wrong labels like "Free since 46h" after a fresh login.
+  const candidates = [
+    toMs(presenceTimes?.[key]?.freeSince),
+    getUserLastCompletedAt(projects, userName),
+    toMs(user?.freeSinceAt),
+    toMs(user?.availableSinceAt),
+    toMs(user?.availabilityUpdatedAt)
+  ].filter(Boolean);
+
+  const sessionCandidates = sessionStart
+    ? candidates.filter(ms => ms >= sessionStart)
+    : candidates;
+
+  return sessionCandidates.length ? Math.max(...sessionCandidates) : sessionStart || 0;
 };
 
 export const getUserBusySince = (projects = [], userName = '', presenceTimes = {}) => {

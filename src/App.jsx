@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { formatLastSeenDateTime, formatCallDuration, formatDateKey, formatDateTime, formatDuration, formatMinutes } from './utils/date';
 import { allProjectDocs, getCompletedDocuments, getLatestCompletedFileName, getTaskDescription, getEstimateDetails, getCompletedFileBadge } from './utils/taskDisplayUtils';
+import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass, buildPaymentTrackingUpdate } from './utils/paymentStatusUtils';
 import { getBreakMinutesFromLog, getTaskBusySince, getUserActiveTasks, getUserLastCompletedAt, getUserFreeSince, getUserBusySince, getDraftingElapsedMs, getTotalLoggedInMinutesFromLog, getActiveMinutesFromLog, getAttendanceActiveTaskMinutes, buildAttendanceAccrual, deriveAttendanceSession, getAttendanceFirstLoginLabel } from './utils/presenceAttendanceUtils';
 import { createSafeMeetingRoomName, buildJitsiUrl } from './utils/meeting';
 import { copyTextToClipboard } from './utils/clipboard';
@@ -684,6 +685,55 @@ const getAssignmentRecommendations = (users = [], projects = []) => {
       return { ...u, active, doneToday, limit, onBreak, offline, score };
     })
     .sort((a,b) => a.score - b.score || b.doneToday - a.doneToday || a.name.localeCompare(b.name));
+};
+
+const getDisplayTaskId = (project = {}) => project.displayId || project.originalTaskId || project.id;
+const isRevisionWorkItem = (project = {}) => project.isRevisionWorkItem === true || String(project.id || '').includes('__REV__');
+const getNextRevisionNumber = (project = {}) => {
+  const existing = [
+    ...(Array.isArray(project.revisionHistory) ? project.revisionHistory : []),
+    ...(Array.isArray(project.subTasks) ? project.subTasks : [])
+  ];
+  const nums = existing.map(item => Number(item.revisionNumber || String(item.revisionCode || '').replace(/[^0-9]/g, ''))).filter(Number.isFinite);
+  return Math.max(0, ...nums) + 1;
+};
+const makeRevisionWorkItem = (project = {}, revision = {}, requestedBy = '') => {
+  const now = revision.createdAt || Date.now();
+  const revisionNumber = revision.revisionNumber || getNextRevisionNumber(project);
+  const baseId = String(project.originalTaskId || project.displayId || project.id || `TASK-${now}`);
+  return normalizeProjectRecord({
+    ...project,
+    id: `${baseId}__REV__${revisionNumber}_${now}`,
+    displayId: baseId,
+    originalTaskId: baseId,
+    isRevisionWorkItem: true,
+    revisionNumber,
+    revisionCode: `R${revisionNumber}`,
+    taskName: `${project.taskName || makeTaskDisplayName(project)} • Revision ${revisionNumber}`,
+    status: 'Revision Pending',
+    priority: 'Urgent',
+    createdAt: now,
+    updatedAt: now,
+    syncVersion: now,
+    completedAt: null,
+    approvedAt: null,
+    submittedAt: null,
+    draftingStartedAt: null,
+    currentDraftingStartedAt: null,
+    draftingCompletedAt: null,
+    internalReviewStartedAt: null,
+    finalConclusion: 'Revision Pending',
+    reviewStatus: 'Revision Pending',
+    revisionRequestedAt: now,
+    revisionRequestedBy: requestedBy,
+    documents: revision.attachments ? [...revision.attachments] : [],
+    completedFiles: [],
+    subTasks: [{ ...revision, id: revision.id || now, status: 'Pending' }],
+    timeline: [
+      { id: now, text: `Revision ${revisionNumber} created from original task ${baseId}${requestedBy ? ` by ${requestedBy}` : ''}`, time: new Date(now).toLocaleString() },
+      ...(revision.title ? [{ id: now + 1, text: `Revision note: ${revision.title}`, time: new Date(now).toLocaleString() }] : [])
+    ]
+  });
 };
 
 const isIncompleteProject = (project = {}) => project.status !== 'Completed';
@@ -2040,27 +2090,46 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     if (!revisionText && subTaskAttachments.length === 0) return;
     const now = Date.now();
     const title = revisionText || `Revision attachment added by ${user.name}`;
+    const revisionNumber = getNextRevisionNumber(project);
+    const revisionItem = {
+      id: now,
+      title,
+      status: 'Pending',
+      addedBy: user.name,
+      createdAt: now,
+      time: new Date(now).toLocaleString(),
+      timeSpent: '0h',
+      attachments: subTaskAttachments,
+      revisionNumber,
+      revisionCode: `R${revisionNumber}`
+    };
+    const isArchivedCompletedCase = project.status === 'Completed';
+    const revisionWorkItem = isArchivedCompletedCase ? makeRevisionWorkItem(project, revisionItem, user.name) : null;
     const updatedProject = {
       ...project,
-      priority: 'Urgent',
-      status: 'Revision Pending',
-      reviewStatus: 'Reverted',
+      // Keep archived completed cases completed/permanent. The active revision is created as a temporary work item.
+      priority: isArchivedCompletedCase ? project.priority : 'Urgent',
+      status: isArchivedCompletedCase ? project.status : 'Revision Pending',
+      reviewStatus: isArchivedCompletedCase ? project.reviewStatus : 'Reverted',
       revisionRequestedAt: now,
       reviewedBy: user.name,
-      documents: [...(project.documents || []), ...subTaskAttachments],
-      subTasks: [
-        ...(project.subTasks || []),
-        { id: now, title, status: 'Pending', addedBy: user.name, createdAt: now, time: new Date(now).toLocaleString(), timeSpent: '0h', attachments: subTaskAttachments }
+      documents: isArchivedCompletedCase ? (project.documents || []) : [...(project.documents || []), ...subTaskAttachments],
+      subTasks: isArchivedCompletedCase ? (project.subTasks || []) : [...(project.subTasks || []), revisionItem],
+      revisionHistory: [
+        ...(project.revisionHistory || []),
+        { ...revisionItem, action: 'Revision Requested', reviewer: user.name, at: now, workItemId: revisionWorkItem?.id || null }
       ],
       reviewHistory: [
         ...(project.reviewHistory || []),
-        { id: now, action: 'Revision Requested', comment: title, reviewer: user.name, at: now, attachments: subTaskAttachments }
+        { id: now, action: 'Revision Requested', comment: title, reviewer: user.name, at: now, attachments: subTaskAttachments, revisionNumber, workItemId: revisionWorkItem?.id || null }
       ],
       timeline: [
         ...(project.timeline || []),
-        { id: now, text: `Revision requested by ${user.name}: ${title}`, time: new Date(now).toLocaleString() },
+        { id: now, text: `Revision ${revisionNumber} requested by ${user.name}: ${title}`, time: new Date(now).toLocaleString() },
+        ...(isArchivedCompletedCase ? [{ id: now + 0.5, text: `Temporary revision work item created for today while original task ID remains permanent.`, time: new Date(now).toLocaleString() }] : []),
         ...(subTaskAttachments.length ? [{ id: now + 1, text: `Revision attachment added by ${user.name}: ${subTaskAttachments.map(d => d.name).join(', ')}`, time: new Date(now).toLocaleString() }] : [])
-      ]
+      ],
+      ...(revisionWorkItem ? { _spawnProjects: [revisionWorkItem] } : {})
     };
     onUpdateProject(updatedProject, project);
     setNewSubTask('');
@@ -3296,42 +3365,103 @@ function AppShell() {
   };
 
   const handleUpdateProject = async (updatedProject, oldProject) => {
+    const spawnedProjects = Array.isArray(updatedProject?._spawnProjects) ? updatedProject._spawnProjects : [];
+    if (updatedProject && Object.prototype.hasOwnProperty.call(updatedProject, '_spawnProjects')) {
+      const { _spawnProjects, ...cleanProject } = updatedProject;
+      updatedProject = cleanProject;
+    }
     updatedProject = normalizeProjectRecord({ ...updatedProject, updatedAt: Date.now(), syncVersion: Date.now() });
-    if (isAssignedValue(updatedProject.assignedTo)) recordAssignmentLedger(updatedProject);
+    const normalizedSpawned = spawnedProjects.map(p => normalizeProjectRecord({ ...p, updatedAt: p.updatedAt || Date.now(), syncVersion: p.syncVersion || Date.now() }));
+
+    // When a temporary revision work item is finally approved, copy its outcome back to the permanent original task.
+    let linkedOriginalUpdate = null;
+    if (isRevisionWorkItem(updatedProject) && updatedProject.status === 'Completed' && updatedProject.originalTaskId) {
+      const original = projects.find(p => String(p.id) === String(updatedProject.originalTaskId));
+      if (original) {
+        const now = Date.now();
+        const revisionNumber = updatedProject.revisionNumber || getNextRevisionNumber(original);
+        const revisionFiles = [...(updatedProject.completedFiles || []), ...(updatedProject.documents || []).filter(d => String(d.type || '').toLowerCase() === 'completed')];
+        linkedOriginalUpdate = normalizeProjectRecord({
+          ...original,
+          updatedAt: now,
+          syncVersion: now,
+          documents: [...(original.documents || []), ...revisionFiles],
+          completedFiles: [...(original.completedFiles || []), ...revisionFiles],
+          revisionHistory: [
+            ...(original.revisionHistory || []),
+            {
+              id: now,
+              revisionNumber,
+              revisionCode: `R${revisionNumber}`,
+              action: 'Revision Completed',
+              status: 'Completed',
+              completedBy: updatedProject.completedBy || updatedProject.assignedTo,
+              completedAt: updatedProject.completedAt || now,
+              workItemId: updatedProject.id,
+              files: revisionFiles
+            }
+          ],
+          timeline: [
+            ...(original.timeline || []),
+            { id: now, text: `Revision ${revisionNumber} completed and linked back to original task ${original.id}.`, time: new Date(now).toLocaleString() }
+          ]
+        });
+      }
+    }
+
+    const projectsToSave = [updatedProject, ...normalizedSpawned, ...(linkedOriginalUpdate ? [linkedOriginalUpdate] : [])];
+    projectsToSave.forEach(p => { if (isAssignedValue(p.assignedTo)) recordAssignmentLedger(p); });
     oldProject = oldProject ? normalizeProjectRecord(oldProject) : oldProject;
     // Update the screen immediately. Previously the app waited for Firestore;
     // if a completed file was large or Firebase rejected it, the upload looked like nothing happened.
     setSelectedProject(updatedProject);
     setProjects(prev => {
-      const next = mergeProjectsByFreshness(prev.filter(p => String(p.id) !== String(updatedProject.id)), [updatedProject]);
+      const ids = new Set(projectsToSave.map(p => String(p.id)));
+      const next = mergeProjectsByFreshness(prev.filter(p => !ids.has(String(p.id))), projectsToSave);
       persistAndBroadcastProjects(next);
       return next;
     });
     
     if (firebaseUser && !isLocalMock) {
-        try {
-          await setDoc(
-            doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', updatedProject.id.toString()),
-            stripLargeLocalFilesForCloud(updatedProject)
-          );
-        } catch(e){
-          console.warn('Project cloud save failed, but local screen has been updated.', e);
+        for (const projectToSave of projectsToSave) {
+          try {
+            await setDoc(
+              doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', projectToSave.id.toString()),
+              stripLargeLocalFilesForCloud(projectToSave)
+            );
+          } catch(e){
+            console.warn('Project cloud save failed, but local screen has been updated.', e);
+          }
         }
     }
 
+    normalizedSpawned.forEach(spawned => {
+      const targetRole = activeUsers.find(u => u.name === spawned.assignedTo)?.role || ROLES.DESIGNER;
+      addNotification(targetRole, spawned.assignedTo, `URGENT REVISION assigned: ${getDisplayTaskId(spawned)} ${spawned.revisionCode || ''}`.trim(), 'urgent');
+      addNotification(ROLES.MANAGER, null, `Revision work item created: ${getDisplayTaskId(spawned)} ${spawned.revisionCode || ''}`.trim(), 'urgent');
+    });
+
     if (oldProject && updatedProject.status !== oldProject.status) {
-      if (updatedProject.status === 'Completed') addNotification(ROLES.MANAGER, null, `Task ${updatedProject.id} completed and ready`, 'success');
-      if (updatedProject.status === 'Completed') addNotification(ROLES.DESIGNER, updatedProject.assignedTo, `Task ${updatedProject.id} marked as Completed`, 'success');
+      if (updatedProject.status === 'Completed') addNotification(ROLES.MANAGER, null, `Task ${getDisplayTaskId(updatedProject)} completed and ready`, 'success');
+      if (updatedProject.status === 'Completed') addNotification(ROLES.DESIGNER, updatedProject.assignedTo, `Task ${getDisplayTaskId(updatedProject)} marked as Completed`, 'success');
     }
     if (oldProject && updatedProject.priority === 'Urgent' && oldProject.priority !== 'Urgent') {
-      addNotification(ROLES.DESIGNER, updatedProject.assignedTo, `URGENT REVISION: Task ${updatedProject.id}`, 'urgent');
+      addNotification(ROLES.DESIGNER, updatedProject.assignedTo, `URGENT REVISION: Task ${getDisplayTaskId(updatedProject)}`, 'urgent');
     }
     if (oldProject && updatedProject.assignedTo !== oldProject.assignedTo && updatedProject.assignedTo !== 'Unassigned') {
       const targetRole = activeUsers.find(u => u.name === updatedProject.assignedTo)?.role || ROLES.DESIGNER;
-      addNotification(targetRole, updatedProject.assignedTo, `Task Re-assigned to you: ${updatedProject.id}`, 'info');
+      addNotification(targetRole, updatedProject.assignedTo, `Task Re-assigned to you: ${getDisplayTaskId(updatedProject)}`, 'info');
     }
   };
   
+
+  const handlePaymentStatusChange = async (project, status) => {
+    if (!project || currentUser?.role !== ROLES.ADMIN) return;
+    const normalizedStatus = PAYMENT_TRACKING_OPTIONS.includes(status) ? status : 'Not Updated';
+    const updatedProject = buildPaymentTrackingUpdate(project, normalizedStatus, currentUser);
+    await handleUpdateProject(updatedProject, project);
+  };
+
   const handleDeleteTask = async (taskId) => {
      const id = String(taskId);
      setSelectedProject(null);
@@ -3805,7 +3935,7 @@ function AppShell() {
         ) : activeTab === 'ledger' && currentUser.role === ROLES.ADMIN ? (
           <LedgerView projects={projects} onSelectProject={(p) => { setActiveTab('board'); setSelectedProject(p); }} />
         ) : activeTab === 'archive' ? (
-          <HistoryArchiveView projects={projects} onSelectProject={(p) => { setActiveTab('board'); setSelectedProject(p); }} />
+          <HistoryArchiveView projects={projects} currentUser={currentUser} onSelectProject={(p) => { setActiveTab('board'); setSelectedProject(p); }} onPaymentStatusChange={handlePaymentStatusChange} />
         ) : activeTab === 'team' ? (
           <TeamPerformanceView users={activeUsers} projects={projects} onUpdateUser={handleUpdateUser} currentUser={currentUser} />
         ) : activeTab === 'attendance' ? (
@@ -3832,10 +3962,12 @@ function AppShell() {
             setSelectedProject={setSelectedProject}
             nowTick={nowTick}
             ROLES={ROLES}
+            currentUser={currentUser}
             getCustomerDisplayName={getCustomerDisplayName}
             getDraftElapsed={getDraftElapsed}
             getOperationalUsers={getOperationalUsers}
             isUserActuallyOnline={isUserActuallyOnline}
+            onPaymentStatusChange={handlePaymentStatusChange}
           />
         )}
       </main>

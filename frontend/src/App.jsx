@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { formatLastSeenDateTime, formatCallDuration, formatDateKey, formatDateTime, formatDuration, formatMinutes } from './utils/date';
 import { allProjectDocs, getCompletedDocuments, getLatestCompletedFileName, getTaskDescription, getEstimateDetails, getCompletedFileBadge } from './utils/taskDisplayUtils';
+import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass, buildPaymentTrackingUpdate } from './utils/paymentStatusUtils';
 import { getBreakMinutesFromLog, getTaskBusySince, getUserActiveTasks, getUserLastCompletedAt, getUserFreeSince, getUserBusySince, getDraftingElapsedMs, getTotalLoggedInMinutesFromLog, getActiveMinutesFromLog, getAttendanceActiveTaskMinutes, buildAttendanceAccrual, deriveAttendanceSession, getAttendanceFirstLoginLabel } from './utils/presenceAttendanceUtils';
 import { createSafeMeetingRoomName, buildJitsiUrl } from './utils/meeting';
 import { copyTextToClipboard } from './utils/clipboard';
@@ -721,6 +722,55 @@ const getAssignmentRecommendations = (users = [], projects = []) => {
       return { ...u, active, doneToday, limit, onBreak, offline, score };
     })
     .sort((a,b) => a.score - b.score || b.doneToday - a.doneToday || a.name.localeCompare(b.name));
+};
+
+const getDisplayTaskId = (project = {}) => project.displayId || project.originalTaskId || project.id;
+const isRevisionWorkItem = (project = {}) => project.isRevisionWorkItem === true || String(project.id || '').includes('__REV__');
+const getNextRevisionNumber = (project = {}) => {
+  const existing = [
+    ...(Array.isArray(project.revisionHistory) ? project.revisionHistory : []),
+    ...(Array.isArray(project.subTasks) ? project.subTasks : [])
+  ];
+  const nums = existing.map(item => Number(item.revisionNumber || String(item.revisionCode || '').replace(/[^0-9]/g, ''))).filter(Number.isFinite);
+  return Math.max(0, ...nums) + 1;
+};
+const makeRevisionWorkItem = (project = {}, revision = {}, requestedBy = '') => {
+  const now = revision.createdAt || Date.now();
+  const revisionNumber = revision.revisionNumber || getNextRevisionNumber(project);
+  const baseId = String(project.originalTaskId || project.displayId || project.id || `TASK-${now}`);
+  return normalizeProjectRecord({
+    ...project,
+    id: `${baseId}__REV__${revisionNumber}_${now}`,
+    displayId: baseId,
+    originalTaskId: baseId,
+    isRevisionWorkItem: true,
+    revisionNumber,
+    revisionCode: `R${revisionNumber}`,
+    taskName: `${project.taskName || makeTaskDisplayName(project)} • Revision ${revisionNumber}`,
+    status: 'Revision Pending',
+    priority: 'Urgent',
+    createdAt: now,
+    updatedAt: now,
+    syncVersion: now,
+    completedAt: null,
+    approvedAt: null,
+    submittedAt: null,
+    draftingStartedAt: null,
+    currentDraftingStartedAt: null,
+    draftingCompletedAt: null,
+    internalReviewStartedAt: null,
+    finalConclusion: 'Revision Pending',
+    reviewStatus: 'Revision Pending',
+    revisionRequestedAt: now,
+    revisionRequestedBy: requestedBy,
+    documents: revision.attachments ? [...revision.attachments] : [],
+    completedFiles: [],
+    subTasks: [{ ...revision, id: revision.id || now, status: 'Pending' }],
+    timeline: [
+      { id: now, text: `Revision ${revisionNumber} created from original task ${baseId}${requestedBy ? ` by ${requestedBy}` : ''}`, time: new Date(now).toLocaleString() },
+      ...(revision.title ? [{ id: now + 1, text: `Revision note: ${revision.title}`, time: new Date(now).toLocaleString() }] : [])
+    ]
+  });
 };
 
 const isIncompleteProject = (project = {}) => project.status !== 'Completed';
@@ -1704,6 +1754,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showEditCase, setShowEditCase] = useState(false);
   const [isUploadingFinal, setIsUploadingFinal] = useState(false);
+  const [fileUploadProgress, setFileUploadProgress] = useState(null);
   const [subTaskAttachments, setSubTaskAttachments] = useState([]);
   const [noteAttachments, setNoteAttachments] = useState([]);
   const [isUploadingRevisionAttachment, setIsUploadingRevisionAttachment] = useState(false);
@@ -1715,6 +1766,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const canDesignerRevertOwnTask = user.role === ROLES.DESIGNER && isAssignedToMe;
   const canRevertTask = (canManage || canDesignerRevertOwnTask) && project.status !== 'Lead Received';
   const showFinancials = user.role === ROLES.ADMIN;
+  const paymentTrackingStatus = getPaymentTrackingStatus(project);
   const activeDraftingForUser = (usersProjects = []) => (usersProjects || []).find(p => samePerson(p.assignedTo, project.assignedTo || user.name) && p.status === 'Drafting' && String(p.id) !== String(project.id));
 
   const handleSaveCaseEdit = (event) => {
@@ -1924,14 +1976,20 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     const files = e.target.files;
     if (!files || files.length === 0) return;
     if (type === 'completed') setIsUploadingFinal(true);
+    setFileUploadProgress({ type, fileName: files[0]?.name || 'file', percent: 0, current: 1, total: files.length });
 
     try {
     const updatedProject = { ...project };
     if (!updatedProject.documents) updatedProject.documents = [];
     if (!updatedProject.completedFiles) updatedProject.completedFiles = [];
 
-    for (const file of Array.from(files)) {
-        const uploadedDoc = await uploadProjectFile(file, project.id, type, user.name);
+    const fileList = Array.from(files);
+    for (let index = 0; index < fileList.length; index += 1) {
+        const file = fileList[index];
+        setFileUploadProgress({ type, fileName: file.name, percent: 0, current: index + 1, total: fileList.length });
+        const uploadedDoc = await uploadProjectFile(file, project.id, type, user.name, (percent) => {
+          setFileUploadProgress({ type, fileName: file.name, percent, current: index + 1, total: fileList.length });
+        });
         updatedProject.documents.push(uploadedDoc);
 
         if (type === 'completed') {
@@ -1964,6 +2022,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
       alert(`File upload failed: ${error?.message || 'Please check your internet connection and try again.'}`);
     } finally {
       if (type === 'completed') setIsUploadingFinal(false);
+      setFileUploadProgress(null);
       if (e?.target) e.target.value = '';
     }
   };
@@ -1977,7 +2036,10 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     try {
       const uploadedDocs = [];
       for (const file of files) {
-        const uploadedDoc = await uploadProjectFile(file, project.id, attachmentType, user.name);
+        setFileUploadProgress({ type: attachmentType, fileName: file.name, percent: 0, current: uploadedDocs.length + 1, total: files.length });
+        const uploadedDoc = await uploadProjectFile(file, project.id, attachmentType, user.name, (percent) => {
+          setFileUploadProgress({ type: attachmentType, fileName: file.name, percent, current: uploadedDocs.length + 1, total: files.length });
+        });
         uploadedDocs.push({
           ...uploadedDoc,
           id: uploadedDoc.id || `${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -1992,6 +2054,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
       alert(`Attachment upload failed: ${error?.message || 'Please check your internet connection and try again.'}`);
     } finally {
       setUploading(false);
+      setFileUploadProgress(null);
       if (event?.target) event.target.value = '';
     }
   };
@@ -2076,27 +2139,46 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     if (!revisionText && subTaskAttachments.length === 0) return;
     const now = Date.now();
     const title = revisionText || `Revision attachment added by ${user.name}`;
+    const revisionNumber = getNextRevisionNumber(project);
+    const revisionItem = {
+      id: now,
+      title,
+      status: 'Pending',
+      addedBy: user.name,
+      createdAt: now,
+      time: new Date(now).toLocaleString(),
+      timeSpent: '0h',
+      attachments: subTaskAttachments,
+      revisionNumber,
+      revisionCode: `R${revisionNumber}`
+    };
+    const isArchivedCompletedCase = project.status === 'Completed';
+    const revisionWorkItem = isArchivedCompletedCase ? makeRevisionWorkItem(project, revisionItem, user.name) : null;
     const updatedProject = {
       ...project,
-      priority: 'Urgent',
-      status: 'Revision Pending',
-      reviewStatus: 'Reverted',
+      // Keep archived completed cases completed/permanent. The active revision is created as a temporary work item.
+      priority: isArchivedCompletedCase ? project.priority : 'Urgent',
+      status: isArchivedCompletedCase ? project.status : 'Revision Pending',
+      reviewStatus: isArchivedCompletedCase ? project.reviewStatus : 'Reverted',
       revisionRequestedAt: now,
       reviewedBy: user.name,
-      documents: [...(project.documents || []), ...subTaskAttachments],
-      subTasks: [
-        ...(project.subTasks || []),
-        { id: now, title, status: 'Pending', addedBy: user.name, createdAt: now, time: new Date(now).toLocaleString(), timeSpent: '0h', attachments: subTaskAttachments }
+      documents: isArchivedCompletedCase ? (project.documents || []) : [...(project.documents || []), ...subTaskAttachments],
+      subTasks: isArchivedCompletedCase ? (project.subTasks || []) : [...(project.subTasks || []), revisionItem],
+      revisionHistory: [
+        ...(project.revisionHistory || []),
+        { ...revisionItem, action: 'Revision Requested', reviewer: user.name, at: now, workItemId: revisionWorkItem?.id || null }
       ],
       reviewHistory: [
         ...(project.reviewHistory || []),
-        { id: now, action: 'Revision Requested', comment: title, reviewer: user.name, at: now, attachments: subTaskAttachments }
+        { id: now, action: 'Revision Requested', comment: title, reviewer: user.name, at: now, attachments: subTaskAttachments, revisionNumber, workItemId: revisionWorkItem?.id || null }
       ],
       timeline: [
         ...(project.timeline || []),
-        { id: now, text: `Revision requested by ${user.name}: ${title}`, time: new Date(now).toLocaleString() },
+        { id: now, text: `Revision ${revisionNumber} requested by ${user.name}: ${title}`, time: new Date(now).toLocaleString() },
+        ...(isArchivedCompletedCase ? [{ id: now + 0.5, text: `Temporary revision work item created for today while original task ID remains permanent.`, time: new Date(now).toLocaleString() }] : []),
         ...(subTaskAttachments.length ? [{ id: now + 1, text: `Revision attachment added by ${user.name}: ${subTaskAttachments.map(d => d.name).join(', ')}`, time: new Date(now).toLocaleString() }] : [])
-      ]
+      ],
+      ...(revisionWorkItem ? { _spawnProjects: [revisionWorkItem] } : {})
     };
     onUpdateProject(updatedProject, project);
     setNewSubTask('');
@@ -2133,6 +2215,23 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     const updatedProject = {
       ...project,
       ledger: { ...(project.ledger || {}), [field]: value, updatedAt: Date.now() }
+    };
+    onUpdateProject(updatedProject, project);
+  };
+
+  const updatePaymentTrackingStatus = (status) => {
+    if (!showFinancials) return;
+    const now = Date.now();
+    const normalizedStatus = PAYMENT_TRACKING_OPTIONS.includes(status) ? status : 'Not Updated';
+    const updatedProject = {
+      ...project,
+      paymentTrackingStatus: normalizedStatus,
+      paymentTrackingUpdatedAt: now,
+      paymentTrackingUpdatedBy: user.name,
+      timeline: [
+        ...(project.timeline || []),
+        { id: now, text: `Payment status marked ${normalizedStatus} by ${user.name}`, time: new Date(now).toLocaleString() }
+      ]
     };
     onUpdateProject(updatedProject, project);
   };
@@ -2272,6 +2371,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
               <h1 className="text-2xl font-black text-slate-800 tracking-tight">{project.id}</h1>
               <Badge colorClass={getStatusColor(project.status)}>{project.status}</Badge>
               <Badge colorClass={getPriorityColor(project.priority, project.dueDate)}>{project.priority}</Badge>
+              {showFinancials && <Badge colorClass={getPaymentStatusBadgeClass(paymentTrackingStatus)}>Payment: {paymentTrackingStatus}</Badge>}
             </div>
             <p className="text-sm font-semibold text-slate-500 flex items-center">
               <Building2 className="w-4 h-4 mr-1.5 opacity-70"/> {getCustomerDisplayName(project)} • {project.location}
@@ -2518,13 +2618,13 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
              <div className="space-y-4">
                <h3 className="text-xs font-extrabold text-slate-400 uppercase tracking-widest bg-slate-50 py-2 px-3 rounded-lg inline-block">Source Files (From Bank)</h3>
                {(project.documents||[]).filter(d => d.type === 'source').map((doc, idx) => (
-                 <div key={idx} className="flex items-center justify-between p-3.5 bg-slate-50 rounded-2xl border border-slate-100 group hover:border-indigo-200 transition-colors">
-                   <div className="flex items-center text-slate-700 overflow-hidden pr-2">
+                 <div key={idx} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3.5 bg-slate-50 rounded-2xl border border-slate-100 group hover:border-indigo-200 transition-colors">
+                   <div className="flex items-center text-slate-700 overflow-hidden pr-0 sm:pr-2 w-full min-w-0">
                      <div className="p-2 bg-white rounded-lg shadow-sm border border-slate-100">{getFileIcon(doc.name)}</div>
-                     <span className="font-bold ml-4 truncate">{doc.name}</span>
+                     <span className="font-bold ml-4 truncate min-w-0">{doc.name}</span>
                    </div>
                    {doc.url ? (
-                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-indigo-600 bg-white border border-slate-200 hover:bg-indigo-50 px-4 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
+                     <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-indigo-600 bg-white border border-slate-200 hover:bg-indigo-50 px-4 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex-1 sm:flex-none min-h-[42px]">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center justify-center gap-1 flex-1 sm:flex-none min-h-[42px]"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
                    ) : (
                      <button type="button" className="text-xs font-bold text-slate-400 bg-slate-50 px-4 py-2 rounded-xl whitespace-nowrap cursor-not-allowed border border-slate-200">Unavailable</button>
                    )}
@@ -2540,14 +2640,14 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                </div>
                {(project.documents||[]).filter(d => d.type === 'working').length === 0 && <p className="text-sm text-slate-500 font-medium italic px-2">No working files uploaded yet.</p>}
                {(project.documents||[]).filter(d => d.type === 'working').map((doc, idx) => (
-                 <div key={idx} className="flex items-center justify-between p-3.5 bg-blue-50/50 rounded-2xl border border-blue-100 group hover:border-blue-200 transition-colors">
-                   <div className="flex items-center text-blue-900 overflow-hidden pr-2">
+                 <div key={idx} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3.5 bg-blue-50/50 rounded-2xl border border-blue-100 group hover:border-blue-200 transition-colors">
+                   <div className="flex items-center text-blue-900 overflow-hidden pr-0 sm:pr-2 w-full min-w-0">
                      <div className="p-2 bg-white rounded-lg shadow-sm border border-blue-100">{getFileIcon(doc.name)}</div>
-                     <span className="font-bold ml-4 truncate">{doc.name}</span>
+                     <span className="font-bold ml-4 truncate min-w-0">{doc.name}</span>
                      <span className="text-[11px] font-bold ml-3 text-blue-600 bg-blue-100 px-2 py-1 rounded-lg whitespace-nowrap hidden sm:inline-block border border-blue-200">by {doc.uploadedBy}</span>
                    </div>
                    {doc.url ? (
-                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-blue-700 bg-white hover:bg-blue-50 shadow-sm border border-blue-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
+                     <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-blue-700 bg-white hover:bg-blue-50 shadow-sm border border-blue-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors flex-1 sm:flex-none min-h-[42px]">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center justify-center gap-1 flex-1 sm:flex-none min-h-[42px]"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
                    ) : (
                      <button type="button" className="text-xs font-bold text-slate-400 bg-slate-50 px-4 py-2 rounded-xl whitespace-nowrap cursor-not-allowed border border-slate-200">Unavailable</button>
                    )}
@@ -2557,17 +2657,17 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                <h3 className="text-xs font-extrabold text-slate-400 uppercase tracking-widest bg-emerald-50 py-2 px-3 rounded-lg inline-block mt-8 border-t-2 border-slate-100 pt-6 w-full max-w-fit">Completed Work (AutoCAD/PDF)</h3>
                {completedDocs.length === 0 && <p className="text-sm text-slate-500 font-medium italic px-2">No completed files yet.</p>}
                {completedDocs.map((doc, idx) => (
-                 <div key={idx} className="flex items-center justify-between p-3.5 bg-emerald-50/50 rounded-2xl border border-emerald-100 group">
-                   <div className="flex items-center text-emerald-900 overflow-hidden pr-2">
+                 <div key={idx} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3.5 bg-emerald-50/50 rounded-2xl border border-emerald-100 group">
+                   <div className="flex items-center text-emerald-900 overflow-hidden pr-0 sm:pr-2 w-full min-w-0">
                      <div className="p-2 bg-white rounded-lg shadow-sm border border-emerald-100">
                         {doc.name.includes('QR') ? <ImageIcon className="w-5 h-5 text-emerald-600" /> : getFileIcon(doc.name)}
                      </div>
-                     <span className="font-bold ml-4 truncate">{doc.name}</span>
+                     <span className="font-bold ml-4 truncate min-w-0">{doc.name}</span>
                      <span className="text-[10px] font-black ml-3 text-emerald-700 bg-white px-2 py-1 rounded-lg border border-emerald-100">V{idx + 1}</span>
                      <span className="text-[11px] font-bold ml-3 text-emerald-600 bg-emerald-100 px-2 py-1 rounded-lg whitespace-nowrap hidden sm:inline-block border border-emerald-200">by {doc.uploadedBy}</span>
                    </div>
                    {doc.url && (
-                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-emerald-700 bg-white hover:bg-emerald-50 shadow-sm border border-emerald-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
+                     <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-emerald-700 bg-white hover:bg-emerald-50 shadow-sm border border-emerald-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors flex-1 sm:flex-none min-h-[42px]">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center justify-center gap-1 flex-1 sm:flex-none min-h-[42px]"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
                    )}
                  </div>
                ))}
@@ -2578,7 +2678,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                    <p className="text-xs font-bold text-purple-500 mb-3">These are the latest completed files submitted after revision. Use these for review/approval instead of older completed versions.</p>
                    <div className="space-y-2">
                      {latestRevisedCompletedDocs.map((doc, idx) => (
-                       <div key={doc.id || idx} className="flex items-center justify-between p-3 bg-white rounded-xl border border-purple-100">
+                       <div key={doc.id || idx} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3 bg-white rounded-xl border border-purple-100">
                          <div className="flex items-center min-w-0 pr-2 text-purple-900">
                            <div className="p-2 bg-purple-50 rounded-lg border border-purple-100">{getFileIcon(doc.name)}</div>
                            <div className="ml-3 min-w-0">
@@ -2586,7 +2686,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                              <p className="text-[11px] font-bold text-purple-500">Latest revision upload • by {doc.uploadedBy || 'Team'}</p>
                            </div>
                          </div>
-                         <button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-100 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>
+                         <button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-100 px-4 py-2 rounded-xl whitespace-nowrap transition-colors w-full sm:w-auto min-h-[42px]">Download</button>
                        </div>
                      ))}
                    </div>
@@ -2652,6 +2752,13 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                   <div className="bg-indigo-100 p-4 rounded-2xl mb-4 shadow-sm"><Upload className="w-8 h-8 text-indigo-600" /></div>
                   <p className="font-bold text-slate-700 mb-1 text-lg">{isUploadingFinal ? 'Uploading...' : 'Upload Final File'}</p>
                   <p className="text-xs font-medium text-slate-500">PDF, AutoCAD, image, Word or Excel format</p>
+                  {isUploadingFinal && fileUploadProgress && (
+                    <div className="w-full max-w-xs mt-4">
+                      <div className="flex justify-between text-[10px] font-black text-indigo-600 mb-1"><span className="truncate max-w-[180px]">{fileUploadProgress.fileName}</span><span>{fileUploadProgress.percent || 0}%</span></div>
+                      <div className="w-full h-2 rounded-full bg-white border border-indigo-100 overflow-hidden"><div className="h-full bg-indigo-600 transition-all" style={{ width: `${fileUploadProgress.percent || 0}%` }}></div></div>
+                      <p className="text-[10px] font-bold text-slate-400 mt-1">File {fileUploadProgress.current} of {fileUploadProgress.total}</p>
+                    </div>
+                  )}
                 </button>
                 <input ref={completedFileInputRef} type="file" multiple className="hidden" accept=".pdf,.dwg,.dxf,.jpg,.jpeg,.png,.mp4,.mov,.avi,.mkv,.webm,.xls,.xlsx,.csv,.doc,.docx" onChange={(e) => handleFileUpload('completed', e)} />
               </div>
@@ -2667,6 +2774,18 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
               </div>
               
               <div className="space-y-4 text-sm relative z-10">
+                <div className={`rounded-2xl border p-4 bg-white ${getPaymentStatusBadgeClass(paymentTrackingStatus)}`}>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[10px] font-black uppercase tracking-widest opacity-70">Admin Payment Status</p>
+                      <p className="text-lg font-black">{paymentTrackingStatus}</p>
+                      {project.paymentTrackingUpdatedAt && <p className="text-[11px] font-bold opacity-70 mt-0.5">Updated by {project.paymentTrackingUpdatedBy || 'Admin'} • {formatDateTime(project.paymentTrackingUpdatedAt)}</p>}
+                    </div>
+                    <select value={paymentTrackingStatus} onChange={(e) => updatePaymentTrackingStatus(e.target.value)} className="bg-white border-2 border-current/20 rounded-xl p-2.5 font-black outline-none min-w-[170px]">
+                      {PAYMENT_TRACKING_OPTIONS.map(option => <option key={option} value={option}>{option}</option>)}
+                    </select>
+                  </div>
+                </div>
                 <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Total Estimate Amount</label><input type="number" value={project.estimate || ''} onChange={e => onUpdateProject({...project, estimate: e.target.value}, project)} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400" /></div>
                 
                 <div className="grid grid-cols-2 gap-3">
@@ -2858,9 +2977,33 @@ function AppShell() {
   const [backendStateReady, setBackendStateReady] = useState(false);
   
   const [selectedProject, setSelectedProject] = useState(null);
+  const taskDetailReturnRef = useRef({ tab: 'command', scrollY: 0 });
+
+  const openProjectDetail = (project, returnTab = activeTab) => {
+    if (!project) return;
+    taskDetailReturnRef.current = {
+      tab: returnTab || activeTab || 'command',
+      scrollY: typeof window !== 'undefined' ? window.scrollY : 0
+    };
+    setSelectedProject(project);
+  };
+
+  const closeProjectDetail = () => {
+    const returnState = taskDetailReturnRef.current || {};
+    const returnTab = returnState.tab || activeTab || 'command';
+    const returnScrollY = Number.isFinite(returnState.scrollY) ? returnState.scrollY : 0;
+    setSelectedProject(null);
+    setActiveTab(returnTab);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        try { window.scrollTo({ top: returnScrollY, left: 0, behavior: 'auto' }); } catch (e) { window.scrollTo(0, returnScrollY); }
+      });
+    });
+  };
   const [activeTab, setActiveTab] = useState('command');
   const [boardViewMode, setBoardViewMode] = useState('list'); // 'list' or 'kanban'
   const [selectedBoardDate, setSelectedBoardDate] = useState(formatDateKey());
+  const [archiveViewState, setArchiveViewState] = useState({ filterMonth: 'All', filterDate: '' });
   const [nowTick, setNowTick] = useState(Date.now());
   // Lightweight live clock for elapsed drafting/free/break timers.
   // Keep this interval modest so multi-tab usage stays low CPU, but timers
@@ -3342,8 +3485,41 @@ function AppShell() {
   };
 
   const handleUpdateProject = async (updatedProject, oldProject) => {
+    const spawnedProjects = Array.isArray(updatedProject?._spawnProjects) ? updatedProject._spawnProjects : [];
+    if (updatedProject && Object.prototype.hasOwnProperty.call(updatedProject, '_spawnProjects')) {
+      const { _spawnProjects, ...cleanProject } = updatedProject;
+      updatedProject = cleanProject;
+    }
     updatedProject = normalizeProjectRecord({ ...updatedProject, updatedAt: Date.now(), syncVersion: Date.now() });
-    if (isAssignedValue(updatedProject.assignedTo)) recordAssignmentLedger(updatedProject);
+    const normalizedSpawned = spawnedProjects.map(p => normalizeProjectRecord({ ...p, updatedAt: p.updatedAt || Date.now(), syncVersion: p.syncVersion || Date.now() }));
+
+    let linkedOriginalUpdate = null;
+    if (isRevisionWorkItem(updatedProject) && updatedProject.status === 'Completed' && updatedProject.originalTaskId) {
+      const original = projects.find(p => String(p.id) === String(updatedProject.originalTaskId));
+      if (original) {
+        const now = Date.now();
+        const revisionNumber = updatedProject.revisionNumber || getNextRevisionNumber(original);
+        const revisionFiles = [...(updatedProject.completedFiles || []), ...(updatedProject.documents || []).filter(d => String(d.type || '').toLowerCase() === 'completed')];
+        linkedOriginalUpdate = normalizeProjectRecord({
+          ...original,
+          updatedAt: now,
+          syncVersion: now,
+          documents: [...(original.documents || []), ...revisionFiles],
+          completedFiles: [...(original.completedFiles || []), ...revisionFiles],
+          revisionHistory: [
+            ...(original.revisionHistory || []),
+            { id: now, revisionNumber, revisionCode: `R${revisionNumber}`, action: 'Revision Completed', status: 'Completed', completedBy: updatedProject.completedBy || updatedProject.assignedTo, completedAt: updatedProject.completedAt || now, workItemId: updatedProject.id, files: revisionFiles }
+          ],
+          timeline: [
+            ...(original.timeline || []),
+            { id: now, text: `Revision ${revisionNumber} completed and linked back to original task ${original.id}.`, time: new Date(now).toLocaleString() }
+          ]
+        });
+      }
+    }
+
+    const projectsToSave = [updatedProject, ...normalizedSpawned, ...(linkedOriginalUpdate ? [linkedOriginalUpdate] : [])];
+    projectsToSave.forEach(p => { if (isAssignedValue(p.assignedTo)) recordAssignmentLedger(p); });
     oldProject = oldProject ? normalizeProjectRecord(oldProject) : oldProject;
 
     const updatedId = String(updatedProject.id || '').trim();
@@ -3355,28 +3531,29 @@ function AppShell() {
       ...(Array.isArray(oldProject?.previousTaskIds) ? oldProject.previousTaskIds : []),
     ].map(x => String(x || '').trim()).filter(Boolean));
 
-    // Update the screen immediately and replace the original task even if the edit
-    // changed fields used for generating the task ID. This prevents mobile edit
-    // submissions from leaving the old task behind as a duplicate.
     setSelectedProject(updatedProject);
     setProjects(prev => {
+      const saveIds = new Set(projectsToSave.map(p => String(p.id)));
       const withoutOldVersions = (prev || []).filter(p => {
+        if (saveIds.has(String(p.id))) return false;
         const ids = [p.id, p.caseId, ...(Array.isArray(p.previousTaskIds) ? p.previousTaskIds : [])]
           .map(x => String(x || '').trim())
           .filter(Boolean);
         return !ids.some(id => relatedOldIds.has(id));
       });
-      const next = mergeProjectsByFreshness(withoutOldVersions, [updatedProject]);
+      const next = mergeProjectsByFreshness(withoutOldVersions, projectsToSave);
       persistAndBroadcastProjects(next);
       return next;
     });
     
     if (firebaseUser && !isLocalMock) {
         try {
-          await setDoc(
-            doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', updatedProject.id.toString()),
-            stripLargeLocalFilesForCloud(updatedProject)
-          );
+          for (const projectToSave of projectsToSave) {
+            await setDoc(
+              doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', projectToSave.id.toString()),
+              stripLargeLocalFilesForCloud(projectToSave)
+            );
+          }
           if (oldId && updatedId && oldId !== updatedId) {
             await deleteDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', oldId));
           }
@@ -3385,19 +3562,60 @@ function AppShell() {
         }
     }
 
+    normalizedSpawned.forEach(spawned => {
+      const targetRole = activeUsers.find(u => u.name === spawned.assignedTo)?.role || ROLES.DESIGNER;
+      addNotification(targetRole, spawned.assignedTo, `URGENT REVISION assigned: ${getDisplayTaskId(spawned)} ${spawned.revisionCode || ''}`.trim(), 'urgent');
+      addNotification(ROLES.MANAGER, null, `Revision work item created: ${getDisplayTaskId(spawned)} ${spawned.revisionCode || ''}`.trim(), 'urgent');
+    });
+
     if (oldProject && updatedProject.status !== oldProject.status) {
-      if (updatedProject.status === 'Completed') addNotification(ROLES.MANAGER, null, `Task ${updatedProject.id} completed and ready`, 'success');
-      if (updatedProject.status === 'Completed') addNotification(ROLES.DESIGNER, updatedProject.assignedTo, `Task ${updatedProject.id} marked as Completed`, 'success');
+      if (updatedProject.status === 'Completed') addNotification(ROLES.MANAGER, null, `Task ${getDisplayTaskId(updatedProject)} completed and ready`, 'success');
+      if (updatedProject.status === 'Completed') addNotification(ROLES.DESIGNER, updatedProject.assignedTo, `Task ${getDisplayTaskId(updatedProject)} marked as Completed`, 'success');
     }
     if (oldProject && updatedProject.priority === 'Urgent' && oldProject.priority !== 'Urgent') {
-      addNotification(ROLES.DESIGNER, updatedProject.assignedTo, `URGENT REVISION: Task ${updatedProject.id}`, 'urgent');
+      addNotification(ROLES.DESIGNER, updatedProject.assignedTo, `URGENT REVISION: Task ${getDisplayTaskId(updatedProject)}`, 'urgent');
     }
     if (oldProject && updatedProject.assignedTo !== oldProject.assignedTo && updatedProject.assignedTo !== 'Unassigned') {
       const targetRole = activeUsers.find(u => u.name === updatedProject.assignedTo)?.role || ROLES.DESIGNER;
-      addNotification(targetRole, updatedProject.assignedTo, `Task Re-assigned to you: ${updatedProject.id}`, 'info');
+      addNotification(targetRole, updatedProject.assignedTo, `Task Re-assigned to you: ${getDisplayTaskId(updatedProject)}`, 'info');
     }
   };
   
+
+  const handlePaymentStatusChange = async (project, status) => {
+    if (!project || currentUser?.role !== ROLES.ADMIN) return;
+    const normalizedStatus = PAYMENT_TRACKING_OPTIONS.includes(status) ? status : 'Not Updated';
+    const optimisticProject = buildPaymentTrackingUpdate(project, normalizedStatus, currentUser);
+
+    // Save through the backend finance endpoint when available so the inline
+    // payment control and Finance Ledger stay linked across all admin sessions.
+    if (USE_BACKEND_STATE && backendStateReady && isDbReady) {
+      try {
+        const amount = optimisticProject?.ledger?.amountIn || optimisticProject?.estimate || optimisticProject?.estimateAmount || 0;
+        const res = await fetch(`${API_BASE}/api/state/projects/${encodeURIComponent(project.id || project.caseId)}/payment-status`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            paymentTrackingStatus: normalizedStatus,
+            amount,
+            by: currentUser.name,
+            updatedBy: currentUser.name,
+          })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && (data.project || data.case)) {
+          await handleUpdateProject(normalizeProjectRecord(data.project || data.case), project);
+          return;
+        }
+        console.warn('Inline payment backend update failed, using local fallback:', data.error || res.status);
+      } catch (e) {
+        console.warn('Inline payment backend update failed, using local fallback:', e.message);
+      }
+    }
+
+    await handleUpdateProject(optimisticProject, project);
+  };
+
   const handleDeleteTask = async (taskId) => {
      const id = String(taskId);
      setSelectedProject(null);
@@ -3844,8 +4062,7 @@ function AppShell() {
     const id = String(project.id || project.caseId || '').trim();
     if (!id) return;
     const latest = (projects || []).find(p => String(p.id || '') === id || String(p.caseId || '') === id) || project;
-    setActiveTab('board');
-    setSelectedProject(latest);
+    openProjectDetail(latest, activeTab);
   };
 
   const displayedProjects = projects
@@ -3927,7 +4144,7 @@ function AppShell() {
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
               {displayedProjects.slice(0, 12).map(p => (
-                <button key={p.id} type="button" onClick={() => setSelectedProject(p)} className="kalpa-task-row text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 hover:border-indigo-100 rounded-2xl p-4 transition-all">
+                <button key={p.id} type="button" onClick={() => openProjectDetail(p, activeTab)} className="kalpa-task-row text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 hover:border-indigo-100 rounded-2xl p-4 transition-all">
                   <p className="font-black text-slate-800">{p.id}</p>
                   <p className="text-xs font-bold text-slate-500 mt-1">{getCustomerDisplayName(p)} • {p.location}</p>
                   <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase">{p.type} • {p.assignedTo || 'Unassigned'} • {p.status}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mt-2 line-clamp-2"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1 line-clamp-2"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}
@@ -3943,17 +4160,24 @@ function AppShell() {
         )}
 
         {selectedProject ? (
-          <TaskDetailView project={selectedProject} user={currentUser} onBack={() => setSelectedProject(null)} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} onDiscussTask={handleDiscussTaskInGlobalChat} />
+          <TaskDetailView project={selectedProject} user={currentUser} onBack={closeProjectDetail} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} onDiscussTask={handleDiscussTaskInGlobalChat} />
         ) : activeTab === 'command' ? (
-          <CommandCentreView projects={projects} users={activeUsers} attendanceLogs={attendanceLogs} currentUser={currentUser} onSelectProject={(p) => { setActiveTab('board'); setSelectedProject(p); }} />
+          <CommandCentreView projects={projects} users={activeUsers} attendanceLogs={attendanceLogs} currentUser={currentUser} onSelectProject={(p) => openProjectDetail(p, 'command')} />
         ) : activeTab === 'productivity' ? (
           <ProductivityDashboard users={activeUsers} projects={projects} />
         ) : activeTab === 'closing' && currentUser.role === ROLES.ADMIN ? (
           <DailyClosingReport projects={projects} />
         ) : activeTab === 'ledger' && currentUser.role === ROLES.ADMIN ? (
-          <LedgerView projects={projects} onSelectProject={(p) => { setActiveTab('board'); setSelectedProject(p); }} />
+          <LedgerView projects={projects} onSelectProject={(p) => openProjectDetail(p, 'ledger')} />
         ) : activeTab === 'archive' ? (
-          <HistoryArchiveView projects={projects} onSelectProject={(p) => { setActiveTab('board'); setSelectedProject(p); }} />
+          <HistoryArchiveView
+            projects={projects}
+            currentUser={currentUser}
+            archiveViewState={archiveViewState}
+            setArchiveViewState={setArchiveViewState}
+            onSelectProject={(p) => openProjectDetail(p, 'archive')}
+            onPaymentStatusChange={handlePaymentStatusChange}
+          />
         ) : activeTab === 'team' ? (
           <TeamPerformanceView users={activeUsers} projects={projects} onUpdateUser={handleUpdateUser} currentUser={currentUser} />
         ) : activeTab === 'attendance' ? (
@@ -3977,14 +4201,16 @@ function AppShell() {
             displayedProjects={displayedProjects}
             projects={projects}
             activeUsers={activeUsers}
-            setSelectedProject={setSelectedProject}
+            setSelectedProject={(p) => openProjectDetail(p, activeTab)}
             nowTick={nowTick}
             ROLES={ROLES}
             getCustomerDisplayName={getCustomerDisplayName}
             getDraftElapsed={getDraftElapsed}
             getOperationalUsers={getOperationalUsers}
             isUserActuallyOnline={isUserActuallyOnline}
+            onPaymentStatusChange={handlePaymentStatusChange}
             onDiscussTask={handleDiscussTaskInGlobalChat}
+            currentUser={currentUser}
           />
         )}
       </main>

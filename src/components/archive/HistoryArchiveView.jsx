@@ -2,8 +2,35 @@ import React, { useMemo, useState } from 'react';
 import { Archive, Calendar, Check, Filter } from 'lucide-react';
 import { formatDateTime } from '../../utils/date';
 import { getEstimateDetails, getLatestCompletedFileName, getTaskDescription } from '../../utils/taskDisplayUtils';
+import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass } from '../../utils/paymentStatusUtils';
 
 const getCustomerDisplayName = (project = {}) => project.customerName || 'Customer not added';
+const isAdminUser = (user = {}) => String(user?.role || '').trim().toUpperCase() === 'ADMIN';
+const isRevisionWorkItem = (project = {}) => project.isRevisionWorkItem === true || String(project.id || '').includes('__REV__');
+
+const ArchivePaymentControl = ({ project, currentUser, onPaymentStatusChange }) => {
+  if (!isAdminUser(currentUser)) return null;
+  const status = getPaymentTrackingStatus(project);
+  const handleChange = (event) => {
+    event.stopPropagation();
+    if (typeof onPaymentStatusChange === 'function') onPaymentStatusChange(project, event.target.value);
+  };
+  return (
+    <label className={`kalpa-payment-control ${getPaymentStatusBadgeClass(status)}`} title={`Payment status: ${status}`} onClick={(event) => event.stopPropagation()}>
+      <span className="kalpa-payment-dot" aria-hidden="true" />
+      <select
+        value={status}
+        onClick={(event) => event.stopPropagation()}
+        onChange={handleChange}
+        className="kalpa-payment-select"
+        aria-label={`Payment status for ${project.id}`}
+      >
+        {PAYMENT_TRACKING_OPTIONS.map(option => <option key={option} value={option}>{option}</option>)}
+      </select>
+    </label>
+  );
+};
+
 
 const getCompletedDateKey = (completedAt) => {
   const d = new Date(completedAt);
@@ -56,55 +83,58 @@ const ArchiveTaskMeta = ({ project }) => {
       <p className="text-xs font-medium text-slate-500">{getCustomerDisplayName(project)} • {project.type}</p>
       {description && (
         <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 whitespace-normal line-clamp-2 max-w-lg">
-          <span className="font-black">Description:</span> {description}
+          {description}
         </p>
       )}
       {estimateDetails && (
         <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 whitespace-normal line-clamp-2 max-w-lg">
-          <span className="font-black">Estimate:</span> {estimateDetails}
+          ₹ {estimateDetails}
         </p>
       )}
       {completedFileName && (
         <p className="text-[11px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 w-fit max-w-lg truncate">
-          Completed: {completedFileName}
+          📄 {completedFileName}
         </p>
       )}
     </div>
   );
 };
 
-const ArchiveTableRow = ({ project, onSelectProject }) => (
+const ArchiveTableRow = ({ project, onSelectProject, currentUser, onPaymentStatusChange }) => (
   <tr className="hover:bg-slate-50 cursor-pointer transition-colors group" onClick={() => onSelectProject(project)}>
-    <td className="px-6 py-5">
+    <td className="px-4 py-5">
       <span className="font-bold text-slate-700">{project.completedAt ? formatDateTime(project.completedAt) : '-'}</span>
       <p className="text-[11px] font-semibold text-slate-400 mt-1">{project.completedAt ? new Date(project.completedAt).toLocaleTimeString() : ''}</p>
     </td>
-    <td className="px-6 py-5 min-w-[320px]">
+    <td className="px-4 py-5 min-w-0">
       <ArchiveTaskMeta project={project} />
     </td>
-    <td className="px-6 py-5 font-medium text-slate-600">{project.location}</td>
-    <td className="px-6 py-5 font-medium text-slate-600">{project.assignedTo}</td>
-    <td className="px-6 py-5 text-right">
+    <td className="px-4 py-5 font-medium text-slate-600 truncate">{project.location}</td>
+    <td className="px-4 py-5 font-medium text-slate-600 truncate">{project.assignedTo}</td>
+    {isAdminUser(currentUser) && (
+      <td className="px-4 py-5 align-middle"><ArchivePaymentControl project={project} currentUser={currentUser} onPaymentStatusChange={onPaymentStatusChange} /></td>
+    )}
+    <td className="px-3 py-5 text-right align-middle">
       <div className="flex items-center justify-end gap-2">
         {project.reportSent && (
           <span className="bg-emerald-50 text-emerald-600 border border-emerald-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider rounded-lg flex items-center mr-2">
             <Check className="w-3 h-3 mr-1" /> Sent
           </span>
         )}
-        <button type="button" className="text-indigo-600 bg-indigo-50 group-hover:bg-indigo-600 group-hover:text-white px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-sm">
-          View Files
+        <button type="button" className="text-indigo-600 bg-indigo-50 group-hover:bg-indigo-600 group-hover:text-white px-3 py-2 rounded-xl text-xs font-bold transition-all shadow-sm whitespace-nowrap">
+          View
         </button>
       </div>
     </td>
   </tr>
 );
 
-export const HistoryArchiveView = ({ projects, onSelectProject }) => {
+export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, onPaymentStatusChange }) => {
   const [filterMonth, setFilterMonth] = useState('All');
   const [filterDate, setFilterDate] = useState('');
 
   const archived = useMemo(() => (projects || [])
-    .filter((project) => project.status === 'Completed')
+    .filter((project) => project.status === 'Completed' && !isRevisionWorkItem(project))
     .sort((a, b) => (b.completedAt || 0) - (a.completedAt || 0)), [projects]);
 
   const uniqueMonths = useMemo(() => [...new Set(archived.map((project) => {
@@ -151,23 +181,32 @@ export const HistoryArchiveView = ({ projects, onSelectProject }) => {
       </div>
 
       <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm whitespace-nowrap">
+        <div className="kalpa-archive-table-wrap">
+          <table className="kalpa-archive-table w-full text-left text-sm">
+            <colgroup>
+              <col className="kalpa-archive-col-date" />
+              <col className="kalpa-archive-col-details" />
+              <col className="kalpa-archive-col-location" />
+              <col className="kalpa-archive-col-designer" />
+              {isAdminUser(currentUser) && <col className="kalpa-archive-col-payment" />}
+              <col className="kalpa-archive-col-action" />
+            </colgroup>
             <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
               <tr>
                 <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Date Completed</th>
                 <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Task Details</th>
                 <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Location</th>
                 <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Designer</th>
-                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Action</th>
+                {isAdminUser(currentUser) && <th className="px-4 py-5 font-bold uppercase tracking-wider text-xs">Payment</th>}
+                <th className="px-4 py-5 font-bold uppercase tracking-wider text-xs text-right">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filteredArchived.map((project) => (
-                <ArchiveTableRow key={project.id} project={project} onSelectProject={onSelectProject} />
+                <ArchiveTableRow key={project.id} project={project} onSelectProject={onSelectProject} currentUser={currentUser} onPaymentStatusChange={onPaymentStatusChange} />
               ))}
               {filteredArchived.length === 0 && (
-                <tr><td colSpan={5} className="px-6 py-16 text-center text-slate-400 font-medium">No completed tasks found for this period.</td></tr>
+                <tr><td colSpan={isAdminUser(currentUser) ? 6 : 5} className="px-6 py-16 text-center text-slate-400 font-medium">No completed tasks found for this period.</td></tr>
               )}
             </tbody>
           </table>

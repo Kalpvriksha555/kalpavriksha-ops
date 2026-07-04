@@ -100,13 +100,29 @@ const normalizePersonName = (name = '') => normalizeTeamUser({ name, username: n
 const getCustomerDisplayName = (project = {}) => project.customerName || 'Customer not added';
 const makeTaskDisplayName = (project = {}) => [project.type, getCustomerDisplayName(project), project.location].filter(Boolean).join(' • ');
 const getProjectDateKey = (project) => formatDateKey(project.createdAt || project.completedAt || Date.now());
-const isIncompleteProject = (project = {}) => project.status !== 'Completed';
-const isCarriedForwardProject = (project = {}, dateKey = formatDateKey()) => isIncompleteProject(project) && getProjectDateKey(project) < dateKey;
-const shouldShowOnOperationsDate = (project = {}, dateKey = formatDateKey()) => getProjectDateKey(project) === dateKey || (dateKey === formatDateKey() && isCarriedForwardProject(project, dateKey));
-
+const getProjectCompletedDateKey = (project = {}) => formatDateKey(project.completedAt || project.draftingCompletedAt || project.submittedAt || project.updatedAt || project.createdAt || Date.now());
 const normalizeWorkStatus = (status = '') => String(status || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+const REVISION_STATUS_KEYS = new Set(['REVISIONPENDING', 'REVISIONINPROGRESS', 'REVERTED']);
+const COMPLETED_STATUS_KEYS = new Set(['COMPLETED', 'APPROVED', 'FINALAPPROVED', 'CLOSED']);
+const hasCompletedDeliverable = (project = {}) => {
+  const completedFiles = Array.isArray(project.completedFiles) && project.completedFiles.length > 0;
+  const completedDocs = Array.isArray(project.documents) && project.documents.some(doc => ['completed', 'final'].includes(String(doc?.type || '').toLowerCase()));
+  return completedFiles || completedDocs;
+};
+const isProjectCompleted = (project = {}) => {
+  const statusKey = normalizeWorkStatus(project.status);
+  const reviewKey = normalizeWorkStatus(project.reviewStatus || project.finalConclusion || '');
+  if (REVISION_STATUS_KEYS.has(statusKey) || REVISION_STATUS_KEYS.has(reviewKey)) return false;
+  if (COMPLETED_STATUS_KEYS.has(statusKey) || reviewKey === 'APPROVED') return true;
+  return !!project.completedAt && hasCompletedDeliverable(project);
+};
+const isIncompleteProject = (project = {}) => !isProjectCompleted(project);
+const isCarriedForwardProject = (project = {}, dateKey = formatDateKey()) => isIncompleteProject(project) && getProjectDateKey(project) < dateKey;
+const wasCompletedOnDate = (project = {}, dateKey = formatDateKey()) => isProjectCompleted(project) && getProjectCompletedDateKey(project) === dateKey;
+const shouldShowOnOperationsDate = (project = {}, dateKey = formatDateKey()) => getProjectDateKey(project) === dateKey || wasCompletedOnDate(project, dateKey) || (dateKey === formatDateKey() && isCarriedForwardProject(project, dateKey));
+
 const CLOSED_REVISION_STATUSES = new Set(['COMPLETED', 'APPROVED', 'ARCHIVED', 'CLOSED', 'DELETED', 'CANCELLED', 'CANCELED']);
-const ACTIVE_REVISION_STATUSES = new Set(['REVISIONPENDING', 'REVISIONINPROGRESS', 'REVERTED']);
+const ACTIVE_REVISION_STATUSES = REVISION_STATUS_KEYS;
 const isSubTaskOpen = (subTask = {}) => !['DONE', 'COMPLETED', 'APPROVED', 'CLOSED', 'RESOLVED'].includes(normalizeWorkStatus(subTask.status || 'Pending'));
 const getOpenRevisionItems = (project = {}) => (project.subTasks || project.revisions || []).filter(isSubTaskOpen);
 const hasActiveRevision = (project = {}) => {
@@ -129,7 +145,7 @@ const getLatestRevisionNote = (project = {}) => {
 const getSlaInfo = (project = {}, now = Date.now()) => {
   const createdAt = project.createdAt || now;
   const assignedAt = project.assignedAt || project.assignedOn || (project.assignedTo && project.assignedTo !== 'Unassigned' ? createdAt : null);
-  const draftStart = project.draftingStartedAt || (project.status === 'Drafting' ? assignedAt || createdAt : null);
+  const draftStart = project.draftingStartedAt || (normalizeWorkStatus(project.status) === 'DRAFTING' ? assignedAt || createdAt : null);
   const submittedAt = project.submittedAt || project.draftingCompletedAt || null;
   const completedAt = project.completedAt || null;
   const totalEnd = completedAt || now;
@@ -137,15 +153,16 @@ const getSlaInfo = (project = {}, now = Date.now()) => {
   const reviewStart = submittedAt || null;
   const reviewEnd = completedAt || now;
   const ageHours = Math.floor((totalEnd - createdAt) / 3600000);
-  const isDelayed = project.status !== 'Completed' && ageHours >= 8;
-  const isWarning = project.status !== 'Completed' && ageHours >= 4 && ageHours < 8;
+  const completed = isProjectCompleted(project);
+  const isDelayed = !completed && ageHours >= 8;
+  const isWarning = !completed && ageHours >= 4 && ageHours < 8;
   return {
     total: formatDuration(createdAt, totalEnd),
     drafting: project.draftingStartedAt ? formatMinutes(Math.floor(getDraftingElapsedMs(project, now) / 60000)) : (draftStart ? formatDuration(draftStart, draftingEnd) : '-'),
     review: reviewStart ? formatDuration(reviewStart, reviewEnd) : '-',
     ageHours,
-    label: isDelayed ? 'Delayed' : isWarning ? 'Near SLA' : project.status === 'Completed' ? 'Completed' : 'On Track',
-    colorClass: isDelayed ? 'bg-red-50 text-red-700 border-red-200' : isWarning ? 'bg-orange-50 text-orange-700 border-orange-200' : project.status === 'Completed' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-blue-50 text-blue-700 border-blue-200'
+    label: isDelayed ? 'Delayed' : isWarning ? 'Near SLA' : completed ? 'Completed' : 'On Track',
+    colorClass: isDelayed ? 'bg-red-50 text-red-700 border-red-200' : isWarning ? 'bg-orange-50 text-orange-700 border-orange-200' : completed ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-blue-50 text-blue-700 border-blue-200'
   };
 };
 
@@ -153,7 +170,7 @@ const getTodayMetrics = (projects = [], dateKey = formatDateKey()) => {
   const todays = projects.filter(p => getProjectDateKey(p) === dateKey);
   const carried = projects.filter(p => isCarriedForwardProject(p, dateKey));
   const activeToday = projects.filter(p => shouldShowOnOperationsDate(p, dateKey));
-  const completedToday = projects.filter(p => p.status === 'Completed' && formatDateKey(p.completedAt || p.createdAt) === dateKey);
+  const completedToday = projects.filter(p => wasCompletedOnDate(p, dateKey));
   const pendingCollections = projects.filter(p => (Number(p.estimate) || 0) > (Number(p.ledger?.amountIn) || 0));
   const paymentsToday = projects.filter(p => p.ledger?.updatedAt && formatDateKey(p.ledger.updatedAt) === dateKey);
   const revisions = activeToday.filter(hasActiveRevision);
@@ -161,9 +178,9 @@ const getTodayMetrics = (projects = [], dateKey = formatDateKey()) => {
     todays, carried, activeToday, completedToday, pendingCollections, paymentsToday, revisions,
     received: todays.length,
     carriedCount: carried.length,
-    pending: activeToday.filter(p => p.status === 'Lead Received').length,
-    drafting: activeToday.filter(p => p.status === 'Drafting').length,
-    review: activeToday.filter(p => p.status === 'Internal Review').length,
+    pending: activeToday.filter(p => isIncompleteProject(p) && !['DRAFTING','DRAFTINGPAUSED','INTERNALREVIEW'].includes(normalizeWorkStatus(p.status))).length,
+    drafting: activeToday.filter(p => normalizeWorkStatus(p.status) === 'DRAFTING').length,
+    review: activeToday.filter(p => normalizeWorkStatus(p.status) === 'INTERNALREVIEW').length,
     completed: completedToday.length,
     paymentReceived: paymentsToday.reduce((sum, p) => sum + (Number(p.ledger?.amountIn) || 0), 0),
     pendingAmount: pendingCollections.reduce((sum, p) => sum + Math.max(0, (Number(p.estimate) || 0) - (Number(p.ledger?.amountIn) || 0)), 0)
@@ -182,7 +199,7 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
   });
   useEffect(() => { const timer = setInterval(() => setAvailabilityNow(Date.now()), 30000); return () => clearInterval(timer); }, []);
   const metrics = getTodayMetrics(projects, dateKey);
-  const rawActiveBoard = metrics.activeToday.slice().sort((a,b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const rawActiveBoard = metrics.activeToday.slice().sort((a,b) => (toMs(b.completedAt || b.updatedAt || b.createdAt) || 0) - (toMs(a.completedAt || a.updatedAt || a.createdAt) || 0));
   const people = getOperationalUsers(users || [], { includeAdmins: true });
   const workingTeam = people.filter(u => u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER);
   const activeTasksFor = (userName) => getUserActiveTasks(projects, userName);
@@ -261,16 +278,29 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
   const breaks = breakPeople.length;
   const availabilityGroups = { Available: availablePeople, Busy: busyPeople, Break: breakPeople, Offline: offlinePeople };
   const selectedAvailabilityPeople = availabilityGroups[availabilityFilter] || [];
-  const completionRate = metrics.received ? Math.round((metrics.completed / metrics.received) * 100) : 0;
-  const pendingNow = rawActiveBoard.filter(p => p.status !== 'Completed').length;
-  const delayedCount = rawActiveBoard.filter(p => getSlaInfo(p).label === 'Delayed').length;
-  const nearSlaCount = rawActiveBoard.filter(p => getSlaInfo(p).label === 'Near SLA').length;
+  // Completion rate must never cross 100%.
+  // It is calculated against all work relevant to the selected date:
+  // cases received that day + pending carried forward + cases completed that day.
+  // This prevents carried-forward completions from making the rate show values like 150%.
+  const completionRateBase = new Map();
+  [...metrics.todays, ...metrics.carried, ...metrics.completedToday].forEach((p) => {
+    if (p?.id) completionRateBase.set(String(p.id), p);
+  });
+  const completionRateTotal = completionRateBase.size;
+  const completionRate = completionRateTotal
+    ? Math.min(100, Math.round((metrics.completed / completionRateTotal) * 100))
+    : 0;
+  const pendingNow = rawActiveBoard.filter(p => isIncompleteProject(p)).length;
+  const pendingBoard = rawActiveBoard.filter(p => isIncompleteProject(p));
+  const delayedCount = pendingBoard.filter(p => getSlaInfo(p).label === 'Delayed').length;
+  const nearSlaCount = pendingBoard.filter(p => getSlaInfo(p).label === 'Near SLA').length;
   const activeCapacity = workingTeam.reduce((sum, u) => sum + activeTasksFor(u.name).length, 0);
   const capacityLimit = workingTeam.reduce((sum, u) => sum + Number(u.dailyLimit || u.taskLimit || 10), 0) || Math.max(workingTeam.length * 10, 1);
   const capacityPct = Math.min(100, Math.round((activeCapacity / capacityLimit) * 100));
   const statusFlow = [
     ['Received', metrics.received, 'bg-blue-500', 'received'],
-    ['Carried', metrics.carriedCount, 'bg-orange-500', 'carried'],
+    ['Pending', pendingNow, 'bg-orange-500', 'pending'],
+    ['Carried', metrics.carriedCount, 'bg-amber-500', 'carried'],
     ['Drafting', metrics.drafting, 'bg-indigo-500', 'drafting'],
     ['Review', metrics.review, 'bg-purple-500', 'review'],
     ['Completed', metrics.completed, 'bg-emerald-500', 'completed'],
@@ -279,7 +309,7 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
   const maxFlow = Math.max(...statusFlow.map(([, value]) => Number(value) || 0), 1);
   const workloadCards = workingTeam.map(u => {
     const active = activeTasksFor(u.name);
-    const completedToday = projects.filter(p => normalizePersonName(p.assignedTo) === normalizePersonName(u.name) && p.status === 'Completed' && formatDateKey(p.completedAt || p.createdAt) === dateKey).length;
+    const completedToday = projects.filter(p => normalizePersonName(p.assignedTo) === normalizePersonName(u.name) && wasCompletedOnDate(p, dateKey)).length;
     const revisions = projects.filter(p => normalizePersonName(p.assignedTo) === normalizePersonName(u.name) && hasActiveRevision(p)).length;
     const limit = Number(u.dailyLimit || u.taskLimit || 10) || 10;
     const loadPct = Math.min(100, Math.round((active.length / limit) * 100));
@@ -300,14 +330,14 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
   };
   const filterOperations = (filterKey) => {
     if (filterKey === 'received') return metrics.todays.slice().sort((a,b) => (b.createdAt || 0) - (a.createdAt || 0));
-    if (filterKey === 'pending') return rawActiveBoard.filter(p => p.status !== 'Completed');
-    if (filterKey === 'completed') return metrics.completedToday.slice().sort((a,b) => (b.completedAt || b.createdAt || 0) - (a.completedAt || a.createdAt || 0));
-    if (filterKey === 'delayed') return rawActiveBoard.filter(p => getSlaInfo(p).label === 'Delayed');
-    if (filterKey === 'near') return rawActiveBoard.filter(p => getSlaInfo(p).label === 'Near SLA');
+    if (filterKey === 'pending') return pendingBoard;
+    if (filterKey === 'completed') return metrics.completedToday.slice().sort((a,b) => (toMs(b.completedAt || b.updatedAt || b.createdAt) || 0) - (toMs(a.completedAt || a.updatedAt || a.createdAt) || 0));
+    if (filterKey === 'delayed') return pendingBoard.filter(p => getSlaInfo(p).label === 'Delayed');
+    if (filterKey === 'near') return pendingBoard.filter(p => getSlaInfo(p).label === 'Near SLA');
     if (filterKey === 'revisions') return metrics.revisions.slice().sort((a,b) => (b.revisionRequestedAt || b.updatedAt || b.createdAt || 0) - (a.revisionRequestedAt || a.updatedAt || a.createdAt || 0));
     if (filterKey === 'carried') return metrics.carried.slice();
-    if (filterKey === 'drafting') return rawActiveBoard.filter(p => p.status === 'Drafting' || p.status === 'Drafting Paused');
-    if (filterKey === 'review') return rawActiveBoard.filter(p => p.status === 'Internal Review');
+    if (filterKey === 'drafting') return rawActiveBoard.filter(p => normalizeWorkStatus(p.status) === 'DRAFTING' || normalizeWorkStatus(p.status) === 'DRAFTINGPAUSED');
+    if (filterKey === 'review') return rawActiveBoard.filter(p => normalizeWorkStatus(p.status) === 'INTERNALREVIEW');
     return rawActiveBoard;
   };
   const activeBoard = filterOperations(dashboardFilter);
@@ -354,7 +384,7 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
             <div><h2 className="font-black text-slate-800 text-xl flex items-center"><BarChart3 className="w-5 h-5 mr-2 text-indigo-500" /> Operations Flow</h2><p className="text-xs font-bold text-slate-400 mt-1">Pending vs completed trend for the selected day.</p></div>
             <Badge colorClass={completionRate >= 70 ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : completionRate >= 40 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}>{completionRate}% Done</Badge>
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
             {statusFlow.map(([label, value, color, filterKey]) => (
               <button key={label} type="button" onClick={() => applyDashboardFilter(filterKey)} className={`bg-slate-50 border border-slate-100 rounded-2xl p-4 text-left transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98] ${dashboardFilter === filterKey ? 'ring-2 ring-indigo-200 bg-indigo-50/50' : ''}`}>
                 <div className="h-28 flex items-end justify-center">
@@ -505,7 +535,7 @@ export const ProductivityDashboard = ({ users = [], projects = [] }) => {
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Productivity Dashboard</h1><p className="text-slate-500 font-medium mt-2">Designer and manager performance, visible to the whole team.</p></div>
-      <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden"><div className="overflow-x-auto"><table className="w-full text-left text-sm whitespace-nowrap"><thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100"><tr><th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Member</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Today</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Week</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Month</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Active</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Avg SLA</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Revision %</th></tr></thead><tbody className="divide-y divide-slate-100">{team.map(u => { const userTasks = projects.filter(p => p.assignedTo === u.name); const completed = userTasks.filter(p => p.status === 'Completed'); const today = completed.filter(p => formatDateKey(p.completedAt || p.createdAt) === todayKey).length; const week = completed.filter(p => (p.completedAt || 0) >= weekStart).length; const month = completed.filter(p => formatDateKey(p.completedAt || p.createdAt).slice(0,7) === monthKey).length; const active = userTasks.filter(p => p.status !== 'Completed').length; const revs = userTasks.filter(p => (p.subTasks || []).length > 0).length; const revPct = userTasks.length ? Math.round((revs / userTasks.length) * 100) : 0; const avgMins = completed.length ? Math.round(completed.reduce((sum,p) => sum + Math.max(0, ((p.completedAt || p.submittedAt || p.createdAt || Date.now()) - (p.createdAt || Date.now()))/60000), 0) / completed.length) : 0; return <tr key={u.id} className="hover:bg-slate-50"><td className="px-6 py-5"><p className="font-black text-slate-800">{u.name}</p><p className="text-xs font-bold text-slate-400">{u.role}</p></td><td className="px-6 py-5 text-center font-black text-emerald-600">{today}</td><td className="px-6 py-5 text-center font-black text-indigo-600">{week}</td><td className="px-6 py-5 text-center font-black text-slate-800">{month}</td><td className="px-6 py-5 text-center"><span className="bg-orange-50 text-orange-700 px-3 py-1 rounded-lg font-black text-xs">{active}</span></td><td className="px-6 py-5 text-center font-bold text-slate-600">{avgMins ? formatDuration(0, avgMins * 60000) : '-'}</td><td className="px-6 py-5 text-center font-bold text-red-500">{revPct}%</td></tr> })}</tbody></table></div></div>
+      <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden"><div className="overflow-x-auto"><table className="w-full text-left text-sm whitespace-nowrap"><thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100"><tr><th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Member</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Today</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Week</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Month</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Active</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Avg SLA</th><th className="px-6 py-5 text-center font-bold uppercase tracking-wider text-xs">Revision %</th></tr></thead><tbody className="divide-y divide-slate-100">{team.map(u => { const userTasks = projects.filter(p => p.assignedTo === u.name); const completed = userTasks.filter(p => p.status === 'Completed'); const today = completed.filter(p => formatDateKey(p.completedAt || p.createdAt) === todayKey).length; const week = completed.filter(p => (p.completedAt || 0) >= weekStart).length; const month = completed.filter(p => formatDateKey(p.completedAt || p.createdAt).slice(0,7) === monthKey).length; const active = userTasks.filter(p => isIncompleteProject(p)).length; const revs = userTasks.filter(p => (p.subTasks || []).length > 0).length; const revPct = userTasks.length ? Math.round((revs / userTasks.length) * 100) : 0; const avgMins = completed.length ? Math.round(completed.reduce((sum,p) => sum + Math.max(0, ((p.completedAt || p.submittedAt || p.createdAt || Date.now()) - (p.createdAt || Date.now()))/60000), 0) / completed.length) : 0; return <tr key={u.id} className="hover:bg-slate-50"><td className="px-6 py-5"><p className="font-black text-slate-800">{u.name}</p><p className="text-xs font-bold text-slate-400">{u.role}</p></td><td className="px-6 py-5 text-center font-black text-emerald-600">{today}</td><td className="px-6 py-5 text-center font-black text-indigo-600">{week}</td><td className="px-6 py-5 text-center font-black text-slate-800">{month}</td><td className="px-6 py-5 text-center"><span className="bg-orange-50 text-orange-700 px-3 py-1 rounded-lg font-black text-xs">{active}</span></td><td className="px-6 py-5 text-center font-bold text-slate-600">{avgMins ? formatDuration(0, avgMins * 60000) : '-'}</td><td className="px-6 py-5 text-center font-bold text-red-500">{revPct}%</td></tr> })}</tbody></table></div></div>
     </div>
   );
 };

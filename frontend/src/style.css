@@ -3320,3 +3320,522 @@ button:disabled {
     max-width: 95vw !important;
   }
 }
+
+/* Admin payment-status list placement patch: keep payment tracking in list columns. */
+.kalpa-ops-list-has-payment .kalpa-ops-grid-header,
+.kalpa-ops-list-has-payment .kalpa-ops-grid-row {
+  grid-template-columns: minmax(185px, 1.06fr) minmax(145px, .58fr) minmax(86px, .31fr) minmax(58px, .22fr) minmax(112px, .36fr) minmax(96px, .32fr);
+}
+.kalpa-ops-payment-cell {
+  display: flex;
+  align-items: center;
+}
+@media (max-width: 1120px) {
+  .kalpa-ops-list-has-payment .kalpa-ops-grid-header,
+  .kalpa-ops-list-has-payment .kalpa-ops-grid-row {
+    grid-template-columns: minmax(150px, .9fr) minmax(120px, .48fr) minmax(74px, .28fr) minmax(52px, .20fr) minmax(100px, .34fr) minmax(88px, .30fr);
+    column-gap: 7px;
+  }
+}
+@media (max-width: 820px) {
+  .kalpa-ops-list-has-payment .kalpa-ops-grid-row {
+    grid-template-columns: 1fr;
+  }
+  .kalpa-ops-payment-cell {
+    justify-content: space-between;
+    border-top: 1px solid #f1f5f9;
+    padding-top: 10px;
+  }
+}
+
+/* Payment columns final fit polish: compact badges and no horizontal overflow on desktop. */
+.kalpa-payment-badge {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 5px !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  width: fit-content !important;
+  white-space: nowrap !important;
+  border-width: 1px !important;
+  border-style: solid !important;
+  border-radius: 999px !important;
+  padding: 5px 9px !important;
+  font-size: 10px !important;
+  line-height: 1 !important;
+  font-weight: 900 !important;
+  letter-spacing: .02em !important;
+  text-transform: none !important;
+  box-shadow: 0 6px 14px rgba(15, 23, 42, .045) !important;
+}
+.kalpa-payment-badge .kalpa-payment-text {
+  display: inline-block !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+.kalpa-payment-dot {
+  width: 7px !important;
+  height: 7px !important;
+  border-radius: 999px !important;
+  background: currentColor !important;
+  opacity: .82 !important;
+  flex: 0 0 auto !important;
+}
+.kalpa-archive-table-wrap {
+  width: 100% !important;
+  overflow: hidden !important;
+}
+.kalpa-archive-table {
+  table-layout: fixed !important;
+  width: 100% !important;
+  min-width: 0 !important;
+}
+.kalpa-archive-table th,
+.kalpa-archive-table td {
+  overflow: hidden !important;
+}
+.kalpa-archive-col-date { width: 15% !important; }
+.kalpa-archive-col-details { width: 38% !important; }
+.kalpa-archive-col-location { width: 9% !important; }
+.kalpa-archive-col-designer { width: 11% !important; }
+.kalpa-archive-col-payment { width: 13% !important; }
+.kalpa-archive-col-action { width: 8% !important; }
+.kalpa-archive-table .kalpa-payment-badge {
+  max-width: 118px !important;
+}
+.kalpa-archive-table .kalpa-payment-badge .kalpa-payment-text {
+  max-width: 90px !important;
+}
+.kalpa-ops-list-has-payment .kalpa-ops-grid-header,
+.kalpa-ops-list-has-payment .kalpa-ops-grid-row {
+  grid-template-columns: minmax(160px, 1.05fr) minmax(130px, .55fr) minmax(82px, .30fr) minmax(50px, .18fr) minmax(102px, .36fr) minmax(92px, .30fr) !important;
+  column-gap: 8px !important;
+}
+.kalpa-ops-payment-cell .kalpa-payment-badge {
+  max-width: 112px !important;
+}
+.kalpa-ops-payment-cell .kalpa-payment-badge .kalpa-payment-text {
+  max-width: 84px !important;
+}
+@media (max-width: 1280px) {
+  .kalpa-archive-col-date { width: 14% !important; }
+  .kalpa-archive-col-details { width: 36% !important; }
+  .kalpa-archive-col-location { width: 9% !important; }
+  .kalpa-archive-col-designer { width: 11% !important; }
+  .kalpa-archive-col-payment { width: 14% !important; }
+  .kalpa-archive-col-action { width: 8% !important; }
+  .kalpa-payment-badge { padding: 5px 7px !important; font-size: 9.5px !important; }
+  .kalpa-archive-table .kalpa-payment-badge .kalpa-payment-text { max-width: 78px !important; }
+  .kalpa-ops-list-has-payment .kalpa-ops-grid-header,
+  .kalpa-ops-list-has-payment .kalpa-ops-grid-row {
+    grid-template-columns: minmax(150px, 1fr) minmax(118px, .48fr) minmax(74px, .26fr) minmax(46px, .16fr) minmax(92px, .32fr) minmax(84px, .28fr) !important;
+    column-gap: 7px !important;
+  }
+}
+@media (max-width: 900px) {
+  .kalpa-archive-table-wrap {
+    overflow-x: auto !important;
+  }
+  .kalpa-archive-table {
+    min-width: 760px !important;
+  }
+}
+@media (max-width: 820px) {
+  .kalpa-ops-list-has-payment .kalpa-ops-grid-row { grid-template-columns: 1fr !important; }
+  .kalpa-ops-payment-cell { justify-content: space-between !important; border-top: 1px solid #f1f5f9 !important; padding-top: 10px !important; }
+  .kalpa-payment-badge .kalpa-payment-text { max-width: none !important; }
+}
+
+/* ==========================================================
+   Mobile Perfection Polish v3 — layout-only hardening
+   Purpose: every page fits cleanly on phones without changing workflow/data logic.
+   Scope: CSS only. No JS/API/database behavior touched.
+   ========================================================== */
+:root {
+  --kd-mobile-edge: clamp(0.65rem, 3vw, 1rem);
+  --kd-mobile-card-radius: 1.05rem;
+}
+
+@media (max-width: 768px) {
+  *, *::before, *::after { box-sizing: border-box !important; }
+  html, body, #root { max-width: 100vw !important; overflow-x: hidden !important; }
+  body { min-width: 0 !important; }
+
+  /* Universal page shell: no side overflow, better thumb spacing. */
+  main,
+  main.max-w-\[1400px\],
+  .kalpa-page,
+  .kalpa-production-polish,
+  .max-w-\[1400px\] {
+    width: 100% !important;
+    max-width: 100vw !important;
+    min-width: 0 !important;
+    padding-left: var(--kd-mobile-edge) !important;
+    padding-right: var(--kd-mobile-edge) !important;
+  }
+
+  /* Header/nav: compact, non-crushing, scrollable action chips. */
+  header, nav.sticky, nav[class*="sticky"], .sticky.top-0 {
+    max-width: 100vw !important;
+    overflow: visible !important;
+  }
+  header > div, nav > div, header .max-w-\[1400px\], nav .max-w-\[1400px\] {
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+  header .truncate, nav .truncate, header h1, nav h1 {
+    min-width: 0 !important;
+    max-width: min(48vw, 15rem) !important;
+  }
+  header .flex, nav .flex { min-width: 0 !important; }
+  header button, nav button, header a, nav a {
+    flex: 0 0 auto !important;
+    min-height: 42px !important;
+  }
+
+  /* Main tab rail always stays tappable and scrolls horizontally. */
+  .kalpa-main-tabs,
+  main > div.flex.flex-wrap.gap-2.mb-8,
+  main > div.bg-white.p-1\.5.rounded-2xl,
+  .bg-white.p-1\.5.rounded-2xl.shadow-sm.border-2.border-slate-100.w-fit {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    justify-content: flex-start !important;
+    gap: 0.45rem !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    -webkit-overflow-scrolling: touch !important;
+    scrollbar-width: none !important;
+    position: relative !important;
+    z-index: 110 !important;
+  }
+  .kalpa-main-tabs::-webkit-scrollbar,
+  main > div.flex.flex-wrap.gap-2.mb-8::-webkit-scrollbar,
+  main > div.bg-white.p-1\.5.rounded-2xl::-webkit-scrollbar { display: none !important; }
+  .kalpa-main-tabs > button,
+  main > div.flex.flex-wrap.gap-2.mb-8 > button,
+  main > div.bg-white.p-1\.5.rounded-2xl > button {
+    flex: 0 0 auto !important;
+    white-space: nowrap !important;
+    min-width: max-content !important;
+    min-height: 44px !important;
+  }
+
+  /* Cards, panels, stat blocks and task rows become clean stacked cards. */
+  .grid { min-width: 0 !important; }
+  .grid[class*="grid-cols"],
+  .grid[class*="sm:grid-cols"],
+  .grid[class*="md:grid-cols"],
+  .grid[class*="lg:grid-cols"],
+  .grid[class*="xl:grid-cols"] {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  .flex[class*="md:flex-row"], .flex[class*="lg:flex"], .flex[class*="xl:flex-row"],
+  .md\:flex-row, .lg\:flex-row, .xl\:flex-row {
+    flex-direction: column !important;
+  }
+  .md\:items-center, .md\:items-end, .lg\:items-center, .xl\:items-end {
+    align-items: stretch !important;
+  }
+  .kalpa-panel, .kalpa-stat-card, .kalpa-task-row,
+  .rounded-3xl, .rounded-2xl {
+    max-width: 100% !important;
+  }
+  .kalpa-task-row,
+  .kalpa-operation-row,
+  [class*="task-row"] {
+    width: 100% !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+  }
+  .kalpa-task-row > *, .kalpa-operation-row > * { min-width: 0 !important; }
+
+  /* Text wrapping: long task names, file names, locations and banker names cannot push the page wider. */
+  p, span, div, td, th, button, a {
+    overflow-wrap: anywhere;
+  }
+  .truncate {
+    min-width: 0 !important;
+  }
+  .break-words, .whitespace-normal {
+    overflow-wrap: anywhere !important;
+  }
+
+  /* Forms: single-column, readable, no zoom jump on iOS/Android. */
+  form, fieldset, label { max-width: 100% !important; min-width: 0 !important; }
+  input, select, textarea {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    font-size: 16px !important;
+    min-height: 46px !important;
+  }
+  textarea { min-height: 92px !important; }
+  input[type="checkbox"], input[type="radio"] {
+    width: auto !important;
+    min-height: auto !important;
+  }
+  input[type="file"] {
+    min-height: 48px !important;
+    padding: 0.65rem !important;
+    white-space: normal !important;
+  }
+  .space-y-6 > :not([hidden]) ~ :not([hidden]) { margin-top: 1rem !important; }
+  .space-y-5 > :not([hidden]) ~ :not([hidden]) { margin-top: 0.85rem !important; }
+  .space-x-4 > :not([hidden]) ~ :not([hidden]),
+  .space-x-3 > :not([hidden]) ~ :not([hidden]) {
+    margin-left: 0 !important;
+  }
+
+  /* Actions: wrap instead of falling out of the card. */
+  .kalpa-actionbar,
+  .kalpa-filterbar,
+  .kalpa-datebar,
+  [class*="justify-between"][class*="items-center"],
+  [class*="justify-between"][class*="items-end"] {
+    flex-wrap: wrap !important;
+    gap: 0.6rem !important;
+    min-width: 0 !important;
+  }
+  .kalpa-actionbar > *, .kalpa-filterbar > *, .kalpa-datebar > * {
+    min-width: 0 !important;
+  }
+  button, a[role="button"] {
+    min-height: 42px !important;
+    touch-action: manipulation !important;
+  }
+
+  /* Tables: mobile uses smooth internal scroll; desktop remains unchanged. */
+  .overflow-x-auto,
+  .kalpa-table-wrap,
+  div[class*="overflow-x-auto"] {
+    max-width: 100% !important;
+    overflow-x: auto !important;
+    overflow-y: visible !important;
+    -webkit-overflow-scrolling: touch !important;
+    overscroll-behavior-x: contain !important;
+  }
+  table {
+    width: max-content !important;
+    min-width: min(780px, 220vw) !important;
+    max-width: none !important;
+    table-layout: auto !important;
+  }
+  th, td {
+    padding: 0.72rem 0.62rem !important;
+    vertical-align: top !important;
+  }
+  td .max-w-\[260px\], td .max-w-\[300px\], td .max-w-\[360px\], td .max-w-\[420px\] {
+    max-width: 210px !important;
+  }
+  .kalpa-payment-select,
+  select[aria-label*="Payment"],
+  select[title*="Payment"] {
+    min-width: 116px !important;
+    width: 116px !important;
+    max-width: 116px !important;
+    font-size: 0.76rem !important;
+    padding-left: 0.45rem !important;
+    padding-right: 1.55rem !important;
+  }
+
+  /* Modal/dialog polish: full-width safe sheet with sticky footer-friendly padding. */
+  .fixed.inset-0 {
+    padding: max(0.55rem, env(safe-area-inset-top)) var(--kd-mobile-edge) max(0.75rem, env(safe-area-inset-bottom)) !important;
+    overflow-y: auto !important;
+    align-items: flex-start !important;
+  }
+  [role="dialog"],
+  .modal, .modal-content, .case-modal, .task-modal, .form-modal,
+  .kalpa-lead-modal-card,
+  .fixed.inset-0 > div {
+    max-width: calc(100vw - (var(--kd-mobile-edge) * 2)) !important;
+  }
+  .fixed.inset-0 > .max-w-5xl,
+  .fixed.inset-0 > .max-w-4xl,
+  .fixed.inset-0 > .max-w-3xl,
+  .fixed.inset-0 > .max-w-2xl,
+  .fixed.inset-0 > .max-w-xl,
+  [role="dialog"] > div,
+  .modal-content,
+  .case-modal,
+  .task-modal,
+  .form-modal {
+    width: 100% !important;
+    max-height: calc(100dvh - 1.2rem - env(safe-area-inset-bottom)) !important;
+    overflow-y: auto !important;
+    border-radius: var(--kd-mobile-card-radius) !important;
+    margin: 0 auto !important;
+  }
+
+  /* Upload/download controls: clear file names and comfortable buttons. */
+  [class*="upload"], [class*="download"], [class*="file"], .kalpa-file-row {
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+  .kalpa-file-row,
+  [class*="file-row"],
+  [class*="attachment"] {
+    overflow: hidden !important;
+  }
+  a[download], button[download],
+  button:has(svg), a:has(svg) {
+    touch-action: manipulation !important;
+  }
+
+  /* Notification panel and chat never block page controls unless open. */
+  .kalpa-notification-panel,
+  [data-kalpa-notification-panel] {
+    left: var(--kd-mobile-edge) !important;
+    right: var(--kd-mobile-edge) !important;
+    width: auto !important;
+    max-width: none !important;
+  }
+  .kalpa-toast-host, .kalpa-toast-stack, .kalpa-active-toasts {
+    left: var(--kd-mobile-edge) !important;
+    right: var(--kd-mobile-edge) !important;
+    max-width: none !important;
+  }
+
+  /* Chat bottom sheet: consistent across all pages. */
+  .kalpa-chat-shell {
+    position: fixed !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    width: 100vw !important;
+    max-width: 100vw !important;
+    pointer-events: none !important;
+    z-index: 9600 !important;
+  }
+  .kalpa-chat-shell .kalpa-chat-launcher,
+  .kalpa-chat-shell > button:not(.kalpa-chat-unread-preview) {
+    pointer-events: auto !important;
+    position: fixed !important;
+    right: calc(0.85rem + env(safe-area-inset-right)) !important;
+    bottom: calc(0.85rem + env(safe-area-inset-bottom)) !important;
+    width: 58px !important;
+    height: 58px !important;
+    min-width: 58px !important;
+    border-radius: 1rem !important;
+  }
+  .kalpa-chat-panel {
+    pointer-events: auto !important;
+    position: fixed !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    top: auto !important;
+    width: 100vw !important;
+    max-width: 100vw !important;
+    height: min(88dvh, calc(100dvh - env(safe-area-inset-top) - 0.4rem)) !important;
+    max-height: min(88dvh, calc(100dvh - env(safe-area-inset-top) - 0.4rem)) !important;
+    border-radius: 1.25rem 1.25rem 0 0 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    overflow: hidden !important;
+  }
+  .kalpa-chat-sidebar {
+    flex: 0 0 112px !important;
+    height: 112px !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    overflow: hidden !important;
+  }
+  .kalpa-chat-main,
+  .kalpa-chat-panel > .flex-1 {
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+  }
+  .kalpa-chat-messages {
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+  }
+  .kalpa-chat-inputbar {
+    flex: 0 0 auto !important;
+    padding-bottom: calc(0.6rem + env(safe-area-inset-bottom)) !important;
+  }
+
+  /* Calendar/archive/date controls keep previous-date workflows usable on phones. */
+  input[type="date"], input[type="month"], .kalpa-date-control {
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+}
+
+@media (max-width: 420px) {
+  :root { --kd-mobile-edge: 0.58rem; }
+  h1, .text-5xl, .text-4xl, .text-3xl {
+    font-size: clamp(1.28rem, 7vw, 1.75rem) !important;
+  }
+  h2, .text-2xl { font-size: 1.12rem !important; }
+  .p-8, .p-7, .p-6, .p-5, .p-4 { padding: 0.78rem !important; }
+  .px-6, .px-5, .px-4 { padding-left: 0.78rem !important; padding-right: 0.78rem !important; }
+  .py-5, .py-4 { padding-top: 0.75rem !important; padding-bottom: 0.75rem !important; }
+  table { min-width: min(720px, 240vw) !important; }
+  td .max-w-\[260px\], td .max-w-\[300px\], td .max-w-\[360px\], td .max-w-\[420px\] { max-width: 180px !important; }
+  .kalpa-chat-sidebar { flex-basis: 104px !important; height: 104px !important; }
+  .kalpa-chat-sidebar button { min-width: 116px !important; max-width: 136px !important; }
+}
+
+/* Finance-linked payment control: admin can update status directly from list rows. */
+.kalpa-payment-control {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  width: fit-content !important;
+  border-width: 1px !important;
+  border-style: solid !important;
+  border-radius: 999px !important;
+  padding: 4px 8px !important;
+  box-shadow: 0 6px 14px rgba(15, 23, 42, .045) !important;
+  cursor: pointer !important;
+}
+.kalpa-payment-select {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  background: transparent !important;
+  border: 0 !important;
+  outline: none !important;
+  color: inherit !important;
+  font-size: 10px !important;
+  line-height: 1 !important;
+  font-weight: 900 !important;
+  max-width: 96px !important;
+  cursor: pointer !important;
+  padding: 2px 12px 2px 0 !important;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%) !important;
+  background-position: calc(100% - 6px) 45%, calc(100% - 2px) 45% !important;
+  background-size: 4px 4px, 4px 4px !important;
+  background-repeat: no-repeat !important;
+  text-overflow: ellipsis !important;
+}
+.kalpa-payment-select option {
+  color: #0f172a !important;
+  background: #ffffff !important;
+  font-weight: 800 !important;
+}
+.kalpa-ops-payment-cell .kalpa-payment-control,
+.kalpa-archive-table .kalpa-payment-control {
+  max-width: 118px !important;
+}
+@media (max-width: 1280px) {
+  .kalpa-payment-control { padding: 4px 7px !important; }
+  .kalpa-payment-select { font-size: 9.5px !important; max-width: 82px !important; }
+}
+@media (max-width: 820px) {
+  .kalpa-payment-select { max-width: none !important; }
+}

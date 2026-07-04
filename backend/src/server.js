@@ -258,6 +258,137 @@ function rememberDeletedProject(d, id){
 
 function now(){ return new Date().toISOString(); }
 
+
+const PAYMENT_TRACKING_OPTIONS = ['Not Updated', 'Pending', 'Paid'];
+function normalizePaymentTrackingStatus(value = '') {
+  const key = String(value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (key === 'PAID' || key === 'YES' || key === 'RECEIVED') return 'Paid';
+  if (key === 'PENDING' || key === 'PARTIAL' || key === 'PAYMENTPENDING') return 'Pending';
+  return 'Not Updated';
+}
+function getCasePaymentAmount(c = {}, explicitAmount) {
+  const candidates = [
+    explicitAmount,
+    c.paymentAmountIn,
+    c.ledger?.amountIn,
+    c.estimate,
+    c.estimateAmount,
+    c.totalAmount,
+    c.amount,
+    c.ledger?.expectedAmount,
+  ];
+  for (const value of candidates) {
+    if (value === undefined || value === null || value === '') continue;
+    const cleaned = typeof value === 'string' ? value.replace(/[^0-9.-]/g, '') : value;
+    const numeric = Number(cleaned);
+    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  }
+  return 0;
+}
+function findCaseByAnyId(cases = [], id = '') {
+  const target = String(id || '').trim();
+  return (cases || []).find(c => [c.id, c.caseId, c.displayId, c.originalTaskId]
+    .filter(Boolean)
+    .some(value => String(value).trim() === target));
+}
+function upsertInlinePaymentLedger(d, c, status, body = {}) {
+  d.payments ||= [];
+  c.ledger ||= {};
+  c.history ||= [];
+  const nowIso = now();
+  const by = body.by || body.updatedBy || 'Admin';
+  const amount = getCasePaymentAmount(c, body.amount);
+  const caseKey = String(c.id || c.caseId || '').trim();
+  const caseNo = c.caseId || c.displayId || c.originalTaskId || c.id || '';
+  const existing = d.payments.find(p => p.source === 'INLINE_PAYMENT_STATUS'
+    && String(p.caseId || '') === caseKey
+    && String(p.ledgerStatus || 'ACTIVE') === 'ACTIVE');
+
+  c.paymentTrackingStatus = status;
+  c.paymentTrackingUpdatedAt = Date.now();
+  c.paymentTrackingUpdatedBy = by;
+  c.ledger = {
+    ...c.ledger,
+    status,
+    paymentStatus: status,
+    updatedAt: Date.now(),
+    updatedBy: by,
+  };
+
+  if (status === 'Paid') {
+    c.paymentStatus = 'YES';
+    c.paymentReceived = 'YES';
+    c.paymentAmountIn = amount;
+    c.paymentDate = body.paymentDate || nowIso.slice(0, 10);
+    c.paymentTime = body.paymentTime || new Date().toTimeString().slice(0, 5);
+    c.ledger.amountIn = amount;
+    c.ledger.date = c.ledger.date || c.paymentDate;
+    c.ledger.autoFilledFromPaymentStatus = true;
+    c.ledger.financeLedgerLinked = true;
+    c.ledger.financeLedgerId = existing?.id || c.ledger.financeLedgerId || nanoid(8);
+
+    if (existing) {
+      Object.assign(existing, {
+        caseNo,
+        location: c.location || c.city || '',
+        customerName: c.customerName || '',
+        bank: c.client || c.bank || c.bankName || '',
+        branch: c.branch || c.branchName || '',
+        paymentReceived: 'YES',
+        paymentAmountIn: amount,
+        paymentDate: c.paymentDate,
+        paymentTime: c.paymentTime,
+        ledgerStatus: 'ACTIVE',
+        updatedAt: nowIso,
+        updatedBy: by,
+        note: body.note || 'Auto-updated from inline payment status',
+      });
+    } else {
+      d.payments.unshift({
+        id: c.ledger.financeLedgerId,
+        source: 'INLINE_PAYMENT_STATUS',
+        caseId: caseKey,
+        caseNo,
+        location: c.location || c.city || '',
+        customerName: c.customerName || '',
+        bankerName: c.bankerName || '',
+        bank: c.client || c.bank || c.bankName || '',
+        branch: c.branch || c.branchName || '',
+        paymentReceived: 'YES',
+        paymentAmountIn: amount,
+        refundAmount: 0,
+        paymentDate: c.paymentDate,
+        paymentTime: c.paymentTime,
+        payerName: body.payerName || c.customerName || '',
+        transactionId: body.transactionId || '',
+        mode: body.mode || 'Inline status',
+        note: body.note || 'Auto-created after admin marked payment as Paid',
+        ledgerStatus: 'ACTIVE',
+        createdAt: nowIso,
+        createdBy: by,
+        updatedAt: nowIso,
+        updatedBy: by,
+      });
+    }
+    c.history.unshift({ at: nowIso, by, action: `Payment marked Paid and ₹${Number(amount || 0).toLocaleString('en-IN')} added to Finance Ledger` });
+  } else {
+    c.paymentStatus = status === 'Pending' ? 'PENDING' : 'NOT_UPDATED';
+    c.paymentReceived = status === 'Pending' ? 'PARTIAL' : 'NO';
+    c.ledger.financeLedgerLinked = false;
+    if (existing) {
+      existing.ledgerStatus = 'REVERSED';
+      existing.reversedAt = nowIso;
+      existing.reversedBy = by;
+      existing.reversalReason = `Payment status changed to ${status}`;
+      existing.updatedAt = nowIso;
+      existing.updatedBy = by;
+    }
+    c.history.unshift({ at: nowIso, by, action: `Payment status changed to ${status}${existing ? '; previous paid ledger entry marked reversed' : ''}` });
+  }
+  addAudit(d, by, `Inline payment status changed to ${status}`, caseNo);
+  return c;
+}
+
 const PRESENCE_STALE_MS = Number(process.env.PRESENCE_STALE_MS || 90000);
 const toMs = (value) => {
   if (!value) return 0;
@@ -976,6 +1107,23 @@ app.post('/api/cases/:id/upload-final', uploadAny,(req,res)=>{ const d=db(); con
   c.status='MANAGER_REVIEW'; c.history.unshift({at:now(),by:req.body.by||c.assigneeName,action:isRevision?'Revised file uploaded':'Completed file uploaded for manager review'}); notifyRole(d,'MANAGER',`${isRevision?'Revised':'Completed'} file uploaded: ${c.caseId}`,'completed',c.id); notifyRole(d,'ADMIN',`${isRevision?'Revised':'Completed'} file uploaded: ${c.caseId}`,'completed',c.id); addAudit(d,req.body.by||c.assigneeName,'Final upload',c.caseId); save(d); res.json(c); });
 app.post('/api/cases/:id/manager-complete', async (req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); c.status='COMPLETED'; c.completedAt=now(); c.history.unshift({at:now(),by:req.body.by||'Manager',action:'Reviewed by manager and marked complete'}); notifyRole(d,'ADMIN',`Case completed after manager review: ${c.caseId}`,'completed',c.id); notifyUser(d,c.assigneeName,`Case marked complete: ${c.caseId}`,'completed',c.id); addAudit(d,req.body.by||'Manager','Case completed',c.caseId); save(d); res.json(c); });
 app.post('/api/cases/:id/revision',(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); c.status='REOPENED_FOR_REVISION'; c.priority='Urgent'; const rev={id:nanoid(8),note:req.body.note||'Banker revision requested',by:req.body.by||'Admin/Manager',createdAt:now()}; c.revisions.unshift(rev); c.history.unshift({at:now(),by:rev.by,action:'Revision opened as urgent'}); notifyUser(d,c.assigneeName,`URGENT revision task: ${c.caseId} - ${rev.note}`,'task',c.id); notifyRole(d,'MANAGER',`URGENT revision opened: ${c.caseId}`,'task',c.id); save(d); res.json(c); });
+
+app.post('/api/state/projects/:id/payment-status', (req, res) => {
+  try {
+    const d = db();
+    const c = findCaseByAnyId(d.cases || [], req.params.id);
+    if (!c) return res.status(404).json({ ok:false, error:'Case not found' });
+    const status = normalizePaymentTrackingStatus(req.body.paymentTrackingStatus || req.body.status || req.body.paymentStatus);
+    const updated = upsertInlinePaymentLedger(d, c, status, req.body || {});
+    updated.updatedAt = Date.now();
+    updated.syncVersion = Date.now();
+    save(d);
+    res.json({ ok:true, project:updated, case:updated, payments:d.payments || [] });
+  } catch (e) {
+    res.status(500).json({ ok:false, error:e.message || 'Payment status update failed' });
+  }
+});
+
 app.post('/api/cases/:id/payment',(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const received=String(req.body.paymentReceived||'').toUpperCase(); if(!['YES','NO','PARTIAL','REFUND'].includes(received)) return res.status(400).json({error:'paymentReceived is mandatory: YES, NO, PARTIAL or REFUND'}); const p={id:nanoid(8),caseId:c.id,caseNo:c.caseId,location:c.city,bankerName:c.bankerName,bank:c.bank,branch:c.branch,paymentReceived:received,paymentAmountIn:Number(req.body.paymentAmountIn||0),refundAmount:Number(req.body.refundAmount||0),paymentDate:req.body.paymentDate||new Date().toISOString().slice(0,10),paymentTime:req.body.paymentTime||new Date().toTimeString().slice(0,5),payerName:req.body.payerName||'',transactionId:req.body.transactionId||'',mode:req.body.mode||'',note:req.body.note||'',createdAt:now(),createdBy:req.body.by||'Admin'}; d.payments.unshift(p); Object.assign(c,{paymentStatus:received,paymentAmountIn:p.paymentAmountIn,refundAmount:p.refundAmount,payerName:p.payerName,transactionId:p.transactionId,paymentDate:p.paymentDate,paymentTime:p.paymentTime}); c.history.unshift({at:now(),by:p.createdBy,action:`Payment ledger updated: ${received}`}); addAudit(d,p.createdBy,'Payment ledger updated',c.caseId); save(d); res.json(p); });
 
 
