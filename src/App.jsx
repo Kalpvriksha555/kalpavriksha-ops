@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { formatLastSeenDateTime, formatCallDuration, formatDateKey, formatDateTime, formatDuration, formatMinutes } from './utils/date';
 import { allProjectDocs, getCompletedDocuments, getLatestCompletedFileName, getTaskDescription, getEstimateDetails, getCompletedFileBadge } from './utils/taskDisplayUtils';
-import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass, buildPaymentTrackingUpdate } from './utils/paymentStatusUtils';
+import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass, buildPaymentTrackingUpdate, getPaymentEstimateAmount, getPaymentReceivedAmount, derivePaymentTrackingStatusFromData } from './utils/paymentStatusUtils';
 import { getBreakMinutesFromLog, getTaskBusySince, getUserActiveTasks, getUserLastCompletedAt, getUserFreeSince, getUserBusySince, getDraftingElapsedMs, getTotalLoggedInMinutesFromLog, getActiveMinutesFromLog, getAttendanceActiveTaskMinutes, buildAttendanceAccrual, deriveAttendanceSession, getAttendanceFirstLoginLabel } from './utils/presenceAttendanceUtils';
 import { createSafeMeetingRoomName, buildJitsiUrl } from './utils/meeting';
 import { copyTextToClipboard } from './utils/clipboard';
@@ -1338,6 +1338,20 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
         <div className="bg-white rounded-2xl border-2 border-amber-100 p-4 shadow-sm"><p className="text-[11px] font-black text-amber-500 uppercase tracking-widest">Break Time</p><p className="text-2xl font-black text-amber-700 mt-1">{formatMinutes(attendanceSummary.totalBreak)}</p></div>
       </div>
 
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+        {financePaymentStatuses.map(status => (
+          <button
+            key={status}
+            type="button"
+            onClick={() => setSelectedPaymentStatus(status)}
+            className={`text-left rounded-2xl border-2 p-4 transition-all ${selectedPaymentStatus === status ? 'border-indigo-300 bg-indigo-50 shadow-sm' : 'border-slate-100 bg-white hover:bg-slate-50'}`}
+          >
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{status}</p>
+            <p className="text-2xl font-black text-slate-800 mt-1">{statusCounts[status] || 0}</p>
+          </button>
+        ))}
+      </div>
+
       <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm whitespace-nowrap">
@@ -1418,8 +1432,57 @@ const LedgerView = ({ projects, onSelectProject }) => {
   const [activeTab, setActiveTab] = useState('transactions');
   const [selectedLocation, setSelectedLocation] = useState('All');
   const [selectedClient, setSelectedClient] = useState('All');
+  const [selectedPaymentStatus, setSelectedPaymentStatus] = useState('All');
+  const [selectedReminderFilter, setSelectedReminderFilter] = useState('All');
   
-  const baseLedgerProjects = projects.filter(p => (Number(p.estimate) > 0) || (Number(p.ledger?.amountIn) > 0) || p.ledger?.updatedAt);
+  const financePaymentStatuses = ['All', 'Not Updated', 'Pending', 'Partially Paid', 'Paid', 'Overpaid'];
+  const deriveLedgerPaymentStatus = (project = {}) => {
+    const estimate = getPaymentEstimateAmount(project);
+    const received = getPaymentReceivedAmount(project);
+    const rawStatus = String(project.paymentTrackingStatus || project.paymentStatus || project.paymentReceived || project.ledger?.status || project.ledger?.paymentStatus || '').toUpperCase();
+    const hasFinanceData = Boolean(
+      estimate > 0 || received > 0 || project.ledger?.updatedAt || project.ledger?.date || project.paymentTrackingUpdatedAt ||
+      project.paymentDate || project.paymentTime || project.ledger?.receivedFrom || project.ledger?.txnId || project.ledger?.mode
+    );
+
+    // Never show Paid/Cleared when no money has actually been received.
+    if (received > 0 && estimate > 0 && received > estimate) return 'Overpaid';
+    if (received > 0 && estimate > 0 && received === estimate) return 'Paid';
+    if (received > 0 && estimate > 0 && received < estimate) return 'Partially Paid';
+    if (received > 0 && estimate <= 0) return 'Paid';
+    if (estimate > 0 || rawStatus.includes('PENDING') || rawStatus === 'PARTIAL' || hasFinanceData) return 'Pending';
+    return 'Not Updated';
+  };
+  const getLedgerPaymentBadgeClass = (status = 'Not Updated') => {
+    switch (status) {
+      case 'Paid': return 'bg-emerald-50 text-emerald-700 border-emerald-100';
+      case 'Overpaid': return 'bg-violet-50 text-violet-700 border-violet-100';
+      case 'Partially Paid': return 'bg-blue-50 text-blue-700 border-blue-100';
+      case 'Pending': return 'bg-amber-50 text-amber-700 border-amber-100';
+      default: return 'bg-rose-50 text-rose-700 border-rose-100';
+    }
+  };
+
+  const getLedgerPaymentAgeDays = (project = {}) => {
+    const rawDate = project.ledger?.date || project.paymentDate || project.completedAt || project.createdAt;
+    const parsed = rawDate ? new Date(rawDate) : null;
+    const timestamp = parsed && !Number.isNaN(parsed.getTime()) ? parsed.getTime() : Date.now();
+    return Math.max(0, Math.floor((Date.now() - timestamp) / 86400000));
+  };
+
+  const getLedgerReminderLevel = (project = {}) => {
+    const status = deriveLedgerPaymentStatus(project);
+    if (status === 'Paid' || status === 'Overpaid') return '';
+    const ageDays = getLedgerPaymentAgeDays(project);
+    if (ageDays >= 30) return '30+';
+    if (ageDays >= 15) return '15+';
+    if (ageDays >= 7) return '7+';
+    if (status === 'Pending' || status === 'Partially Paid') return 'Pending';
+    if (status === 'Not Updated') return 'Not Updated';
+    return '';
+  };
+  
+  const baseLedgerProjects = projects.filter(p => (Number(p.estimate) > 0) || (Number(p.ledger?.amountIn) > 0) || p.ledger?.updatedAt || p.paymentTrackingUpdatedAt);
   const allLocations = [...new Set(baseLedgerProjects.map(p => p.location).filter(Boolean))].sort();
   const availableClients = [...new Set(baseLedgerProjects.filter(p => selectedLocation === 'All' || p.location === selectedLocation).map(p => p.client).filter(Boolean))].sort();
 
@@ -1430,15 +1493,92 @@ const LedgerView = ({ projects, onSelectProject }) => {
   const ledgerProjects = baseLedgerProjects.filter(p => {
       if (selectedLocation !== 'All' && p.location !== selectedLocation) return false;
       if (selectedClient !== 'All' && p.client !== selectedClient) return false;
+      if (selectedPaymentStatus !== 'All' && deriveLedgerPaymentStatus(p) !== selectedPaymentStatus) return false;
+      if (selectedReminderFilter !== 'All') {
+        const status = deriveLedgerPaymentStatus(p);
+        const ageDays = getLedgerPaymentAgeDays(p);
+        if (selectedReminderFilter === 'notUpdated' && status !== 'Not Updated') return false;
+        if (selectedReminderFilter === 'pending' && !(status === 'Pending' || status === 'Partially Paid')) return false;
+        if (selectedReminderFilter === 'over7' && ageDays < 7) return false;
+        if (selectedReminderFilter === 'over15' && ageDays < 15) return false;
+        if (selectedReminderFilter === 'over30' && ageDays < 30) return false;
+      }
       return true;
   }).sort((a,b) => ((b.ledger?.updatedAt || b.completedAt || b.createdAt) || 0) - ((a.ledger?.updatedAt || a.completedAt || a.createdAt) || 0));
 
-  const totalCost = ledgerProjects.reduce((sum, p) => sum + (Number(p.estimate) || 0), 0);
-  const totalReceived = ledgerProjects.reduce((sum, p) => sum + (Number(p.ledger?.amountIn) || 0), 0);
+  const statusCounts = baseLedgerProjects.reduce((acc, p) => {
+    const status = deriveLedgerPaymentStatus(p);
+    acc[status] = (acc[status] || 0) + 1;
+    acc.All += 1;
+    return acc;
+  }, { All: 0, 'Not Updated': 0, Pending: 0, 'Partially Paid': 0, Paid: 0, Overpaid: 0 });
+
+  const totalCost = ledgerProjects.reduce((sum, p) => sum + getPaymentEstimateAmount(p), 0);
+  const totalReceived = ledgerProjects.reduce((sum, p) => sum + getPaymentReceivedAmount(p), 0);
   const totalExpenses = ledgerProjects.reduce((sum, p) => sum + (Number(p.ledger?.expenses) || 0), 0);
   const totalRefund = ledgerProjects.reduce((sum, p) => sum + (Number(p.ledger?.refund) || 0), 0);
   const netRevenue = totalReceived - totalExpenses - totalRefund;
-  const totalPending = ledgerProjects.reduce((sum, p) => sum + Math.max(0, (Number(p.estimate) || 0) - (Number(p.ledger?.amountIn) || 0)), 0);
+  const totalPending = ledgerProjects.reduce((sum, p) => sum + Math.max(0, getPaymentEstimateAmount(p) - getPaymentReceivedAmount(p)), 0);
+
+  const paymentReminderProjects = baseLedgerProjects.filter(p => {
+    const status = deriveLedgerPaymentStatus(p);
+    return status === 'Not Updated' || status === 'Pending' || status === 'Partially Paid';
+  });
+  const paymentReminderStats = paymentReminderProjects.reduce((acc, p) => {
+    const status = deriveLedgerPaymentStatus(p);
+    const pendingAmount = Math.max(0, getPaymentEstimateAmount(p) - getPaymentReceivedAmount(p));
+    const ageDays = getLedgerPaymentAgeDays(p);
+    if (status === 'Not Updated') acc.notUpdated += 1;
+    if (status === 'Pending' || status === 'Partially Paid') acc.pending += 1;
+    if (ageDays >= 7) acc.over7 += 1;
+    if (ageDays >= 15) acc.over15 += 1;
+    if (ageDays >= 30) acc.over30 += 1;
+    acc.outstanding += pendingAmount;
+    return acc;
+  }, { notUpdated: 0, pending: 0, over7: 0, over15: 0, over30: 0, outstanding: 0 });
+
+  const applyPaymentReminderFilter = (type) => {
+    setActiveTab('pending');
+    setSelectedPaymentStatus('All');
+    setSelectedReminderFilter(type || 'All');
+  };
+
+  useEffect(() => {
+    setSelectedReminderFilter('All');
+  }, [selectedLocation, selectedClient, selectedPaymentStatus]);
+
+  const paymentAuditEvents = ledgerProjects.flatMap(p => {
+    const explicitAudit = Array.isArray(p.paymentAuditTrail) ? p.paymentAuditTrail : [];
+    const ledgerAudit = Array.isArray(p.ledger?.auditTrail) ? p.ledger.auditTrail : [];
+    const historyAudit = (Array.isArray(p.history) ? p.history : [])
+      .filter(h => /payment|ledger|paid|pending|refund|received/i.test(String(h.action || h.text || '')))
+      .map(h => ({
+        id: h.id || `${p.id}-${h.at || h.time || Math.random()}`,
+        at: h.at || h.time || p.ledger?.updatedAt || p.paymentTrackingUpdatedAt || p.updatedAt,
+        by: h.by || h.user || h.updatedBy || p.paymentTrackingUpdatedBy || p.ledger?.updatedBy || 'Admin',
+        action: h.action || h.text || 'Payment activity',
+        note: h.note || '',
+      }));
+    const synthesized = (p.ledger?.updatedAt || p.paymentTrackingUpdatedAt) ? [{
+      id: `${p.id}-current-payment-state`,
+      at: p.ledger?.updatedAt || p.paymentTrackingUpdatedAt,
+      by: p.paymentTrackingUpdatedBy || p.ledger?.updatedBy || 'Admin',
+      action: 'Current payment state',
+      oldStatus: '',
+      newStatus: deriveLedgerPaymentStatus(p),
+      oldAmount: '',
+      newAmount: Number(p.ledger?.amountIn) || 0,
+      note: 'Latest saved payment/ledger state for this task'
+    }] : [];
+    return [...explicitAudit, ...ledgerAudit, ...historyAudit, ...synthesized].map(event => ({
+      ...event,
+      taskId: p.id,
+      customerName: getCustomerDisplayName(p),
+      bank: p.client || '',
+      status: event.newStatus || deriveLedgerPaymentStatus(p),
+      amount: event.newAmount ?? event.amount ?? Number(p.ledger?.amountIn || 0),
+    }));
+  }).sort((a, b) => (new Date(b.at || 0).getTime() || 0) - (new Date(a.at || 0).getTime() || 0));
 
   const monthlyStats = {};
   const clientStats = {};
@@ -1471,10 +1611,10 @@ const LedgerView = ({ projects, onSelectProject }) => {
   });
 
   const handleExport = () => {
-    const headers = ["Task ID", "Created Date", "Client", "Customer", "Location", "Cost (Est)", "Received", "Actual Expenses", "Refund", "Pending"];
+    const headers = ["Task ID", "Created Date", "Client", "Customer", "Location", "Payment Status", "Cost (Est)", "Received", "Actual Expenses", "Refund", "Pending"];
     const rows = ledgerProjects.map(p => [
       p.id, p.createdAt ? new Date(p.createdAt).toLocaleDateString() : '-',
-      p.client, p.customerName || '', p.location || '', Number(p.estimate)||0, Number(p.ledger?.amountIn)||0, Number(p.ledger?.expenses)||0, Number(p.ledger?.refund)||0, (Number(p.estimate)||0) - (Number(p.ledger?.amountIn)||0)
+      p.client, p.customerName || '', p.location || '', deriveLedgerPaymentStatus(p), getPaymentEstimateAmount(p), getPaymentReceivedAmount(p), Number(p.ledger?.expenses)||0, Number(p.ledger?.refund)||0, Math.max(0, getPaymentEstimateAmount(p) - getPaymentReceivedAmount(p))
     ]);
     exportToCSV(headers, rows, "Financial_Ledger.csv");
   };
@@ -1505,6 +1645,15 @@ const LedgerView = ({ projects, onSelectProject }) => {
                       </select>
                   </div>
               </div>
+              <div className="flex flex-col">
+                  <label className="text-[10px] font-black uppercase text-slate-400 mb-1 tracking-widest">Payment Status</label>
+                  <div className="relative">
+                      <Filter className="w-4 h-4 text-indigo-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <select value={selectedPaymentStatus} onChange={e => setSelectedPaymentStatus(e.target.value)} className="pl-9 pr-8 py-2.5 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-700 outline-none focus:border-indigo-500 appearance-none shadow-sm cursor-pointer min-w-[190px]">
+                          {financePaymentStatuses.map(status => <option key={status} value={status}>{status} ({statusCounts[status] || 0})</option>)}
+                      </select>
+                  </div>
+              </div>
            </div>
         </div>
         <div className="flex flex-wrap gap-3 mt-4 xl:mt-0">
@@ -1514,8 +1663,47 @@ const LedgerView = ({ projects, onSelectProject }) => {
             <button type="button" onClick={() => setActiveTab('monthly')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'monthly' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><List className="w-4 h-4 mr-1.5" /> Monthly</button>
             <button type="button" onClick={() => setActiveTab('clients')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'clients' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Briefcase className="w-4 h-4 mr-1.5" /> Banks</button>
             <button type="button" onClick={() => setActiveTab('customers')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'customers' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><User className="w-4 h-4 mr-1.5" /> Customers</button>
+            <button type="button" onClick={() => setActiveTab('report')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'report' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><BarChart3 className="w-4 h-4 mr-1.5" /> Report</button>
+            <button type="button" onClick={() => setActiveTab('audit')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'audit' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Shield className="w-4 h-4 mr-1.5" /> Audit</button>
           </div>
           <button onClick={handleExport} className="flex items-center px-4 py-2.5 bg-emerald-100 text-emerald-700 font-bold rounded-xl hover:bg-emerald-200 transition-colors"><Download className="w-4 h-4 mr-2" /> Export</button>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm p-4 sm:p-5">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center">
+              <Bell className="w-5 h-5 text-indigo-600" />
+            </div>
+            <div>
+              <h3 className="text-lg font-black text-slate-800">Payment Reminders</h3>
+              <p className="text-xs font-bold text-slate-400">Admin-only finance reminders. These filters do not affect Archive or Operations.</p>
+            </div>
+          </div>
+          <div className="text-sm font-black text-slate-700">Outstanding: <span className="text-orange-600">₹{paymentReminderStats.outstanding.toLocaleString()}</span></div>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-4">
+          <button type="button" onClick={() => applyPaymentReminderFilter('notUpdated')} className="text-left rounded-2xl border border-rose-100 bg-rose-50 p-3 hover:bg-rose-100 transition-colors">
+            <p className="text-[10px] font-black uppercase tracking-widest text-rose-500">Not Updated</p>
+            <p className="text-2xl font-black text-rose-700 mt-1">{paymentReminderStats.notUpdated}</p>
+          </button>
+          <button type="button" onClick={() => applyPaymentReminderFilter('pending')} className="text-left rounded-2xl border border-amber-100 bg-amber-50 p-3 hover:bg-amber-100 transition-colors">
+            <p className="text-[10px] font-black uppercase tracking-widest text-amber-600">Pending</p>
+            <p className="text-2xl font-black text-amber-700 mt-1">{paymentReminderStats.pending}</p>
+          </button>
+          <button type="button" onClick={() => applyPaymentReminderFilter('over7')} className="text-left rounded-2xl border border-yellow-100 bg-yellow-50 p-3 hover:bg-yellow-100 transition-colors">
+            <p className="text-[10px] font-black uppercase tracking-widest text-yellow-700">Over 7 Days</p>
+            <p className="text-2xl font-black text-yellow-800 mt-1">{paymentReminderStats.over7}</p>
+          </button>
+          <button type="button" onClick={() => applyPaymentReminderFilter('over15')} className="text-left rounded-2xl border border-orange-100 bg-orange-50 p-3 hover:bg-orange-100 transition-colors">
+            <p className="text-[10px] font-black uppercase tracking-widest text-orange-600">Over 15 Days</p>
+            <p className="text-2xl font-black text-orange-700 mt-1">{paymentReminderStats.over15}</p>
+          </button>
+          <button type="button" onClick={() => applyPaymentReminderFilter('over30')} className="text-left rounded-2xl border border-red-100 bg-red-50 p-3 hover:bg-red-100 transition-colors">
+            <p className="text-[10px] font-black uppercase tracking-widest text-red-600">Over 30 Days</p>
+            <p className="text-2xl font-black text-red-700 mt-1">{paymentReminderStats.over30}</p>
+          </button>
         </div>
       </div>
 
@@ -1558,6 +1746,7 @@ const LedgerView = ({ projects, onSelectProject }) => {
                 <tr>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Payment Date & Time</th>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Task ID & Client</th>
+                  <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-center">Status</th>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Cost (Est)</th>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Received</th>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Expenses</th>
@@ -1567,10 +1756,11 @@ const LedgerView = ({ projects, onSelectProject }) => {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {ledgerProjects.filter(p => activeTab === 'pending' ? ((Number(p.estimate) || 0) > (Number(p.ledger?.amountIn) || 0)) : true).map(p => {
-                  const est = Number(p.estimate) || 0;
-                  const rec = Number(p.ledger?.amountIn) || 0;
+                  const est = getPaymentEstimateAmount(p);
+                  const rec = getPaymentReceivedAmount(p);
                   const exp = Number(p.ledger?.expenses) || 0;
-                  const pen = est - rec;
+                  const status = deriveLedgerPaymentStatus(p);
+                  const pen = Math.max(0, est - rec);
                   const updateDate = p.ledger?.updatedAt ? new Date(p.ledger.updatedAt) : null;
                   
                   return (
@@ -1586,11 +1776,14 @@ const LedgerView = ({ projects, onSelectProject }) => {
                         </div>
                         <p className="font-medium text-slate-500 text-xs mt-0.5">{getCustomerDisplayName(p)}</p>
                       </td>
+                      <td className="px-6 py-5 text-center">
+                        <span className={`inline-flex items-center justify-center px-2.5 py-1 rounded-full border text-[11px] font-black ${getLedgerPaymentBadgeClass(deriveLedgerPaymentStatus(p))}`}>{deriveLedgerPaymentStatus(p)}</span>
+                      </td>
                       <td className="px-6 py-5 text-right font-bold text-slate-600">₹{est.toLocaleString()}</td>
                       <td className="px-6 py-5 text-right font-bold text-emerald-600">₹{rec.toLocaleString()}</td>
                       <td className="px-6 py-5 text-right font-bold text-amber-600">₹{exp.toLocaleString()}</td>
                       <td className="px-6 py-5 text-right font-black text-slate-800">
-                        {pen > 0 ? <span className="text-red-500 bg-red-50 px-2 py-1 rounded-lg border border-red-100">₹{pen.toLocaleString()}</span> : <span className="text-slate-400"><CheckCircle className="w-4 h-4 inline text-emerald-500"/> Cleared</span>}
+                        {status === 'Paid' || status === 'Overpaid' ? <span className="text-slate-400"><CheckCircle className="w-4 h-4 inline text-emerald-500"/> Cleared</span> : pen > 0 ? <span className="text-red-500 bg-red-50 px-2 py-1 rounded-lg border border-red-100">₹{pen.toLocaleString()}</span> : <span className="text-slate-400">Not Updated</span>}
                       </td>
                       <td className="px-6 py-5 text-center">
                          {p.ledger?.screenshot ? (
@@ -1603,7 +1796,7 @@ const LedgerView = ({ projects, onSelectProject }) => {
                   )
                 })}
                 {ledgerProjects.filter(p => activeTab === 'pending' ? ((Number(p.estimate) || 0) > (Number(p.ledger?.amountIn) || 0)) : true).length === 0 && (
-                   <tr><td colSpan="7" className="text-center py-10 text-slate-500 font-medium">No records found for this view.</td></tr>
+                   <tr><td colSpan="8" className="text-center py-10 text-slate-500 font-medium">No records found for this view.</td></tr>
                 )}
               </tbody>
             </table>
@@ -1706,6 +1899,106 @@ const LedgerView = ({ projects, onSelectProject }) => {
               </tbody>
             </table>
           )}
+
+
+          {activeTab === 'report' && (
+            <div className="p-5 space-y-5">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div className="bg-slate-50 rounded-2xl p-4 border border-slate-100">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Filtered Records</p>
+                  <p className="text-2xl font-black text-slate-800">{ledgerProjects.length}</p>
+                </div>
+                <div className="bg-emerald-50 rounded-2xl p-4 border border-emerald-100">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-emerald-600">Filtered Received</p>
+                  <p className="text-2xl font-black text-emerald-700">₹{totalReceived.toLocaleString()}</p>
+                </div>
+                <div className="bg-orange-50 rounded-2xl p-4 border border-orange-100">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-orange-600">Filtered Pending</p>
+                  <p className="text-2xl font-black text-orange-700">₹{totalPending.toLocaleString()}</p>
+                </div>
+                <div className="bg-indigo-50 rounded-2xl p-4 border border-indigo-100">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Filtered Net</p>
+                  <p className="text-2xl font-black text-indigo-700">₹{netRevenue.toLocaleString()}</p>
+                </div>
+              </div>
+              <table className="w-full text-left text-sm whitespace-nowrap">
+                <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
+                  <tr>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs">Task ID</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs">Bank / Customer</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs text-center">Payment Status</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs text-right">Estimate</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs text-right">Received</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs text-right">Pending</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {ledgerProjects.map(p => {
+                    const est = Number(p.estimate) || 0;
+                    const rec = Number(p.ledger?.amountIn) || 0;
+                    const status = deriveLedgerPaymentStatus(p);
+                    return (
+                      <tr key={`report-${p.id}`} className="hover:bg-slate-50">
+                        <td className="px-4 py-4 font-black text-slate-800">{p.id}</td>
+                        <td className="px-4 py-4">
+                          <p className="font-bold text-slate-700">{p.client || '-'}</p>
+                          <p className="text-xs text-slate-500 font-semibold">{getCustomerDisplayName(p)}</p>
+                        </td>
+                        <td className="px-4 py-4 text-center">
+                          <span className={`inline-flex px-2.5 py-1 rounded-full border text-[11px] font-black ${getLedgerPaymentBadgeClass(status)}`}>{status}</span>
+                        </td>
+                        <td className="px-4 py-4 text-right font-bold text-slate-600">₹{est.toLocaleString()}</td>
+                        <td className="px-4 py-4 text-right font-bold text-emerald-600">₹{rec.toLocaleString()}</td>
+                        <td className="px-4 py-4 text-right font-black text-red-600">₹{Math.max(0, est - rec).toLocaleString()}</td>
+                      </tr>
+                    );
+                  })}
+                  {ledgerProjects.length === 0 && <tr><td colSpan="6" className="text-center py-10 text-slate-500 font-medium">No report records found for the selected finance filters.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {activeTab === 'audit' && (
+            <div className="p-5 space-y-5">
+              <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-4">
+                <h3 className="text-lg font-black text-indigo-800">Payment Audit Trail</h3>
+                <p className="text-sm font-bold text-indigo-500 mt-1">Admin-only history of payment and ledger changes. Archive and Operations logic is not affected by this view.</p>
+              </div>
+              <table className="w-full text-left text-sm whitespace-nowrap">
+                <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
+                  <tr>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs">Date & Time</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs">Task</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs">Changed By</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs">Change</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs text-right">Amount</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs">Note</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {paymentAuditEvents.map(event => (
+                    <tr key={`${event.taskId}-${event.id || event.at}`} className="hover:bg-slate-50">
+                      <td className="px-4 py-4 font-bold text-slate-700">{event.at ? formatDateTime(event.at) : '-'}</td>
+                      <td className="px-4 py-4">
+                        <p className="font-black text-slate-800">{event.taskId}</p>
+                        <p className="text-xs text-slate-500 font-semibold">{event.customerName}{event.bank ? ` • ${event.bank}` : ''}</p>
+                      </td>
+                      <td className="px-4 py-4 font-bold text-slate-600">{event.by || 'Admin'}</td>
+                      <td className="px-4 py-4">
+                        <p className="font-bold text-slate-700">{event.action || 'Payment activity'}</p>
+                        {(event.oldStatus || event.newStatus) && <p className="text-xs font-black text-indigo-600 mt-1">{event.oldStatus || '-'} → {event.newStatus || event.status || '-'}</p>}
+                      </td>
+                      <td className="px-4 py-4 text-right font-black text-emerald-700">₹{Number(event.amount || 0).toLocaleString()}</td>
+                      <td className="px-4 py-4 text-xs font-semibold text-slate-500 max-w-md truncate" title={event.note || ''}>{event.note || '-'}</td>
+                    </tr>
+                  ))}
+                  {paymentAuditEvents.length === 0 && <tr><td colSpan="6" className="text-center py-10 text-slate-500 font-medium">No payment audit entries found for the selected finance filters.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          )}
+
         </div>
       </div>
     </div>
@@ -2163,9 +2456,20 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
 
   const updateLedger = (field, value) => {
     if (!showFinancials) return;
+    const now = Date.now();
+    const nextLedger = { ...(project.ledger || {}), [field]: value, updatedAt: now, updatedBy: user?.name || 'Admin' };
+    const draftProject = { ...project, ledger: nextLedger };
+    const computedStatus = derivePaymentTrackingStatusFromData(draftProject);
+    const amountIn = getPaymentReceivedAmount(draftProject);
     const updatedProject = {
-      ...project,
-      ledger: { ...(project.ledger || {}), [field]: value, updatedAt: Date.now() }
+      ...draftProject,
+      paymentTrackingStatus: computedStatus,
+      paymentTrackingUpdatedAt: now,
+      paymentTrackingUpdatedBy: user?.name || 'Admin',
+      paymentStatus: computedStatus === 'Paid' ? 'YES' : (computedStatus === 'Pending' ? 'PENDING' : 'NOT_UPDATED'),
+      paymentReceived: computedStatus === 'Paid' ? 'YES' : (computedStatus === 'Pending' ? 'PARTIAL' : 'NO'),
+      paymentAmountIn: amountIn,
+      paymentDate: nextLedger.date || project.paymentDate,
     };
     onUpdateProject(updatedProject, project);
   };
@@ -3458,6 +3762,36 @@ function AppShell() {
   const handlePaymentStatusChange = async (project, status) => {
     if (!project || currentUser?.role !== ROLES.ADMIN) return;
     const normalizedStatus = PAYMENT_TRACKING_OPTIONS.includes(status) ? status : 'Not Updated';
+
+    if (normalizedStatus === 'Paid') {
+      const estimateAmount = getPaymentEstimateAmount(project);
+      const existingAmount = getPaymentReceivedAmount(project);
+      const defaultAmount = existingAmount || estimateAmount || '';
+      const amountInput = window.prompt(`Enter amount received for ${project.id}${estimateAmount ? ` (estimate ₹${Number(estimateAmount).toLocaleString('en-IN')})` : ''}:`, defaultAmount ? String(defaultAmount) : '');
+      if (amountInput === null || String(amountInput).trim() === '') return;
+      const amount = Number(String(amountInput).replace(/[^0-9.-]/g, ''));
+      if (!Number.isFinite(amount) || amount <= 0) {
+        alert('Please enter a valid received amount before marking payment as Paid.');
+        return;
+      }
+      const today = new Date().toISOString().slice(0, 10);
+      const paymentDate = window.prompt('Enter payment date (YYYY-MM-DD):', project.ledger?.date || project.paymentDate || today);
+      if (paymentDate === null || !String(paymentDate).trim()) return;
+      const mode = window.prompt('Enter payment mode (Cash / UPI / Bank Transfer / Cheque):', project.ledger?.mode || '');
+      if (mode === null || !String(mode).trim()) return;
+      const transactionId = window.prompt('Reference / Transaction ID (optional):', project.ledger?.txnId || project.transactionId || '') || '';
+      const note = window.prompt('Remarks (optional):', '') || '';
+      const updatedProject = buildPaymentTrackingUpdate(project, 'Paid', currentUser, {
+        amountIn: amount,
+        paymentDate: String(paymentDate).trim(),
+        mode: String(mode).trim(),
+        transactionId: String(transactionId).trim(),
+        note: String(note).trim(),
+      });
+      await handleUpdateProject(updatedProject, project);
+      return;
+    }
+
     const updatedProject = buildPaymentTrackingUpdate(project, normalizedStatus, currentUser);
     await handleUpdateProject(updatedProject, project);
   };

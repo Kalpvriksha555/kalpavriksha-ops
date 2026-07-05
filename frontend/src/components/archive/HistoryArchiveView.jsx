@@ -8,6 +8,15 @@ const getCustomerDisplayName = (project = {}) => project.customerName || 'Custom
 const isAdminUser = (user = {}) => String(user?.role || '').trim().toUpperCase() === 'ADMIN';
 const isRevisionWorkItem = (project = {}) => project.isRevisionWorkItem === true || String(project.id || '').includes('__REV__');
 
+const getArchiveRevisionSummary = (project = {}) => {
+  const history = Array.isArray(project.revisionHistory) ? project.revisionHistory : [];
+  const reviewHistory = Array.isArray(project.reviewHistory) ? project.reviewHistory.filter(item => String(item.action || item.comment || '').toLowerCase().includes('revision')) : [];
+  const active = Array.isArray(project.subTasks) ? project.subTasks.filter(item => !['done', 'completed', 'approved', 'closed'].includes(String(item.status || '').toLowerCase())) : [];
+  const total = Math.max(history.length, reviewHistory.length, active.length ? history.length + active.length : history.length);
+  const completed = history.filter(item => ['done', 'completed', 'approved', 'closed'].includes(String(item.status || item.action || '').toLowerCase())).length;
+  return { total, completed, active: active.length };
+};
+
 const getCompletedDateKey = (completedAt) => {
   const d = new Date(completedAt);
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
@@ -95,6 +104,15 @@ const ArchiveTaskMeta = ({ project, currentUser }) => {
           📄 {completedFileName}
         </p>
       )}
+      {(() => {
+        const revisionSummary = getArchiveRevisionSummary(project);
+        if (!revisionSummary.total && !revisionSummary.active) return null;
+        return (
+          <p className="text-[11px] font-black text-purple-700 bg-purple-50 border border-purple-100 rounded-lg px-2 py-1 w-fit max-w-lg truncate">
+            ↻ Revisions: {revisionSummary.total} total • {revisionSummary.completed} completed{revisionSummary.active ? ` • ${revisionSummary.active} active` : ''}
+          </p>
+        );
+      })()}
     </div>
   );
 };

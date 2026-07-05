@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { formatLastSeenDateTime, formatCallDuration, formatDateKey, formatDateTime, formatDuration, formatMinutes } from './utils/date';
 import { allProjectDocs, getCompletedDocuments, getLatestCompletedFileName, getTaskDescription, getEstimateDetails, getCompletedFileBadge } from './utils/taskDisplayUtils';
-import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass, buildPaymentTrackingUpdate } from './utils/paymentStatusUtils';
+import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass, buildPaymentTrackingUpdate, getPaymentEstimateAmount, getPaymentReceivedAmount, derivePaymentTrackingStatusFromData } from './utils/paymentStatusUtils';
 import { getBreakMinutesFromLog, getTaskBusySince, getUserActiveTasks, getUserLastCompletedAt, getUserFreeSince, getUserBusySince, getDraftingElapsedMs, getTotalLoggedInMinutesFromLog, getActiveMinutesFromLog, getAttendanceActiveTaskMinutes, buildAttendanceAccrual, deriveAttendanceSession, getAttendanceFirstLoginLabel } from './utils/presenceAttendanceUtils';
 import { createSafeMeetingRoomName, buildJitsiUrl } from './utils/meeting';
 import { copyTextToClipboard } from './utils/clipboard';
@@ -20,7 +20,7 @@ import { API_BASE, USE_BACKEND_STATE, ONLINE_STALE_MS, MAX_INLINE_DATA_URL_CHARS
 import { fileToBase64, cleanFileName } from './utils/fileUtils';
 import { absoluteApiUrl, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile } from './services/fileService';
 import { sendRealOtp, verifyRealOtp } from './services/otpService';
-import { buildNotification, getVisibleNotifications, NOTIFICATION_CATEGORIES, getNotificationCategory, getNotificationPriority, buildActivityTimeline, isNotificationForUser, isNotificationReadByUser, addNotificationReadUser, mergeNotificationsByStability } from './services/notificationService';
+import { buildNotification, getVisibleNotifications, NOTIFICATION_CATEGORIES, getNotificationCategory, getNotificationPriority, buildActivityTimeline, isNotificationForUser } from './services/notificationService';
 import { 
   Briefcase, CheckCircle, Clock, FileText, LayoutDashboard, LogOut, 
   MapPin, Plus, Search, User, Users, Wallet, ArrowRight, Upload, 
@@ -476,49 +476,13 @@ const normalizeTeamUser = (u = {}) => {
   return createEmployeeLifecycleProfile(presenceSafe, u);
 };
 
-const getTeamUserIdentityKey = (u = {}) => {
-  const nameKey = identityKey(u.name || '');
-  if (nameKey) return `name:${nameKey}`;
-  const usernameKey = String(u.username || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  if (usernameKey) return `username:${usernameKey}`;
-  const emailKey = String(u.email || '').trim().toLowerCase();
-  if (emailKey) return `email:${emailKey}`;
-  return `id:${String(u.id || '')}`;
-};
-
-const mergeTeamUserPresence = (previous = {}, incoming = {}) => {
-  const prev = normalizeTeamUser(previous);
-  const next = normalizeTeamUser(incoming);
-  const prevActivity = userLastActivityAt(prev);
-  const nextActivity = userLastActivityAt(next);
-  const preferredPresence = nextActivity >= prevActivity ? next : prev;
-  const stableProfile = next.profileUpdatedAt && (!prev.profileUpdatedAt || toMs(next.profileUpdatedAt) >= toMs(prev.profileUpdatedAt)) ? next : prev;
-  return normalizeTeamUser({
-    ...prev,
-    ...next,
-    id: preferredPresence.id || next.id || prev.id,
-    name: stableProfile.name || next.name || prev.name,
-    username: stableProfile.username || next.username || prev.username,
-    role: stableProfile.role || next.role || prev.role,
-    status: stableProfile.status || next.status || prev.status,
-    isOnline: preferredPresence.isOnline,
-    availability: preferredPresence.availability,
-    breakStartedAt: preferredPresence.breakStartedAt || null,
-    availabilityUpdatedAt: preferredPresence.availabilityUpdatedAt || null,
-    lastLoginAt: preferredPresence.lastLoginAt || null,
-    lastSeenAt: preferredPresence.lastSeenAt || null,
-    lastHeartbeatAt: preferredPresence.lastHeartbeatAt || null,
-    lastLogoutAt: preferredPresence.lastLogoutAt || null
-  });
-};
-
 const normalizeTeamUsers = (list = []) => {
   const source = (Array.isArray(list) && list.length ? list : INITIAL_USERS).map(normalizeTeamUser);
   const byKey = new Map();
   source.forEach(u => {
-    const key = getTeamUserIdentityKey(u);
-    const prev = byKey.get(key);
-    byKey.set(key, prev ? mergeTeamUserPresence(prev, u) : u);
+    const key = String(u.username || identityKey(u.name) || u.id);
+    const prev = byKey.get(key) || {};
+    byKey.set(key, normalizeTeamUser({ ...prev, ...u, id: prev.id || u.id }));
   });
   return [...byKey.values()];
 };
@@ -621,9 +585,8 @@ const exportToCSV = (headers, rows, filename) => {
 };
 
 const getAttendanceUser = (log, users = []) => {
-  const normalizedUsers = normalizeTeamUsers(users && users.length ? users : INITIAL_USERS);
-  return normalizedUsers.find(u => String(u.id) === String(log.userId))
-    || normalizedUsers.find(u => samePerson(u.name, log.name) || samePerson(u.username, log.name) || samePerson(u.name, log.username))
+  return (users || []).find(u => String(u.id) === String(log.userId))
+    || (users || []).find(u => samePerson(u.name, log.name))
     || null;
 };
 
@@ -773,6 +736,66 @@ const makeRevisionWorkItem = (project = {}, revision = {}, requestedBy = '') => 
   });
 };
 
+
+const getRevisionTimelineItems = (project = {}, projects = []) => {
+  const baseId = String(project.originalTaskId || project.displayId || project.id || '');
+  const items = [];
+  const pushItem = (raw = {}, fallback = {}) => {
+    if (!raw) return;
+    const label = raw.revisionCode || (raw.revisionNumber ? `R${raw.revisionNumber}` : fallback.revisionCode || 'REV');
+    const title = raw.title || raw.comment || raw.text || raw.action || fallback.title || 'Revision activity';
+    const ts = Number(raw.at || raw.completedAt || raw.createdAt || raw.updatedAt || raw.id || fallback.at || Date.now());
+    items.push({
+      id: raw.id || `${label}-${ts}-${items.length}`,
+      label,
+      title,
+      action: raw.action || fallback.action || raw.status || 'Revision Activity',
+      status: raw.status || fallback.status || 'Pending',
+      by: raw.reviewer || raw.completedBy || raw.addedBy || raw.by || raw.requestedBy || fallback.by || '',
+      at: ts,
+      workItemId: raw.workItemId || fallback.workItemId || '',
+      files: raw.files || raw.attachments || fallback.files || [],
+    });
+  };
+
+  (Array.isArray(project.revisionHistory) ? project.revisionHistory : []).forEach(item => pushItem(item));
+  (Array.isArray(project.reviewHistory) ? project.reviewHistory : [])
+    .filter(item => String(item.action || item.comment || '').toLowerCase().includes('revision'))
+    .forEach(item => pushItem(item));
+  (Array.isArray(project.subTasks) ? project.subTasks : []).forEach(item => pushItem(item, { action: 'Revision Requested', status: item.status || 'Pending' }));
+
+  (Array.isArray(projects) ? projects : [])
+    .filter(item => isRevisionWorkItem(item) && String(item.originalTaskId || item.displayId || '').trim() === baseId)
+    .forEach(item => {
+      const revisionNumber = item.revisionNumber || getNextRevisionNumber(project);
+      pushItem({
+        id: item.id,
+        revisionNumber,
+        revisionCode: item.revisionCode || `R${revisionNumber}`,
+        title: item.taskName || `Revision ${revisionNumber}`,
+        action: item.status === 'Completed' ? 'Revision Completed' : 'Revision Work Item',
+        status: item.status || 'Revision Pending',
+        completedBy: item.completedBy || item.assignedTo,
+        createdAt: item.createdAt,
+        completedAt: item.completedAt,
+        workItemId: item.id,
+        files: [...(item.completedFiles || []), ...(item.documents || []).filter(doc => String(doc.type || '').toLowerCase() === 'completed')]
+      });
+    });
+
+  const seen = new Set();
+  return items
+    .filter(item => {
+      const key = [item.label, item.action, item.title, item.workItemId, item.at].join('|');
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => (a.at || 0) - (b.at || 0));
+};
+
+const isRevisionTimelineItemCompleted = (item = {}) => ['DONE', 'COMPLETED', 'APPROVED', 'CLOSED', 'RESOLVED'].includes(normalizeWorkStatusForRevision(item.status || item.action));
+
 const isIncompleteProject = (project = {}) => project.status !== 'Completed';
 
 const isCarriedForwardProject = (project = {}, dateKey = formatDateKey()) => {
@@ -880,7 +903,6 @@ const LoginScreen = ({ onLogin, users, onRecoverPassword }) => {
   const [otpSent, setOtpSent] = useState(false);
 
   const activeUsers = normalizeTeamUsers(users && users.length > 0 ? users : INITIAL_USERS);
-
   const handleLogin = (e) => {
     e.preventDefault();
     const sourceUsers = activeUsers.some(u => u.username) ? activeUsers : INITIAL_USERS;
@@ -1293,13 +1315,14 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
   const [filterDate, setFilterDate] = useState(new Date().toLocaleDateString('en-CA'));
   const [monthKey, setMonthKey] = useState(new Date().toLocaleDateString('en-CA').slice(0, 7));
   const safeLogs = Array.isArray(attendanceLogs) ? attendanceLogs : [];
+  const filteredLogs = safeLogs.filter(log => log.date === filterDate && normalizeRole(log.role) !== ROLES.ADMIN);
   const daysInMonth = (() => {
     const [year, month] = monthKey.split('-').map(Number);
     const count = new Date(year, month, 0).getDate();
     return Array.from({ length: count }, (_, i) => `${monthKey}-${String(i + 1).padStart(2, '0')}`);
   })();
   const teamMembers = getOperationalUsers(users && users.length ? users : INITIAL_USERS, { includeAdmins: false });
-  const isPresent = (user, date) => safeLogs.some(log => log.date === date && (String(log.userId) === String(user.id) || samePerson(log.name, user.name) || samePerson(log.username, user.username)));
+  const isPresent = (user, date) => safeLogs.some(log => String(log.userId) === String(user.id) && log.date === date);
   const attendanceRows = teamMembers.map(user => {
     const log = safeLogs.find(l => l.date === filterDate && (String(l.userId) === String(user.id) || samePerson(l.name, user.name)));
     const rowBase = {
@@ -1373,6 +1396,7 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
         <div className="bg-white rounded-2xl border-2 border-indigo-100 p-4 shadow-sm"><p className="text-[11px] font-black text-indigo-500 uppercase tracking-widest">Active Time</p><p className="text-2xl font-black text-indigo-700 mt-1">{formatMinutes(attendanceSummary.totalActive)}</p></div>
         <div className="bg-white rounded-2xl border-2 border-amber-100 p-4 shadow-sm"><p className="text-[11px] font-black text-amber-500 uppercase tracking-widest">Break Time</p><p className="text-2xl font-black text-amber-700 mt-1">{formatMinutes(attendanceSummary.totalBreak)}</p></div>
       </div>
+
 
       <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
@@ -1454,8 +1478,37 @@ const LedgerView = ({ projects, onSelectProject }) => {
   const [activeTab, setActiveTab] = useState('transactions');
   const [selectedLocation, setSelectedLocation] = useState('All');
   const [selectedClient, setSelectedClient] = useState('All');
+  const [selectedPaymentStatus, setSelectedPaymentStatus] = useState('All');
   
-  const baseLedgerProjects = projects.filter(p => (Number(p.estimate) > 0) || (Number(p.ledger?.amountIn) > 0) || p.ledger?.updatedAt);
+  const financePaymentStatuses = ['All', 'Not Updated', 'Pending', 'Partially Paid', 'Paid', 'Overpaid'];
+  const deriveLedgerPaymentStatus = (project = {}) => {
+    const estimate = getPaymentEstimateAmount(project);
+    const received = getPaymentReceivedAmount(project);
+    const rawStatus = String(project.paymentTrackingStatus || project.paymentStatus || project.paymentReceived || project.ledger?.status || project.ledger?.paymentStatus || '').toUpperCase();
+    const hasFinanceData = Boolean(
+      estimate > 0 || received > 0 || project.ledger?.updatedAt || project.ledger?.date || project.paymentTrackingUpdatedAt ||
+      project.paymentDate || project.paymentTime || project.ledger?.receivedFrom || project.ledger?.txnId || project.ledger?.mode
+    );
+
+    // Never show Paid/Cleared when no money has actually been received.
+    if (received > 0 && estimate > 0 && received > estimate) return 'Overpaid';
+    if (received > 0 && estimate > 0 && received === estimate) return 'Paid';
+    if (received > 0 && estimate > 0 && received < estimate) return 'Partially Paid';
+    if (received > 0 && estimate <= 0) return 'Paid';
+    if (estimate > 0 || rawStatus.includes('PENDING') || rawStatus === 'PARTIAL' || hasFinanceData) return 'Pending';
+    return 'Not Updated';
+  };
+  const getLedgerPaymentBadgeClass = (status = 'Not Updated') => {
+    switch (status) {
+      case 'Paid': return 'bg-emerald-50 text-emerald-700 border-emerald-100';
+      case 'Overpaid': return 'bg-violet-50 text-violet-700 border-violet-100';
+      case 'Partially Paid': return 'bg-blue-50 text-blue-700 border-blue-100';
+      case 'Pending': return 'bg-amber-50 text-amber-700 border-amber-100';
+      default: return 'bg-rose-50 text-rose-700 border-rose-100';
+    }
+  };
+  
+  const baseLedgerProjects = projects.filter(p => (Number(p.estimate) > 0) || (Number(p.ledger?.amountIn) > 0) || p.ledger?.updatedAt || p.paymentTrackingUpdatedAt);
   const allLocations = [...new Set(baseLedgerProjects.map(p => p.location).filter(Boolean))].sort();
   const availableClients = [...new Set(baseLedgerProjects.filter(p => selectedLocation === 'All' || p.location === selectedLocation).map(p => p.client).filter(Boolean))].sort();
 
@@ -1466,15 +1519,56 @@ const LedgerView = ({ projects, onSelectProject }) => {
   const ledgerProjects = baseLedgerProjects.filter(p => {
       if (selectedLocation !== 'All' && p.location !== selectedLocation) return false;
       if (selectedClient !== 'All' && p.client !== selectedClient) return false;
+      if (selectedPaymentStatus !== 'All' && deriveLedgerPaymentStatus(p) !== selectedPaymentStatus) return false;
       return true;
   }).sort((a,b) => ((b.ledger?.updatedAt || b.completedAt || b.createdAt) || 0) - ((a.ledger?.updatedAt || a.completedAt || a.createdAt) || 0));
 
-  const totalCost = ledgerProjects.reduce((sum, p) => sum + (Number(p.estimate) || 0), 0);
-  const totalReceived = ledgerProjects.reduce((sum, p) => sum + (Number(p.ledger?.amountIn) || 0), 0);
+  const statusCounts = baseLedgerProjects.reduce((acc, p) => {
+    const status = deriveLedgerPaymentStatus(p);
+    acc[status] = (acc[status] || 0) + 1;
+    acc.All += 1;
+    return acc;
+  }, { All: 0, 'Not Updated': 0, Pending: 0, 'Partially Paid': 0, Paid: 0, Overpaid: 0 });
+
+  const totalCost = ledgerProjects.reduce((sum, p) => sum + getPaymentEstimateAmount(p), 0);
+  const totalReceived = ledgerProjects.reduce((sum, p) => sum + getPaymentReceivedAmount(p), 0);
   const totalExpenses = ledgerProjects.reduce((sum, p) => sum + (Number(p.ledger?.expenses) || 0), 0);
   const totalRefund = ledgerProjects.reduce((sum, p) => sum + (Number(p.ledger?.refund) || 0), 0);
   const netRevenue = totalReceived - totalExpenses - totalRefund;
-  const totalPending = ledgerProjects.reduce((sum, p) => sum + Math.max(0, (Number(p.estimate) || 0) - (Number(p.ledger?.amountIn) || 0)), 0);
+  const totalPending = ledgerProjects.reduce((sum, p) => sum + Math.max(0, getPaymentEstimateAmount(p) - getPaymentReceivedAmount(p)), 0);
+
+  const paymentAuditEvents = ledgerProjects.flatMap(p => {
+    const explicitAudit = Array.isArray(p.paymentAuditTrail) ? p.paymentAuditTrail : [];
+    const ledgerAudit = Array.isArray(p.ledger?.auditTrail) ? p.ledger.auditTrail : [];
+    const historyAudit = (Array.isArray(p.history) ? p.history : [])
+      .filter(h => /payment|ledger|paid|pending|refund|received/i.test(String(h.action || h.text || '')))
+      .map(h => ({
+        id: h.id || `${p.id}-${h.at || h.time || Math.random()}`,
+        at: h.at || h.time || p.ledger?.updatedAt || p.paymentTrackingUpdatedAt || p.updatedAt,
+        by: h.by || h.user || h.updatedBy || p.paymentTrackingUpdatedBy || p.ledger?.updatedBy || 'Admin',
+        action: h.action || h.text || 'Payment activity',
+        note: h.note || '',
+      }));
+    const synthesized = (p.ledger?.updatedAt || p.paymentTrackingUpdatedAt) ? [{
+      id: `${p.id}-current-payment-state`,
+      at: p.ledger?.updatedAt || p.paymentTrackingUpdatedAt,
+      by: p.paymentTrackingUpdatedBy || p.ledger?.updatedBy || 'Admin',
+      action: 'Current payment state',
+      oldStatus: '',
+      newStatus: deriveLedgerPaymentStatus(p),
+      oldAmount: '',
+      newAmount: Number(p.ledger?.amountIn) || 0,
+      note: 'Latest saved payment/ledger state for this task'
+    }] : [];
+    return [...explicitAudit, ...ledgerAudit, ...historyAudit, ...synthesized].map(event => ({
+      ...event,
+      taskId: p.id,
+      customerName: getCustomerDisplayName(p),
+      bank: p.client || '',
+      status: event.newStatus || deriveLedgerPaymentStatus(p),
+      amount: event.newAmount ?? event.amount ?? Number(p.ledger?.amountIn || 0),
+    }));
+  }).sort((a, b) => (new Date(b.at || 0).getTime() || 0) - (new Date(a.at || 0).getTime() || 0));
 
   const monthlyStats = {};
   const clientStats = {};
@@ -1507,10 +1601,10 @@ const LedgerView = ({ projects, onSelectProject }) => {
   });
 
   const handleExport = () => {
-    const headers = ["Task ID", "Created Date", "Client", "Customer", "Location", "Cost (Est)", "Received", "Actual Expenses", "Refund", "Pending"];
+    const headers = ["Task ID", "Created Date", "Client", "Customer", "Location", "Payment Status", "Cost (Est)", "Received", "Actual Expenses", "Refund", "Pending"];
     const rows = ledgerProjects.map(p => [
       p.id, p.createdAt ? new Date(p.createdAt).toLocaleDateString() : '-',
-      p.client, p.customerName || '', p.location || '', Number(p.estimate)||0, Number(p.ledger?.amountIn)||0, Number(p.ledger?.expenses)||0, Number(p.ledger?.refund)||0, (Number(p.estimate)||0) - (Number(p.ledger?.amountIn)||0)
+      p.client, p.customerName || '', p.location || '', deriveLedgerPaymentStatus(p), getPaymentEstimateAmount(p), getPaymentReceivedAmount(p), Number(p.ledger?.expenses)||0, Number(p.ledger?.refund)||0, Math.max(0, getPaymentEstimateAmount(p) - getPaymentReceivedAmount(p))
     ]);
     exportToCSV(headers, rows, "Financial_Ledger.csv");
   };
@@ -1541,6 +1635,15 @@ const LedgerView = ({ projects, onSelectProject }) => {
                       </select>
                   </div>
               </div>
+              <div className="flex flex-col">
+                  <label className="text-[10px] font-black uppercase text-slate-400 mb-1 tracking-widest">Payment Status</label>
+                  <div className="relative">
+                      <Filter className="w-4 h-4 text-indigo-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <select value={selectedPaymentStatus} onChange={e => setSelectedPaymentStatus(e.target.value)} className="pl-9 pr-8 py-2.5 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-700 outline-none focus:border-indigo-500 appearance-none shadow-sm cursor-pointer min-w-[190px]">
+                          {financePaymentStatuses.map(status => <option key={status} value={status}>{status} ({statusCounts[status] || 0})</option>)}
+                      </select>
+                  </div>
+              </div>
            </div>
         </div>
         <div className="flex flex-wrap gap-3 mt-4 xl:mt-0">
@@ -1550,6 +1653,8 @@ const LedgerView = ({ projects, onSelectProject }) => {
             <button type="button" onClick={() => setActiveTab('monthly')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'monthly' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><List className="w-4 h-4 mr-1.5" /> Monthly</button>
             <button type="button" onClick={() => setActiveTab('clients')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'clients' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Briefcase className="w-4 h-4 mr-1.5" /> Banks</button>
             <button type="button" onClick={() => setActiveTab('customers')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'customers' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><User className="w-4 h-4 mr-1.5" /> Customers</button>
+            <button type="button" onClick={() => setActiveTab('report')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'report' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><BarChart3 className="w-4 h-4 mr-1.5" /> Report</button>
+            <button type="button" onClick={() => setActiveTab('audit')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'audit' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Shield className="w-4 h-4 mr-1.5" /> Audit</button>
           </div>
           <button onClick={handleExport} className="flex items-center px-4 py-2.5 bg-emerald-100 text-emerald-700 font-bold rounded-xl hover:bg-emerald-200 transition-colors"><Download className="w-4 h-4 mr-2" /> Export</button>
         </div>
@@ -1594,6 +1699,7 @@ const LedgerView = ({ projects, onSelectProject }) => {
                 <tr>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Payment Date & Time</th>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Task ID & Client</th>
+                  <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-center">Status</th>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Cost (Est)</th>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Received</th>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Expenses</th>
@@ -1603,10 +1709,11 @@ const LedgerView = ({ projects, onSelectProject }) => {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {ledgerProjects.filter(p => activeTab === 'pending' ? ((Number(p.estimate) || 0) > (Number(p.ledger?.amountIn) || 0)) : true).map(p => {
-                  const est = Number(p.estimate) || 0;
-                  const rec = Number(p.ledger?.amountIn) || 0;
+                  const est = getPaymentEstimateAmount(p);
+                  const rec = getPaymentReceivedAmount(p);
                   const exp = Number(p.ledger?.expenses) || 0;
-                  const pen = est - rec;
+                  const status = deriveLedgerPaymentStatus(p);
+                  const pen = Math.max(0, est - rec);
                   const updateDate = p.ledger?.updatedAt ? new Date(p.ledger.updatedAt) : null;
                   
                   return (
@@ -1622,11 +1729,14 @@ const LedgerView = ({ projects, onSelectProject }) => {
                         </div>
                         <p className="font-medium text-slate-500 text-xs mt-0.5">{getCustomerDisplayName(p)}</p>
                       </td>
+                      <td className="px-6 py-5 text-center">
+                        <span className={`inline-flex items-center justify-center px-2.5 py-1 rounded-full border text-[11px] font-black ${getLedgerPaymentBadgeClass(deriveLedgerPaymentStatus(p))}`}>{deriveLedgerPaymentStatus(p)}</span>
+                      </td>
                       <td className="px-6 py-5 text-right font-bold text-slate-600">₹{est.toLocaleString()}</td>
                       <td className="px-6 py-5 text-right font-bold text-emerald-600">₹{rec.toLocaleString()}</td>
                       <td className="px-6 py-5 text-right font-bold text-amber-600">₹{exp.toLocaleString()}</td>
                       <td className="px-6 py-5 text-right font-black text-slate-800">
-                        {pen > 0 ? <span className="text-red-500 bg-red-50 px-2 py-1 rounded-lg border border-red-100">₹{pen.toLocaleString()}</span> : <span className="text-slate-400"><CheckCircle className="w-4 h-4 inline text-emerald-500"/> Cleared</span>}
+                        {status === 'Paid' || status === 'Overpaid' ? <span className="text-slate-400"><CheckCircle className="w-4 h-4 inline text-emerald-500"/> Cleared</span> : pen > 0 ? <span className="text-red-500 bg-red-50 px-2 py-1 rounded-lg border border-red-100">₹{pen.toLocaleString()}</span> : <span className="text-slate-400">Not Updated</span>}
                       </td>
                       <td className="px-6 py-5 text-center">
                          {p.ledger?.screenshot ? (
@@ -1639,7 +1749,7 @@ const LedgerView = ({ projects, onSelectProject }) => {
                   )
                 })}
                 {ledgerProjects.filter(p => activeTab === 'pending' ? ((Number(p.estimate) || 0) > (Number(p.ledger?.amountIn) || 0)) : true).length === 0 && (
-                   <tr><td colSpan="7" className="text-center py-10 text-slate-500 font-medium">No records found for this view.</td></tr>
+                   <tr><td colSpan="8" className="text-center py-10 text-slate-500 font-medium">No records found for this view.</td></tr>
                 )}
               </tbody>
             </table>
@@ -1742,19 +1852,118 @@ const LedgerView = ({ projects, onSelectProject }) => {
               </tbody>
             </table>
           )}
+
+
+          {activeTab === 'report' && (
+            <div className="p-5 space-y-5">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div className="bg-slate-50 rounded-2xl p-4 border border-slate-100">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Filtered Records</p>
+                  <p className="text-2xl font-black text-slate-800">{ledgerProjects.length}</p>
+                </div>
+                <div className="bg-emerald-50 rounded-2xl p-4 border border-emerald-100">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-emerald-600">Filtered Received</p>
+                  <p className="text-2xl font-black text-emerald-700">₹{totalReceived.toLocaleString()}</p>
+                </div>
+                <div className="bg-orange-50 rounded-2xl p-4 border border-orange-100">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-orange-600">Filtered Pending</p>
+                  <p className="text-2xl font-black text-orange-700">₹{totalPending.toLocaleString()}</p>
+                </div>
+                <div className="bg-indigo-50 rounded-2xl p-4 border border-indigo-100">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Filtered Net</p>
+                  <p className="text-2xl font-black text-indigo-700">₹{netRevenue.toLocaleString()}</p>
+                </div>
+              </div>
+              <table className="w-full text-left text-sm whitespace-nowrap">
+                <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
+                  <tr>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs">Task ID</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs">Bank / Customer</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs text-center">Payment Status</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs text-right">Estimate</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs text-right">Received</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs text-right">Pending</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {ledgerProjects.map(p => {
+                    const est = Number(p.estimate) || 0;
+                    const rec = Number(p.ledger?.amountIn) || 0;
+                    const status = deriveLedgerPaymentStatus(p);
+                    return (
+                      <tr key={`report-${p.id}`} className="hover:bg-slate-50">
+                        <td className="px-4 py-4 font-black text-slate-800">{p.id}</td>
+                        <td className="px-4 py-4">
+                          <p className="font-bold text-slate-700">{p.client || '-'}</p>
+                          <p className="text-xs text-slate-500 font-semibold">{getCustomerDisplayName(p)}</p>
+                        </td>
+                        <td className="px-4 py-4 text-center">
+                          <span className={`inline-flex px-2.5 py-1 rounded-full border text-[11px] font-black ${getLedgerPaymentBadgeClass(status)}`}>{status}</span>
+                        </td>
+                        <td className="px-4 py-4 text-right font-bold text-slate-600">₹{est.toLocaleString()}</td>
+                        <td className="px-4 py-4 text-right font-bold text-emerald-600">₹{rec.toLocaleString()}</td>
+                        <td className="px-4 py-4 text-right font-black text-red-600">₹{Math.max(0, est - rec).toLocaleString()}</td>
+                      </tr>
+                    );
+                  })}
+                  {ledgerProjects.length === 0 && <tr><td colSpan="6" className="text-center py-10 text-slate-500 font-medium">No report records found for the selected finance filters.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {activeTab === 'audit' && (
+            <div className="p-5 space-y-5">
+              <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-4">
+                <h3 className="text-lg font-black text-indigo-800">Payment Audit Trail</h3>
+                <p className="text-sm font-bold text-indigo-500 mt-1">Admin-only history of payment and ledger changes. Archive and Operations logic is not affected by this view.</p>
+              </div>
+              <table className="w-full text-left text-sm whitespace-nowrap">
+                <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
+                  <tr>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs">Date & Time</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs">Task</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs">Changed By</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs">Change</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs text-right">Amount</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs">Note</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {paymentAuditEvents.map(event => (
+                    <tr key={`${event.taskId}-${event.id || event.at}`} className="hover:bg-slate-50">
+                      <td className="px-4 py-4 font-bold text-slate-700">{event.at ? formatDateTime(event.at) : '-'}</td>
+                      <td className="px-4 py-4">
+                        <p className="font-black text-slate-800">{event.taskId}</p>
+                        <p className="text-xs text-slate-500 font-semibold">{event.customerName}{event.bank ? ` • ${event.bank}` : ''}</p>
+                      </td>
+                      <td className="px-4 py-4 font-bold text-slate-600">{event.by || 'Admin'}</td>
+                      <td className="px-4 py-4">
+                        <p className="font-bold text-slate-700">{event.action || 'Payment activity'}</p>
+                        {(event.oldStatus || event.newStatus) && <p className="text-xs font-black text-indigo-600 mt-1">{event.oldStatus || '-'} → {event.newStatus || event.status || '-'}</p>}
+                      </td>
+                      <td className="px-4 py-4 text-right font-black text-emerald-700">₹{Number(event.amount || 0).toLocaleString()}</td>
+                      <td className="px-4 py-4 text-xs font-semibold text-slate-500 max-w-md truncate" title={event.note || ''}>{event.note || '-'}</td>
+                    </tr>
+                  ))}
+                  {paymentAuditEvents.length === 0 && <tr><td colSpan="6" className="text-center py-10 text-slate-500 font-medium">No payment audit entries found for the selected finance filters.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          )}
+
         </div>
       </div>
     </div>
   );
 };
 
-const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, projects = [], onDeleteTask, onDiscussTask }) => {
+const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, projects = [], onDeleteTask }) => {
   const [newSubTask, setNewSubTask] = useState('');
   const [newNote, setNewNote] = useState('');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showEditCase, setShowEditCase] = useState(false);
   const [isUploadingFinal, setIsUploadingFinal] = useState(false);
-  const [fileUploadProgress, setFileUploadProgress] = useState(null);
   const [subTaskAttachments, setSubTaskAttachments] = useState([]);
   const [noteAttachments, setNoteAttachments] = useState([]);
   const [isUploadingRevisionAttachment, setIsUploadingRevisionAttachment] = useState(false);
@@ -1766,7 +1975,6 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const canDesignerRevertOwnTask = user.role === ROLES.DESIGNER && isAssignedToMe;
   const canRevertTask = (canManage || canDesignerRevertOwnTask) && project.status !== 'Lead Received';
   const showFinancials = user.role === ROLES.ADMIN;
-  const paymentTrackingStatus = getPaymentTrackingStatus(project);
   const activeDraftingForUser = (usersProjects = []) => (usersProjects || []).find(p => samePerson(p.assignedTo, project.assignedTo || user.name) && p.status === 'Drafting' && String(p.id) !== String(project.id));
 
   const handleSaveCaseEdit = (event) => {
@@ -1976,20 +2184,14 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     const files = e.target.files;
     if (!files || files.length === 0) return;
     if (type === 'completed') setIsUploadingFinal(true);
-    setFileUploadProgress({ type, fileName: files[0]?.name || 'file', percent: 0, current: 1, total: files.length });
 
     try {
     const updatedProject = { ...project };
     if (!updatedProject.documents) updatedProject.documents = [];
     if (!updatedProject.completedFiles) updatedProject.completedFiles = [];
 
-    const fileList = Array.from(files);
-    for (let index = 0; index < fileList.length; index += 1) {
-        const file = fileList[index];
-        setFileUploadProgress({ type, fileName: file.name, percent: 0, current: index + 1, total: fileList.length });
-        const uploadedDoc = await uploadProjectFile(file, project.id, type, user.name, (percent) => {
-          setFileUploadProgress({ type, fileName: file.name, percent, current: index + 1, total: fileList.length });
-        });
+    for (const file of Array.from(files)) {
+        const uploadedDoc = await uploadProjectFile(file, project.id, type, user.name);
         updatedProject.documents.push(uploadedDoc);
 
         if (type === 'completed') {
@@ -2022,7 +2224,6 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
       alert(`File upload failed: ${error?.message || 'Please check your internet connection and try again.'}`);
     } finally {
       if (type === 'completed') setIsUploadingFinal(false);
-      setFileUploadProgress(null);
       if (e?.target) e.target.value = '';
     }
   };
@@ -2036,10 +2237,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     try {
       const uploadedDocs = [];
       for (const file of files) {
-        setFileUploadProgress({ type: attachmentType, fileName: file.name, percent: 0, current: uploadedDocs.length + 1, total: files.length });
-        const uploadedDoc = await uploadProjectFile(file, project.id, attachmentType, user.name, (percent) => {
-          setFileUploadProgress({ type: attachmentType, fileName: file.name, percent, current: uploadedDocs.length + 1, total: files.length });
-        });
+        const uploadedDoc = await uploadProjectFile(file, project.id, attachmentType, user.name);
         uploadedDocs.push({
           ...uploadedDoc,
           id: uploadedDoc.id || `${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -2054,7 +2252,6 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
       alert(`Attachment upload failed: ${error?.message || 'Please check your internet connection and try again.'}`);
     } finally {
       setUploading(false);
-      setFileUploadProgress(null);
       if (event?.target) event.target.value = '';
     }
   };
@@ -2212,26 +2409,20 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
 
   const updateLedger = (field, value) => {
     if (!showFinancials) return;
-    const updatedProject = {
-      ...project,
-      ledger: { ...(project.ledger || {}), [field]: value, updatedAt: Date.now() }
-    };
-    onUpdateProject(updatedProject, project);
-  };
-
-  const updatePaymentTrackingStatus = (status) => {
-    if (!showFinancials) return;
     const now = Date.now();
-    const normalizedStatus = PAYMENT_TRACKING_OPTIONS.includes(status) ? status : 'Not Updated';
+    const nextLedger = { ...(project.ledger || {}), [field]: value, updatedAt: now, updatedBy: user?.name || 'Admin' };
+    const draftProject = { ...project, ledger: nextLedger };
+    const computedStatus = derivePaymentTrackingStatusFromData(draftProject);
+    const amountIn = getPaymentReceivedAmount(draftProject);
     const updatedProject = {
-      ...project,
-      paymentTrackingStatus: normalizedStatus,
+      ...draftProject,
+      paymentTrackingStatus: computedStatus,
       paymentTrackingUpdatedAt: now,
-      paymentTrackingUpdatedBy: user.name,
-      timeline: [
-        ...(project.timeline || []),
-        { id: now, text: `Payment status marked ${normalizedStatus} by ${user.name}`, time: new Date(now).toLocaleString() }
-      ]
+      paymentTrackingUpdatedBy: user?.name || 'Admin',
+      paymentStatus: computedStatus === 'Paid' ? 'YES' : (computedStatus === 'Pending' ? 'PENDING' : 'NOT_UPDATED'),
+      paymentReceived: computedStatus === 'Paid' ? 'YES' : (computedStatus === 'Pending' ? 'PARTIAL' : 'NO'),
+      paymentAmountIn: amountIn,
+      paymentDate: nextLedger.date || project.paymentDate,
     };
     onUpdateProject(updatedProject, project);
   };
@@ -2288,6 +2479,10 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
       }
   };
 
+
+  const revisionTimelineItems = getRevisionTimelineItems(project, projects);
+  const completedRevisionItems = revisionTimelineItems.filter(isRevisionTimelineItemCompleted).length;
+  const activeRevisionItems = revisionTimelineItems.length - completedRevisionItems;
 
   const shareCompletedFileOnWhatsApp = async () => {
     const completedDocs = getCompletedDocuments(project);
@@ -2355,10 +2550,6 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
         ? (canManage ? 'Approve Final' : 'Awaiting Approval')
         : 'Advance Status';
 
-  const discussThisTaskInChat = () => {
-    if (typeof onDiscussTask === 'function') onDiscussTask(project);
-  };
-
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-5 bg-white p-5 rounded-3xl border-2 border-slate-100 shadow-sm">
@@ -2371,7 +2562,6 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
               <h1 className="text-2xl font-black text-slate-800 tracking-tight">{project.id}</h1>
               <Badge colorClass={getStatusColor(project.status)}>{project.status}</Badge>
               <Badge colorClass={getPriorityColor(project.priority, project.dueDate)}>{project.priority}</Badge>
-              {showFinancials && <Badge colorClass={getPaymentStatusBadgeClass(paymentTrackingStatus)}>Payment: {paymentTrackingStatus}</Badge>}
             </div>
             <p className="text-sm font-semibold text-slate-500 flex items-center">
               <Building2 className="w-4 h-4 mr-1.5 opacity-70"/> {getCustomerDisplayName(project)} • {project.location}
@@ -2380,11 +2570,6 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
           </div>
         </div>
         <div className="flex flex-wrap gap-3">
-          
-
-          <button type="button" onClick={discussThisTaskInChat} className="px-4 py-2.5 bg-indigo-50 text-indigo-700 rounded-xl hover:bg-indigo-100 transition-all flex items-center font-bold text-sm whitespace-nowrap border border-indigo-100">
-             <MessageSquare className="w-4 h-4 mr-1.5" /> Discuss in Chat
-          </button>
           
           <button id="client-link-btn" type="button" onClick={copyClientLink} className={`px-4 py-2.5 bg-slate-100 text-slate-700 rounded-xl hover:bg-slate-200 transition-all flex items-center font-bold text-sm whitespace-nowrap`}>
              <LinkIcon className="w-4 h-4 mr-1.5" /> Client Link
@@ -2618,13 +2803,13 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
              <div className="space-y-4">
                <h3 className="text-xs font-extrabold text-slate-400 uppercase tracking-widest bg-slate-50 py-2 px-3 rounded-lg inline-block">Source Files (From Bank)</h3>
                {(project.documents||[]).filter(d => d.type === 'source').map((doc, idx) => (
-                 <div key={idx} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3.5 bg-slate-50 rounded-2xl border border-slate-100 group hover:border-indigo-200 transition-colors">
-                   <div className="flex items-center text-slate-700 overflow-hidden pr-0 sm:pr-2 w-full min-w-0">
+                 <div key={idx} className="flex items-center justify-between p-3.5 bg-slate-50 rounded-2xl border border-slate-100 group hover:border-indigo-200 transition-colors">
+                   <div className="flex items-center text-slate-700 overflow-hidden pr-2">
                      <div className="p-2 bg-white rounded-lg shadow-sm border border-slate-100">{getFileIcon(doc.name)}</div>
-                     <span className="font-bold ml-4 truncate min-w-0">{doc.name}</span>
+                     <span className="font-bold ml-4 truncate">{doc.name}</span>
                    </div>
                    {doc.url ? (
-                     <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-indigo-600 bg-white border border-slate-200 hover:bg-indigo-50 px-4 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex-1 sm:flex-none min-h-[42px]">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center justify-center gap-1 flex-1 sm:flex-none min-h-[42px]"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
+                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-indigo-600 bg-white border border-slate-200 hover:bg-indigo-50 px-4 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
                    ) : (
                      <button type="button" className="text-xs font-bold text-slate-400 bg-slate-50 px-4 py-2 rounded-xl whitespace-nowrap cursor-not-allowed border border-slate-200">Unavailable</button>
                    )}
@@ -2640,14 +2825,14 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                </div>
                {(project.documents||[]).filter(d => d.type === 'working').length === 0 && <p className="text-sm text-slate-500 font-medium italic px-2">No working files uploaded yet.</p>}
                {(project.documents||[]).filter(d => d.type === 'working').map((doc, idx) => (
-                 <div key={idx} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3.5 bg-blue-50/50 rounded-2xl border border-blue-100 group hover:border-blue-200 transition-colors">
-                   <div className="flex items-center text-blue-900 overflow-hidden pr-0 sm:pr-2 w-full min-w-0">
+                 <div key={idx} className="flex items-center justify-between p-3.5 bg-blue-50/50 rounded-2xl border border-blue-100 group hover:border-blue-200 transition-colors">
+                   <div className="flex items-center text-blue-900 overflow-hidden pr-2">
                      <div className="p-2 bg-white rounded-lg shadow-sm border border-blue-100">{getFileIcon(doc.name)}</div>
-                     <span className="font-bold ml-4 truncate min-w-0">{doc.name}</span>
+                     <span className="font-bold ml-4 truncate">{doc.name}</span>
                      <span className="text-[11px] font-bold ml-3 text-blue-600 bg-blue-100 px-2 py-1 rounded-lg whitespace-nowrap hidden sm:inline-block border border-blue-200">by {doc.uploadedBy}</span>
                    </div>
                    {doc.url ? (
-                     <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-blue-700 bg-white hover:bg-blue-50 shadow-sm border border-blue-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors flex-1 sm:flex-none min-h-[42px]">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center justify-center gap-1 flex-1 sm:flex-none min-h-[42px]"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
+                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-blue-700 bg-white hover:bg-blue-50 shadow-sm border border-blue-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
                    ) : (
                      <button type="button" className="text-xs font-bold text-slate-400 bg-slate-50 px-4 py-2 rounded-xl whitespace-nowrap cursor-not-allowed border border-slate-200">Unavailable</button>
                    )}
@@ -2657,17 +2842,17 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                <h3 className="text-xs font-extrabold text-slate-400 uppercase tracking-widest bg-emerald-50 py-2 px-3 rounded-lg inline-block mt-8 border-t-2 border-slate-100 pt-6 w-full max-w-fit">Completed Work (AutoCAD/PDF)</h3>
                {completedDocs.length === 0 && <p className="text-sm text-slate-500 font-medium italic px-2">No completed files yet.</p>}
                {completedDocs.map((doc, idx) => (
-                 <div key={idx} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3.5 bg-emerald-50/50 rounded-2xl border border-emerald-100 group">
-                   <div className="flex items-center text-emerald-900 overflow-hidden pr-0 sm:pr-2 w-full min-w-0">
+                 <div key={idx} className="flex items-center justify-between p-3.5 bg-emerald-50/50 rounded-2xl border border-emerald-100 group">
+                   <div className="flex items-center text-emerald-900 overflow-hidden pr-2">
                      <div className="p-2 bg-white rounded-lg shadow-sm border border-emerald-100">
                         {doc.name.includes('QR') ? <ImageIcon className="w-5 h-5 text-emerald-600" /> : getFileIcon(doc.name)}
                      </div>
-                     <span className="font-bold ml-4 truncate min-w-0">{doc.name}</span>
+                     <span className="font-bold ml-4 truncate">{doc.name}</span>
                      <span className="text-[10px] font-black ml-3 text-emerald-700 bg-white px-2 py-1 rounded-lg border border-emerald-100">V{idx + 1}</span>
                      <span className="text-[11px] font-bold ml-3 text-emerald-600 bg-emerald-100 px-2 py-1 rounded-lg whitespace-nowrap hidden sm:inline-block border border-emerald-200">by {doc.uploadedBy}</span>
                    </div>
                    {doc.url && (
-                     <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-emerald-700 bg-white hover:bg-emerald-50 shadow-sm border border-emerald-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors flex-1 sm:flex-none min-h-[42px]">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center justify-center gap-1 flex-1 sm:flex-none min-h-[42px]"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
+                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-emerald-700 bg-white hover:bg-emerald-50 shadow-sm border border-emerald-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
                    )}
                  </div>
                ))}
@@ -2678,7 +2863,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                    <p className="text-xs font-bold text-purple-500 mb-3">These are the latest completed files submitted after revision. Use these for review/approval instead of older completed versions.</p>
                    <div className="space-y-2">
                      {latestRevisedCompletedDocs.map((doc, idx) => (
-                       <div key={doc.id || idx} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3 bg-white rounded-xl border border-purple-100">
+                       <div key={doc.id || idx} className="flex items-center justify-between p-3 bg-white rounded-xl border border-purple-100">
                          <div className="flex items-center min-w-0 pr-2 text-purple-900">
                            <div className="p-2 bg-purple-50 rounded-lg border border-purple-100">{getFileIcon(doc.name)}</div>
                            <div className="ml-3 min-w-0">
@@ -2686,7 +2871,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                              <p className="text-[11px] font-bold text-purple-500">Latest revision upload • by {doc.uploadedBy || 'Team'}</p>
                            </div>
                          </div>
-                         <button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-100 px-4 py-2 rounded-xl whitespace-nowrap transition-colors w-full sm:w-auto min-h-[42px]">Download</button>
+                         <button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-100 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>
                        </div>
                      ))}
                    </div>
@@ -2694,6 +2879,51 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                )}
              </div>
           </div>
+
+          {(revisionTimelineItems.length > 0 || project.status === 'Completed') && (
+            <div className="bg-white p-7 rounded-3xl shadow-sm border-2 border-slate-100">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5">
+                <div>
+                  <h2 className="text-xl font-extrabold text-slate-800 flex items-center">
+                    <Clock className="w-5 h-5 mr-2 text-purple-500" /> Revision Timeline
+                  </h2>
+                  <p className="text-xs font-bold text-slate-400 mt-1">Permanent task ID stays unchanged. Revision items are linked history only.</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <span className="bg-purple-50 text-purple-700 border border-purple-100 px-3 py-1.5 rounded-xl text-xs font-black">{revisionTimelineItems.length} Total</span>
+                  <span className="bg-emerald-50 text-emerald-700 border border-emerald-100 px-3 py-1.5 rounded-xl text-xs font-black">{completedRevisionItems} Completed</span>
+                  <span className="bg-red-50 text-red-700 border border-red-100 px-3 py-1.5 rounded-xl text-xs font-black">{activeRevisionItems} Active</span>
+                </div>
+              </div>
+              {revisionTimelineItems.length === 0 ? (
+                <p className="text-sm text-slate-500 font-medium italic px-2">No revision history yet.</p>
+              ) : (
+                <div className="relative pl-4 border-l-2 border-purple-100 space-y-4">
+                  {revisionTimelineItems.map((item, idx) => (
+                    <div key={item.id || idx} className="relative bg-purple-50/50 border border-purple-100 rounded-2xl p-4">
+                      <span className={`absolute -left-[25px] top-5 w-4 h-4 rounded-full border-4 border-white ${isRevisionTimelineItemCompleted(item) ? 'bg-emerald-500' : 'bg-red-500'}`} />
+                      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-[10px] font-black uppercase tracking-widest text-purple-600">{item.label} • {item.action}</p>
+                          <p className="font-black text-slate-800 mt-1 break-words">{item.title}</p>
+                          <p className="text-xs font-bold text-slate-500 mt-1">{item.by ? `By ${item.by} • ` : ''}{item.at ? new Date(item.at).toLocaleString() : ''}</p>
+                          {item.workItemId && <p className="text-[10px] font-bold text-purple-500 mt-1">Linked work item: {item.workItemId}</p>}
+                        </div>
+                        <span className={`px-3 py-1.5 rounded-xl text-xs font-black border whitespace-nowrap ${isRevisionTimelineItemCompleted(item) ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-red-50 text-red-700 border-red-100'}`}>{item.status || 'Pending'}</span>
+                      </div>
+                      {Array.isArray(item.files) && item.files.length > 0 && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {item.files.slice(0, 4).map((file, fileIdx) => (
+                            <span key={file.id || file.name || fileIdx} className="text-[11px] font-bold bg-white text-purple-700 border border-purple-100 px-2.5 py-1.5 rounded-lg max-w-full truncate">📄 {file.name || 'Revision file'}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="bg-white p-7 rounded-3xl shadow-sm border-2 border-slate-100">
             <h2 className="text-xl font-extrabold text-slate-800 mb-5 flex items-center">
@@ -2752,13 +2982,6 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                   <div className="bg-indigo-100 p-4 rounded-2xl mb-4 shadow-sm"><Upload className="w-8 h-8 text-indigo-600" /></div>
                   <p className="font-bold text-slate-700 mb-1 text-lg">{isUploadingFinal ? 'Uploading...' : 'Upload Final File'}</p>
                   <p className="text-xs font-medium text-slate-500">PDF, AutoCAD, image, Word or Excel format</p>
-                  {isUploadingFinal && fileUploadProgress && (
-                    <div className="w-full max-w-xs mt-4">
-                      <div className="flex justify-between text-[10px] font-black text-indigo-600 mb-1"><span className="truncate max-w-[180px]">{fileUploadProgress.fileName}</span><span>{fileUploadProgress.percent || 0}%</span></div>
-                      <div className="w-full h-2 rounded-full bg-white border border-indigo-100 overflow-hidden"><div className="h-full bg-indigo-600 transition-all" style={{ width: `${fileUploadProgress.percent || 0}%` }}></div></div>
-                      <p className="text-[10px] font-bold text-slate-400 mt-1">File {fileUploadProgress.current} of {fileUploadProgress.total}</p>
-                    </div>
-                  )}
                 </button>
                 <input ref={completedFileInputRef} type="file" multiple className="hidden" accept=".pdf,.dwg,.dxf,.jpg,.jpeg,.png,.mp4,.mov,.avi,.mkv,.webm,.xls,.xlsx,.csv,.doc,.docx" onChange={(e) => handleFileUpload('completed', e)} />
               </div>
@@ -2774,18 +2997,6 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
               </div>
               
               <div className="space-y-4 text-sm relative z-10">
-                <div className={`rounded-2xl border p-4 bg-white ${getPaymentStatusBadgeClass(paymentTrackingStatus)}`}>
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div>
-                      <p className="text-[10px] font-black uppercase tracking-widest opacity-70">Admin Payment Status</p>
-                      <p className="text-lg font-black">{paymentTrackingStatus}</p>
-                      {project.paymentTrackingUpdatedAt && <p className="text-[11px] font-bold opacity-70 mt-0.5">Updated by {project.paymentTrackingUpdatedBy || 'Admin'} • {formatDateTime(project.paymentTrackingUpdatedAt)}</p>}
-                    </div>
-                    <select value={paymentTrackingStatus} onChange={(e) => updatePaymentTrackingStatus(e.target.value)} className="bg-white border-2 border-current/20 rounded-xl p-2.5 font-black outline-none min-w-[170px]">
-                      {PAYMENT_TRACKING_OPTIONS.map(option => <option key={option} value={option}>{option}</option>)}
-                    </select>
-                  </div>
-                </div>
                 <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Total Estimate Amount</label><input type="number" value={project.estimate || ''} onChange={e => onUpdateProject({...project, estimate: e.target.value}, project)} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400" /></div>
                 
                 <div className="grid grid-cols-2 gap-3">
@@ -2977,33 +3188,9 @@ function AppShell() {
   const [backendStateReady, setBackendStateReady] = useState(false);
   
   const [selectedProject, setSelectedProject] = useState(null);
-  const taskDetailReturnRef = useRef({ tab: 'command', scrollY: 0 });
-
-  const openProjectDetail = (project, returnTab = activeTab) => {
-    if (!project) return;
-    taskDetailReturnRef.current = {
-      tab: returnTab || activeTab || 'command',
-      scrollY: typeof window !== 'undefined' ? window.scrollY : 0
-    };
-    setSelectedProject(project);
-  };
-
-  const closeProjectDetail = () => {
-    const returnState = taskDetailReturnRef.current || {};
-    const returnTab = returnState.tab || activeTab || 'command';
-    const returnScrollY = Number.isFinite(returnState.scrollY) ? returnState.scrollY : 0;
-    setSelectedProject(null);
-    setActiveTab(returnTab);
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        try { window.scrollTo({ top: returnScrollY, left: 0, behavior: 'auto' }); } catch (e) { window.scrollTo(0, returnScrollY); }
-      });
-    });
-  };
   const [activeTab, setActiveTab] = useState('command');
   const [boardViewMode, setBoardViewMode] = useState('list'); // 'list' or 'kanban'
   const [selectedBoardDate, setSelectedBoardDate] = useState(formatDateKey());
-  const [archiveViewState, setArchiveViewState] = useState({ filterMonth: 'All', filterDate: '' });
   const [nowTick, setNowTick] = useState(Date.now());
   // Lightweight live clock for elapsed drafting/free/break timers.
   // Keep this interval modest so multi-tab usage stays low CPU, but timers
@@ -3033,6 +3220,14 @@ function AppShell() {
   }, [darkMode]);
   
   const activeUsers = normalizeTeamUsers(users && users.length > 0 ? users : INITIAL_USERS);
+  const financeSafeHeaders = React.useMemo(() => ({
+    'X-User-Role': currentUser?.role || '',
+    'X-User-Name': currentUser?.name || ''
+  }), [currentUser?.role, currentUser?.name]);
+  const jsonFinanceSafeHeaders = React.useMemo(() => ({
+    'Content-Type': 'application/json',
+    ...financeSafeHeaders
+  }), [financeSafeHeaders]);
 
   // Central production persistence: hydrate and save operational state through backend.
   // When DATABASE_URL is configured in backend/.env, this is persisted in PostgreSQL.
@@ -3041,7 +3236,7 @@ function AppShell() {
     let cancelled = false;
     const hydrate = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/state`, { cache: 'no-store' });
+        const res = await fetch(`${API_BASE}/api/state`, { cache: 'no-store', headers: financeSafeHeaders });
         if (!res.ok) throw new Error(`Backend state failed: ${res.status}`);
         const data = await res.json();
         if (cancelled) return;
@@ -3057,7 +3252,7 @@ function AppShell() {
           setChatMessages(incomingChats);
           try { localStorage.setItem('kalpa_chats', JSON.stringify(incomingChats)); } catch(e) {}
         }
-        if (Array.isArray(data.notifications)) setNotifications(prev => mergeNotificationsByStability(prev, data.notifications));
+        if (Array.isArray(data.notifications)) setNotifications(data.notifications);
         if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(data.attendanceLogs);
         setBackendStateReady(true);
         setIsDbReady(true);
@@ -3069,7 +3264,7 @@ function AppShell() {
     };
     hydrate();
     return () => { cancelled = true; };
-  }, []);
+  }, [financeSafeHeaders]);
 
   // Production presence poll: all roles use the same backend truth for users,
   // so Admin/Manager/Designer screens do not disagree about online/offline state.
@@ -3078,7 +3273,7 @@ function AppShell() {
     let cancelled = false;
     const refreshPresence = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/state`, { cache: 'no-store' });
+        const res = await fetch(`${API_BASE}/api/state`, { cache: 'no-store', headers: financeSafeHeaders });
         const data = await res.json().catch(() => ({}));
         if (cancelled || !Array.isArray(data.users)) return;
         setUsers(prev => normalizeTeamUsers([...(prev || []), ...data.users]));
@@ -3096,7 +3291,11 @@ function AppShell() {
           });
         }
         if (Array.isArray(data.notifications)) {
-          setNotifications(prev => mergeNotificationsByStability(prev, data.notifications));
+          setNotifications(prev => {
+            const byId = new Map();
+            [...(prev || []), ...data.notifications].forEach(n => { if (n?.id) byId.set(String(n.id), { ...(byId.get(String(n.id)) || {}), ...n }); });
+            return Array.from(byId.values()).sort((a,b) => Number(b.id || 0) - Number(a.id || 0));
+          });
         }
         if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(data.attendanceLogs);
       } catch (e) {}
@@ -3111,7 +3310,7 @@ function AppShell() {
       window.removeEventListener('focus', refreshPresence);
       document.removeEventListener('visibilitychange', refreshPresence);
     };
-  }, [backendStateReady]);
+  }, [backendStateReady, financeSafeHeaders]);
 
   useEffect(() => {
     if (!USE_BACKEND_STATE || !backendStateReady || !isDbReady) return;
@@ -3126,12 +3325,12 @@ function AppShell() {
       };
       fetch(`${API_BASE}/api/state`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        headers: jsonFinanceSafeHeaders,
+        body: JSON.stringify({ ...payload, currentUserRole: currentUser?.role || '' })
       }).catch(err => console.warn('Backend/PostgreSQL state save failed:', err.message));
     }, 900);
     return () => clearTimeout(timer);
-  }, [backendStateReady, isDbReady, users, projects, chatMessages, notifications, attendanceLogs]);
+  }, [backendStateReady, isDbReady, users, projects, chatMessages, notifications, attendanceLogs, currentUser?.role, jsonFinanceSafeHeaders]);
 
   // Keep assignment/status changes live across tabs without creating storage-event loops.
   // Important: never write back to localStorage while handling an incoming sync event;
@@ -3196,10 +3395,9 @@ function AppShell() {
 
   useEffect(() => {
     if (!currentUser) return;
-    const latest = activeUsers.find(u => String(u.id) === String(currentUser.id))
-      || activeUsers.find(u => samePerson(u.name, currentUser.name) || samePerson(u.username, currentUser.username));
+    const latest = activeUsers.find(u => u.id === currentUser.id);
     if (latest && (latest.role !== currentUser.role || latest.name !== currentUser.name || latest.profilePhoto !== currentUser.profilePhoto || latest.username !== currentUser.username)) {
-      setCurrentUser(prev => mergeTeamUserPresence(latest, prev));
+      setCurrentUser(prev => ({ ...prev, ...latest }));
       if (activeTab === 'ledger' && latest.role !== ROLES.ADMIN) setActiveTab('command');
       if (activeTab === 'closing' && latest.role !== ROLES.ADMIN) setActiveTab('command');
     }
@@ -3442,13 +3640,9 @@ function AppShell() {
 
     const userHeartbeat = setInterval(() => {
       const beatNow = Date.now();
-      setCurrentUser(prev => {
-        if (!prev) return prev;
-        const refreshed = { ...prev, isOnline: true, lastSeenAt: beatNow, lastHeartbeatAt: beatNow };
-        handleUpdateUser(refreshed);
-        postPresenceUpdate(refreshed, refreshed.availability === 'Break' ? 'break' : 'heartbeat');
-        return refreshed;
-      });
+      const refreshed = { ...currentUser, isOnline: true, lastSeenAt: beatNow, lastHeartbeatAt: beatNow };
+      setCurrentUser(refreshed);
+      handleUpdateUser(refreshed);
     }, 30000);
 
     return () => { clearInterval(interval); clearInterval(userHeartbeat); };
@@ -3493,6 +3687,7 @@ function AppShell() {
     updatedProject = normalizeProjectRecord({ ...updatedProject, updatedAt: Date.now(), syncVersion: Date.now() });
     const normalizedSpawned = spawnedProjects.map(p => normalizeProjectRecord({ ...p, updatedAt: p.updatedAt || Date.now(), syncVersion: p.syncVersion || Date.now() }));
 
+    // When a temporary revision work item is finally approved, copy its outcome back to the permanent original task.
     let linkedOriginalUpdate = null;
     if (isRevisionWorkItem(updatedProject) && updatedProject.status === 'Completed' && updatedProject.originalTaskId) {
       const original = projects.find(p => String(p.id) === String(updatedProject.originalTaskId));
@@ -3508,7 +3703,17 @@ function AppShell() {
           completedFiles: [...(original.completedFiles || []), ...revisionFiles],
           revisionHistory: [
             ...(original.revisionHistory || []),
-            { id: now, revisionNumber, revisionCode: `R${revisionNumber}`, action: 'Revision Completed', status: 'Completed', completedBy: updatedProject.completedBy || updatedProject.assignedTo, completedAt: updatedProject.completedAt || now, workItemId: updatedProject.id, files: revisionFiles }
+            {
+              id: now,
+              revisionNumber,
+              revisionCode: `R${revisionNumber}`,
+              action: 'Revision Completed',
+              status: 'Completed',
+              completedBy: updatedProject.completedBy || updatedProject.assignedTo,
+              completedAt: updatedProject.completedAt || now,
+              workItemId: updatedProject.id,
+              files: revisionFiles
+            }
           ],
           timeline: [
             ...(original.timeline || []),
@@ -3521,44 +3726,26 @@ function AppShell() {
     const projectsToSave = [updatedProject, ...normalizedSpawned, ...(linkedOriginalUpdate ? [linkedOriginalUpdate] : [])];
     projectsToSave.forEach(p => { if (isAssignedValue(p.assignedTo)) recordAssignmentLedger(p); });
     oldProject = oldProject ? normalizeProjectRecord(oldProject) : oldProject;
-
-    const updatedId = String(updatedProject.id || '').trim();
-    const oldId = String(oldProject?.id || oldProject?.caseId || '').trim();
-    const relatedOldIds = new Set([
-      updatedId,
-      oldId,
-      ...(Array.isArray(updatedProject.previousTaskIds) ? updatedProject.previousTaskIds : []),
-      ...(Array.isArray(oldProject?.previousTaskIds) ? oldProject.previousTaskIds : []),
-    ].map(x => String(x || '').trim()).filter(Boolean));
-
+    // Update the screen immediately. Previously the app waited for Firestore;
+    // if a completed file was large or Firebase rejected it, the upload looked like nothing happened.
     setSelectedProject(updatedProject);
     setProjects(prev => {
-      const saveIds = new Set(projectsToSave.map(p => String(p.id)));
-      const withoutOldVersions = (prev || []).filter(p => {
-        if (saveIds.has(String(p.id))) return false;
-        const ids = [p.id, p.caseId, ...(Array.isArray(p.previousTaskIds) ? p.previousTaskIds : [])]
-          .map(x => String(x || '').trim())
-          .filter(Boolean);
-        return !ids.some(id => relatedOldIds.has(id));
-      });
-      const next = mergeProjectsByFreshness(withoutOldVersions, projectsToSave);
+      const ids = new Set(projectsToSave.map(p => String(p.id)));
+      const next = mergeProjectsByFreshness(prev.filter(p => !ids.has(String(p.id))), projectsToSave);
       persistAndBroadcastProjects(next);
       return next;
     });
     
     if (firebaseUser && !isLocalMock) {
-        try {
-          for (const projectToSave of projectsToSave) {
+        for (const projectToSave of projectsToSave) {
+          try {
             await setDoc(
               doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', projectToSave.id.toString()),
               stripLargeLocalFilesForCloud(projectToSave)
             );
+          } catch(e){
+            console.warn('Project cloud save failed, but local screen has been updated.', e);
           }
-          if (oldId && updatedId && oldId !== updatedId) {
-            await deleteDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', oldId));
-          }
-        } catch(e){
-          console.warn('Project cloud save failed, but local screen has been updated.', e);
         }
     }
 
@@ -3585,35 +3772,38 @@ function AppShell() {
   const handlePaymentStatusChange = async (project, status) => {
     if (!project || currentUser?.role !== ROLES.ADMIN) return;
     const normalizedStatus = PAYMENT_TRACKING_OPTIONS.includes(status) ? status : 'Not Updated';
-    const optimisticProject = buildPaymentTrackingUpdate(project, normalizedStatus, currentUser);
 
-    // Save through the backend finance endpoint when available so the inline
-    // payment control and Finance Ledger stay linked across all admin sessions.
-    if (USE_BACKEND_STATE && backendStateReady && isDbReady) {
-      try {
-        const amount = optimisticProject?.ledger?.amountIn || optimisticProject?.estimate || optimisticProject?.estimateAmount || 0;
-        const res = await fetch(`${API_BASE}/api/state/projects/${encodeURIComponent(project.id || project.caseId)}/payment-status`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            paymentTrackingStatus: normalizedStatus,
-            amount,
-            by: currentUser.name,
-            updatedBy: currentUser.name,
-          })
-        });
-        const data = await res.json().catch(() => ({}));
-        if (res.ok && (data.project || data.case)) {
-          await handleUpdateProject(normalizeProjectRecord(data.project || data.case), project);
-          return;
-        }
-        console.warn('Inline payment backend update failed, using local fallback:', data.error || res.status);
-      } catch (e) {
-        console.warn('Inline payment backend update failed, using local fallback:', e.message);
+    if (normalizedStatus === 'Paid') {
+      const estimateAmount = getPaymentEstimateAmount(project);
+      const existingAmount = getPaymentReceivedAmount(project);
+      const defaultAmount = existingAmount || estimateAmount || '';
+      const amountInput = window.prompt(`Enter amount received for ${project.id}${estimateAmount ? ` (estimate ₹${Number(estimateAmount).toLocaleString('en-IN')})` : ''}:`, defaultAmount ? String(defaultAmount) : '');
+      if (amountInput === null || String(amountInput).trim() === '') return;
+      const amount = Number(String(amountInput).replace(/[^0-9.-]/g, ''));
+      if (!Number.isFinite(amount) || amount <= 0) {
+        alert('Please enter a valid received amount before marking payment as Paid.');
+        return;
       }
+      const today = new Date().toISOString().slice(0, 10);
+      const paymentDate = window.prompt('Enter payment date (YYYY-MM-DD):', project.ledger?.date || project.paymentDate || today);
+      if (paymentDate === null || !String(paymentDate).trim()) return;
+      const mode = window.prompt('Enter payment mode (Cash / UPI / Bank Transfer / Cheque):', project.ledger?.mode || '');
+      if (mode === null || !String(mode).trim()) return;
+      const transactionId = window.prompt('Reference / Transaction ID (optional):', project.ledger?.txnId || project.transactionId || '') || '';
+      const note = window.prompt('Remarks (optional):', '') || '';
+      const updatedProject = buildPaymentTrackingUpdate(project, 'Paid', currentUser, {
+        amountIn: amount,
+        paymentDate: String(paymentDate).trim(),
+        mode: String(mode).trim(),
+        transactionId: String(transactionId).trim(),
+        note: String(note).trim(),
+      });
+      await handleUpdateProject(updatedProject, project);
+      return;
     }
 
-    await handleUpdateProject(optimisticProject, project);
+    const updatedProject = buildPaymentTrackingUpdate(project, normalizedStatus, currentUser);
+    await handleUpdateProject(updatedProject, project);
   };
 
   const handleDeleteTask = async (taskId) => {
@@ -3644,35 +3834,7 @@ function AppShell() {
 
   const handleSendMessage = async (msg) => {
     if (!firebaseUser) return;
-    const resolveChatTaskRefs = (text = '', existingRefs = []) => {
-      const found = new Map();
-      const add = (p) => {
-        if (!p) return;
-        const key = String(p.id || p.caseId || '').trim().toUpperCase();
-        if (!key || found.has(key)) return;
-        found.set(key, {
-          id: p.id || p.caseId || '',
-          caseId: p.caseId || p.id || '',
-          customerName: p.customerName || '',
-          location: p.location || p.city || '',
-          bank: p.client || p.bankName || p.bank || '',
-          status: p.status || '',
-          assignedTo: p.assignedTo || p.assigneeName || ''
-        });
-      };
-      (existingRefs || []).forEach(ref => {
-        const refId = String(ref?.id || ref?.caseId || ref?.taskId || '').replace(/^#/, '').trim().toUpperCase();
-        const match = (projects || []).find(p => [p.id, p.caseId].filter(Boolean).some(v => String(v).trim().toUpperCase() === refId));
-        add(match || ref);
-      });
-      const haystack = ` ${String(text || '').toUpperCase()} `;
-      (projects || []).forEach(p => {
-        const ids = [p.id, p.caseId].filter(Boolean).map(v => String(v).trim().toUpperCase());
-        if (ids.some(id => id && (haystack.includes(`#${id}`) || haystack.includes(` ${id} `) || haystack.includes(`\n${id} `) || haystack.includes(` ${id}\n`)))) add(p);
-      });
-      return Array.from(found.values()).slice(0, 5);
-    };
-    const normalizedMsg = { ...msg, taskRefs: msg.taskRefs?.length ? msg.taskRefs : resolveChatTaskRefs(msg.text, msg.taskRefs), readBy: msg.readBy || [{ name: msg.sender, time: msg.time }] };
+    const normalizedMsg = { ...msg, readBy: msg.readBy || [{ name: msg.sender, time: msg.time }] };
     setChatMessages(prev => {
       const next = [...prev, normalizedMsg].sort((a,b) => a.id - b.id);
       if (isLocalMock) localStorage.setItem('kalpa_chats', JSON.stringify(sanitizeChatsForCache(next)));
@@ -3737,8 +3899,8 @@ function AppShell() {
       const next = prev.map(n => {
         const belongsToMe = (!n.targetUser && n.targetRole === currentUser.role) || samePerson(n.targetUser, currentUser.name) || samePerson(n.targetUser, currentUser.username) || (!!currentUser.id && String(n.targetUser || '').toLowerCase() === String(currentUser.id || '').toLowerCase());
         const isChatNotice = ['mention', 'chat', 'message'].includes(String(n.type || '').toLowerCase()) || /mention|message|chat/i.test(String(n.title || ''));
-        if (!belongsToMe || !isChatNotice || isNotificationReadByUser(n, currentUser)) return n;
-        const updated = addNotificationReadUser(n, currentUser);
+        if (!belongsToMe || !isChatNotice || (n.readBy || []).includes(currentUser.name)) return n;
+        const updated = { ...n, readBy: [...(n.readBy || []), currentUser.name] };
         readRelevantNotifications.push(updated);
         return updated;
       });
@@ -3772,8 +3934,8 @@ function AppShell() {
     const changed = [];
     setNotifications(prev => {
       const next = (prev || []).map(n => {
-        if (String(n.id) !== String(notifId) || isNotificationReadByUser(n, currentUser)) return n;
-        const updated = addNotificationReadUser(n, currentUser);
+        if (String(n.id) !== String(notifId) || (n.readBy || []).includes(currentUser.name)) return n;
+        const updated = { ...n, readBy: [...(n.readBy || []), currentUser.name] };
         changed.push(updated);
         return updated;
       });
@@ -3788,8 +3950,8 @@ function AppShell() {
     const changed = [];
     setNotifications(prev => {
       const next = (prev || []).map(n => {
-        if (!isNotificationForUser(n, currentUser) || isNotificationReadByUser(n, currentUser)) return n;
-        const updated = addNotificationReadUser(n, currentUser);
+        if (!isNotificationForUser(n, currentUser) || (n.readBy || []).includes(currentUser.name)) return n;
+        const updated = { ...n, readBy: [...(n.readBy || []), currentUser.name] };
         changed.push(updated);
         return updated;
       });
@@ -3813,36 +3975,6 @@ function AppShell() {
     } catch(e) {
       console.warn('Desktop notification permission failed', e);
     }
-  };
-
-  const postPresenceUpdate = async (userPatch, action = 'heartbeat') => {
-    if (!USE_BACKEND_STATE || !userPatch) return null;
-    try {
-      const res = await fetch(`${API_BASE}/api/presence`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, user: {
-          id: userPatch.id,
-          name: userPatch.name,
-          username: userPatch.username,
-          email: userPatch.email,
-          role: userPatch.role,
-          status: userPatch.status,
-          availability: userPatch.availability,
-          breakStartedAt: userPatch.breakStartedAt || null
-        } })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data.user) {
-        const normalizedServerUser = normalizeTeamUser(data.user);
-        setUsers(prev => normalizeTeamUsers([...(prev || []), normalizedServerUser]));
-        setCurrentUser(prev => prev && String(prev.id) === String(normalizedServerUser.id) ? { ...prev, ...normalizedServerUser } : prev);
-        return normalizedServerUser;
-      }
-    } catch (e) {
-      console.warn('Presence update failed:', e.message);
-    }
-    return null;
   };
 
   const handleUpdateUser = async (u) => {
@@ -3919,7 +4051,6 @@ function AppShell() {
     const onlineUser = { ...user, isOnline: true, availability: 'Available', lastLoginAt: loginNow, lastSeenAt: loginNow, lastHeartbeatAt: loginNow, availabilityUpdatedAt: loginNow, breakStartedAt: null };
     setCurrentUser(onlineUser);
     handleUpdateUser(onlineUser);
-    postPresenceUpdate(onlineUser, 'login');
   };
 
   const handleLogout = () => {
@@ -3942,9 +4073,7 @@ function AppShell() {
         };
       });
       const logoutNow = Date.now();
-      const offlineUser = { ...currentUser, isOnline: false, availability: 'Unavailable', lastLogoutAt: logoutNow, lastSeenAt: logoutNow, lastHeartbeatAt: logoutNow, availabilityUpdatedAt: logoutNow, breakStartedAt: null };
-      handleUpdateUser(offlineUser);
-      postPresenceUpdate(offlineUser, 'logout');
+      handleUpdateUser({ ...currentUser, isOnline: false, availability: 'Unavailable', lastLogoutAt: logoutNow, lastSeenAt: logoutNow, lastHeartbeatAt: logoutNow, availabilityUpdatedAt: logoutNow, breakStartedAt: null });
     }
     setCurrentUser(null);
     setSelectedProject(null);
@@ -3983,7 +4112,6 @@ function AppShell() {
     });
     setCurrentUser(updated);
     handleUpdateUser(updated);
-    postPresenceUpdate(updated, onBreak ? 'resume' : 'break');
   };
 
   const handleLeadFileChange = (e) => {
@@ -4033,7 +4161,7 @@ function AppShell() {
   if (currentUser.role === ROLES.DESIGNER && activeTab === 'board') setTimeout(() => setActiveTab('command'), 0);
   const myNotifs = getVisibleNotifications(notifications, currentUser)
     .map(n => ({ ...n, category: n.category || getNotificationCategory(n), priority: n.priority || getNotificationPriority(n) }));
-  const unreadNotifs = myNotifs.filter(n => !isNotificationReadByUser(n, currentUser)).length;
+  const unreadNotifs = myNotifs.filter(n => !(n.readBy||[]).includes(currentUser.name)).length;
   const notificationCounts = NOTIFICATION_CATEGORIES.reduce((acc, label) => {
     acc[label] = label === 'All' ? myNotifs.length : myNotifs.filter(n => n.category === label).length;
     return acc;
@@ -4045,25 +4173,6 @@ function AppShell() {
     return [n.title, n.category, n.priority, n.type, n.time].filter(Boolean).join(' ').toLowerCase().includes(q);
   });
   const activityTimeline = buildActivityTimeline(projects, chatMessages, notifications);
-
-  const handleDiscussTaskInGlobalChat = (project = {}) => {
-    const taskId = project.id || project.caseId || '';
-    if (!taskId) return;
-    try {
-      window.dispatchEvent(new CustomEvent('kalpa:discuss-task', {
-        detail: { projectId: taskId, project }
-      }));
-    } catch (e) {
-      console.warn('Could not open task reference in chat:', e);
-    }
-  };
-
-  const handleOpenTaskFromChat = (project = {}) => {
-    const id = String(project.id || project.caseId || '').trim();
-    if (!id) return;
-    const latest = (projects || []).find(p => String(p.id || '') === id || String(p.caseId || '') === id) || project;
-    openProjectDetail(latest, activeTab);
-  };
 
   const displayedProjects = projects
     .filter(p => {
@@ -4144,7 +4253,7 @@ function AppShell() {
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
               {displayedProjects.slice(0, 12).map(p => (
-                <button key={p.id} type="button" onClick={() => openProjectDetail(p, activeTab)} className="kalpa-task-row text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 hover:border-indigo-100 rounded-2xl p-4 transition-all">
+                <button key={p.id} type="button" onClick={() => setSelectedProject(p)} className="kalpa-task-row text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 hover:border-indigo-100 rounded-2xl p-4 transition-all">
                   <p className="font-black text-slate-800">{p.id}</p>
                   <p className="text-xs font-bold text-slate-500 mt-1">{getCustomerDisplayName(p)} • {p.location}</p>
                   <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase">{p.type} • {p.assignedTo || 'Unassigned'} • {p.status}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mt-2 line-clamp-2"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1 line-clamp-2"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}
@@ -4160,24 +4269,17 @@ function AppShell() {
         )}
 
         {selectedProject ? (
-          <TaskDetailView project={selectedProject} user={currentUser} onBack={closeProjectDetail} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} onDiscussTask={handleDiscussTaskInGlobalChat} />
+          <TaskDetailView project={selectedProject} user={currentUser} onBack={() => setSelectedProject(null)} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} />
         ) : activeTab === 'command' ? (
-          <CommandCentreView projects={projects} users={activeUsers} attendanceLogs={attendanceLogs} currentUser={currentUser} onSelectProject={(p) => openProjectDetail(p, 'command')} />
+          <CommandCentreView projects={projects} users={activeUsers} currentUser={currentUser} onSelectProject={(p) => { setActiveTab('board'); setSelectedProject(p); }} />
         ) : activeTab === 'productivity' ? (
           <ProductivityDashboard users={activeUsers} projects={projects} />
         ) : activeTab === 'closing' && currentUser.role === ROLES.ADMIN ? (
           <DailyClosingReport projects={projects} />
         ) : activeTab === 'ledger' && currentUser.role === ROLES.ADMIN ? (
-          <LedgerView projects={projects} onSelectProject={(p) => openProjectDetail(p, 'ledger')} />
+          <LedgerView projects={projects} onSelectProject={(p) => { setActiveTab('board'); setSelectedProject(p); }} />
         ) : activeTab === 'archive' ? (
-          <HistoryArchiveView
-            projects={projects}
-            currentUser={currentUser}
-            archiveViewState={archiveViewState}
-            setArchiveViewState={setArchiveViewState}
-            onSelectProject={(p) => openProjectDetail(p, 'archive')}
-            onPaymentStatusChange={handlePaymentStatusChange}
-          />
+          <HistoryArchiveView projects={projects} currentUser={currentUser} onSelectProject={(p) => { setActiveTab('board'); setSelectedProject(p); }} onPaymentStatusChange={handlePaymentStatusChange} />
         ) : activeTab === 'team' ? (
           <TeamPerformanceView users={activeUsers} projects={projects} onUpdateUser={handleUpdateUser} currentUser={currentUser} />
         ) : activeTab === 'attendance' ? (
@@ -4201,21 +4303,20 @@ function AppShell() {
             displayedProjects={displayedProjects}
             projects={projects}
             activeUsers={activeUsers}
-            setSelectedProject={(p) => openProjectDetail(p, activeTab)}
+            setSelectedProject={setSelectedProject}
             nowTick={nowTick}
             ROLES={ROLES}
+            currentUser={currentUser}
             getCustomerDisplayName={getCustomerDisplayName}
             getDraftElapsed={getDraftElapsed}
             getOperationalUsers={getOperationalUsers}
             isUserActuallyOnline={isUserActuallyOnline}
             onPaymentStatusChange={handlePaymentStatusChange}
-            onDiscussTask={handleDiscussTaskInGlobalChat}
-            currentUser={currentUser}
           />
         )}
       </main>
 
-      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} projects={projects} onOpenTaskReference={handleOpenTaskFromChat} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} />}
+      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} />}
 
       {showNewLead && (
         <div className="kalpa-lead-modal fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[80] flex justify-center items-center p-4">
@@ -4282,8 +4383,9 @@ function AppShell() {
                  try {
                    const saveRes = await fetch(`${API_BASE}/api/state`, {
                      method: 'POST',
-                     headers: { 'Content-Type': 'application/json' },
+                     headers: jsonFinanceSafeHeaders,
                      body: JSON.stringify({
+                       currentUserRole: currentUser?.role || '',
                        users: normalizeTeamUsers(users && users.length ? users : INITIAL_USERS),
                        projects: sanitizeProjectsForCache(filterDeletedProjects(nextProjects)),
                        deletedProjectIds: getDeletedProjectIds(),

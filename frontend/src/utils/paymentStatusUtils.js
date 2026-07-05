@@ -2,24 +2,52 @@ export const PAYMENT_TRACKING_OPTIONS = ['Not Updated', 'Pending', 'Paid'];
 
 const normalizePaymentValue = (value = '') => String(value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 
-export const getPaymentTrackingStatus = (project = {}) => {
-  const explicit = String(project.paymentTrackingStatus || project.paymentTrackStatus || '').trim();
-  if (explicit) {
-    const normalizedExplicit = PAYMENT_TRACKING_OPTIONS.find(option => normalizePaymentValue(option) === normalizePaymentValue(explicit));
-    if (normalizedExplicit) return normalizedExplicit;
+export const getPaymentEstimateAmount = (project = {}) => {
+  const raw = project.estimate ?? project.estimateAmount ?? project.amount ?? project.totalAmount ?? project.ledger?.expectedAmount ?? 0;
+  const cleaned = typeof raw === 'string' ? raw.replace(/[^0-9.-]/g, '') : raw;
+  return Math.max(0, Number(cleaned) || 0);
+};
+
+export const getPaymentReceivedAmount = (project = {}) => {
+  const raw = project.ledger?.amountIn ?? project.paymentAmountIn ?? project.amountReceived ?? project.receivedAmount ?? 0;
+  const cleaned = typeof raw === 'string' ? raw.replace(/[^0-9.-]/g, '') : raw;
+  return Math.max(0, Number(cleaned) || 0);
+};
+
+export const derivePaymentTrackingStatusFromData = (project = {}) => {
+  const ledger = project.ledger || {};
+  const estimate = getPaymentEstimateAmount(project);
+  const amountIn = getPaymentReceivedAmount(project);
+  const rawStatus = normalizePaymentValue(project.paymentTrackingStatus || project.paymentStatus || project.paymentReceived || ledger.status || ledger.paymentStatus || '');
+  const hasAnyFinanceData = Boolean(
+    estimate > 0 || amountIn > 0 || ledger.date || ledger.receivedFrom || ledger.txnId || ledger.transactionId || ledger.mode ||
+    project.paymentDate || project.paymentTime || ledger.updatedAt || project.paymentTrackingUpdatedAt
+  );
+
+  // Paid is valid only when a positive amount is actually received.
+  if (amountIn > 0) {
+    if (estimate > 0 && amountIn < estimate) return 'Pending';
+    return 'Paid';
   }
 
-  const ledger = project.ledger || {};
-  const amountIn = Number(ledger.amountIn ?? project.paymentAmountIn ?? 0) || 0;
-  const estimate = Number(project.estimate ?? project.estimateAmount ?? 0) || 0;
-  const hasLedgerUpdate = Boolean(ledger.updatedAt || project.paymentTrackingUpdatedAt || project.paymentDate || project.paymentTime || amountIn > 0);
-  const legacyStatus = normalizePaymentValue(project.paymentStatus || project.paymentReceived || ledger.status || '');
+  // Estimate or other payment information exists, but no money has been received yet.
+  if (estimate > 0 || rawStatus === 'PENDING' || rawStatus === 'PARTIAL' || hasAnyFinanceData) return 'Pending';
 
-  if (legacyStatus === 'PAID' || legacyStatus === 'RECEIVED' || legacyStatus === 'YES') return 'Paid';
-  if (legacyStatus === 'PARTIAL' || legacyStatus === 'REFUND') return 'Pending';
-  if (amountIn > 0 && estimate > 0 && amountIn >= estimate) return 'Paid';
-  if (amountIn > 0 || (hasLedgerUpdate && legacyStatus === 'PENDING')) return 'Pending';
   return 'Not Updated';
+};
+
+export const getPaymentTrackingStatus = (project = {}) => {
+  const explicit = String(project.paymentTrackingStatus || project.paymentTrackStatus || '').trim();
+  const normalizedExplicit = explicit
+    ? PAYMENT_TRACKING_OPTIONS.find(option => normalizePaymentValue(option) === normalizePaymentValue(explicit))
+    : '';
+  const dataStatus = derivePaymentTrackingStatusFromData(project);
+
+  // Never allow a stale manual "Paid" value to override missing payment data.
+  if (normalizedExplicit === 'Paid' && dataStatus !== 'Paid') return dataStatus;
+  // If financial values exist, they are the source of truth.
+  if (dataStatus !== 'Not Updated') return dataStatus;
+  return normalizedExplicit || dataStatus;
 };
 
 export const getPaymentStatusBadgeClass = (status = 'Not Updated') => {
@@ -41,52 +69,82 @@ export const getPaymentStatusDotClass = (status = 'Not Updated') => {
   }
 };
 
-export const getPaymentEstimateAmount = (project = {}) => {
-  const raw = project.estimate ?? project.estimateAmount ?? project.amount ?? project.totalAmount ?? project.ledger?.expectedAmount ?? 0;
-  const cleaned = typeof raw === 'string' ? raw.replace(/[^0-9.-]/g, '') : raw;
-  return Math.max(0, Number(cleaned) || 0);
-};
-
-export const buildPaymentTrackingUpdate = (project = {}, status = 'Not Updated', user = {}) => {
+export const buildPaymentTrackingUpdate = (project = {}, status = 'Not Updated', user = {}, paymentDetails = {}) => {
   const now = Date.now();
   const normalizedStatus = PAYMENT_TRACKING_OPTIONS.includes(status) ? status : 'Not Updated';
-  const estimateAmount = getPaymentEstimateAmount(project);
   const existingLedger = project.ledger || {};
-  const existingAmountIn = Number(existingLedger.amountIn ?? 0) || 0;
-  const paidAmount = normalizedStatus === 'Paid' ? (estimateAmount || existingAmountIn) : existingAmountIn;
+  const estimateAmount = getPaymentEstimateAmount(project);
+  const existingAmountIn = getPaymentReceivedAmount(project);
+  const enteredAmount = paymentDetails.amountIn ?? paymentDetails.amount ?? paymentDetails.paymentAmountIn;
+  const cleanedEnteredAmount = typeof enteredAmount === 'string' ? enteredAmount.replace(/[^0-9.-]/g, '') : enteredAmount;
+  const enteredNumeric = Number(cleanedEnteredAmount);
   const today = new Date(now).toISOString().slice(0, 10);
-  const ledgerUpdate = {
+
+  let nextLedger = {
     ...existingLedger,
-    status: normalizedStatus,
-    paymentStatus: normalizedStatus,
     updatedAt: now,
     updatedBy: user?.name || 'Admin',
   };
 
   if (normalizedStatus === 'Paid') {
-    ledgerUpdate.amountIn = paidAmount;
-    ledgerUpdate.date = existingLedger.date || today;
-    ledgerUpdate.receivedFrom = existingLedger.receivedFrom || project.customerName || project.client || 'Auto-filled from payment status';
-    ledgerUpdate.autoFilledFromPaymentStatus = true;
+    const amountToSave = Number.isFinite(enteredNumeric) && enteredNumeric > 0 ? enteredNumeric : existingAmountIn;
+    if (amountToSave <= 0) return project;
+    nextLedger = {
+      ...nextLedger,
+      amountIn: amountToSave,
+      date: paymentDetails.paymentDate || paymentDetails.date || existingLedger.date || today,
+      mode: paymentDetails.mode || existingLedger.mode || '',
+      receivedFrom: paymentDetails.receivedFrom || paymentDetails.payerName || existingLedger.receivedFrom || project.customerName || project.client || '',
+      txnId: paymentDetails.txnId || paymentDetails.transactionId || existingLedger.txnId || '',
+      status: amountToSave >= estimateAmount || estimateAmount <= 0 ? 'Paid' : 'Pending',
+      paymentStatus: amountToSave >= estimateAmount || estimateAmount <= 0 ? 'Paid' : 'Pending',
+      financeLedgerLinked: true,
+    };
+  } else {
+    nextLedger = {
+      ...nextLedger,
+      status: normalizedStatus,
+      paymentStatus: normalizedStatus,
+    };
   }
 
+  const draft = { ...project, ledger: nextLedger };
+  const computedStatus = derivePaymentTrackingStatusFromData(draft);
+  const previousStatus = getPaymentTrackingStatus(project);
+  const nextAmountIn = getPaymentReceivedAmount(draft);
+  const auditEvent = {
+    id: `pay-${now}`,
+    at: new Date(now).toISOString(),
+    by: user?.name || 'Admin',
+    action: 'Payment status updated',
+    oldStatus: previousStatus,
+    newStatus: computedStatus,
+    oldAmount: existingAmountIn,
+    newAmount: nextAmountIn,
+    note: paymentDetails.note || (computedStatus === 'Paid'
+      ? `Payment saved and ₹${Number(nextAmountIn || 0).toLocaleString('en-IN')} linked to Finance Ledger.`
+      : `Payment status calculated as ${computedStatus}.`)
+  };
+
   return {
-    ...project,
-    paymentTrackingStatus: normalizedStatus,
+    ...draft,
+    paymentTrackingStatus: computedStatus,
     paymentTrackingUpdatedAt: now,
     paymentTrackingUpdatedBy: user?.name || 'Admin',
-    paymentAmountIn: normalizedStatus === 'Paid' ? paidAmount : project.paymentAmountIn,
-    ledger: ledgerUpdate,
+    paymentStatus: computedStatus === 'Paid' ? 'YES' : (computedStatus === 'Pending' ? 'PENDING' : 'NOT_UPDATED'),
+    paymentReceived: computedStatus === 'Paid' ? 'YES' : (computedStatus === 'Pending' ? 'PARTIAL' : 'NO'),
+    paymentAmountIn: nextAmountIn,
+    paymentDate: nextLedger.date || project.paymentDate,
+    paymentAuditTrail: [auditEvent, ...(project.paymentAuditTrail || [])],
     timeline: [
       ...(project.timeline || []),
       {
         id: now,
-        text: normalizedStatus === 'Paid'
-          ? `Payment marked Paid by ${user?.name || 'Admin'} and ₹${Number(paidAmount || 0).toLocaleString('en-IN')} was added to Finance Ledger.`
-          : `Payment status marked ${normalizedStatus} by ${user?.name || 'Admin'}.`,
+        text: computedStatus === 'Paid'
+          ? `Payment saved by ${user?.name || 'Admin'} and ₹${Number(nextAmountIn || 0).toLocaleString('en-IN')} was added to Finance Ledger.`
+          : `Payment status calculated as ${computedStatus} by ${user?.name || 'Admin'}.`,
         time: new Date(now).toLocaleString()
       }
     ]
   };
 };
-

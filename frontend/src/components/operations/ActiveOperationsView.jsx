@@ -10,6 +10,16 @@ import { getStatusColor } from '../../services/taskService';
 const isAdminUser = (user = {}) => String(user?.role || '').trim().toUpperCase() === 'ADMIN';
 const getDisplayTaskId = (project = {}) => project.displayId || project.originalTaskId || project.id;
 const isRevisionWorkItem = (project = {}) => project.isRevisionWorkItem === true || String(project.id || '').includes('__REV__');
+const isRevisionLikeProject = (project = {}) => {
+  const status = String(project.status || project.reviewStatus || '').toLowerCase();
+  return isRevisionWorkItem(project) || status.includes('revision') || project.revisionCode || project.originalTaskId;
+};
+const getRevisionLabel = (project = {}) => {
+  if (!isRevisionLikeProject(project)) return null;
+  const baseId = getDisplayTaskId(project);
+  const code = project.revisionCode || (project.revisionNumber ? `R${project.revisionNumber}` : 'REV');
+  return `${code} • Original ${baseId}`;
+};
 
 const CompactTextPill = ({ label, value, tone = 'indigo' }) => {
   if (!value) return null;
@@ -72,7 +82,7 @@ const OperationKanbanCard = ({ project, onSelectProject, getCustomerDisplayName,
 
 const OperationsKanban = ({ projects, onSelectProject, getCustomerDisplayName, onDiscussTask, currentUser, onPaymentStatusChange }) => (
   <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-6">
-    {['Lead Received', 'Drafting', 'Drafting Paused', 'Completed'].map(statusCol => (
+    {['Lead Received', 'Revision Pending', 'Revision In Progress', 'Drafting', 'Drafting Paused', 'Internal Review', 'Completed'].map(statusCol => (
       <div key={statusCol} className="bg-slate-100/50 rounded-3xl p-3 sm:p-4 border-2 border-slate-100/50 min-h-[420px] sm:min-h-[500px] transition-colors duration-200">
         <h3 className="font-black text-slate-500 uppercase tracking-widest text-xs mb-4 px-2">{statusCol} <span className="ml-2 bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full">{projects.filter(p => p.status === statusCol).length}</span></h3>
         <div className="space-y-4">
@@ -233,6 +243,38 @@ const TeamActivityPanel = ({ users, projects, nowTick, ROLES, onSelectProject, g
   </div>
 );
 
+
+const RevisionQueuePanel = ({ projects, onSelectProject, getCustomerDisplayName }) => {
+  const revisionProjects = (projects || []).filter(isRevisionLikeProject).filter(p => String(p.status || '').toLowerCase() !== 'completed');
+  if (revisionProjects.length === 0) return null;
+  return (
+    <div className="bg-red-50 border-2 border-red-100 rounded-3xl p-4 sm:p-5 shadow-sm">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
+        <div>
+          <h2 className="text-sm font-black text-red-700 uppercase tracking-widest flex items-center gap-2"><Flag className="w-4 h-4" /> Revision Queue</h2>
+          <p className="text-xs font-bold text-red-500 mt-1">Today's active revision work items. Original archive records remain permanent.</p>
+        </div>
+        <span className="bg-white text-red-700 border border-red-100 rounded-xl px-3 py-1 text-xs font-black">{revisionProjects.length} Active</span>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        {revisionProjects.slice(0, 6).map(project => (
+          <button key={project.id} type="button" onClick={() => onSelectProject(project)} className="text-left bg-white border border-red-100 hover:border-red-200 rounded-2xl p-3 transition-all hover:shadow-md">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="font-black text-slate-800 truncate">{getDisplayTaskId(project)}</p>
+                <p className="text-[10px] font-black text-red-600 uppercase tracking-wider mt-1">{getRevisionLabel(project)}</p>
+              </div>
+              <span className="bg-red-100 text-red-700 border border-red-200 rounded-lg px-2 py-0.5 text-[10px] font-black whitespace-nowrap">{project.revisionCode || 'REV'}</span>
+            </div>
+            <p className="text-xs font-bold text-slate-600 truncate mt-2">{getCustomerDisplayName(project)} • {project.location || 'Location not added'}</p>
+            <p className="text-[10px] font-bold text-slate-400 mt-1">Assigned to {project.assignedTo || 'Unassigned'} • {project.status || 'Revision Pending'}</p>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 export const ActiveOperationsView = ({
   activeTab,
   canManage,
@@ -281,6 +323,8 @@ export const ActiveOperationsView = ({
         )}
       </div>
     </div>
+
+    <RevisionQueuePanel projects={displayedProjects} onSelectProject={setSelectedProject} getCustomerDisplayName={getCustomerDisplayName} />
 
     <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px] gap-5 sm:gap-8">
       <div className="w-full min-w-0">

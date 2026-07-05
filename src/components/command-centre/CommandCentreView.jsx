@@ -142,6 +142,86 @@ const getLatestRevisionNote = (project = {}) => {
   return latest?.title || latest?.text || latest?.comment || latest?.description || '';
 };
 
+
+const getRevisionCreatedAt = (item = {}, project = {}) => toMs(item.createdAt || item.requestedAt || item.assignedAt || project.revisionRequestedAt || project.updatedAt || project.createdAt || Date.now());
+const getRevisionUpdatedAt = (item = {}, project = {}) => toMs(item.completedAt || item.approvedAt || item.updatedAt || item.reviewedAt || item.createdAt || project.updatedAt || project.completedAt || project.createdAt || Date.now());
+
+const getRevisionStage = (item = {}, project = {}) => {
+  const statusKey = normalizeWorkStatus(item.status || project.revisionStatus || project.reviewStatus || project.status || '');
+  const reviewKey = normalizeWorkStatus(project.reviewStatus || project.finalConclusion || item.reviewStatus || '');
+  if (['APPROVED', 'DONE', 'COMPLETED', 'CLOSED', 'RESOLVED'].includes(statusKey) || ['APPROVED', 'FINALAPPROVED'].includes(reviewKey)) return 'approved';
+  if (['INTERNALREVIEW', 'REVIEW', 'UNDERREVIEW', 'UPLOADED', 'SUBMITTED', 'WAITINGAPPROVAL', 'PENDINGAPPROVAL'].includes(statusKey) || ['INTERNALREVIEW', 'PENDINGAPPROVAL', 'UNDERREVIEW'].includes(reviewKey)) return 'review';
+  if (['REVISIONINPROGRESS', 'DRAFTING', 'DRAFTINGPAUSED', 'INPROGRESS', 'WORKING'].includes(statusKey)) return 'inProgress';
+  return 'pending';
+};
+
+const getRevisionTimelineSteps = (project = {}) => {
+  const items = (project.subTasks || project.revisions || []);
+  const latest = items.slice().sort((a, b) => getRevisionUpdatedAt(b, project) - getRevisionUpdatedAt(a, project))[0] || {};
+  const stage = getRevisionStage(latest, project);
+  const steps = [
+    { key: 'created', label: 'Revision Created', done: true },
+    { key: 'assigned', label: 'Assigned', done: !!(project.assignedTo && project.assignedTo !== 'Unassigned') },
+    { key: 'working', label: 'Designer Working', done: ['inProgress', 'review', 'approved'].includes(stage) },
+    { key: 'review', label: 'Internal Review', done: ['review', 'approved'].includes(stage) },
+    { key: 'approved', label: 'Approved', done: stage === 'approved' }
+  ];
+  return { stage, steps };
+};
+
+const getRevisionStageLabel = (stage = 'pending') => ({
+  pending: 'Revision Pending',
+  inProgress: 'Designer Working',
+  review: 'Under Review',
+  approved: 'Approved'
+}[stage] || 'Revision Pending');
+
+const buildRevisionDashboard = (projects = [], dateKey = formatDateKey()) => {
+  const revisionProjects = (projects || []).filter(project => hasActiveRevision(project) || (project.subTasks || project.revisions || []).length > 0 || normalizeWorkStatus(project.status).startsWith('REVISION'));
+  const now = Date.now();
+  const buckets = { pending: [], inProgress: [], review: [], approved: [] };
+  revisionProjects.forEach(project => {
+    const { stage } = getRevisionTimelineSteps(project);
+    (buckets[stage] || buckets.pending).push(project);
+  });
+  const active = revisionProjects.filter(project => getRevisionTimelineSteps(project).stage !== 'approved');
+  const approvedToday = buckets.approved.filter(project => formatDateKey(project.revisionApprovedAt || project.completedAt || project.updatedAt || Date.now()) === dateKey);
+  const completedDurations = buckets.approved.map(project => {
+    const items = project.subTasks || project.revisions || [];
+    const created = items.length ? Math.min(...items.map(item => getRevisionCreatedAt(item, project))) : toMs(project.revisionRequestedAt || project.createdAt);
+    const finished = toMs(project.revisionApprovedAt || project.completedAt || project.updatedAt);
+    return created && finished && finished >= created ? finished - created : 0;
+  }).filter(Boolean);
+  const avgMs = completedDurations.length ? Math.round(completedDurations.reduce((sum, n) => sum + n, 0) / completedDurations.length) : 0;
+  const oldest = active.slice().sort((a, b) => {
+    const aCreated = Math.min(...((a.subTasks || a.revisions || [{}]).map(item => getRevisionCreatedAt(item, a))));
+    const bCreated = Math.min(...((b.subTasks || b.revisions || [{}]).map(item => getRevisionCreatedAt(item, b))));
+    return aCreated - bCreated;
+  })[0] || null;
+  const oldestMs = oldest ? Math.max(0, now - Math.min(...((oldest.subTasks || oldest.revisions || [{}]).map(item => getRevisionCreatedAt(item, oldest))))) : 0;
+  const aging = { oneDay: 0, threeDays: 0, sevenDays: 0 };
+  active.forEach(project => {
+    const created = Math.min(...((project.subTasks || project.revisions || [{}]).map(item => getRevisionCreatedAt(item, project))));
+    const ageDays = Math.floor((now - created) / 86400000);
+    if (ageDays >= 1) aging.oneDay += 1;
+    if (ageDays >= 3) aging.threeDays += 1;
+    if (ageDays >= 7) aging.sevenDays += 1;
+  });
+  return {
+    all: revisionProjects,
+    active,
+    pending: buckets.pending,
+    inProgress: buckets.inProgress,
+    review: buckets.review,
+    approved: buckets.approved,
+    approvedToday,
+    avgMs,
+    oldest,
+    oldestMs,
+    aging
+  };
+};
+
 const getSlaInfo = (project = {}, now = Date.now()) => {
   const createdAt = project.createdAt || now;
   const assignedAt = project.assignedAt || project.assignedOn || (project.assignedTo && project.assignedTo !== 'Unassigned' ? createdAt : null);
@@ -199,6 +279,7 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
   });
   useEffect(() => { const timer = setInterval(() => setAvailabilityNow(Date.now()), 30000); return () => clearInterval(timer); }, []);
   const metrics = getTodayMetrics(projects, dateKey);
+  const revisionDashboard = buildRevisionDashboard(projects, dateKey);
   const rawActiveBoard = metrics.activeToday.slice().sort((a,b) => (toMs(b.completedAt || b.updatedAt || b.createdAt) || 0) - (toMs(a.completedAt || a.updatedAt || a.createdAt) || 0));
   const people = getOperationalUsers(users || [], { includeAdmins: true });
   const workingTeam = people.filter(u => u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER);
@@ -304,7 +385,7 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
     ['Drafting', metrics.drafting, 'bg-indigo-500', 'drafting'],
     ['Review', metrics.review, 'bg-purple-500', 'review'],
     ['Completed', metrics.completed, 'bg-emerald-500', 'completed'],
-    ['Revisions', metrics.revisions.length, 'bg-red-500', 'revisions']
+    ['Revisions', revisionDashboard.active.length, 'bg-red-500', 'revisions']
   ];
   const maxFlow = Math.max(...statusFlow.map(([, value]) => Number(value) || 0), 1);
   const workloadCards = workingTeam.map(u => {
@@ -323,7 +404,10 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
     completed: 'Completed today',
     delayed: 'Delayed SLA cases',
     near: 'Near SLA cases',
-    revisions: 'Urgent revisions',
+    revisions: 'Revision queue',
+    'revision-review': 'Revisions under review',
+    'revision-approved-today': 'Revisions approved today',
+    'revision-oldest': 'Oldest pending revision',
     carried: 'Carried forward cases',
     drafting: 'Drafting cases',
     review: 'Internal review cases'
@@ -334,7 +418,10 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
     if (filterKey === 'completed') return metrics.completedToday.slice().sort((a,b) => (toMs(b.completedAt || b.updatedAt || b.createdAt) || 0) - (toMs(a.completedAt || a.updatedAt || a.createdAt) || 0));
     if (filterKey === 'delayed') return pendingBoard.filter(p => getSlaInfo(p).label === 'Delayed');
     if (filterKey === 'near') return pendingBoard.filter(p => getSlaInfo(p).label === 'Near SLA');
-    if (filterKey === 'revisions') return metrics.revisions.slice().sort((a,b) => (b.revisionRequestedAt || b.updatedAt || b.createdAt || 0) - (a.revisionRequestedAt || a.updatedAt || a.createdAt || 0));
+    if (filterKey === 'revisions') return revisionDashboard.active.slice().sort((a,b) => (toMs(b.revisionRequestedAt || b.updatedAt || b.createdAt) || 0) - (toMs(a.revisionRequestedAt || a.updatedAt || a.createdAt) || 0));
+    if (filterKey === 'revision-review') return revisionDashboard.review.slice().sort((a,b) => (toMs(b.updatedAt || b.createdAt) || 0) - (toMs(a.updatedAt || a.createdAt) || 0));
+    if (filterKey === 'revision-approved-today') return revisionDashboard.approvedToday.slice().sort((a,b) => (toMs(b.revisionApprovedAt || b.completedAt || b.updatedAt) || 0) - (toMs(a.revisionApprovedAt || a.completedAt || a.updatedAt) || 0));
+    if (filterKey === 'revision-oldest') return revisionDashboard.oldest ? [revisionDashboard.oldest] : [];
     if (filterKey === 'carried') return metrics.carried.slice();
     if (filterKey === 'drafting') return rawActiveBoard.filter(p => normalizeWorkStatus(p.status) === 'DRAFTING' || normalizeWorkStatus(p.status) === 'DRAFTINGPAUSED');
     if (filterKey === 'review') return rawActiveBoard.filter(p => normalizeWorkStatus(p.status) === 'INTERNALREVIEW');
@@ -355,7 +442,7 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
     ['Completion Rate', `${completionRate}%`, 'bg-emerald-50 text-emerald-700 border-emerald-100', 'completed', 'View completed cases for this date'],
     ['Delayed SLA', delayedCount, 'bg-red-50 text-red-700 border-red-100', 'delayed', 'View overdue SLA cases'],
     ['Near SLA', nearSlaCount, 'bg-amber-50 text-amber-700 border-amber-100', 'near', 'View cases approaching SLA'],
-    ['Urgent Revisions', metrics.revisions.length, 'bg-purple-50 text-purple-700 border-purple-100', 'revisions', 'View urgent revision queue']
+    ['Revision Pending', revisionDashboard.active.length, 'bg-purple-50 text-purple-700 border-purple-100', 'revisions', 'View revision queue']
   ];
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -377,6 +464,51 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
           <p className="mt-3 text-[10px] font-black uppercase tracking-widest opacity-60">Click to view</p>
         </button>
       ))}</div>
+
+      <div className="kalpa-panel bg-white rounded-3xl border-2 border-purple-100 p-5 sm:p-6 shadow-sm">
+        <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-5">
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-[0.22em] text-purple-500">Revision Dashboard</p>
+            <h2 className="text-xl font-black text-slate-800 mt-1">Live revision queue</h2>
+            <p className="text-xs font-bold text-slate-400 mt-1">Reads revision data only; Archive and Operations filtering stay unchanged.</p>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 flex-1">
+            {[
+              ['Pending', revisionDashboard.pending.length + revisionDashboard.inProgress.length, 'revisions', 'bg-red-50 text-red-700 border-red-100'],
+              ['Under Review', revisionDashboard.review.length, 'revision-review', 'bg-purple-50 text-purple-700 border-purple-100'],
+              ['Approved Today', revisionDashboard.approvedToday.length, 'revision-approved-today', 'bg-emerald-50 text-emerald-700 border-emerald-100'],
+              ['Avg Time', revisionDashboard.avgMs ? formatDuration(0, revisionDashboard.avgMs) : '-', 'revisions', 'bg-indigo-50 text-indigo-700 border-indigo-100'],
+              ['Oldest', revisionDashboard.oldestMs ? formatDuration(0, revisionDashboard.oldestMs) : '-', 'revision-oldest', 'bg-amber-50 text-amber-700 border-amber-100'],
+              ['> 3 Days', revisionDashboard.aging.threeDays, 'revisions', 'bg-orange-50 text-orange-700 border-orange-100']
+            ].map(([label, value, filterKey, cls]) => (
+              <button key={label} type="button" onClick={() => applyDashboardFilter(filterKey)} className={`${cls} border rounded-2xl p-3 text-left hover:shadow-md transition-all active:scale-[0.98] ${dashboardFilter === filterKey ? 'ring-2 ring-purple-200' : ''}`}>
+                <p className="text-[9px] font-black uppercase tracking-widest opacity-70">{label}</p>
+                <p className="text-lg sm:text-2xl font-black mt-1">{value}</p>
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 mt-5">
+          {revisionDashboard.active.slice(0, 3).map(project => {
+            const { stage, steps } = getRevisionTimelineSteps(project);
+            return (
+              <button key={project.id} type="button" onClick={() => onSelectProject(project)} className="text-left bg-slate-50 border border-slate-100 rounded-2xl p-4 hover:bg-purple-50 hover:border-purple-100 transition-all">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="font-black text-slate-800 truncate">{project.id}</p>
+                    <p className="text-[11px] font-bold text-slate-400 truncate">{getCustomerDisplayName(project)} • {project.assignedTo || 'Unassigned'}</p>
+                  </div>
+                  <Badge colorClass={stage === 'review' ? 'bg-purple-50 text-purple-700 border-purple-100' : stage === 'inProgress' ? 'bg-indigo-50 text-indigo-700 border-indigo-100' : 'bg-red-50 text-red-700 border-red-100'}>{getRevisionStageLabel(stage)}</Badge>
+                </div>
+                <div className="flex flex-wrap gap-1.5 mt-3">
+                  {steps.map(step => <span key={step.key} className={`text-[9px] font-black uppercase px-2 py-1 rounded-lg border ${step.done ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-white text-slate-400 border-slate-100'}`}>{step.label}</span>)}
+                </div>
+              </button>
+            );
+          })}
+          {revisionDashboard.active.length === 0 && <div className="lg:col-span-3 rounded-2xl bg-slate-50 border border-slate-100 p-4 text-sm font-bold text-slate-400">No active revision queue items.</div>}
+        </div>
+      </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
         <div className="kalpa-panel xl:col-span-2 bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
@@ -468,7 +600,7 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
             </div>
           </div>
           {currentUser?.role === ROLES.ADMIN && <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm"><h3 className="font-black text-slate-800 mb-4">Payment Health</h3><p className="text-xs font-black text-slate-400 uppercase tracking-widest">Received Today</p><p className="text-3xl font-black text-emerald-600 mb-4">₹{metrics.paymentReceived.toLocaleString()}</p><p className="text-xs font-black text-slate-400 uppercase tracking-widest">Pending Collections</p><p className="text-3xl font-black text-red-500">₹{metrics.pendingAmount.toLocaleString()}</p></div>}
-          <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm"><h3 className="font-black text-slate-800 mb-4">Urgent Revision Queue</h3>{metrics.revisions.slice(0,5).map(p => <button key={p.id} onClick={() => onSelectProject(p)} className="w-full text-left bg-red-50 border border-red-100 p-3 rounded-xl mb-2"><p className="font-black text-red-700 text-xs">{p.id}</p><p className="text-[10px] font-bold text-red-500">{getRevisionBadgeLabel(p)}</p>{getLatestRevisionNote(p) && <p className="text-[11px] font-semibold text-red-700 mt-1 line-clamp-2">{getLatestRevisionNote(p)}</p>}</button>)}{metrics.revisions.length === 0 && <p className="text-sm text-slate-400 font-bold">No urgent revisions.</p>}</div>
+          <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm"><h3 className="font-black text-slate-800 mb-4">Urgent Revision Queue</h3>{revisionDashboard.active.slice(0,5).map(p => <button key={p.id} onClick={() => onSelectProject(p)} className="w-full text-left bg-red-50 border border-red-100 p-3 rounded-xl mb-2"><p className="font-black text-red-700 text-xs">{p.id}</p><p className="text-[10px] font-bold text-red-500">{getRevisionBadgeLabel(p)}</p>{getLatestRevisionNote(p) && <p className="text-[11px] font-semibold text-red-700 mt-1 line-clamp-2">{getLatestRevisionNote(p)}</p>}</button>)}{revisionDashboard.active.length === 0 && <p className="text-sm text-slate-400 font-bold">No urgent revisions.</p>}</div>
         </div>
       </div>
 
