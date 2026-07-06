@@ -197,3 +197,72 @@
     max-width: 136px !important;
   }
 }
+
+/* Phase 13A Calculator Professional Mobile UI: keep chat launcher clear of bottom nav/keypad */
+@media (max-width: 768px) {
+  .kalpa-chat-shell .kalpa-chat-launcher,
+  .kalpa-chat-shell > button:not(.kalpa-chat-unread-preview) {
+    bottom: calc(6.15rem + env(safe-area-inset-bottom)) !important;
+  }
+  .calculator-page {
+    padding-left: 0.25rem;
+    padding-right: 0.25rem;
+  }
+  .calculator-display {
+    top: 0.35rem !important;
+  }
+  .calculator-keypad button {
+    min-height: 3.35rem;
+  }
+}
+
+/* Phase 13C: hard-force calculator keypad to stay in calculator grid on phones */
+.calculator-keypad,
+.calculator-quick-actions {
+  display: grid !important;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  width: 100% !important;
+}
+.calculator-keypad > button,
+.calculator-quick-actions > button,
+.calculator-key {
+  width: 100% !important;
+  min-width: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+@media (max-width: 768px) {
+  .calculator-page .calculator-keypad {
+    gap: 0.5rem !important;
+  }
+  .calculator-page .calculator-keypad > button {
+    height: clamp(3.15rem, 12vw, 3.75rem) !important;
+    min-height: 0 !important;
+  }
+  .calculator-page .calculator-display input {
+    min-height: 3rem !important;
+  }
+}
+
+/* Phase 13D final mobile chat overrides */
+@media (max-width: 768px) {
+  body.kalpa-mobile-chat-open .kalpa-chat-panel { inset: 0 !important; height: 100dvh !important; max-height: 100dvh !important; border-radius: 0 !important; }
+  body.kalpa-mobile-chat-open .kalpa-chat-channel-strip { overflow-x: auto !important; flex-wrap: nowrap !important; -webkit-overflow-scrolling: touch !important; touch-action: pan-x !important; }
+  body.kalpa-mobile-chat-open .kalpa-chat-channel-strip button { flex: 0 0 auto !important; min-width: 124px !important; }
+  body.kalpa-mobile-chat-open .kalpa-message-options-trigger { pointer-events: auto !important; z-index: 2147482600 !important; }
+}
+
+
+/* Phase 13E: restored WhatsApp-style chat action portals */
+.kalpa-chat-action-portal, .kalpa-chat-reaction-portal {
+  z-index: 2147483100 !important;
+}
+@media (max-width: 640px) {
+  .kalpa-message-options-trigger {
+    min-width: 40px !important;
+    min-height: 40px !important;
+    pointer-events: auto !important;
+    -webkit-tap-highlight-color: transparent;
+  }
+}

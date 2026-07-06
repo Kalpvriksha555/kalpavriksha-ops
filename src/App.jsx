@@ -1,20 +1,20 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { formatLastSeenDateTime, formatCallDuration, formatDateKey, formatDateTime, formatDuration, formatMinutes } from './utils/date';
 import { allProjectDocs, getCompletedDocuments, getLatestCompletedFileName, getTaskDescription, getEstimateDetails, getCompletedFileBadge } from './utils/taskDisplayUtils';
-import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass, buildPaymentTrackingUpdate, getPaymentEstimateAmount, getPaymentReceivedAmount, derivePaymentTrackingStatusFromData } from './utils/paymentStatusUtils';
-import { getBreakMinutesFromLog, getTaskBusySince, getUserActiveTasks, getUserLastCompletedAt, getUserFreeSince, getUserBusySince, getDraftingElapsedMs, getTotalLoggedInMinutesFromLog, getActiveMinutesFromLog, getAttendanceActiveTaskMinutes, buildAttendanceAccrual, deriveAttendanceSession, getAttendanceFirstLoginLabel } from './utils/presenceAttendanceUtils';
+import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass, buildPaymentTrackingUpdate, getPaymentEstimateAmount, getPaymentReceivedAmount, derivePaymentTrackingStatusFromData } from './features/finance';
+import { getBreakMinutesFromLog, getTaskBusySince, getUserActiveTasks, getUserLastCompletedAt, getUserFreeSince, getUserBusySince, getDraftingElapsedMs, getTotalLoggedInMinutesFromLog, getActiveMinutesFromLog, getAttendanceActiveTaskMinutes, buildAttendanceAccrual, deriveAttendanceSession, getAttendanceFirstLoginLabel } from './features/attendance';
 import { createSafeMeetingRoomName, buildJitsiUrl } from './utils/meeting';
 import { copyTextToClipboard } from './utils/clipboard';
 import { Badge, PageLoadingScreen, EmptyState, MiniEmptyState } from './components/shared';
-import { LocalModeBanner, DatabasePermissionBanner, TopNavigation, MobileSearchBar, MainTabNavigation } from './components/layout';
-import { ActiveToasts } from './components/notifications/ActiveToasts';
-import { ProfileView } from './components/profile/ProfileView';
-import { CalculatorView } from './components/calculator/CalculatorView';
-import { TeamMeetingRoom } from './components/meetings/TeamMeetingRoom';
-import { CommunicationHub } from './components/chat/CommunicationHub';
-import { HistoryArchiveView } from './components/archive/HistoryArchiveView';
-import { CommandCentreView, ProductivityDashboard, DailyClosingReport } from './components/command-centre/CommandCentreView';
-import { ActiveOperationsView } from './components/operations/ActiveOperationsView';
+import { LocalModeBanner, DatabasePermissionBanner, TopNavigation, MobileSearchBar, MainTabNavigation, MobileBottomNavigation } from './components/layout';
+import { ActiveToasts } from './features/notifications';
+import { ProfileView } from './features/profile';
+import { CalculatorView } from './features/calculator';
+import { TeamMeetingRoom } from './features/meetings';
+import { CommunicationHub } from './features/chat';
+import { HistoryArchiveView } from './features/archive';
+import { CommandCentreView, ProductivityDashboard, DailyClosingReport, ReportsAnalyticsView, ProductionQAView, SystemSettingsView } from './features/command-centre';
+import { ActiveOperationsView } from './features/operations';
 import { getStatusColor, getPriorityColor } from './services/taskService';
 import { API_BASE, USE_BACKEND_STATE, ONLINE_STALE_MS, MAX_INLINE_DATA_URL_CHARS } from './config/appConfig';
 import { fileToBase64, cleanFileName } from './utils/fileUtils';
@@ -114,7 +114,18 @@ const saveDeletedProjectIds = (ids = []) => {
 const rememberDeletedProjects = (...ids) => saveDeletedProjectIds([...getDeletedProjectIds(), ...ids.flat().map(x => String(x)).filter(Boolean)]);
 const filterDeletedProjects = (projects = []) => {
   const deleted = new Set(getDeletedProjectIds());
-  return (Array.isArray(projects) ? projects : []).filter(p => p && !deleted.has(String(p.id || '')) && !deleted.has(String(p.caseId || '')));
+  const list = Array.isArray(projects) ? projects : [];
+  const supersededIds = new Set();
+  list.forEach(p => {
+    (p?.previousTaskIds || []).forEach(id => { if (id) supersededIds.add(String(id)); });
+    if (p?.supersedesTaskId) supersededIds.add(String(p.supersedesTaskId));
+  });
+  return list.filter(p => {
+    if (!p) return false;
+    const id = String(p.id || '');
+    const caseId = String(p.caseId || '');
+    return !deleted.has(id) && !deleted.has(caseId) && !supersededIds.has(id) && !supersededIds.has(caseId);
+  });
 };
 
 
@@ -494,6 +505,34 @@ const samePerson = (a = '', b = '') => identityKey(a) === identityKey(b);
 const readEntryName = (entry) => typeof entry === 'string' ? entry : (entry?.name || '');
 const hasReadBy = (message, userName) => (message?.readBy || []).some(r => samePerson(readEntryName(r), userName));
 
+const normalizeTimelineEvent = (event = {}) => {
+  const at = event.at || event.time || event.createdAt || new Date().toISOString();
+  const title = event.title || event.text || event.action || 'Timeline Event';
+  return {
+    ...event,
+    id: event.id || `${at}-${title}`,
+    title,
+    text: event.text || title,
+    by: event.by || event.user || event.createdBy || 'System',
+    at,
+    time: event.time || at,
+    remarks: event.remarks || event.note || ''
+  };
+};
+
+const normalizeTimeline = (timeline = [], history = []) => {
+  const raw = Array.isArray(timeline) && timeline.length
+    ? timeline
+    : (Array.isArray(history) ? history.map(h => ({ title: h.action, text: h.action, by: h.by, at: h.at, time: h.at })) : []);
+  const seen = new Set();
+  return raw.map(normalizeTimelineEvent).filter(event => {
+    const key = [event.type || '', event.title || event.text || '', event.by || '', event.at || event.time || '', event.remarks || ''].join('|');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort((a, b) => new Date(a.at || a.time || 0).getTime() - new Date(b.at || b.time || 0).getTime());
+};
+
 const normalizeProjectRecord = (project = {}) => {
   const assignedTo = normalizePersonName(project.assignedTo || '');
   const createdBy = normalizePersonName(project.createdBy || '');
@@ -503,7 +542,8 @@ const normalizeProjectRecord = (project = {}) => {
     assignedTo: assignedTo || project.assignedTo,
     createdBy: createdBy || project.createdBy,
     manager: manager || project.manager,
-    taskName: project.taskName || makeTaskDisplayName(project)
+    taskName: project.taskName || makeTaskDisplayName(project),
+    timeline: normalizeTimeline(project.timeline, project.history)
   };
 };
 
@@ -517,6 +557,7 @@ const mergeProjectRecordSafely = (existing = {}, incoming = {}) => {
   const b = normalizeProjectRecord(incoming || {});
   const incomingNewer = projectFreshness(b) >= projectFreshness(a);
   const base = incomingNewer ? { ...a, ...b } : { ...b, ...a };
+  base.timeline = normalizeTimeline([...(a.timeline || []), ...(b.timeline || [])], [...(a.history || []), ...(b.history || [])]);
 
   // Assignment is business-critical and must not be downgraded by an older
   // Unassigned copy arriving from another tab, cache, or delayed snapshot.
@@ -736,6 +777,66 @@ const makeRevisionWorkItem = (project = {}, revision = {}, requestedBy = '') => 
   });
 };
 
+
+const getRevisionTimelineItems = (project = {}, projects = []) => {
+  const baseId = String(project.originalTaskId || project.displayId || project.id || '');
+  const items = [];
+  const pushItem = (raw = {}, fallback = {}) => {
+    if (!raw) return;
+    const label = raw.revisionCode || (raw.revisionNumber ? `R${raw.revisionNumber}` : fallback.revisionCode || 'REV');
+    const title = raw.title || raw.comment || raw.text || raw.action || fallback.title || 'Revision activity';
+    const ts = Number(raw.at || raw.completedAt || raw.createdAt || raw.updatedAt || raw.id || fallback.at || Date.now());
+    items.push({
+      id: raw.id || `${label}-${ts}-${items.length}`,
+      label,
+      title,
+      action: raw.action || fallback.action || raw.status || 'Revision Activity',
+      status: raw.status || fallback.status || 'Pending',
+      by: raw.reviewer || raw.completedBy || raw.addedBy || raw.by || raw.requestedBy || fallback.by || '',
+      at: ts,
+      workItemId: raw.workItemId || fallback.workItemId || '',
+      files: raw.files || raw.attachments || fallback.files || [],
+    });
+  };
+
+  (Array.isArray(project.revisionHistory) ? project.revisionHistory : []).forEach(item => pushItem(item));
+  (Array.isArray(project.reviewHistory) ? project.reviewHistory : [])
+    .filter(item => String(item.action || item.comment || '').toLowerCase().includes('revision'))
+    .forEach(item => pushItem(item));
+  (Array.isArray(project.subTasks) ? project.subTasks : []).forEach(item => pushItem(item, { action: 'Revision Requested', status: item.status || 'Pending' }));
+
+  (Array.isArray(projects) ? projects : [])
+    .filter(item => isRevisionWorkItem(item) && String(item.originalTaskId || item.displayId || '').trim() === baseId)
+    .forEach(item => {
+      const revisionNumber = item.revisionNumber || getNextRevisionNumber(project);
+      pushItem({
+        id: item.id,
+        revisionNumber,
+        revisionCode: item.revisionCode || `R${revisionNumber}`,
+        title: item.taskName || `Revision ${revisionNumber}`,
+        action: item.status === 'Completed' ? 'Revision Completed' : 'Revision Work Item',
+        status: item.status || 'Revision Pending',
+        completedBy: item.completedBy || item.assignedTo,
+        createdAt: item.createdAt,
+        completedAt: item.completedAt,
+        workItemId: item.id,
+        files: [...(item.completedFiles || []), ...(item.documents || []).filter(doc => String(doc.type || '').toLowerCase() === 'completed')]
+      });
+    });
+
+  const seen = new Set();
+  return items
+    .filter(item => {
+      const key = [item.label, item.action, item.title, item.workItemId, item.at].join('|');
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => (a.at || 0) - (b.at || 0));
+};
+
+const isRevisionTimelineItemCompleted = (item = {}) => ['DONE', 'COMPLETED', 'APPROVED', 'CLOSED', 'RESOLVED'].includes(normalizeWorkStatusForRevision(item.status || item.action));
+
 const isIncompleteProject = (project = {}) => project.status !== 'Completed';
 
 const isCarriedForwardProject = (project = {}, dateKey = formatDateKey()) => {
@@ -843,7 +944,6 @@ const LoginScreen = ({ onLogin, users, onRecoverPassword }) => {
   const [otpSent, setOtpSent] = useState(false);
 
   const activeUsers = normalizeTeamUsers(users && users.length > 0 ? users : INITIAL_USERS);
-
   const handleLogin = (e) => {
     e.preventDefault();
     const sourceUsers = activeUsers.some(u => u.username) ? activeUsers : INITIAL_USERS;
@@ -1034,7 +1134,7 @@ const LoginScreen = ({ onLogin, users, onRecoverPassword }) => {
 };
 
 
-const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser }) => {
+const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser, onOpenPerformance }) => {
   const [selectedUser, setSelectedUser] = useState(null);
   const [newUser, setNewUser] = useState({ name: '', username: '', password: '', role: ROLES.DESIGNER });
   const [showAddForm, setShowAddForm] = useState(false);
@@ -1059,64 +1159,59 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser }) => 
   };
 
   if (selectedUser) {
-    const userTasks = projects.filter(p => p.assignedTo === selectedUser.name && p.status === 'Completed').sort((a,b) => (b.completedAt || 0) - (a.completedAt || 0));
-    const totalTasks = userTasks.length;
-    const totalRevisions = userTasks.reduce((sum, p) => sum + (p.subTasks?.length || 0), 0);
+    const userProjects = projects.filter(p => p.assignedTo === selectedUser.name);
+    const activeTasks = userProjects.filter(p => p.status !== 'Completed' && p.status !== 'Archived');
+    const currentTask = activeTasks.find(p => ['Drafting', 'Internal Review', 'Assigned', 'Revision Pending', 'Revision In Progress'].includes(p.status)) || activeTasks[0];
+    const online = isUserActuallyOnline(selectedUser);
+    const liveStatus = selectedUser.availability === 'Break' ? 'On Break' : online ? (currentTask ? 'Working' : 'Available') : 'Offline';
+    const statusClass = liveStatus === 'Working' ? 'bg-indigo-50 text-indigo-700 border-indigo-100' : liveStatus === 'Available' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : liveStatus === 'On Break' ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-slate-100 text-slate-500 border-slate-200';
 
     return (
       <div className="space-y-6 animate-in slide-in-from-right-8 duration-300">
         <button onClick={() => setSelectedUser(null)} className="flex items-center text-sm font-bold text-slate-500 hover:text-indigo-600 transition-colors bg-white px-4 py-2 rounded-xl shadow-sm border border-slate-100 w-fit">
-           <ArrowLeft className="w-4 h-4 mr-2" /> Back to Team List
+           <ArrowLeft className="w-4 h-4 mr-2" /> Back to Team
         </button>
-        
-        <div className="bg-white rounded-3xl p-8 shadow-sm border-2 border-slate-100">
-           <div className="flex items-center gap-4 mb-8 border-b-2 border-slate-100 pb-6">
+        <div className="bg-white rounded-3xl p-6 sm:p-8 shadow-sm border-2 border-slate-100">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-5 border-b-2 border-slate-100 pb-6 mb-6">
+            <div className="flex items-center gap-4">
               <div className="bg-indigo-100 p-4 rounded-2xl text-indigo-600"><User className="w-8 h-8" /></div>
               <div>
-                 <h2 className="text-3xl font-black text-slate-800 tracking-tight">{selectedUser.name}</h2>
-                 <p className="font-bold text-slate-400 uppercase tracking-widest text-sm mt-1">{selectedUser.role} Analytics</p>
+                <h2 className="text-2xl sm:text-3xl font-black text-slate-800 tracking-tight">{selectedUser.name}</h2>
+                <p className="font-bold text-slate-400 uppercase tracking-widest text-xs sm:text-sm mt-1">{selectedUser.role} • People profile</p>
               </div>
-           </div>
+            </div>
+            <span className={`${statusClass} border px-4 py-2 rounded-2xl text-sm font-black w-fit`}>{liveStatus}</span>
+          </div>
 
-           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-8">
-              <div className="bg-emerald-50 border-2 border-emerald-100 rounded-3xl p-6 shadow-sm">
-                 <div className="flex items-center gap-3 mb-2 text-emerald-600"><CheckCircle className="w-6 h-6"/><h3 className="font-extrabold uppercase tracking-widest text-sm">Tasks Completed</h3></div>
-                 <p className="text-5xl font-black text-emerald-800">{totalTasks}</p>
-                 <p className="text-sm font-medium text-emerald-600 mt-2">Lifetime operational efficiency</p>
-              </div>
-              <div className="bg-orange-50 border-2 border-orange-100 rounded-3xl p-6 shadow-sm">
-                 <div className="flex items-center gap-3 mb-2 text-orange-600"><Clock className="w-6 h-6"/><h3 className="font-extrabold uppercase tracking-widest text-sm">Total Revisions Handled</h3></div>
-                 <p className="text-5xl font-black text-orange-800">{totalRevisions}</p>
-                 <p className="text-sm font-medium text-orange-600 mt-2">Corrections required post-draft</p>
-              </div>
-           </div>
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
+            <div className="bg-slate-50 border border-slate-100 rounded-2xl p-5">
+              <p className="text-xs font-black uppercase tracking-widest text-slate-400">Current Task</p>
+              <p className="font-black text-slate-800 mt-2">{currentTask ? (currentTask.id || currentTask.caseId || 'Assigned case') : 'No active task'}</p>
+              <p className="text-xs font-bold text-slate-400 mt-1">{currentTask ? `${currentTask.client || currentTask.customerName || 'Case'} • ${currentTask.location || currentTask.city || 'Location'}` : 'Live status only'}</p>
+            </div>
+            <div className="bg-slate-50 border border-slate-100 rounded-2xl p-5">
+              <p className="text-xs font-black uppercase tracking-widest text-slate-400">Open Work</p>
+              <p className="font-black text-slate-800 mt-2">{activeTasks.length} active case{activeTasks.length === 1 ? '' : 's'}</p>
+              <p className="text-xs font-bold text-slate-400 mt-1">People page avoids historical analytics.</p>
+            </div>
+            <div className="bg-emerald-50 border-2 border-emerald-100 rounded-2xl p-5">
+              <p className="text-xs font-black uppercase tracking-widest text-emerald-500">Need history?</p>
+              <button type="button" onClick={onOpenPerformance} className="font-black text-emerald-900 mt-2 text-left hover:underline">Open Performance Analytics</button>
+              <p className="text-xs font-bold text-emerald-700 mt-1">Completed work, revisions, SLA and trends live there.</p>
+            </div>
+          </div>
 
-           <h3 className="text-xl font-extrabold text-slate-800 mb-4 tracking-tight">Completed Tasks Breakdown</h3>
-           <div className="overflow-x-auto border-2 border-slate-100 rounded-2xl">
-              <table className="w-full text-left text-sm whitespace-nowrap">
-                <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
-                  <tr>
-                    <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs">Date</th>
-                    <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs">Task ID</th>
-                    <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs">Client & Location</th>
-                    <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs text-center">Revisions Needed</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {userTasks.map(t => (
-                    <tr key={t.id} className="hover:bg-slate-50">
-                       <td className="px-6 py-4 font-bold text-slate-600">{t.completedAt ? formatDateTime(t.completedAt) : '-'}</td>
-                       <td className="px-6 py-4 font-bold text-slate-800">{t.id}</td>
-                       <td className="px-6 py-4"><p className="font-bold text-slate-700">{t.client}</p><p className="text-xs text-slate-400 font-medium">{t.location}</p></td>
-                       <td className="px-6 py-4 text-center">
-                          <span className={`px-3 py-1.5 rounded-lg text-xs font-black ${t.subTasks?.length > 0 ? 'bg-red-50 text-red-600' : 'bg-emerald-50 text-emerald-600'}`}>{t.subTasks?.length || 0} Revisions</span>
-                       </td>
-                    </tr>
-                  ))}
-                  {userTasks.length === 0 && <tr><td colSpan="4" className="px-6 py-8 text-center text-slate-400 font-medium">No completed tasks yet.</td></tr>}
-                </tbody>
-              </table>
-           </div>
+          <h3 className="text-lg font-extrabold text-slate-800 mb-3 tracking-tight">Active Assignments</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {activeTasks.slice(0, 6).map(t => (
+              <div key={t.id || t.caseId} className="border-2 border-slate-100 rounded-2xl p-4 bg-white">
+                <p className="font-black text-slate-800">{t.id || t.caseId}</p>
+                <p className="text-xs font-bold text-slate-500 mt-1">{t.type || t.caseType || 'Case'} • {t.location || t.city || 'Location'}</p>
+                <p className="text-[10px] font-black uppercase tracking-widest text-indigo-500 mt-3">{t.status || 'Assigned'}</p>
+              </div>
+            ))}
+            {activeTasks.length === 0 && <div className="md:col-span-2 text-center bg-slate-50 border border-slate-100 rounded-2xl p-8 text-slate-400 font-bold">No active assignments.</div>}
+          </div>
         </div>
       </div>
     );
@@ -1125,35 +1220,39 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser }) => 
   return (
     <div className="space-y-6">
       <div className="bg-white rounded-3xl p-8 shadow-sm border-2 border-slate-100 animate-in fade-in">
-        <h2 className="text-2xl font-extrabold text-slate-800 tracking-tight mb-6 flex items-center">
-          <BarChart3 className="w-6 h-6 mr-3 text-indigo-500"/> Team Workload Overview
+        <h2 className="text-2xl font-extrabold text-slate-800 tracking-tight mb-4 flex items-center">
+          <Users className="w-6 h-6 mr-3 text-indigo-500"/> Team Live Status
         </h2>
+        <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-4 mb-5">
+          <p className="text-sm font-semibold text-indigo-700">This page is now only for people management and live team status. Historical charts, rankings and trends are available only in Performance Analytics.</p>
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm whitespace-nowrap">
             <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
               <tr>
                 <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs">Team Member</th>
-                <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs text-center">Active / Pending</th>
-                <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs text-center">Completed</th>
-                <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs text-center">Total Assigned</th>
+                <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs text-center">Availability</th>
+                <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs">Current Task</th>
+                <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs text-center">Active</th>
+                <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs text-center">Profile</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {users.filter(u => (u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER) && u.status === 'APPROVED').map(u => {
                  const userProjects = projects.filter(p => p.assignedTo === u.name);
-                 const pending = userProjects.filter(p => p.status !== 'Completed').length;
-                 const completed = userProjects.filter(p => p.status === 'Completed').length;
-                 const total = userProjects.length;
+                 const activeTasks = userProjects.filter(p => p.status !== 'Completed' && p.status !== 'Archived');
+                 const currentTask = activeTasks.find(p => ['Drafting', 'Internal Review', 'Assigned', 'Revision Pending', 'Revision In Progress'].includes(p.status)) || activeTasks[0];
+                 const completedToday = userProjects.filter(p => p.status === 'Completed' && formatDateKey(p.completedAt || p.updatedAt || p.createdAt) === formatDateKey()).length;
+                 const online = isUserActuallyOnline(u);
+                 const statusLabel = u.availability === 'Break' ? 'On Break' : online ? (currentTask ? 'Working' : 'Available') : 'Offline';
+                 const statusClass = statusLabel === 'Working' ? 'bg-indigo-50 text-indigo-700 border-indigo-100' : statusLabel === 'Available' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : statusLabel === 'On Break' ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-slate-100 text-slate-500 border-slate-200';
                  return (
                    <tr key={u.id} className="hover:bg-slate-50">
-                      <td className="px-6 py-4 font-bold text-slate-800">{u.name} <span className="text-xs text-slate-400 font-medium ml-2">({u.role})</span></td>
-                      <td className="px-6 py-4 text-center">
-                         <span className={`px-3 py-1.5 rounded-lg text-xs font-black ${pending > 0 ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{pending} Tasks</span>
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                         <span className={`px-3 py-1.5 rounded-lg text-xs font-black ${completed > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{completed} Tasks</span>
-                      </td>
-                      <td className="px-6 py-4 text-center font-black text-slate-800">{total}</td>
+                      <td className="px-6 py-4"><button type="button" onClick={() => setSelectedUser(u)} className="font-bold text-slate-800 hover:text-indigo-600 text-left">{u.name} <span className="text-xs text-slate-400 font-medium ml-2">({u.role})</span></button></td>
+                      <td className="px-6 py-4 text-center"><span className={`px-3 py-1.5 rounded-lg border text-xs font-black ${statusClass}`}>{statusLabel}</span></td>
+                      <td className="px-6 py-4"><p className="font-black text-slate-700">{currentTask?.id || '-'}</p><p className="text-xs font-bold text-slate-400">{currentTask ? `${currentTask.type || 'Task'} • ${currentTask.location || ''}` : 'No active task'}</p></td>
+                      <td className="px-6 py-4 text-center font-black text-slate-800">{activeTasks.length}</td>
+                      <td className="px-6 py-4 text-center"><button type="button" onClick={() => setSelectedUser(u)} className="px-3 py-1.5 rounded-lg text-xs font-black bg-indigo-50 text-indigo-700 border border-indigo-100">Open</button></td>
                    </tr>
                  )
               })}
@@ -1164,7 +1263,7 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser }) => 
 
       <div className="bg-white rounded-3xl p-8 shadow-sm border-2 border-slate-100 animate-in fade-in">
         <div className="flex justify-between items-center mb-6">
-          <h2 className="text-2xl font-extrabold text-slate-800 tracking-tight">Team & Security Control</h2>
+          <h2 className="text-2xl font-extrabold text-slate-800 tracking-tight">Team & Access Control</h2>
           {isAdmin && !showAddForm && (
              <button onClick={() => setShowAddForm(true)} className="bg-slate-800 text-white px-4 py-2 rounded-xl text-sm font-bold flex items-center hover:bg-slate-700 transition-colors">
                 <Plus className="w-4 h-4 mr-1.5"/> Add Employee
@@ -1236,11 +1335,6 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser }) => 
                       if (window.confirm(`Archive login for ${u.name}? They will be hidden from active operations but old reports and task history will remain.`)) onUpdateUser({ ...u, status: 'ARCHIVED', archivedAt: Date.now(), archivedBy: currentUser.name });
                    }} className="px-4 py-2.5 bg-slate-900 text-white hover:bg-slate-700 text-sm font-bold rounded-xl transition-all shadow-sm flex items-center">
                       Delete Login
-                   </button>
-                )}
-                {(u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER) && (
-                   <button type="button" onClick={() => setSelectedUser(u)} className="px-5 py-2.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-600 hover:text-white text-sm font-bold rounded-xl transition-all shadow-sm flex items-center">
-                      View Analytics <ChevronRight className="w-4 h-4 ml-1" />
                    </button>
                 )}
               </div>
@@ -1338,19 +1432,6 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
         <div className="bg-white rounded-2xl border-2 border-amber-100 p-4 shadow-sm"><p className="text-[11px] font-black text-amber-500 uppercase tracking-widest">Break Time</p><p className="text-2xl font-black text-amber-700 mt-1">{formatMinutes(attendanceSummary.totalBreak)}</p></div>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
-        {financePaymentStatuses.map(status => (
-          <button
-            key={status}
-            type="button"
-            onClick={() => setSelectedPaymentStatus(status)}
-            className={`text-left rounded-2xl border-2 p-4 transition-all ${selectedPaymentStatus === status ? 'border-indigo-300 bg-indigo-50 shadow-sm' : 'border-slate-100 bg-white hover:bg-slate-50'}`}
-          >
-            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{status}</p>
-            <p className="text-2xl font-black text-slate-800 mt-1">{statusCounts[status] || 0}</p>
-          </button>
-        ))}
-      </div>
 
       <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
@@ -1433,7 +1514,6 @@ const LedgerView = ({ projects, onSelectProject }) => {
   const [selectedLocation, setSelectedLocation] = useState('All');
   const [selectedClient, setSelectedClient] = useState('All');
   const [selectedPaymentStatus, setSelectedPaymentStatus] = useState('All');
-  const [selectedReminderFilter, setSelectedReminderFilter] = useState('All');
   
   const financePaymentStatuses = ['All', 'Not Updated', 'Pending', 'Partially Paid', 'Paid', 'Overpaid'];
   const deriveLedgerPaymentStatus = (project = {}) => {
@@ -1462,25 +1542,6 @@ const LedgerView = ({ projects, onSelectProject }) => {
       default: return 'bg-rose-50 text-rose-700 border-rose-100';
     }
   };
-
-  const getLedgerPaymentAgeDays = (project = {}) => {
-    const rawDate = project.ledger?.date || project.paymentDate || project.completedAt || project.createdAt;
-    const parsed = rawDate ? new Date(rawDate) : null;
-    const timestamp = parsed && !Number.isNaN(parsed.getTime()) ? parsed.getTime() : Date.now();
-    return Math.max(0, Math.floor((Date.now() - timestamp) / 86400000));
-  };
-
-  const getLedgerReminderLevel = (project = {}) => {
-    const status = deriveLedgerPaymentStatus(project);
-    if (status === 'Paid' || status === 'Overpaid') return '';
-    const ageDays = getLedgerPaymentAgeDays(project);
-    if (ageDays >= 30) return '30+';
-    if (ageDays >= 15) return '15+';
-    if (ageDays >= 7) return '7+';
-    if (status === 'Pending' || status === 'Partially Paid') return 'Pending';
-    if (status === 'Not Updated') return 'Not Updated';
-    return '';
-  };
   
   const baseLedgerProjects = projects.filter(p => (Number(p.estimate) > 0) || (Number(p.ledger?.amountIn) > 0) || p.ledger?.updatedAt || p.paymentTrackingUpdatedAt);
   const allLocations = [...new Set(baseLedgerProjects.map(p => p.location).filter(Boolean))].sort();
@@ -1494,15 +1555,6 @@ const LedgerView = ({ projects, onSelectProject }) => {
       if (selectedLocation !== 'All' && p.location !== selectedLocation) return false;
       if (selectedClient !== 'All' && p.client !== selectedClient) return false;
       if (selectedPaymentStatus !== 'All' && deriveLedgerPaymentStatus(p) !== selectedPaymentStatus) return false;
-      if (selectedReminderFilter !== 'All') {
-        const status = deriveLedgerPaymentStatus(p);
-        const ageDays = getLedgerPaymentAgeDays(p);
-        if (selectedReminderFilter === 'notUpdated' && status !== 'Not Updated') return false;
-        if (selectedReminderFilter === 'pending' && !(status === 'Pending' || status === 'Partially Paid')) return false;
-        if (selectedReminderFilter === 'over7' && ageDays < 7) return false;
-        if (selectedReminderFilter === 'over15' && ageDays < 15) return false;
-        if (selectedReminderFilter === 'over30' && ageDays < 30) return false;
-      }
       return true;
   }).sort((a,b) => ((b.ledger?.updatedAt || b.completedAt || b.createdAt) || 0) - ((a.ledger?.updatedAt || a.completedAt || a.createdAt) || 0));
 
@@ -1519,33 +1571,6 @@ const LedgerView = ({ projects, onSelectProject }) => {
   const totalRefund = ledgerProjects.reduce((sum, p) => sum + (Number(p.ledger?.refund) || 0), 0);
   const netRevenue = totalReceived - totalExpenses - totalRefund;
   const totalPending = ledgerProjects.reduce((sum, p) => sum + Math.max(0, getPaymentEstimateAmount(p) - getPaymentReceivedAmount(p)), 0);
-
-  const paymentReminderProjects = baseLedgerProjects.filter(p => {
-    const status = deriveLedgerPaymentStatus(p);
-    return status === 'Not Updated' || status === 'Pending' || status === 'Partially Paid';
-  });
-  const paymentReminderStats = paymentReminderProjects.reduce((acc, p) => {
-    const status = deriveLedgerPaymentStatus(p);
-    const pendingAmount = Math.max(0, getPaymentEstimateAmount(p) - getPaymentReceivedAmount(p));
-    const ageDays = getLedgerPaymentAgeDays(p);
-    if (status === 'Not Updated') acc.notUpdated += 1;
-    if (status === 'Pending' || status === 'Partially Paid') acc.pending += 1;
-    if (ageDays >= 7) acc.over7 += 1;
-    if (ageDays >= 15) acc.over15 += 1;
-    if (ageDays >= 30) acc.over30 += 1;
-    acc.outstanding += pendingAmount;
-    return acc;
-  }, { notUpdated: 0, pending: 0, over7: 0, over15: 0, over30: 0, outstanding: 0 });
-
-  const applyPaymentReminderFilter = (type) => {
-    setActiveTab('pending');
-    setSelectedPaymentStatus('All');
-    setSelectedReminderFilter(type || 'All');
-  };
-
-  useEffect(() => {
-    setSelectedReminderFilter('All');
-  }, [selectedLocation, selectedClient, selectedPaymentStatus]);
 
   const paymentAuditEvents = ledgerProjects.flatMap(p => {
     const explicitAudit = Array.isArray(p.paymentAuditTrail) ? p.paymentAuditTrail : [];
@@ -1667,43 +1692,6 @@ const LedgerView = ({ projects, onSelectProject }) => {
             <button type="button" onClick={() => setActiveTab('audit')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'audit' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Shield className="w-4 h-4 mr-1.5" /> Audit</button>
           </div>
           <button onClick={handleExport} className="flex items-center px-4 py-2.5 bg-emerald-100 text-emerald-700 font-bold rounded-xl hover:bg-emerald-200 transition-colors"><Download className="w-4 h-4 mr-2" /> Export</button>
-        </div>
-      </div>
-
-      <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm p-4 sm:p-5">
-        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center">
-              <Bell className="w-5 h-5 text-indigo-600" />
-            </div>
-            <div>
-              <h3 className="text-lg font-black text-slate-800">Payment Reminders</h3>
-              <p className="text-xs font-bold text-slate-400">Admin-only finance reminders. These filters do not affect Archive or Operations.</p>
-            </div>
-          </div>
-          <div className="text-sm font-black text-slate-700">Outstanding: <span className="text-orange-600">₹{paymentReminderStats.outstanding.toLocaleString()}</span></div>
-        </div>
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-4">
-          <button type="button" onClick={() => applyPaymentReminderFilter('notUpdated')} className="text-left rounded-2xl border border-rose-100 bg-rose-50 p-3 hover:bg-rose-100 transition-colors">
-            <p className="text-[10px] font-black uppercase tracking-widest text-rose-500">Not Updated</p>
-            <p className="text-2xl font-black text-rose-700 mt-1">{paymentReminderStats.notUpdated}</p>
-          </button>
-          <button type="button" onClick={() => applyPaymentReminderFilter('pending')} className="text-left rounded-2xl border border-amber-100 bg-amber-50 p-3 hover:bg-amber-100 transition-colors">
-            <p className="text-[10px] font-black uppercase tracking-widest text-amber-600">Pending</p>
-            <p className="text-2xl font-black text-amber-700 mt-1">{paymentReminderStats.pending}</p>
-          </button>
-          <button type="button" onClick={() => applyPaymentReminderFilter('over7')} className="text-left rounded-2xl border border-yellow-100 bg-yellow-50 p-3 hover:bg-yellow-100 transition-colors">
-            <p className="text-[10px] font-black uppercase tracking-widest text-yellow-700">Over 7 Days</p>
-            <p className="text-2xl font-black text-yellow-800 mt-1">{paymentReminderStats.over7}</p>
-          </button>
-          <button type="button" onClick={() => applyPaymentReminderFilter('over15')} className="text-left rounded-2xl border border-orange-100 bg-orange-50 p-3 hover:bg-orange-100 transition-colors">
-            <p className="text-[10px] font-black uppercase tracking-widest text-orange-600">Over 15 Days</p>
-            <p className="text-2xl font-black text-orange-700 mt-1">{paymentReminderStats.over15}</p>
-          </button>
-          <button type="button" onClick={() => applyPaymentReminderFilter('over30')} className="text-left rounded-2xl border border-red-100 bg-red-50 p-3 hover:bg-red-100 transition-colors">
-            <p className="text-[10px] font-black uppercase tracking-widest text-red-600">Over 30 Days</p>
-            <p className="text-2xl font-black text-red-700 mt-1">{paymentReminderStats.over30}</p>
-          </button>
         </div>
       </div>
 
@@ -2075,7 +2063,9 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
       ...project,
       ...nextSnapshot,
       id: nextTaskId,
-      previousTaskIds: nextTaskId !== project.id ? [...(project.previousTaskIds || []), project.id] : (project.previousTaskIds || []),
+      previousTaskIds: nextTaskId !== project.id ? [...new Set([...(project.previousTaskIds || []), project.id])].filter(Boolean) : (project.previousTaskIds || []),
+      supersedesTaskId: nextTaskId !== project.id ? project.id : project.supersedesTaskId,
+      caseId: nextTaskId,
       taskName: [nextSnapshot.type, nextSnapshot.customerName, nextSnapshot.location].filter(Boolean).join(' • '),
       updatedAt: now,
       syncVersion: now,
@@ -2527,6 +2517,10 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   };
 
 
+  const revisionTimelineItems = getRevisionTimelineItems(project, projects);
+  const completedRevisionItems = revisionTimelineItems.filter(isRevisionTimelineItemCompleted).length;
+  const activeRevisionItems = revisionTimelineItems.length - completedRevisionItems;
+
   const shareCompletedFileOnWhatsApp = async () => {
     const completedDocs = getCompletedDocuments(project);
     if (completedDocs.length === 0) {
@@ -2616,6 +2610,10 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
           
           <button id="client-link-btn" type="button" onClick={copyClientLink} className={`px-4 py-2.5 bg-slate-100 text-slate-700 rounded-xl hover:bg-slate-200 transition-all flex items-center font-bold text-sm whitespace-nowrap`}>
              <LinkIcon className="w-4 h-4 mr-1.5" /> Client Link
+          </button>
+
+          <button type="button" onClick={() => window.dispatchEvent(new CustomEvent('kalpa:discuss-task', { detail: { projectId: project.id || project.caseId || '', project } }))} className="px-4 py-2.5 bg-indigo-50 text-indigo-700 rounded-xl hover:bg-indigo-100 transition-all flex items-center font-bold text-sm whitespace-nowrap border border-indigo-100" title="Open team group chat with this task linked">
+             <MessageSquare className="w-4 h-4 mr-1.5" /> Task Discussion
           </button>
           
           <button type="button" onClick={shareCompletedFileOnWhatsApp} disabled={!isFinalApproved || completedDocsCount === 0} className={`px-4 py-2.5 rounded-xl transition-all flex items-center font-bold text-sm whitespace-nowrap ${isFinalApproved && completedDocsCount > 0 ? 'bg-green-500 text-white hover:bg-green-600 shadow-md shadow-green-100' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`} title={!isFinalApproved ? 'Final file can be shared only after internal review approval' : 'Share approved final file'}>
@@ -2923,6 +2921,51 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
              </div>
           </div>
 
+          {(revisionTimelineItems.length > 0 || project.status === 'Completed') && (
+            <div className="bg-white p-7 rounded-3xl shadow-sm border-2 border-slate-100">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5">
+                <div>
+                  <h2 className="text-xl font-extrabold text-slate-800 flex items-center">
+                    <Clock className="w-5 h-5 mr-2 text-purple-500" /> Revision Timeline
+                  </h2>
+                  <p className="text-xs font-bold text-slate-400 mt-1">Permanent task ID stays unchanged. Revision items are linked history only.</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <span className="bg-purple-50 text-purple-700 border border-purple-100 px-3 py-1.5 rounded-xl text-xs font-black">{revisionTimelineItems.length} Total</span>
+                  <span className="bg-emerald-50 text-emerald-700 border border-emerald-100 px-3 py-1.5 rounded-xl text-xs font-black">{completedRevisionItems} Completed</span>
+                  <span className="bg-red-50 text-red-700 border border-red-100 px-3 py-1.5 rounded-xl text-xs font-black">{activeRevisionItems} Active</span>
+                </div>
+              </div>
+              {revisionTimelineItems.length === 0 ? (
+                <p className="text-sm text-slate-500 font-medium italic px-2">No revision history yet.</p>
+              ) : (
+                <div className="relative pl-4 border-l-2 border-purple-100 space-y-4">
+                  {revisionTimelineItems.map((item, idx) => (
+                    <div key={item.id || idx} className="relative bg-purple-50/50 border border-purple-100 rounded-2xl p-4">
+                      <span className={`absolute -left-[25px] top-5 w-4 h-4 rounded-full border-4 border-white ${isRevisionTimelineItemCompleted(item) ? 'bg-emerald-500' : 'bg-red-500'}`} />
+                      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-[10px] font-black uppercase tracking-widest text-purple-600">{item.label} • {item.action}</p>
+                          <p className="font-black text-slate-800 mt-1 break-words">{item.title}</p>
+                          <p className="text-xs font-bold text-slate-500 mt-1">{item.by ? `By ${item.by} • ` : ''}{item.at ? new Date(item.at).toLocaleString() : ''}</p>
+                          {item.workItemId && <p className="text-[10px] font-bold text-purple-500 mt-1">Linked work item: {item.workItemId}</p>}
+                        </div>
+                        <span className={`px-3 py-1.5 rounded-xl text-xs font-black border whitespace-nowrap ${isRevisionTimelineItemCompleted(item) ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-red-50 text-red-700 border-red-100'}`}>{item.status || 'Pending'}</span>
+                      </div>
+                      {Array.isArray(item.files) && item.files.length > 0 && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {item.files.slice(0, 4).map((file, fileIdx) => (
+                            <span key={file.id || file.name || fileIdx} className="text-[11px] font-bold bg-white text-purple-700 border border-purple-100 px-2.5 py-1.5 rounded-lg max-w-full truncate">📄 {file.name || 'Revision file'}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="bg-white p-7 rounded-3xl shadow-sm border-2 border-slate-100">
             <h2 className="text-xl font-extrabold text-slate-800 mb-5 flex items-center">
               <List className="w-5 h-5 mr-2 text-red-500" /> Revisions & Sub-tasks
@@ -3029,7 +3072,13 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
           )}
 
           <div className="bg-white p-6 rounded-3xl shadow-sm border-2 border-slate-100">
-            <h2 className="text-lg font-extrabold mb-4 text-slate-800">Team Discussion & Notes</h2>
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+              <div>
+                <h2 className="text-lg font-extrabold text-slate-800">Team Discussion & Notes</h2>
+                <p className="text-xs font-bold text-slate-400 mt-1">Local notes stay on this task. Group chat opens the team discussion with this task ID linked.</p>
+              </div>
+              <button type="button" onClick={() => window.dispatchEvent(new CustomEvent('kalpa:discuss-task', { detail: { projectId: project.id || project.caseId || '', project } }))} className="bg-indigo-50 text-indigo-700 border border-indigo-100 px-4 py-2 rounded-xl text-xs font-black hover:bg-indigo-100 flex items-center justify-center gap-2"><MessageSquare className="w-4 h-4" /> Discuss in Group Chat</button>
+            </div>
             <div className="space-y-3 mb-5 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
               {(project.notes||[]).length === 0 && <p className="text-sm text-slate-400 font-medium italic">No discussion notes yet.</p>}
               {(project.notes||[]).map((note, idx) => (
@@ -3097,15 +3146,17 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
           <div className="bg-white p-6 rounded-3xl shadow-sm border-2 border-slate-100">
             <h2 className="text-lg font-extrabold mb-5 text-slate-800">Activity Timeline</h2>
             <div className="space-y-5">
-              {(project.timeline||[]).map((event, idx) => (
-                <div key={idx} className="flex group">
+              {normalizeTimeline(project.timeline, project.history).length === 0 && <p className="text-sm text-slate-400 font-medium italic">No timeline events yet.</p>}
+              {normalizeTimeline(project.timeline, project.history).map((event, idx, arr) => (
+                <div key={event.id || idx} className="flex group">
                   <div className="flex flex-col items-center mr-4">
                     <div className="w-3 h-3 rounded-full bg-indigo-500 mt-1 flex-shrink-0 shadow-sm shadow-indigo-200 group-hover:scale-125 transition-transform"></div>
-                    {idx !== (project.timeline||[]).length - 1 && <div className="w-0.5 h-full bg-slate-100 my-1"></div>}
+                    {idx !== arr.length - 1 && <div className="w-0.5 h-full bg-slate-100 my-1"></div>}
                   </div>
                   <div className="pb-2">
-                    <p className="text-sm font-bold text-slate-800">{event.text}</p>
-                    <p className="text-xs font-semibold text-slate-400 mt-0.5">{event.time}</p>
+                    <p className="text-sm font-bold text-slate-800">{event.title || event.text}</p>
+                    {event.remarks && <p className="text-xs font-semibold text-slate-500 mt-0.5">{event.remarks}</p>}
+                    <p className="text-xs font-semibold text-slate-400 mt-0.5">{event.by || 'System'} • {formatDateTime(event.at || event.time)}</p>
                   </div>
                 </div>
               ))}
@@ -3186,6 +3237,15 @@ function AppShell() {
   const [backendStateReady, setBackendStateReady] = useState(false);
   
   const [selectedProject, setSelectedProject] = useState(null);
+  const [taskDetailReturnTab, setTaskDetailReturnTab] = useState('board');
+  const openTaskDetail = (project, returnTab = activeTab || 'board') => {
+    setTaskDetailReturnTab(returnTab);
+    setSelectedProject(project);
+  };
+  const closeTaskDetail = () => {
+    setSelectedProject(null);
+    if (taskDetailReturnTab) setActiveTab(taskDetailReturnTab);
+  };
   const [activeTab, setActiveTab] = useState('command');
   const [boardViewMode, setBoardViewMode] = useState('list'); // 'list' or 'kanban'
   const [selectedBoardDate, setSelectedBoardDate] = useState(formatDateKey());
@@ -3209,6 +3269,13 @@ function AppShell() {
   
   const [showLocalBanner, setShowLocalBanner] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
+  const [savedGlobalFilters, setSavedGlobalFilters] = useState(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem('kalpa_saved_global_filters') || '[]');
+      return Array.isArray(parsed) ? parsed.filter(f => f && f.query).slice(0, 12) : [];
+    } catch (e) { return []; }
+  });
+  const [savedFilterName, setSavedFilterName] = useState('');
   const [darkMode, setDarkMode] = useState(() => {
     try { return localStorage.getItem('kalpa_ui_dark_mode') === 'true'; } catch(e) { return false; }
   });
@@ -3218,6 +3285,14 @@ function AppShell() {
   }, [darkMode]);
   
   const activeUsers = normalizeTeamUsers(users && users.length > 0 ? users : INITIAL_USERS);
+  const financeSafeHeaders = React.useMemo(() => ({
+    'X-User-Role': currentUser?.role || '',
+    'X-User-Name': currentUser?.name || ''
+  }), [currentUser?.role, currentUser?.name]);
+  const jsonFinanceSafeHeaders = React.useMemo(() => ({
+    'Content-Type': 'application/json',
+    ...financeSafeHeaders
+  }), [financeSafeHeaders]);
 
   // Central production persistence: hydrate and save operational state through backend.
   // When DATABASE_URL is configured in backend/.env, this is persisted in PostgreSQL.
@@ -3226,7 +3301,7 @@ function AppShell() {
     let cancelled = false;
     const hydrate = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/state`, { cache: 'no-store' });
+        const res = await fetch(`${API_BASE}/api/state`, { cache: 'no-store', headers: financeSafeHeaders });
         if (!res.ok) throw new Error(`Backend state failed: ${res.status}`);
         const data = await res.json();
         if (cancelled) return;
@@ -3254,7 +3329,7 @@ function AppShell() {
     };
     hydrate();
     return () => { cancelled = true; };
-  }, []);
+  }, [financeSafeHeaders]);
 
   // Production presence poll: all roles use the same backend truth for users,
   // so Admin/Manager/Designer screens do not disagree about online/offline state.
@@ -3263,7 +3338,7 @@ function AppShell() {
     let cancelled = false;
     const refreshPresence = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/state`, { cache: 'no-store' });
+        const res = await fetch(`${API_BASE}/api/state`, { cache: 'no-store', headers: financeSafeHeaders });
         const data = await res.json().catch(() => ({}));
         if (cancelled || !Array.isArray(data.users)) return;
         setUsers(prev => normalizeTeamUsers([...(prev || []), ...data.users]));
@@ -3300,7 +3375,7 @@ function AppShell() {
       window.removeEventListener('focus', refreshPresence);
       document.removeEventListener('visibilitychange', refreshPresence);
     };
-  }, [backendStateReady]);
+  }, [backendStateReady, financeSafeHeaders]);
 
   useEffect(() => {
     if (!USE_BACKEND_STATE || !backendStateReady || !isDbReady) return;
@@ -3315,12 +3390,12 @@ function AppShell() {
       };
       fetch(`${API_BASE}/api/state`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        headers: jsonFinanceSafeHeaders,
+        body: JSON.stringify({ ...payload, currentUserRole: currentUser?.role || '' })
       }).catch(err => console.warn('Backend/PostgreSQL state save failed:', err.message));
     }, 900);
     return () => clearTimeout(timer);
-  }, [backendStateReady, isDbReady, users, projects, chatMessages, notifications, attendanceLogs]);
+  }, [backendStateReady, isDbReady, users, projects, chatMessages, notifications, attendanceLogs, currentUser?.role, jsonFinanceSafeHeaders]);
 
   // Keep assignment/status changes live across tabs without creating storage-event loops.
   // Important: never write back to localStorage while handling an incoming sync event;
@@ -3716,12 +3791,18 @@ function AppShell() {
     const projectsToSave = [updatedProject, ...normalizedSpawned, ...(linkedOriginalUpdate ? [linkedOriginalUpdate] : [])];
     projectsToSave.forEach(p => { if (isAssignedValue(p.assignedTo)) recordAssignmentLedger(p); });
     oldProject = oldProject ? normalizeProjectRecord(oldProject) : oldProject;
+    const changedPrimaryTaskId = oldProject?.id && updatedProject?.id && String(oldProject.id) !== String(updatedProject.id);
+    if (changedPrimaryTaskId) rememberDeletedProjects(oldProject.id, oldProject.caseId);
     // Update the screen immediately. Previously the app waited for Firestore;
     // if a completed file was large or Firebase rejected it, the upload looked like nothing happened.
     setSelectedProject(updatedProject);
     setProjects(prev => {
       const ids = new Set(projectsToSave.map(p => String(p.id)));
-      const next = mergeProjectsByFreshness(prev.filter(p => !ids.has(String(p.id))), projectsToSave);
+      if (changedPrimaryTaskId) {
+        ids.add(String(oldProject.id));
+        if (oldProject.caseId) ids.add(String(oldProject.caseId));
+      }
+      const next = filterDeletedProjects(mergeProjectsByFreshness((prev || []).filter(p => !ids.has(String(p.id)) && !ids.has(String(p.caseId || ''))), projectsToSave));
       persistAndBroadcastProjects(next);
       return next;
     });
@@ -3737,6 +3818,13 @@ function AppShell() {
             console.warn('Project cloud save failed, but local screen has been updated.', e);
           }
         }
+        if (changedPrimaryTaskId) {
+          try { await deleteDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', oldProject.id.toString())); } catch(e) {}
+        }
+    }
+
+    if (changedPrimaryTaskId && USE_BACKEND_STATE) {
+      try { await fetch(`${API_BASE}/api/state/projects/${encodeURIComponent(oldProject.id)}`, { method: 'DELETE' }); } catch(e) {}
     }
 
     normalizedSpawned.forEach(spawned => {
@@ -3854,6 +3942,19 @@ function AppShell() {
         addNotification(target.role, target.name, `New message from ${normalizedMsg.sender}: ${preview.length > 60 ? `${preview.slice(0, 57)}...` : preview}`, 'chat', { category: 'Chat', priority: 'Normal' });
       }
     }
+  };
+
+  const openTaskDiscussion = (project) => {
+    if (!project) return;
+    window.dispatchEvent(new CustomEvent('kalpa:discuss-task', { detail: { projectId: project.id || project.caseId || '', project } }));
+  };
+
+  const openTaskReferenceFromChat = (projectOrId) => {
+    const projectId = typeof projectOrId === 'string' ? projectOrId : (projectOrId?.id || projectOrId?.caseId || '');
+    const target = (projects || []).find(p => String(p.id) === String(projectId) || String(p.caseId || '') === String(projectId)) || (typeof projectOrId === 'object' ? projectOrId : null);
+    if (!target) return;
+    setActiveTab('board');
+    setSelectedProject(target);
   };
 
   const handleMarkMessagesRead = async (activeChannel) => {
@@ -4163,6 +4264,52 @@ function AppShell() {
     return [n.title, n.category, n.priority, n.type, n.time].filter(Boolean).join(' ').toLowerCase().includes(q);
   });
   const activityTimeline = buildActivityTimeline(projects, chatMessages, notifications);
+  const normalizedGlobalSearch = globalSearch.trim().toLowerCase();
+  const globalCaseResults = !normalizedGlobalSearch ? [] : (projects || [])
+    .filter(p => [p.id, p.client, p.bankName, p.branchName, p.customerName, p.location, p.assignedTo, p.type, p.status, p.description, p.paymentStatus, p.paymentTrackingStatus]
+      .filter(Boolean).join(' ').toLowerCase().includes(normalizedGlobalSearch))
+    .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+  const globalPeopleResults = !normalizedGlobalSearch ? [] : (activeUsers || [])
+    .filter(u => [u.name, u.username, u.role, u.availability, u.status].filter(Boolean).join(' ').toLowerCase().includes(normalizedGlobalSearch))
+    .slice(0, 8);
+  const globalNotificationResults = !normalizedGlobalSearch ? [] : (myNotifs || [])
+    .filter(n => [n.title, n.message, n.type, n.category, n.priority, n.time].filter(Boolean).join(' ').toLowerCase().includes(normalizedGlobalSearch))
+    .slice(0, 8);
+  const globalChatResults = !normalizedGlobalSearch ? [] : (chatMessages || [])
+    .filter(m => [m.sender, m.text, m.channel, m.to, m.fileName].filter(Boolean).join(' ').toLowerCase().includes(normalizedGlobalSearch))
+    .sort((a, b) => Number(b.createdAt || b.id || 0) - Number(a.createdAt || a.id || 0))
+    .slice(0, 8);
+
+  const persistSavedGlobalFilters = (nextFilters) => {
+    const clean = (nextFilters || []).filter(f => f && f.query).slice(0, 12);
+    setSavedGlobalFilters(clean);
+    try { localStorage.setItem('kalpa_saved_global_filters', JSON.stringify(clean)); } catch (e) {}
+  };
+  const saveCurrentGlobalFilter = () => {
+    const query = globalSearch.trim();
+    if (!query) return;
+    const label = (savedFilterName || query).trim().slice(0, 48);
+    const filter = {
+      id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      label,
+      query,
+      tab: activeTab,
+      createdAt: Date.now(),
+      createdBy: currentUser?.name || 'User'
+    };
+    const withoutDuplicate = savedGlobalFilters.filter(f => f.query.toLowerCase() !== query.toLowerCase());
+    persistSavedGlobalFilters([filter, ...withoutDuplicate]);
+    setSavedFilterName('');
+  };
+  const applySavedGlobalFilter = (filter) => {
+    if (!filter?.query) return;
+    setSelectedProject(null);
+    setGlobalSearch(filter.query);
+    if (filter.tab && filter.tab !== 'board') setActiveTab(filter.tab);
+  };
+  const removeSavedGlobalFilter = (filterId) => {
+    persistSavedGlobalFilters(savedGlobalFilters.filter(f => f.id !== filterId));
+  };
 
   const displayedProjects = projects
     .filter(p => {
@@ -4235,21 +4382,94 @@ function AppShell() {
       <main className="max-w-[1400px] mx-auto px-3 sm:px-6 lg:px-8 py-5 sm:py-8 animate-in fade-in duration-300">
         <MobileSearchBar globalSearch={globalSearch} setGlobalSearch={setGlobalSearch} />
         
-        {globalSearch.trim() && !selectedProject && (
-          <div className="bg-white border-2 border-indigo-100 rounded-3xl p-4 sm:p-5 mb-6 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200">
-            <div className="flex justify-between items-center mb-4">
-              <div><h2 className="font-black text-slate-800">Search Results</h2><p className="text-xs font-bold text-slate-400">Showing matching cases for: {globalSearch}</p></div>
-              <button type="button" onClick={() => setGlobalSearch('')} className="text-xs font-black bg-slate-100 text-slate-600 px-3 py-2 rounded-xl">Clear</button>
+        {!globalSearch.trim() && !selectedProject && savedGlobalFilters.length > 0 && (
+          <div className="bg-white border-2 border-slate-100 rounded-3xl p-4 mb-5 shadow-sm">
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-xs font-black uppercase tracking-widest text-slate-500 flex items-center gap-2"><Filter className="w-4 h-4 text-indigo-500" /> Saved Filters</p>
+              <button type="button" onClick={() => persistSavedGlobalFilters([])} className="text-[10px] font-black text-slate-400 hover:text-red-500">Clear all</button>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-              {displayedProjects.slice(0, 12).map(p => (
-                <button key={p.id} type="button" onClick={() => setSelectedProject(p)} className="kalpa-task-row text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 hover:border-indigo-100 rounded-2xl p-4 transition-all">
-                  <p className="font-black text-slate-800">{p.id}</p>
-                  <p className="text-xs font-bold text-slate-500 mt-1">{getCustomerDisplayName(p)} • {p.location}</p>
-                  <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase">{p.type} • {p.assignedTo || 'Unassigned'} • {p.status}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mt-2 line-clamp-2"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1 line-clamp-2"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}
+            <div className="flex gap-2 overflow-x-auto custom-scrollbar pb-1">
+              {savedGlobalFilters.map(filter => (
+                <button key={filter.id} type="button" onClick={() => applySavedGlobalFilter(filter)} className="shrink-0 bg-slate-50 hover:bg-indigo-50 border border-slate-100 hover:border-indigo-100 rounded-2xl px-4 py-3 text-left transition-all">
+                  <span className="block text-xs font-black text-slate-700 max-w-[180px] truncate">{filter.label}</span>
+                  <span className="block text-[10px] font-bold text-slate-400 max-w-[180px] truncate">{filter.query}</span>
                 </button>
               ))}
-              {displayedProjects.length === 0 && <div className="col-span-full"><EmptyState icon={Search} title="No matching cases found" description="Try a customer name, bank, branch, location, task ID, or designer name." compact /></div>}
+            </div>
+          </div>
+        )}
+
+        {globalSearch.trim() && !selectedProject && (
+          <div className="bg-white border-2 border-indigo-100 rounded-3xl p-4 sm:p-5 mb-6 shadow-sm animate-in fade-in slide-in-from-top-2 duration-200">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+              <div><h2 className="font-black text-slate-800 flex items-center gap-2"><Search className="w-5 h-5 text-indigo-600" /> Global Search</h2><p className="text-xs font-bold text-slate-400">Cases, team, notifications and chat results for: {globalSearch}</p></div>
+              <div className="flex flex-wrap gap-2">
+                <input value={savedFilterName} onChange={e => setSavedFilterName(e.target.value)} placeholder="Filter name" className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold outline-none focus:border-indigo-400" />
+                <button type="button" onClick={saveCurrentGlobalFilter} className="text-xs font-black bg-indigo-600 text-white px-3 py-2 rounded-xl self-start sm:self-auto flex items-center gap-1.5"><Save className="w-3.5 h-3.5" /> Save Filter</button>
+                <button type="button" onClick={() => setGlobalSearch('')} className="text-xs font-black bg-slate-100 text-slate-600 px-3 py-2 rounded-xl self-start sm:self-auto">Clear</button>
+              </div>
+            </div>
+
+            {savedGlobalFilters.length > 0 && (
+              <div className="mb-4 bg-indigo-50/60 border border-indigo-100 rounded-2xl p-3">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-indigo-700 flex items-center gap-1.5"><Filter className="w-3.5 h-3.5" /> Saved Filters</p>
+                  <span className="text-[10px] font-black text-indigo-400">{savedGlobalFilters.length}/12</span>
+                </div>
+                <div className="flex gap-2 overflow-x-auto custom-scrollbar pb-1">
+                  {savedGlobalFilters.map(filter => (
+                    <div key={filter.id} className="shrink-0 flex items-center bg-white border border-indigo-100 rounded-xl shadow-sm overflow-hidden">
+                      <button type="button" onClick={() => applySavedGlobalFilter(filter)} className="px-3 py-2 text-xs font-black text-slate-700 hover:bg-indigo-50 text-left">
+                        <span className="block max-w-[180px] truncate">{filter.label}</span>
+                        <span className="block text-[9px] text-slate-400 uppercase tracking-widest truncate max-w-[180px]">{filter.query}</span>
+                      </button>
+                      <button type="button" onClick={() => removeSavedGlobalFilter(filter.id)} className="px-2 py-3 text-slate-300 hover:text-red-500 hover:bg-red-50 border-l border-indigo-50" title="Remove saved filter"><X className="w-3.5 h-3.5" /></button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+              <section className="lg:col-span-2">
+                <div className="flex items-center justify-between mb-2"><h3 className="text-xs font-black text-slate-500 uppercase tracking-widest">Cases</h3><span className="text-[10px] font-black text-indigo-600 bg-indigo-50 px-2 py-1 rounded-full">{globalCaseResults.length}</span></div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {globalCaseResults.slice(0, 10).map(p => (
+                    <button key={p.id} type="button" onClick={() => setSelectedProject(p)} className="kalpa-task-row text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 hover:border-indigo-100 rounded-2xl p-4 transition-all">
+                      <p className="font-black text-slate-800">{p.id}</p>
+                      <p className="text-xs font-bold text-slate-500 mt-1">{getCustomerDisplayName(p)} • {p.location}</p>
+                      <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase">{p.type} • {p.assignedTo || 'Unassigned'} • {p.status}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mt-2 line-clamp-2"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1 line-clamp-2"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}
+                    </button>
+                  ))}
+                  {globalCaseResults.length === 0 && <div className="md:col-span-2"><EmptyState icon={Search} title="No matching cases found" description="Try customer, bank, branch, location, task ID, status, payment status, or designer name." compact /></div>}
+                </div>
+              </section>
+
+              <aside className="space-y-4">
+                <section className="bg-slate-50 border border-slate-100 rounded-2xl p-4">
+                  <div className="flex items-center justify-between mb-3"><h3 className="text-xs font-black text-slate-500 uppercase tracking-widest">Team</h3><span className="text-[10px] font-black text-slate-500 bg-white px-2 py-1 rounded-full">{globalPeopleResults.length}</span></div>
+                  <div className="space-y-2">
+                    {globalPeopleResults.map(u => <button key={u.id || u.username || u.name} type="button" onClick={() => setActiveTab('team')} className="w-full text-left bg-white border border-slate-100 rounded-xl p-3 hover:border-indigo-100"><p className="text-sm font-black text-slate-800">{u.name}</p><p className="text-[11px] font-bold text-slate-400">{u.role} • {u.availability || 'Unavailable'}</p></button>)}
+                    {globalPeopleResults.length === 0 && <p className="text-xs font-bold text-slate-400">No team matches.</p>}
+                  </div>
+                </section>
+
+                <section className="bg-slate-50 border border-slate-100 rounded-2xl p-4">
+                  <div className="flex items-center justify-between mb-3"><h3 className="text-xs font-black text-slate-500 uppercase tracking-widest">Notifications</h3><span className="text-[10px] font-black text-slate-500 bg-white px-2 py-1 rounded-full">{globalNotificationResults.length}</span></div>
+                  <div className="space-y-2">
+                    {globalNotificationResults.map(n => <button key={n.id} type="button" onClick={() => { setShowNotifs(true); markNotificationRead(n.id); }} className="w-full text-left bg-white border border-slate-100 rounded-xl p-3 hover:border-indigo-100"><p className="text-sm font-black text-slate-800 line-clamp-1">{n.title || 'Notification'}</p><p className="text-[11px] font-bold text-slate-400 line-clamp-2">{n.message || n.category || n.type}</p></button>)}
+                    {globalNotificationResults.length === 0 && <p className="text-xs font-bold text-slate-400">No notification matches.</p>}
+                  </div>
+                </section>
+
+                <section className="bg-slate-50 border border-slate-100 rounded-2xl p-4">
+                  <div className="flex items-center justify-between mb-3"><h3 className="text-xs font-black text-slate-500 uppercase tracking-widest">Chat</h3><span className="text-[10px] font-black text-slate-500 bg-white px-2 py-1 rounded-full">{globalChatResults.length}</span></div>
+                  <div className="space-y-2">
+                    {globalChatResults.map(m => <div key={m.id} className="bg-white border border-slate-100 rounded-xl p-3"><p className="text-sm font-black text-slate-800">{m.sender || 'Team'}</p><p className="text-[11px] font-bold text-slate-400 line-clamp-2">{m.text || m.fileName || 'Attachment'}</p></div>)}
+                    {globalChatResults.length === 0 && <p className="text-xs font-bold text-slate-400">No chat matches.</p>}
+                  </div>
+                </section>
+              </aside>
             </div>
           </div>
         )}
@@ -4259,19 +4479,23 @@ function AppShell() {
         )}
 
         {selectedProject ? (
-          <TaskDetailView project={selectedProject} user={currentUser} onBack={() => setSelectedProject(null)} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} />
+          <TaskDetailView project={selectedProject} user={currentUser} onBack={closeTaskDetail} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} />
         ) : activeTab === 'command' ? (
-          <CommandCentreView projects={projects} users={activeUsers} currentUser={currentUser} onSelectProject={(p) => { setActiveTab('board'); setSelectedProject(p); }} />
+          <CommandCentreView projects={projects} users={activeUsers} attendanceLogs={attendanceLogs} currentUser={currentUser} onOpenPerformance={() => setActiveTab('productivity')} onSelectProject={(p) => openTaskDetail(p, 'command')} onNavigate={(target) => { if (target === 'newCase') { setShowNewLead(true); return; } if (target === 'notifications') { setShowNotifs(true); return; } setActiveTab(target); }} />
         ) : activeTab === 'productivity' ? (
           <ProductivityDashboard users={activeUsers} projects={projects} />
         ) : activeTab === 'closing' && currentUser.role === ROLES.ADMIN ? (
-          <DailyClosingReport projects={projects} />
+          <DailyClosingReport projects={projects} currentUser={currentUser} />
+        ) : activeTab === 'reports' && currentUser.role === ROLES.ADMIN ? (
+          <ReportsAnalyticsView projects={projects} users={activeUsers} currentUser={currentUser} />
+        ) : (activeTab === 'settings' || activeTab === 'qa') && currentUser.role === ROLES.ADMIN ? (
+          <SystemSettingsView projects={projects} users={activeUsers} currentUser={currentUser} />
         ) : activeTab === 'ledger' && currentUser.role === ROLES.ADMIN ? (
-          <LedgerView projects={projects} onSelectProject={(p) => { setActiveTab('board'); setSelectedProject(p); }} />
+          <LedgerView projects={projects} onSelectProject={(p) => openTaskDetail(p, 'ledger')} />
         ) : activeTab === 'archive' ? (
-          <HistoryArchiveView projects={projects} currentUser={currentUser} onSelectProject={(p) => { setActiveTab('board'); setSelectedProject(p); }} onPaymentStatusChange={handlePaymentStatusChange} />
+          <HistoryArchiveView projects={projects} currentUser={currentUser} onSelectProject={(p) => openTaskDetail(p, 'archive')} onPaymentStatusChange={handlePaymentStatusChange} />
         ) : activeTab === 'team' ? (
-          <TeamPerformanceView users={activeUsers} projects={projects} onUpdateUser={handleUpdateUser} currentUser={currentUser} />
+          <TeamPerformanceView users={activeUsers} projects={projects} onUpdateUser={handleUpdateUser} currentUser={currentUser} onOpenPerformance={() => setActiveTab('productivity')} />
         ) : activeTab === 'attendance' ? (
           <AttendanceView attendanceLogs={attendanceLogs} users={activeUsers} projects={projects} />
         ) : activeTab === 'profile' ? (
@@ -4301,12 +4525,15 @@ function AppShell() {
             getDraftElapsed={getDraftElapsed}
             getOperationalUsers={getOperationalUsers}
             isUserActuallyOnline={isUserActuallyOnline}
+            onDiscussTask={openTaskDiscussion}
             onPaymentStatusChange={handlePaymentStatusChange}
           />
         )}
       </main>
 
-      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} />}
+      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} projects={projects} onOpenTaskReference={openTaskReferenceFromChat} />}
+
+      {!selectedProject && !showNewLead && <MobileBottomNavigation currentUser={currentUser} ROLES={ROLES} activeTab={activeTab} setActiveTab={setActiveTab} unreadNotifs={unreadNotifs} />}
 
       {showNewLead && (
         <div className="kalpa-lead-modal fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[80] flex justify-center items-center p-4">
@@ -4373,8 +4600,9 @@ function AppShell() {
                  try {
                    const saveRes = await fetch(`${API_BASE}/api/state`, {
                      method: 'POST',
-                     headers: { 'Content-Type': 'application/json' },
+                     headers: jsonFinanceSafeHeaders,
                      body: JSON.stringify({
+                       currentUserRole: currentUser?.role || '',
                        users: normalizeTeamUsers(users && users.length ? users : INITIAL_USERS),
                        projects: sanitizeProjectsForCache(filterDeletedProjects(nextProjects)),
                        deletedProjectIds: getDeletedProjectIds(),

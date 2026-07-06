@@ -32,12 +32,62 @@ export const buildNotification = ({ targetRole, targetUser, title, type = 'info'
 
 const norm = (value = '') => String(value || '').trim().toLowerCase();
 const identityKey = (value = '') => norm(value).replace(/[^a-z0-9]/g, '');
-const readName = (entry) => typeof entry === 'string' ? entry : (entry?.name || '');
+export const normalizeNotificationReadName = (entry) => typeof entry === 'string' ? entry : (entry?.name || entry?.username || entry?.id || '');
 
-const userAliases = (user = {}) => [user?.name, user?.username, user?.id]
+export const notificationUserKeys = (user = {}) => [user?.name, user?.username, user?.id]
   .filter(Boolean)
   .flatMap(value => [norm(value), identityKey(value)])
   .filter(Boolean);
+
+export const isNotificationReadByUser = (notification = {}, user = {}) => {
+  if (!notification || !user) return false;
+  const keys = new Set(notificationUserKeys(user));
+  if (!keys.size) return false;
+  return (notification.readBy || []).some(entry => {
+    const name = normalizeNotificationReadName(entry);
+    return keys.has(norm(name)) || keys.has(identityKey(name));
+  });
+};
+
+export const addNotificationReadUser = (notification = {}, user = {}) => {
+  if (!notification || !user?.name) return notification;
+  if (isNotificationReadByUser(notification, user)) return notification;
+  return {
+    ...notification,
+    readBy: [...(notification.readBy || []), user.name],
+    readAt: Date.now()
+  };
+};
+
+const readByKey = (entry) => identityKey(normalizeNotificationReadName(entry));
+
+export const mergeNotificationRecords = (existing = {}, incoming = {}) => {
+  const readMap = new Map();
+  [...(existing.readBy || []), ...(incoming.readBy || [])].forEach(entry => {
+    const key = readByKey(entry);
+    if (key) readMap.set(key, entry);
+  });
+  const existingUpdated = Number(existing.updatedAt || existing.readAt || 0);
+  const incomingUpdated = Number(incoming.updatedAt || incoming.readAt || 0);
+  const base = incomingUpdated >= existingUpdated ? { ...existing, ...incoming } : { ...incoming, ...existing };
+  return { ...base, readBy: Array.from(readMap.values()) };
+};
+
+export const mergeNotificationsByStability = (current = [], incoming = []) => {
+  const byId = new Map();
+  [...(current || []), ...(incoming || [])].forEach(n => {
+    if (!n?.id) return;
+    const key = String(n.id);
+    byId.set(key, byId.has(key) ? mergeNotificationRecords(byId.get(key), n) : n);
+  });
+  return Array.from(byId.values())
+    .sort((a, b) => Number(b.id || b.createdAt || 0) - Number(a.id || a.createdAt || 0))
+    .slice(0, 200);
+};
+
+const readName = normalizeNotificationReadName;
+
+const userAliases = notificationUserKeys;
 
 const notificationTargetMatchesUser = (targetUser = '', user = {}) => {
   const target = norm(targetUser);
@@ -76,10 +126,7 @@ export const isNotificationForUser = (notification = {}, user = {}) => {
   return !!targetRole && targetRole === userRole;
 };
 
-export const isNotificationUnreadForUser = (notification = {}, user = {}) => {
-  if (!notification || !user?.name) return false;
-  return !(notification.readBy || []).some(entry => norm(readName(entry)) === norm(user.name));
-};
+export const isNotificationUnreadForUser = (notification = {}, user = {}) => !isNotificationReadByUser(notification, user);
 
 export const getVisibleNotifications = (notifications = [], user = {}, { unreadOnly = false, limit } = {}) => {
   const visible = (Array.isArray(notifications) ? notifications : [])

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { MessageSquare, X, Phone, Video, Square, Mic, Smile, Paperclip, Send, Search, User, Star, Hash, AlertCircle, File as FileIcon, ExternalLink, ClipboardList } from 'lucide-react';
 import { formatLastSeenDateTime } from '../../utils/date';
 import { createSafeMeetingRoomName, buildJitsiUrl } from '../../utils/meeting';
@@ -33,6 +34,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const [editingMessage, setEditingMessage] = useState(null);
   const mediaRecorderRef = useRef(null);
   const voiceChunksRef = useRef([]);
+  const voiceCancelRef = useRef(false);
   const chatEndRef = useRef(null);
   const chatScrollRef = useRef(null);
   const composerRef = useRef(null);
@@ -166,6 +168,12 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     const timer = setInterval(() => setVoiceNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [isRecordingVoice]);
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    document.body.classList.toggle('kalpa-mobile-chat-open', !!isOpen);
+    return () => document.body.classList.remove('kalpa-mobile-chat-open');
+  }, [isOpen]);
+
   useEffect(() => {
     if (isOpen && !chatSearch) chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [isOpen, chatMessages.length, activeChannel, isCalling, chatSearch]);
@@ -483,6 +491,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
         return;
       }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      voiceCancelRef.current = false;
       voiceChunksRef.current = [];
       const recorder = new MediaRecorder(stream);
       mediaRecorderRef.current = recorder;
@@ -494,6 +503,11 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
         stream.getTracks().forEach(track => track.stop());
         setIsRecordingVoice(false);
         setVoiceStartedAt(null);
+        if (voiceCancelRef.current) {
+          voiceCancelRef.current = false;
+          voiceChunksRef.current = [];
+          return;
+        }
         if (!blob.size) return;
         const createdAt = makeMessageId();
         const file = new File([blob], `voice-note-${createdAt}.webm`, { type: blob.type || 'audio/webm' });
@@ -523,6 +537,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
 
   const stopVoiceRecording = () => {
     try {
+      voiceCancelRef.current = false;
       const recorder = mediaRecorderRef.current;
       if (recorder && recorder.state !== 'inactive') recorder.stop();
       else { setIsRecordingVoice(false); setVoiceStartedAt(null); }
@@ -530,6 +545,25 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       console.error('Voice note stop failed', error);
       setIsRecordingVoice(false);
       setVoiceStartedAt(null);
+    }
+  };
+
+  const cancelVoiceRecording = () => {
+    try {
+      voiceCancelRef.current = true;
+      const recorder = mediaRecorderRef.current;
+      if (recorder && recorder.state !== 'inactive') recorder.stop();
+      else {
+        setIsRecordingVoice(false);
+        setVoiceStartedAt(null);
+        voiceChunksRef.current = [];
+      }
+    } catch (error) {
+      console.error('Voice note cancel failed', error);
+      setIsRecordingVoice(false);
+      setVoiceStartedAt(null);
+      voiceChunksRef.current = [];
+      voiceCancelRef.current = false;
     }
   };
 
@@ -574,39 +608,108 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   };
 
   const openActionMenu = (event, m) => {
+    event?.preventDefault?.();
     event?.stopPropagation?.();
-    const mobile = isMobileViewport();
-    if (mobile) {
-      setReactionMenu(null);
-      setActionMenu({ id: m.id || m.messageId || m.sentAt || `${m.sender || 'msg'}-${m.time || Date.now()}`, mobile: true, message: m });
-      return;
-    }
-    const menuWidth = 224;
-    const menuHeight = 360;
-    const rawX = event.clientX || 0;
-    const rawY = event.clientY || 0;
-    const x = Math.min(Math.max(12, rawX), Math.max(12, window.innerWidth - menuWidth - 12));
-    const y = Math.min(Math.max(12, rawY), Math.max(12, window.innerHeight - menuHeight - 12));
+    if (!m) return;
+    setShowEmojiPicker(false);
     setReactionMenu(null);
-    setActionMenu({ id: m.id || m.messageId || m.sentAt || `${m.sender || 'msg'}-${m.time || Date.now()}`, x, y, mobile: false, message: m });
+
+    const mobile = isMobileViewport();
+    const viewportW = typeof window !== 'undefined' ? window.innerWidth : 360;
+    const viewportH = typeof window !== 'undefined' ? window.innerHeight : 640;
+    const menuWidth = mobile ? Math.min(256, Math.max(220, viewportW - 28)) : 224;
+    const menuHeight = mobile ? 330 : 390;
+    const safePad = mobile ? 12 : 12;
+
+    const triggerRect = event?.currentTarget?.getBoundingClientRect?.();
+    const point = event?.changedTouches?.[0] || event?.touches?.[0] || event;
+    const fallbackX = point?.clientX || event?.clientX || Math.round(viewportW / 2);
+    const fallbackY = point?.clientY || event?.clientY || Math.round(viewportH / 2);
+    const centerX = triggerRect ? (triggerRect.left + triggerRect.width / 2) : fallbackX;
+    const topY = triggerRect ? triggerRect.top : fallbackY;
+    const bottomY = triggerRect ? triggerRect.bottom : fallbackY;
+
+    let x;
+    if (mobile) {
+      const isRightSideMessage = centerX > viewportW / 2;
+      x = isRightSideMessage
+        ? (triggerRect ? triggerRect.right : fallbackX) - menuWidth
+        : (triggerRect ? triggerRect.left : fallbackX);
+    } else if (centerX > viewportW / 2) {
+      x = (triggerRect ? triggerRect.left : fallbackX) - menuWidth - 8;
+    } else {
+      x = (triggerRect ? triggerRect.right : fallbackX) + 8;
+    }
+    x = Math.min(Math.max(safePad, x), Math.max(safePad, viewportW - menuWidth - safePad));
+
+    let y;
+    const spaceBelow = viewportH - bottomY;
+    const spaceAbove = topY;
+    if (mobile) {
+      // WhatsApp-style: prefer a compact floating card directly above the tapped message.
+      // If there isn't enough room, place it below while keeping it inside the viewport.
+      if (spaceAbove >= menuHeight + safePad) y = topY - menuHeight - 8;
+      else if (spaceBelow >= menuHeight + safePad) y = bottomY + 8;
+      else y = Math.min(Math.max(safePad, topY - Math.round(menuHeight / 2)), Math.max(safePad, viewportH - menuHeight - safePad));
+    } else if (spaceBelow >= menuHeight + safePad) y = bottomY + 8;
+    else if (spaceAbove >= menuHeight + safePad) y = topY - menuHeight - 8;
+    else y = Math.min(Math.max(safePad, topY - 96), Math.max(safePad, viewportH - menuHeight - safePad));
+
+    setActionMenu({
+      id: m.id || m.messageId || m.sentAt || `${m.sender || 'msg'}-${m.time || Date.now()}`,
+      x,
+      y,
+      width: menuWidth,
+      mobile,
+      message: m,
+      openedAt: Date.now()
+    });
   };
 
   const openReactionMenu = (event, m) => {
     event?.stopPropagation?.();
     const mobile = isMobileViewport();
+    const menuWidth = mobile ? 316 : 360;
+    const menuHeight = mobile ? 136 : 96;
+    const safePad = mobile ? 12 : 12;
+    const viewportW = typeof window !== 'undefined' ? window.innerWidth : 1024;
+    const viewportH = typeof window !== 'undefined' ? window.innerHeight : 768;
+    const rect = event?.currentTarget?.getBoundingClientRect?.();
+
+    // Prefer the clicked React option button, then the already-open message action menu,
+    // then the raw pointer position. This keeps the picker visible above the chatbox instead
+    // of being clipped/hidden behind the composer.
+    const baseX = rect ? rect.left : (actionMenu?.x || event?.clientX || Math.round(viewportW / 2));
+    const baseY = rect ? rect.top : (actionMenu?.y || event?.clientY || Math.round(viewportH / 2));
+    const baseRight = rect ? rect.right : baseX + 48;
+    const baseBottom = rect ? rect.bottom : baseY + 44;
+
+    let x = mobile ? baseX : baseRight + 8;
+    if (!mobile && baseX > viewportW / 2) x = baseX - menuWidth - 8;
+    x = Math.min(Math.max(safePad, x), Math.max(safePad, viewportW - menuWidth - safePad));
+
+    const spaceAbove = baseY;
+    const spaceBelow = viewportH - baseBottom;
+    let y;
     if (mobile) {
-      setActionMenu(null);
-      setReactionMenu({ id: m.id || m.messageId || m.sentAt || `${m.sender || 'msg'}-${m.time || Date.now()}`, mobile: true, message: m });
-      return;
-    }
-    const menuWidth = 360;
-    const menuHeight = 96;
-    const rawX = event.clientX || 0;
-    const rawY = event.clientY || 0;
-    const x = Math.min(Math.max(12, rawX), Math.max(12, window.innerWidth - menuWidth - 12));
-    const y = Math.min(Math.max(12, rawY), Math.max(12, window.innerHeight - menuHeight - 12));
+      // WhatsApp-like floating picker: prefer above the action menu/message; fall back below.
+      if (spaceAbove >= menuHeight + safePad) y = baseY - menuHeight - 8;
+      else if (spaceBelow >= menuHeight + safePad) y = baseBottom + 8;
+      else y = Math.min(Math.max(safePad, baseY - 80), Math.max(safePad, viewportH - menuHeight - safePad));
+    } else if (spaceBelow >= menuHeight + safePad) y = baseBottom + 8;
+    else if (spaceAbove >= menuHeight + safePad) y = baseY - menuHeight - 8;
+    else y = Math.min(Math.max(safePad, baseY - 48), Math.max(safePad, viewportH - menuHeight - safePad));
+
     setActionMenu(null);
-    setReactionMenu({ id: m.id || m.messageId || m.sentAt || `${m.sender || 'msg'}-${m.time || Date.now()}`, x, y, mobile: false, message: m });
+    setReactionMenu({
+      id: m.id || m.messageId || m.sentAt || `${m.sender || 'msg'}-${m.time || Date.now()}`,
+      x,
+      y,
+      width: menuWidth,
+      mobile,
+      message: m,
+      openedAt: Date.now()
+    });
   };
 
   const findMessageByMenu = (menu) => {
@@ -617,31 +720,28 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
 
   const activeActionMessage = findMessageByMenu(actionMenu);
   const activeReactionMessage = findMessageByMenu(reactionMenu);
+  const canUsePortal = typeof document !== 'undefined' && document.body;
+  const closeMessageMenus = () => { setActionMenu(null); setReactionMenu(null); };
 
 
   const renderMessageOptions = (m) => {
-    const canEdit = samePerson(m.sender, currentUser.name) && !m.deleted;
-    const canDeleteEveryone = samePerson(m.sender, currentUser.name) || currentUser.role === ROLES.ADMIN;
-    const closeOpenDetails = (event) => {
-      const details = event?.currentTarget?.closest?.('details');
-      if (details) details.removeAttribute('open');
-    };
+    const handleOpen = (e) => openActionMenu(e, m);
     return (
-      <details className="kalpa-inline-message-options relative mt-2 shrink-0" onClick={(e) => e.stopPropagation()}>
-        <summary className="list-none w-10 h-10 sm:w-8 sm:h-8 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 shadow-sm flex items-center justify-center opacity-100 text-xl leading-none cursor-pointer touch-manipulation select-none" aria-label="Message options" title="Message options">
-          ⋮
-        </summary>
-        <div className="kalpa-message-options-menu absolute right-0 top-11 z-[100000] w-56 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl sm:right-0">
-          <button type="button" onClick={(e) => { closeOpenDetails(e); replyToMessage(m); }} className="w-full min-h-[44px] text-left px-4 py-3 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100">↩ Reply</button>
-          <button type="button" onClick={(e) => { closeOpenDetails(e); togglePinMessage(m); }} className="w-full min-h-[44px] text-left px-4 py-3 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100">{isPinnedMessage(m) ? '★ Unpin' : '☆ Pin'}</button>
-          <button type="button" onClick={(e) => { closeOpenDetails(e); openReactionMenu(e, m); }} className="w-full min-h-[44px] text-left px-4 py-3 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100">😊 React</button>
-          <button type="button" onClick={(e) => { closeOpenDetails(e); forwardMessage(m); }} className="w-full min-h-[44px] text-left px-4 py-3 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100">↗ Forward to...</button>
-          <button type="button" onClick={(e) => { closeOpenDetails(e); copyMessage(m); }} className="w-full min-h-[44px] text-left px-4 py-3 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100">⧉ Copy</button>
-          {canEdit && <button type="button" onClick={(e) => { closeOpenDetails(e); editMessage(m); }} className="w-full min-h-[44px] text-left px-4 py-3 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100">✎ Edit</button>}
-          <button type="button" onClick={(e) => { closeOpenDetails(e); deleteForMe(m); }} className="w-full min-h-[44px] text-left px-4 py-3 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100">Hide for me</button>
-          {canDeleteEveryone && <button type="button" onClick={(e) => { closeOpenDetails(e); deleteForEveryone(m); }} className="w-full min-h-[44px] text-left px-4 py-3 text-sm font-black text-red-600 rounded-xl hover:bg-red-50 active:bg-red-100">Delete for everyone</button>}
-        </div>
-      </details>
+      <button
+        type="button"
+        onPointerDown={(e) => { e.stopPropagation(); }}
+        onPointerUp={(e) => { e.stopPropagation(); if (e.pointerType && e.pointerType !== 'mouse') handleOpen(e); }}
+        onTouchStart={(e) => e.stopPropagation()}
+        onTouchEnd={(e) => { e.stopPropagation(); handleOpen(e); }}
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => handleOpen(e)}
+        className="kalpa-message-options-trigger mt-1 shrink-0 w-10 h-10 sm:w-8 sm:h-8 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 shadow-sm flex items-center justify-center opacity-100 text-xl leading-none touch-manipulation select-none"
+        aria-label="Message options"
+        title="Message options"
+        style={{ pointerEvents: 'auto', position: 'relative', zIndex: 60, touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
+      >
+        ⋮
+      </button>
     );
   };
 
@@ -953,7 +1053,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
               <h3 className="text-white font-extrabold flex items-center"><MessageSquare className="w-4 h-4 mr-2" /> Team Chat <span title={currentUserOnline ? 'You are online' : 'You are offline'} className={`ml-2 w-2.5 h-2.5 rounded-full ${currentUserOnline ? 'bg-emerald-300' : 'bg-slate-300'}`}></span></h3>
               <p className="text-indigo-100 text-[10px] font-bold mt-1 uppercase tracking-widest">Global • Direct • Files • Voice</p>
             </div>
-            <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+            <div className="kalpa-chat-channel-strip flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar" style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-x pan-y', overscrollBehaviorX: 'contain' }}>
               <button type="button" onClick={() => { setActiveChannel('global'); setIsCalling(false); setShowEmojiPicker(false); setActionMenu(null); setReactionMenu(null); currentUser.lastChatRead = Date.now(); markCurrentChannelReadNow('global'); }} className={`w-full text-left px-4 py-3 rounded-xl font-bold flex items-center justify-between transition-colors ${activeChannel === 'global' ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>
                 <span className="flex items-center"><Hash className="w-4 h-4 mr-2"/> Global Chat</span>
                 {unreadGlobalCount > 0 && <span className="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full">{unreadGlobalCount}</span>}
@@ -1023,7 +1123,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
                     </div>
                   </div>
                 )}
-                <div ref={chatScrollRef} className="kalpa-chat-messages flex-1 overflow-y-auto p-5 space-y-4 bg-slate-50/50 custom-scrollbar relative" style={{ minHeight: 0, overflowX: 'hidden' }} onClick={() => { setActionMenu(null); setReactionMenu(null); }}>
+                <div ref={chatScrollRef} className="kalpa-chat-messages flex-1 overflow-y-auto p-5 space-y-4 bg-slate-50/50 custom-scrollbar relative" style={{ minHeight: 0, overflowX: 'hidden' }} onClick={(e) => { if (e.target === e.currentTarget) { setActionMenu(null); setReactionMenu(null); } }}>
                   {displayMessages.length === 0 && <p className="text-center text-sm text-slate-400 mt-10 font-medium">Say hello to {activeChannel === 'global' ? 'the team' : activeChannel}!</p>}
                   {displayMessages.map((m, idx) => {
                     const isMine = sameCurrentUser(m.sender);
@@ -1073,7 +1173,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
               <div className="kalpa-chat-inputbar p-3 bg-white border-t-2 border-slate-100 flex flex-col gap-2 z-10 relative shrink-0">
                 {(replyTo || editingMessage) && <div className="flex items-center justify-between gap-3 bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-2"><div className="min-w-0"><p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">{editingMessage ? 'Editing message' : `Replying to ${replyTo?.sender}`}</p><p className="text-xs font-bold text-slate-600 truncate">{editingMessage?.text || replyTo?.text || replyTo?.fileName}</p></div><button type="button" onClick={clearComposerContext} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button></div>}
                 {uploadingAttachment && <div className="flex items-center justify-between gap-3 bg-slate-50 border border-slate-100 rounded-xl px-3 py-2"><div className="min-w-0"><p className="text-[10px] font-black uppercase tracking-widest text-slate-500">{uploadingAttachment.voice ? 'Saving voice note' : 'Uploading attachment'}</p><p className="text-xs font-bold text-slate-600 truncate">{uploadingAttachment.name} {getReadableFileSize(uploadingAttachment.size) ? `• ${getReadableFileSize(uploadingAttachment.size)}` : ''}</p></div><span className="w-4 h-4 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin shrink-0" /></div>}
-                {isRecordingVoice && <div className="flex items-center justify-between gap-3 bg-red-50 border border-red-100 rounded-xl px-3 py-2"><div><p className="text-[10px] font-black uppercase tracking-widest text-red-600">Recording voice note</p><p className="text-xs font-bold text-red-500">{voiceStartedAt ? `${Math.floor((voiceNow - voiceStartedAt)/60000)}:${String(Math.floor(((voiceNow - voiceStartedAt)%60000)/1000)).padStart(2,'0')}` : '0:00'}</p></div><button type="button" onClick={stopVoiceRecording} className="bg-red-600 text-white px-3 py-1.5 rounded-lg text-[11px] font-black">Stop</button></div>}
+                {isRecordingVoice && <div className="kalpa-voice-recording-bar flex items-center justify-between gap-3 bg-red-50 border border-red-100 rounded-xl px-3 py-2"><div className="min-w-0"><p className="text-[10px] font-black uppercase tracking-widest text-red-600">Recording voice note</p><p className="text-xs font-bold text-red-500">{voiceStartedAt ? `${Math.floor((voiceNow - voiceStartedAt)/60000)}:${String(Math.floor(((voiceNow - voiceStartedAt)%60000)/1000)).padStart(2,'0')}` : '0:00'}</p></div><div className="flex items-center gap-2 shrink-0"><button type="button" onClick={cancelVoiceRecording} className="bg-white text-red-600 border border-red-100 px-3 py-1.5 rounded-lg text-[11px] font-black">Cancel</button><button type="button" onClick={stopVoiceRecording} className="bg-red-600 text-white px-3 py-1.5 rounded-lg text-[11px] font-black">Stop & Send</button></div></div>}
                 {showEmojiPicker && (
                   <div
                     className="fixed bg-white border border-slate-100 rounded-2xl shadow-2xl p-3 z-[99998] overflow-hidden"
@@ -1119,7 +1219,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
                   <div className="kalpa-chat-actions-row flex items-center gap-2">
                     <label title="Attach file" className="kalpa-chat-tool-btn p-2.5 text-slate-400 hover:text-indigo-600 bg-slate-50 hover:bg-indigo-50 rounded-xl transition-colors cursor-pointer"><Paperclip className="w-5 h-5" /><input type="file" className="hidden" accept="image/*,video/*,audio/*,.pdf,.dwg,.dxf,.xls,.xlsx,.csv,.doc,.docx,.ppt,.pptx,.zip,.rar" onChange={handleChatFileUpload} /></label>
                     <button type="button" title="Add emoji" onClick={() => setShowEmojiPicker(v => !v)} className={`kalpa-chat-tool-btn p-2.5 rounded-xl transition-colors ${showEmojiPicker ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}><Smile className="w-5 h-5" /></button>
-                    <button type="button" title={isRecordingVoice ? 'Stop voice note' : 'Record voice note'} onClick={isRecordingVoice ? stopVoiceRecording : startVoiceRecording} className={`kalpa-chat-tool-btn p-2.5 rounded-xl transition-colors ${isRecordingVoice ? 'bg-red-50 text-red-600 animate-pulse' : 'bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}>{isRecordingVoice ? <Square className="w-5 h-5" /> : <Mic className="w-5 h-5" />}</button>
+                    <button type="button" title={isRecordingVoice ? 'Stop and send voice note' : 'Record voice note'} onClick={isRecordingVoice ? stopVoiceRecording : startVoiceRecording} className={`kalpa-chat-tool-btn p-2.5 rounded-xl transition-colors ${isRecordingVoice ? 'bg-red-50 text-red-600 animate-pulse' : 'bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}>{isRecordingVoice ? <Square className="w-5 h-5" /> : <Mic className="w-5 h-5" />}</button>
                     <div className="flex-1" />
                     <button type="button" disabled={!msg.trim()} onClick={handleSend} className={`kalpa-chat-send-btn p-3 rounded-xl shadow-md transition-colors ${msg.trim() ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-slate-100 text-slate-300 cursor-not-allowed'}`}><Send className="w-5 h-5" /></button>
                   </div>
@@ -1146,62 +1246,100 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
         </div>
       )}
 
-      {actionMenu && activeActionMessage && (
-        actionMenu.mobile ? (
-          <div className="fixed inset-0 z-[100000] bg-slate-950/45 backdrop-blur-[2px] flex items-end justify-center sm:hidden" onClick={() => setActionMenu(null)} style={{ paddingBottom: 'max(10px, env(safe-area-inset-bottom))' }}>
-            <div className="w-full max-w-md mx-2 bg-white rounded-t-3xl shadow-2xl border border-slate-100 overflow-hidden animate-in slide-in-from-bottom-3 duration-150" onClick={(e) => e.stopPropagation()}>
-              <div className="px-5 pt-3 pb-2 border-b border-slate-100">
-                <div className="w-12 h-1.5 rounded-full bg-slate-200 mx-auto mb-3" />
-                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Message options</p>
-                <p className="text-sm font-black text-slate-800 truncate">{activeActionMessage.text || activeActionMessage.fileName || 'Chat message'}</p>
-              </div>
-              <div className="p-2">
-                <button type="button" onClick={() => replyToMessage(activeActionMessage)} className="w-full min-h-[48px] text-left px-4 py-3 text-base font-bold text-slate-700 rounded-2xl hover:bg-slate-50 active:bg-slate-100">↩ Reply</button>
-                <button type="button" onClick={() => togglePinMessage(activeActionMessage)} className="w-full min-h-[48px] text-left px-4 py-3 text-base font-bold text-slate-700 rounded-2xl hover:bg-slate-50 active:bg-slate-100">{isPinnedMessage(activeActionMessage) ? '★ Unpin' : '☆ Pin'}</button>
-                <button type="button" onClick={(e) => openReactionMenu(e, activeActionMessage)} className="w-full min-h-[48px] text-left px-4 py-3 text-base font-bold text-slate-700 rounded-2xl hover:bg-slate-50 active:bg-slate-100">😊 React</button>
-                <button type="button" onClick={() => forwardMessage(activeActionMessage)} className="w-full min-h-[48px] text-left px-4 py-3 text-base font-bold text-slate-700 rounded-2xl hover:bg-slate-50 active:bg-slate-100">↗ Forward to...</button>
-                <button type="button" onClick={() => copyMessage(activeActionMessage)} className="w-full min-h-[48px] text-left px-4 py-3 text-base font-bold text-slate-700 rounded-2xl hover:bg-slate-50 active:bg-slate-100">⧉ Copy</button>
-                {samePerson(activeActionMessage.sender, currentUser.name) && !activeActionMessage.deleted && <button type="button" onClick={() => editMessage(activeActionMessage)} className="w-full min-h-[48px] text-left px-4 py-3 text-base font-bold text-slate-700 rounded-2xl hover:bg-slate-50 active:bg-slate-100">✎ Edit</button>}
-                <button type="button" onClick={() => deleteForMe(activeActionMessage)} className="w-full min-h-[48px] text-left px-4 py-3 text-base font-bold text-slate-700 rounded-2xl hover:bg-slate-50 active:bg-slate-100">Hide for me</button>
-                {(samePerson(activeActionMessage.sender, currentUser.name) || currentUser.role === ROLES.ADMIN) && <button type="button" onClick={() => deleteForEveryone(activeActionMessage)} className="w-full min-h-[48px] text-left px-4 py-3 text-base font-black text-red-600 rounded-2xl hover:bg-red-50 active:bg-red-100">Delete for everyone</button>}
-                <button type="button" onClick={() => setActionMenu(null)} className="mt-1 w-full min-h-[48px] text-center px-4 py-3 text-base font-black text-slate-500 rounded-2xl bg-slate-50 active:bg-slate-100">Cancel</button>
-              </div>
+      {canUsePortal && actionMenu && activeActionMessage && createPortal((
+        <div
+          className="kalpa-message-action-portal fixed inset-0 pointer-events-auto"
+          style={{ zIndex: 2147483646, isolation: 'isolate' }}
+          onClick={() => setActionMenu(null)}
+          onPointerDown={(e) => e.stopPropagation()}
+          onTouchStart={(e) => e.stopPropagation()}
+        >
+          <div
+            className={`kalpa-message-action-menu fixed bg-white border border-slate-200 shadow-2xl overflow-hidden ${actionMenu.mobile ? 'rounded-2xl sm:rounded-3xl animate-in fade-in zoom-in-95 duration-150' : 'rounded-2xl'}`}
+            style={actionMenu.mobile ? {
+              left: `min(max(12px, ${Number(actionMenu.x || 12)}px), calc(100vw - ${(actionMenu.width || 256) + 12}px))`,
+              top: `min(max(12px, ${Number(actionMenu.y || 12)}px), calc(100vh - 340px))`,
+              width: actionMenu.width || 256,
+              maxWidth: 'calc(100vw - 24px)',
+              maxHeight: 'min(72vh, 340px)',
+              zIndex: 2147483647,
+              overflowY: 'auto',
+              boxShadow: '0 22px 60px rgba(15, 23, 42, 0.28)'
+            } : {
+              left: `min(max(12px, ${Number(actionMenu.x || 12)}px), calc(100vw - ${(actionMenu.width || 224) + 12}px))`,
+              top: `min(max(12px, ${Number(actionMenu.y || 12)}px), calc(100vh - 400px))`,
+              width: actionMenu.width || 224,
+              maxWidth: 'calc(100vw - 24px)',
+              maxHeight: 'min(80vh, 390px)',
+              zIndex: 2147483647,
+              overflowY: 'auto'
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
+          >
+            <div className="px-3 pt-3 pb-2 border-b border-slate-100 bg-white sticky top-0 z-10">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Message options</p>
+              <p className="text-xs font-black text-slate-700 truncate">{activeActionMessage.text || activeActionMessage.fileName || 'Chat message'}</p>
+            </div>
+            <div className="p-1.5">
+              <button type="button" onClick={() => replyToMessage(activeActionMessage)} className="w-full text-left px-3 py-2.5 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100 flex items-center gap-2"><span className="w-6 text-center">↩</span> Reply</button>
+              <button type="button" onClick={() => togglePinMessage(activeActionMessage)} className="w-full text-left px-3 py-2.5 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100 flex items-center gap-2"><span className="w-6 text-center">{isPinnedMessage(activeActionMessage) ? '★' : '☆'}</span> {isPinnedMessage(activeActionMessage) ? 'Unpin' : 'Pin'}</button>
+              <button type="button" onClick={(e) => openReactionMenu(e, activeActionMessage)} className="w-full text-left px-3 py-2.5 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100 flex items-center gap-2"><span className="w-6 text-center">😊</span> React</button>
+              <button type="button" onClick={() => forwardMessage(activeActionMessage)} className="w-full text-left px-3 py-2.5 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100 flex items-center gap-2"><span className="w-6 text-center">↗</span> Forward</button>
+              <button type="button" onClick={() => copyMessage(activeActionMessage)} className="w-full text-left px-3 py-2.5 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100 flex items-center gap-2"><span className="w-6 text-center">⧉</span> Copy</button>
+              {samePerson(activeActionMessage.sender, currentUser.name) && !activeActionMessage.deleted && <button type="button" onClick={() => editMessage(activeActionMessage)} className="w-full text-left px-3 py-2.5 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100 flex items-center gap-2"><span className="w-6 text-center">✎</span> Edit</button>}
+              <button type="button" onClick={() => deleteForMe(activeActionMessage)} className="w-full text-left px-3 py-2.5 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100 flex items-center gap-2"><span className="w-6 text-center">⊘</span> Hide for me</button>
+              {(samePerson(activeActionMessage.sender, currentUser.name) || currentUser.role === ROLES.ADMIN) && <button type="button" onClick={() => deleteForEveryone(activeActionMessage)} className="w-full text-left px-3 py-2.5 text-sm font-black text-red-600 rounded-xl hover:bg-red-50 active:bg-red-100 flex items-center gap-2"><span className="w-6 text-center">🗑</span> Delete for everyone</button>}
             </div>
           </div>
-        ) : (
-          <div className="fixed z-[99999] bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden w-56" style={{ left: actionMenu.x, top: actionMenu.y }} onClick={(e) => e.stopPropagation()}>
-            <button type="button" onClick={() => replyToMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">↩ Reply</button>
-            <button type="button" onClick={() => togglePinMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">{isPinnedMessage(activeActionMessage) ? '★ Unpin' : '☆ Pin'}</button>
-            <button type="button" onClick={(e) => openReactionMenu(e, activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">😊 React</button>
-            <button type="button" onClick={() => forwardMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">↗ Forward to...</button>
-            <button type="button" onClick={() => copyMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">⧉ Copy</button>
-            {samePerson(activeActionMessage.sender, currentUser.name) && !activeActionMessage.deleted && <button type="button" onClick={() => editMessage(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">✎ Edit</button>}
-            <button type="button" onClick={() => deleteForMe(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">Hide for me</button>
-            {(samePerson(activeActionMessage.sender, currentUser.name) || currentUser.role === ROLES.ADMIN) && <button type="button" onClick={() => deleteForEveryone(activeActionMessage)} className="w-full text-left px-4 py-3 text-sm font-black text-red-600 hover:bg-red-50">Delete for everyone</button>}
-          </div>
-        )
-      )}
+        </div>
+      ), document.body)}
 
-      {reactionMenu && activeReactionMessage && (
-        reactionMenu.mobile ? (
-          <div className="fixed inset-0 z-[100001] bg-slate-950/35 backdrop-blur-[2px] flex items-end justify-center sm:hidden" onClick={() => setReactionMenu(null)} style={{ paddingBottom: 'max(10px, env(safe-area-inset-bottom))' }}>
-            <div className="w-full max-w-md mx-2 bg-white rounded-t-3xl shadow-2xl border border-slate-100 overflow-hidden animate-in slide-in-from-bottom-3 duration-150" onClick={(e) => e.stopPropagation()}>
-              <div className="px-5 pt-3 pb-2 border-b border-slate-100">
-                <div className="w-12 h-1.5 rounded-full bg-slate-200 mx-auto mb-3" />
-                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">React to message</p>
-              </div>
-              <div className="p-3 grid grid-cols-6 gap-2">
-                {reactionEmojis.map(emoji => { const selected = Array.isArray((activeReactionMessage.reactions || {})[emoji]) && (activeReactionMessage.reactions || {})[emoji].some(n => samePerson(n, currentUser.name)); return <button type="button" key={emoji} onClick={() => toggleReaction(activeReactionMessage, emoji)} className={`min-h-[48px] rounded-2xl text-2xl flex items-center justify-center transition-all ${selected ? 'bg-indigo-100 ring-2 ring-indigo-200 scale-105' : 'bg-slate-50 active:bg-indigo-50'}`}>{emoji}</button>; })}
-              </div>
-              <div className="px-3 pb-3"><button type="button" onClick={() => setReactionMenu(null)} className="w-full min-h-[48px] rounded-2xl bg-slate-50 text-slate-500 font-black">Cancel</button></div>
+      {canUsePortal && reactionMenu && activeReactionMessage && createPortal((
+        <div
+          className="kalpa-reaction-portal fixed inset-0 pointer-events-auto"
+          style={{ zIndex: 2147483646, isolation: 'isolate' }}
+          onClick={() => setReactionMenu(null)}
+          onPointerDown={(e) => e.stopPropagation()}
+          onTouchStart={(e) => e.stopPropagation()}
+        >
+          <div
+            className={`kalpa-reaction-menu fixed bg-white border border-slate-200 shadow-2xl rounded-2xl overflow-hidden ${reactionMenu.mobile ? 'animate-in fade-in zoom-in-95 duration-150' : ''}`}
+            style={{
+              left: `min(max(12px, ${Number(reactionMenu.x || 12)}px), calc(100vw - ${(reactionMenu.width || 316) + 12}px))`,
+              top: `min(max(12px, ${Number(reactionMenu.y || 12)}px), calc(100vh - 168px))`,
+              width: reactionMenu.width || (reactionMenu.mobile ? 316 : 360),
+              maxWidth: 'calc(100vw - 24px)',
+              maxHeight: 'min(58vh, 168px)',
+              zIndex: 2147483647,
+              boxShadow: '0 22px 60px rgba(15, 23, 42, 0.28)'
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
+          >
+            <div className="px-3 pt-2 pb-1 border-b border-slate-100 bg-white">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">React</p>
+            </div>
+            <div className="p-2 flex items-center gap-1 overflow-x-auto" style={{ overscrollBehaviorX: 'contain', WebkitOverflowScrolling: 'touch' }}>
+              {reactionEmojis.map(emoji => {
+                const selected = Array.isArray((activeReactionMessage.reactions || {})[emoji]) && (activeReactionMessage.reactions || {})[emoji].some(n => samePerson(n, currentUser.name));
+                return (
+                  <button
+                    type="button"
+                    key={emoji}
+                    onClick={() => toggleReaction(activeReactionMessage, emoji)}
+                    className={`w-11 h-11 shrink-0 rounded-xl text-2xl flex items-center justify-center transition-all ${selected ? 'bg-indigo-100 ring-2 ring-indigo-200 scale-105' : 'hover:bg-indigo-50 active:bg-indigo-50 hover:scale-105'}`}
+                  >
+                    {emoji}
+                  </button>
+                );
+              })}
             </div>
           </div>
-        ) : (
-          <div className="fixed z-[99999] bg-white border border-slate-200 rounded-2xl shadow-2xl p-2 overflow-hidden" style={{ left: reactionMenu.x, top: reactionMenu.y, maxWidth: 'min(360px, calc(100vw - 24px))' }} onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center gap-1 overflow-x-auto pb-1" style={{ overscrollBehaviorX: 'contain' }}>{reactionEmojis.map(emoji => { const selected = Array.isArray((activeReactionMessage.reactions || {})[emoji]) && (activeReactionMessage.reactions || {})[emoji].some(n => samePerson(n, currentUser.name)); return <button type="button" key={emoji} onClick={() => toggleReaction(activeReactionMessage, emoji)} className={`w-10 h-10 shrink-0 rounded-xl text-xl flex items-center justify-center transition-all ${selected ? 'bg-indigo-100 ring-2 ring-indigo-200 scale-105' : 'hover:bg-indigo-50 hover:scale-105'}`}>{emoji}</button>; })}</div>
-          </div>
-        )
-      )}
+        </div>
+      ), document.body)}
 
       {latestUnreadMessage && !isOpen && (
         <button type="button" onClick={() => openConversationForMessage(latestUnreadMessage)} className="kalpa-chat-unread-preview mb-3 w-[320px] max-w-[calc(100vw-2rem)] text-left bg-white border border-indigo-100 rounded-2xl shadow-xl p-3 animate-in slide-in-from-bottom-2 hover:shadow-2xl transition-shadow">

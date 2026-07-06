@@ -1,5 +1,20 @@
 {
-  "audit": [],
+  "audit": [
+    {
+      "id": "3AKiFBOS",
+      "at": "2026-07-05T15:21:38.819Z",
+      "by": "Admin",
+      "action": "Case created",
+      "entity": "KD-LUC-2026-0022"
+    },
+    {
+      "id": "Ed3C343a",
+      "at": "2026-07-05T15:21:03.845Z",
+      "by": "Admin",
+      "action": "Case created",
+      "entity": "KD-LUC-2026-0022"
+    }
+  ],
   "cases": [
     {
       "assignedAt": null,
@@ -45,7 +60,7 @@
           "url": "/api/uploads/1783005515935-nrF45o-Chandra_kant_ATS.pdf"
         }
       ],
-      "taskName": "Colony Layout • SHAGUN SINGH • Varanasi",
+      "taskName": "Colony Layout \u2022 SHAGUN SINGH \u2022 Varanasi",
       "location": "Varanasi",
       "updatedAt": 1783005515691,
       "dueDate": null,
@@ -55,14 +70,26 @@
       "assignedTo": "Unassigned",
       "timeline": [
         {
-          "time": "7/2/2026, 8:48:35 PM",
+          "id": "1783005515691",
+          "type": "manual",
+          "title": "Case Created",
           "text": "Case Created",
-          "id": 1783005515691
+          "by": "System",
+          "at": "7/2/2026, 8:48:35 PM",
+          "time": "7/2/2026, 8:48:35 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "time": "7/2/2026, 8:48:35 PM",
+          "id": "1783005515692",
+          "type": "manual",
+          "title": "1 Source File(s) Attached",
           "text": "1 Source File(s) Attached",
-          "id": 1783005515692
+          "by": "System",
+          "at": "7/2/2026, 8:48:35 PM",
+          "time": "7/2/2026, 8:48:35 PM",
+          "remarks": "",
+          "meta": {}
         }
       ],
       "ledger": {},
@@ -105,13 +132,19 @@
       "assignmentVersion": 1782996462153,
       "timeline": [
         {
-          "id": 1782996462154,
+          "id": "1782996462154",
+          "type": "manual",
+          "title": "Case Created",
+          "text": "Case Created",
+          "by": "System",
+          "at": "7/2/2026, 6:17:42 PM",
           "time": "7/2/2026, 6:17:42 PM",
-          "text": "Case Created"
+          "remarks": "",
+          "meta": {}
         }
       ],
       "location": "ALD",
-      "taskName": "Key Route Map • SUDHIR • ALD",
+      "taskName": "Key Route Map \u2022 SUDHIR \u2022 ALD",
       "assignedBy": "Ashutosh Rai",
       "completedFiles": [],
       "status": "Lead Received",
@@ -130,7 +163,7 @@
       "reportSent": false,
       "assignmentVersion": null,
       "priority": "Normal",
-      "taskName": "Key Route + Map Estimate • SHAGUN SINGH • LUCKNOW",
+      "taskName": "Key Route + Map Estimate \u2022 SHAGUN SINGH \u2022 LUCKNOW",
       "bankerName": "",
       "reassignmentHistory": [],
       "createdAt": 1782990996250,
@@ -148,19 +181,37 @@
       "description": "",
       "timeline": [
         {
+          "id": "1782990996250",
+          "type": "manual",
+          "title": "Case Created",
           "text": "Case Created",
+          "by": "System",
+          "at": "02/07/2026, 16:46:36",
           "time": "02/07/2026, 16:46:36",
-          "id": 1782990996250
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782994113391,
-          "text": "Case edited by Shubham Upadhyay • Task ID changed LUCK-AB-SS-0001 → KNP-AB-SS-0001",
-          "time": "7/2/2026, 5:38:33 PM"
+          "id": "1782994113391",
+          "type": "manual",
+          "title": "Case edited by Shubham Upadhyay \u2022 Task ID changed LUCK-AB-SS-0001 \u2192 KNP-AB-SS-0001",
+          "text": "Case edited by Shubham Upadhyay \u2022 Task ID changed LUCK-AB-SS-0001 \u2192 KNP-AB-SS-0001",
+          "by": "System",
+          "at": "7/2/2026, 5:38:33 PM",
+          "time": "7/2/2026, 5:38:33 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782994127673,
-          "text": "Case edited by Shubham Upadhyay • Task ID changed KNP-AB-SS-0001 → LKO-AB-SS-0001",
-          "time": "7/2/2026, 5:38:47 PM"
+          "id": "1782994127673",
+          "type": "manual",
+          "title": "Case edited by Shubham Upadhyay \u2022 Task ID changed KNP-AB-SS-0001 \u2192 LKO-AB-SS-0001",
+          "text": "Case edited by Shubham Upadhyay \u2022 Task ID changed KNP-AB-SS-0001 \u2192 LKO-AB-SS-0001",
+          "by": "System",
+          "at": "7/2/2026, 5:38:47 PM",
+          "time": "7/2/2026, 5:38:47 PM",
+          "remarks": "",
+          "meta": {}
         }
       ],
       "ownership": {
@@ -271,7 +322,7 @@
       "reportSent": false,
       "assignmentVersion": null,
       "priority": "Normal",
-      "taskName": "Key Route + Map Estimate • SHAGUN SINGH • Kanpur",
+      "taskName": "Key Route + Map Estimate \u2022 SHAGUN SINGH \u2022 Kanpur",
       "bankerName": "",
       "reassignmentHistory": [],
       "createdAt": 1782990996250,
@@ -289,14 +340,26 @@
       "description": "",
       "timeline": [
         {
+          "id": "1782990996250",
+          "type": "manual",
+          "title": "Case Created",
           "text": "Case Created",
+          "by": "System",
+          "at": "02/07/2026, 16:46:36",
           "time": "02/07/2026, 16:46:36",
-          "id": 1782990996250
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782994113391,
-          "text": "Case edited by Shubham Upadhyay • Task ID changed LUCK-AB-SS-0001 → KNP-AB-SS-0001",
-          "time": "7/2/2026, 5:38:33 PM"
+          "id": "1782994113391",
+          "type": "manual",
+          "title": "Case edited by Shubham Upadhyay \u2022 Task ID changed LUCK-AB-SS-0001 \u2192 KNP-AB-SS-0001",
+          "text": "Case edited by Shubham Upadhyay \u2022 Task ID changed LUCK-AB-SS-0001 \u2192 KNP-AB-SS-0001",
+          "by": "System",
+          "at": "7/2/2026, 5:38:33 PM",
+          "time": "7/2/2026, 5:38:33 PM",
+          "remarks": "",
+          "meta": {}
         }
       ],
       "ownership": {
@@ -369,89 +432,191 @@
       "assignmentVersion": 1782979206329,
       "timeline": [
         {
-          "id": 1782979206330,
+          "id": "1782979206330",
+          "type": "manual",
+          "title": "Case Created",
           "text": "Case Created",
-          "time": "02/07/2026, 13:30:06"
+          "by": "System",
+          "at": "02/07/2026, 13:30:06",
+          "time": "02/07/2026, 13:30:06",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782979206331,
+          "id": "1782979206331",
+          "type": "manual",
+          "title": "2 Source File(s) Attached",
           "text": "2 Source File(s) Attached",
-          "time": "02/07/2026, 13:30:06"
+          "by": "System",
+          "at": "02/07/2026, 13:30:06",
+          "time": "02/07/2026, 13:30:06",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980750661.9705,
+          "id": "1782980750661.9705",
+          "type": "manual",
+          "title": "File uploaded: KEY PLAN FOR SHASHI SHANKAR.pdf",
           "text": "File uploaded: KEY PLAN FOR SHASHI SHANKAR.pdf",
-          "time": "02/07/2026, 13:55:50"
+          "by": "System",
+          "at": "02/07/2026, 13:55:50",
+          "time": "02/07/2026, 13:55:50",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980750664,
+          "id": "1782980750664",
+          "type": "manual",
+          "title": "Completed work file uploaded. Sent for internal review before final approval.",
           "text": "Completed work file uploaded. Sent for internal review before final approval.",
-          "time": "02/07/2026, 13:55:50"
+          "by": "System",
+          "at": "02/07/2026, 13:55:50",
+          "time": "02/07/2026, 13:55:50",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980761504.4424,
+          "id": "1782980761504.4424",
+          "type": "manual",
+          "title": "File uploaded: KEY PLAN FOR SHASHI SHANKAR.pdf",
           "text": "File uploaded: KEY PLAN FOR SHASHI SHANKAR.pdf",
-          "time": "02/07/2026, 13:56:01"
+          "by": "System",
+          "at": "02/07/2026, 13:56:01",
+          "time": "02/07/2026, 13:56:01",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980761507,
+          "id": "1782980761507",
+          "type": "manual",
+          "title": "Completed work file uploaded. Sent for internal review before final approval.",
           "text": "Completed work file uploaded. Sent for internal review before final approval.",
-          "time": "02/07/2026, 13:56:01"
+          "by": "System",
+          "at": "02/07/2026, 13:56:01",
+          "time": "02/07/2026, 13:56:01",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980773663,
+          "id": "1782980773663",
+          "type": "manual",
+          "title": "File deleted: KEY PLAN FOR SHASHI SHANKAR.pdf",
           "text": "File deleted: KEY PLAN FOR SHASHI SHANKAR.pdf",
-          "time": "02/07/2026, 13:56:13"
+          "by": "System",
+          "at": "02/07/2026, 13:56:13",
+          "time": "02/07/2026, 13:56:13",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980781119,
+          "id": "1782980781119",
+          "type": "manual",
+          "title": "Status reverted back to Drafting by Nilu Gupta",
           "text": "Status reverted back to Drafting by Nilu Gupta",
-          "time": "02/07/2026, 13:56:21"
+          "by": "System",
+          "at": "02/07/2026, 13:56:21",
+          "time": "02/07/2026, 13:56:21",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980783190,
+          "id": "1782980783190",
+          "type": "manual",
+          "title": "Status reverted back to Lead Received by Nilu Gupta",
           "text": "Status reverted back to Lead Received by Nilu Gupta",
-          "time": "02/07/2026, 13:56:23"
+          "by": "System",
+          "at": "02/07/2026, 13:56:23",
+          "time": "02/07/2026, 13:56:23",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980807687,
+          "id": "1782980807687",
+          "type": "manual",
+          "title": "File deleted: KEY PLAN FOR SHASHI SHANKAR.pdf",
           "text": "File deleted: KEY PLAN FOR SHASHI SHANKAR.pdf",
-          "time": "02/07/2026, 13:56:47"
+          "by": "System",
+          "at": "02/07/2026, 13:56:47",
+          "time": "02/07/2026, 13:56:47",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980817930.3687,
+          "id": "1782980817930.3687",
+          "type": "manual",
+          "title": "File uploaded: KEY PLAN FOR SHASHI SHANKAR.pdf",
           "text": "File uploaded: KEY PLAN FOR SHASHI SHANKAR.pdf",
-          "time": "02/07/2026, 13:56:57"
+          "by": "System",
+          "at": "02/07/2026, 13:56:57",
+          "time": "02/07/2026, 13:56:57",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980817933,
+          "id": "1782980817933",
+          "type": "manual",
+          "title": "Completed work file uploaded. Sent for internal review before final approval.",
           "text": "Completed work file uploaded. Sent for internal review before final approval.",
-          "time": "02/07/2026, 13:56:57"
+          "by": "System",
+          "at": "02/07/2026, 13:56:57",
+          "time": "02/07/2026, 13:56:57",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980943032,
-          "text": "Final file approved after internal review by Amit Kushwaha",
-          "time": "7/2/2026, 1:59:03 PM"
-        },
-        {
-          "id": 1782980947736,
+          "id": "1782981262596",
+          "type": "manual",
+          "title": "Completed file delivered via WhatsApp: KEY PLAN FOR SHASHI SHANKAR.pdf",
           "text": "Completed file delivered via WhatsApp: KEY PLAN FOR SHASHI SHANKAR.pdf",
-          "time": "7/2/2026, 1:59:07 PM"
+          "by": "System",
+          "at": "02/07/2026, 14:04:22",
+          "time": "02/07/2026, 14:04:22",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980979922,
-          "text": "Completed file delivered via WhatsApp: KEY PLAN FOR SHASHI SHANKAR.pdf",
-          "time": "7/2/2026, 1:59:39 PM"
-        },
-        {
-          "id": 1782981262596,
-          "text": "Completed file delivered via WhatsApp: KEY PLAN FOR SHASHI SHANKAR.pdf",
-          "time": "02/07/2026, 14:04:22"
-        },
-        {
-          "id": 1782993702242,
+          "id": "1782993702242",
+          "type": "manual",
+          "title": "Revision requested by Amit Kushwaha: STAMP HTA DO AND DIMENSION DAL DO",
           "text": "Revision requested by Amit Kushwaha: STAMP HTA DO AND DIMENSION DAL DO",
-          "time": "02/07/2026, 17:31:42"
+          "by": "System",
+          "at": "02/07/2026, 17:31:42",
+          "time": "02/07/2026, 17:31:42",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782980943032",
+          "type": "manual",
+          "title": "Final file approved after internal review by Amit Kushwaha",
+          "text": "Final file approved after internal review by Amit Kushwaha",
+          "by": "System",
+          "at": "7/2/2026, 1:59:03 PM",
+          "time": "7/2/2026, 1:59:03 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782980947736",
+          "type": "manual",
+          "title": "Completed file delivered via WhatsApp: KEY PLAN FOR SHASHI SHANKAR.pdf",
+          "text": "Completed file delivered via WhatsApp: KEY PLAN FOR SHASHI SHANKAR.pdf",
+          "by": "System",
+          "at": "7/2/2026, 1:59:07 PM",
+          "time": "7/2/2026, 1:59:07 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782980979922",
+          "type": "manual",
+          "title": "Completed file delivered via WhatsApp: KEY PLAN FOR SHASHI SHANKAR.pdf",
+          "text": "Completed file delivered via WhatsApp: KEY PLAN FOR SHASHI SHANKAR.pdf",
+          "by": "System",
+          "at": "7/2/2026, 1:59:39 PM",
+          "time": "7/2/2026, 1:59:39 PM",
+          "remarks": "",
+          "meta": {}
         }
       ],
       "type": "Key Route Map",
@@ -559,7 +724,7 @@
       "status": "Revision Pending",
       "estimate": 0,
       "createdBy": "Amit Kushwaha",
-      "taskName": "Key Route Map • ANISH • VARANASI",
+      "taskName": "Key Route Map \u2022 ANISH \u2022 VARANASI",
       "reassignmentHistory": [
         {
           "by": "Amit Kushwaha",
@@ -629,44 +794,92 @@
       "type": "Key Route + Map Estimate",
       "timeline": [
         {
-          "id": 1782983158994,
+          "id": "1782983158994",
+          "type": "manual",
+          "title": "Case Created",
           "text": "Case Created",
-          "time": "02/07/2026, 14:35:58"
+          "by": "System",
+          "at": "02/07/2026, 14:35:58",
+          "time": "02/07/2026, 14:35:58",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782983158995,
+          "id": "1782983158995",
+          "type": "manual",
+          "title": "1 Source File(s) Attached",
           "text": "1 Source File(s) Attached",
-          "time": "02/07/2026, 14:35:58"
+          "by": "System",
+          "at": "02/07/2026, 14:35:58",
+          "time": "02/07/2026, 14:35:58",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782983345081,
-          "text": "Status advanced to Drafting",
-          "time": "7/2/2026, 2:39:05 PM"
-        },
-        {
-          "id": 1782984706072.957,
-          "text": "File uploaded: EST-MR.MANISH PIPPAL.pdf",
-          "time": "7/2/2026, 3:01:46 PM"
-        },
-        {
-          "id": 1782984711957.197,
-          "text": "File uploaded: MAP-MR.MANISH PIPPAL.pdf",
-          "time": "7/2/2026, 3:01:51 PM"
-        },
-        {
-          "id": 1782984711962,
-          "text": "Completed work file uploaded. Sent for internal review before final approval.",
-          "time": "7/2/2026, 3:01:51 PM"
-        },
-        {
-          "id": 1782985526679,
+          "id": "1782985526679",
+          "type": "manual",
+          "title": "Status advanced to Completed",
           "text": "Status advanced to Completed",
-          "time": "02/07/2026, 15:15:26"
+          "by": "System",
+          "at": "02/07/2026, 15:15:26",
+          "time": "02/07/2026, 15:15:26",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782993091943,
+          "id": "1782983345081",
+          "type": "manual",
+          "title": "Status advanced to Drafting",
+          "text": "Status advanced to Drafting",
+          "by": "System",
+          "at": "7/2/2026, 2:39:05 PM",
+          "time": "7/2/2026, 2:39:05 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782984706072.957",
+          "type": "manual",
+          "title": "File uploaded: EST-MR.MANISH PIPPAL.pdf",
+          "text": "File uploaded: EST-MR.MANISH PIPPAL.pdf",
+          "by": "System",
+          "at": "7/2/2026, 3:01:46 PM",
+          "time": "7/2/2026, 3:01:46 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782984711957.197",
+          "type": "manual",
+          "title": "File uploaded: MAP-MR.MANISH PIPPAL.pdf",
+          "text": "File uploaded: MAP-MR.MANISH PIPPAL.pdf",
+          "by": "System",
+          "at": "7/2/2026, 3:01:51 PM",
+          "time": "7/2/2026, 3:01:51 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782984711962",
+          "type": "manual",
+          "title": "Completed work file uploaded. Sent for internal review before final approval.",
+          "text": "Completed work file uploaded. Sent for internal review before final approval.",
+          "by": "System",
+          "at": "7/2/2026, 3:01:51 PM",
+          "time": "7/2/2026, 3:01:51 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782993091943",
+          "type": "manual",
+          "title": "Revision requested by Ashutosh Rai: isko firse upload kro map est",
           "text": "Revision requested by Ashutosh Rai: isko firse upload kro map est",
-          "time": "7/2/2026, 5:21:31 PM"
+          "by": "System",
+          "at": "7/2/2026, 5:21:31 PM",
+          "time": "7/2/2026, 5:21:31 PM",
+          "remarks": "",
+          "meta": {}
         }
       ],
       "assignedBy": "Amit Kushwaha",
@@ -799,7 +1012,7 @@
       "priority": "Urgent",
       "notes": [],
       "location": "LUCKNOW",
-      "taskName": "Key Route + Map Estimate • RITU • LUCKNOW",
+      "taskName": "Key Route + Map Estimate \u2022 RITU \u2022 LUCKNOW",
       "reassignmentHistory": [
         {
           "by": "Amit Kushwaha",
@@ -843,7 +1056,7 @@
       "priority": "Normal",
       "notes": [],
       "location": "LUCKNOW",
-      "taskName": "Map Estimate • SONI • LUCKNOW",
+      "taskName": "Map Estimate \u2022 SONI \u2022 LUCKNOW",
       "assignedTo": "Nilu Gupta",
       "reassignmentHistory": [
         {
@@ -963,7 +1176,7 @@
         "reviewedBy": "Amit Kushwaha",
         "completedBy": "Amit Kushwaha"
       },
-      "description": "उत्तर रोड 25\nपश्चिम की तरफ अवनीश निषाद \nपूरब की तरफ रामपाल रावत \nदक्षिण की तरफ आरबी सिंह",
+      "description": "\u0909\u0924\u094d\u0924\u0930 \u0930\u094b\u0921 25\n\u092a\u0936\u094d\u091a\u093f\u092e \u0915\u0940 \u0924\u0930\u092b \u0905\u0935\u0928\u0940\u0936 \u0928\u093f\u0937\u093e\u0926 \n\u092a\u0942\u0930\u092c \u0915\u0940 \u0924\u0930\u092b \u0930\u093e\u092e\u092a\u093e\u0932 \u0930\u093e\u0935\u0924 \n\u0926\u0915\u094d\u0937\u093f\u0923 \u0915\u0940 \u0924\u0930\u092b \u0906\u0930\u092c\u0940 \u0938\u093f\u0902\u0939",
       "syncVersion": 1782992968338,
       "subTasks": [],
       "dueDate": null,
@@ -971,54 +1184,114 @@
       "type": "Map Estimate",
       "timeline": [
         {
-          "id": 1782990369050,
+          "id": "1782990369050",
+          "type": "manual",
+          "title": "Case Created",
           "text": "Case Created",
-          "time": "02/07/2026, 16:36:09"
+          "by": "System",
+          "at": "02/07/2026, 16:36:09",
+          "time": "02/07/2026, 16:36:09",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782990369051,
+          "id": "1782990369051",
+          "type": "manual",
+          "title": "1 Source File(s) Attached",
           "text": "1 Source File(s) Attached",
-          "time": "02/07/2026, 16:36:09"
+          "by": "System",
+          "at": "02/07/2026, 16:36:09",
+          "time": "02/07/2026, 16:36:09",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782990402483,
-          "text": "Drafting started by Ashutosh Rai",
-          "time": "7/2/2026, 4:36:42 PM"
-        },
-        {
-          "id": 1782990402483,
-          "text": "Status advanced to Drafting",
-          "time": "7/2/2026, 4:36:42 PM"
-        },
-        {
-          "id": 1782990834852.501,
+          "id": "1782990834852.501",
+          "type": "manual",
+          "title": "File uploaded: EST FOR ISHWAR CHAND.pdf",
           "text": "File uploaded: EST FOR ISHWAR CHAND.pdf",
-          "time": "02/07/2026, 16:43:54"
+          "by": "System",
+          "at": "02/07/2026, 16:43:54",
+          "time": "02/07/2026, 16:43:54",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782990870434.4912,
+          "id": "1782990870434.4912",
+          "type": "manual",
+          "title": "File uploaded: MAP FOR ISHWAR CHAND.pdf",
           "text": "File uploaded: MAP FOR ISHWAR CHAND.pdf",
-          "time": "02/07/2026, 16:44:30"
+          "by": "System",
+          "at": "02/07/2026, 16:44:30",
+          "time": "02/07/2026, 16:44:30",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782990870437,
+          "id": "1782990870437",
+          "type": "manual",
+          "title": "Completed work file uploaded. Sent for internal review before final approval.",
           "text": "Completed work file uploaded. Sent for internal review before final approval.",
-          "time": "02/07/2026, 16:44:30"
+          "by": "System",
+          "at": "02/07/2026, 16:44:30",
+          "time": "02/07/2026, 16:44:30",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782991087596,
+          "id": "1782991087596",
+          "type": "manual",
+          "title": "Final file approved after internal review by Amit Kushwaha",
           "text": "Final file approved after internal review by Amit Kushwaha",
-          "time": "02/07/2026, 16:48:07"
+          "by": "System",
+          "at": "02/07/2026, 16:48:07",
+          "time": "02/07/2026, 16:48:07",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782992928429,
-          "text": "Completed file delivered via WhatsApp: MAP FOR ISHWAR CHAND.pdf",
-          "time": "7/2/2026, 5:18:48 PM"
+          "id": "1782990402483",
+          "type": "manual",
+          "title": "Drafting started by Ashutosh Rai",
+          "text": "Drafting started by Ashutosh Rai",
+          "by": "System",
+          "at": "7/2/2026, 4:36:42 PM",
+          "time": "7/2/2026, 4:36:42 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782992968338,
+          "id": "1782990402483",
+          "type": "manual",
+          "title": "Status advanced to Drafting",
+          "text": "Status advanced to Drafting",
+          "by": "System",
+          "at": "7/2/2026, 4:36:42 PM",
+          "time": "7/2/2026, 4:36:42 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782992928429",
+          "type": "manual",
+          "title": "Completed file delivered via WhatsApp: MAP FOR ISHWAR CHAND.pdf",
           "text": "Completed file delivered via WhatsApp: MAP FOR ISHWAR CHAND.pdf",
-          "time": "7/2/2026, 5:19:28 PM"
+          "by": "System",
+          "at": "7/2/2026, 5:18:48 PM",
+          "time": "7/2/2026, 5:18:48 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782992968338",
+          "type": "manual",
+          "title": "Completed file delivered via WhatsApp: MAP FOR ISHWAR CHAND.pdf",
+          "text": "Completed file delivered via WhatsApp: MAP FOR ISHWAR CHAND.pdf",
+          "by": "System",
+          "at": "7/2/2026, 5:19:28 PM",
+          "time": "7/2/2026, 5:19:28 PM",
+          "remarks": "",
+          "meta": {}
         }
       ],
       "assignedBy": "Amit Kushwaha",
@@ -1070,7 +1343,7 @@
         }
       ],
       "assignedTo": "Khushbu Pandey",
-      "taskName": "Colony Layout • VIMAL • AGRA",
+      "taskName": "Colony Layout \u2022 VIMAL \u2022 AGRA",
       "notes": [],
       "location": "AGRA",
       "ledger": {},
@@ -1154,29 +1427,59 @@
       "type": "Colony Layout",
       "timeline": [
         {
-          "id": 1782991958940,
+          "id": "1782991958940",
+          "type": "manual",
+          "title": "Case Created",
           "text": "Case Created",
-          "time": "02/07/2026, 17:02:38"
+          "by": "System",
+          "at": "02/07/2026, 17:02:38",
+          "time": "02/07/2026, 17:02:38",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782991958941,
+          "id": "1782991958941",
+          "type": "manual",
+          "title": "2 Source File(s) Attached",
           "text": "2 Source File(s) Attached",
-          "time": "02/07/2026, 17:02:38"
+          "by": "System",
+          "at": "02/07/2026, 17:02:38",
+          "time": "02/07/2026, 17:02:38",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782992206832.5762,
+          "id": "1782992206832.5762",
+          "type": "manual",
+          "title": "File uploaded: WhatsApp Image 2026-07-02 at 5.04.32 PM.jpeg",
           "text": "File uploaded: WhatsApp Image 2026-07-02 at 5.04.32 PM.jpeg",
-          "time": "02/07/2026, 17:06:46"
+          "by": "System",
+          "at": "02/07/2026, 17:06:46",
+          "time": "02/07/2026, 17:06:46",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782992606006,
+          "id": "1782992606006",
+          "type": "manual",
+          "title": "Drafting started by Khushbu Pandey",
           "text": "Drafting started by Khushbu Pandey",
-          "time": "7/2/2026, 5:13:26 PM"
+          "by": "System",
+          "at": "7/2/2026, 5:13:26 PM",
+          "time": "7/2/2026, 5:13:26 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782992606006,
+          "id": "1782992606006",
+          "type": "manual",
+          "title": "Status advanced to Drafting",
           "text": "Status advanced to Drafting",
-          "time": "7/2/2026, 5:13:26 PM"
+          "by": "System",
+          "at": "7/2/2026, 5:13:26 PM",
+          "time": "7/2/2026, 5:13:26 PM",
+          "remarks": "",
+          "meta": {}
         }
       ],
       "assignmentVersion": 1782991958940,
@@ -1197,69 +1500,147 @@
       "type": "Floor Plan",
       "timeline": [
         {
-          "id": 1782983456085,
+          "id": "1782983456085",
+          "type": "manual",
+          "title": "Case Created",
           "text": "Case Created",
-          "time": "02/07/2026, 14:40:56"
+          "by": "System",
+          "at": "02/07/2026, 14:40:56",
+          "time": "02/07/2026, 14:40:56",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782983456086,
+          "id": "1782983456086",
+          "type": "manual",
+          "title": "4 Source File(s) Attached",
           "text": "4 Source File(s) Attached",
-          "time": "02/07/2026, 14:40:56"
+          "by": "System",
+          "at": "02/07/2026, 14:40:56",
+          "time": "02/07/2026, 14:40:56",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782983493312,
+          "id": "1782983493312",
+          "type": "manual",
+          "title": "Task re-assigned to Nilu Gupta by Amit Kushwaha",
           "text": "Task re-assigned to Nilu Gupta by Amit Kushwaha",
-          "time": "02/07/2026, 14:41:33"
+          "by": "System",
+          "at": "02/07/2026, 14:41:33",
+          "time": "02/07/2026, 14:41:33",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782990018470,
+          "id": "1782990018470",
+          "type": "manual",
+          "title": "Status advanced to Drafting",
           "text": "Status advanced to Drafting",
-          "time": "02/07/2026, 16:30:18"
+          "by": "System",
+          "at": "02/07/2026, 16:30:18",
+          "time": "02/07/2026, 16:30:18",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782991387628.5737,
+          "id": "1782991387628.5737",
+          "type": "manual",
+          "title": "File uploaded: FLOOR PLAN FOR GAURAV RAMANI.pdf",
           "text": "File uploaded: FLOOR PLAN FOR GAURAV RAMANI.pdf",
-          "time": "02/07/2026, 16:53:07"
+          "by": "System",
+          "at": "02/07/2026, 16:53:07",
+          "time": "02/07/2026, 16:53:07",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782991387631,
+          "id": "1782991387631",
+          "type": "manual",
+          "title": "Completed work file uploaded. Sent for internal review before final approval.",
           "text": "Completed work file uploaded. Sent for internal review before final approval.",
-          "time": "02/07/2026, 16:53:07"
+          "by": "System",
+          "at": "02/07/2026, 16:53:07",
+          "time": "02/07/2026, 16:53:07",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782991394084,
+          "id": "1782991394084",
+          "type": "manual",
+          "title": "Status reverted back to Drafting by Nilu Gupta",
           "text": "Status reverted back to Drafting by Nilu Gupta",
-          "time": "02/07/2026, 16:53:14"
+          "by": "System",
+          "at": "02/07/2026, 16:53:14",
+          "time": "02/07/2026, 16:53:14",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782991395956,
+          "id": "1782991395956",
+          "type": "manual",
+          "title": "Status reverted back to Lead Received by Nilu Gupta",
           "text": "Status reverted back to Lead Received by Nilu Gupta",
-          "time": "02/07/2026, 16:53:15"
+          "by": "System",
+          "at": "02/07/2026, 16:53:15",
+          "time": "02/07/2026, 16:53:15",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782991643325.8367,
+          "id": "1782991643325.8367",
+          "type": "manual",
+          "title": "File uploaded: FLOOR PLAN FOR GAURAV RAMANI.pdf",
           "text": "File uploaded: FLOOR PLAN FOR GAURAV RAMANI.pdf",
-          "time": "02/07/2026, 16:57:23"
+          "by": "System",
+          "at": "02/07/2026, 16:57:23",
+          "time": "02/07/2026, 16:57:23",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782991643328,
+          "id": "1782991643328",
+          "type": "manual",
+          "title": "Completed work file uploaded. Sent for internal review before final approval.",
           "text": "Completed work file uploaded. Sent for internal review before final approval.",
-          "time": "02/07/2026, 16:57:23"
+          "by": "System",
+          "at": "02/07/2026, 16:57:23",
+          "time": "02/07/2026, 16:57:23",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782991648954,
+          "id": "1782991648954",
+          "type": "manual",
+          "title": "Status reverted back to Drafting by Nilu Gupta",
           "text": "Status reverted back to Drafting by Nilu Gupta",
-          "time": "02/07/2026, 16:57:28"
+          "by": "System",
+          "at": "02/07/2026, 16:57:28",
+          "time": "02/07/2026, 16:57:28",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782991651810,
+          "id": "1782991651810",
+          "type": "manual",
+          "title": "Status reverted back to Lead Received by Nilu Gupta",
           "text": "Status reverted back to Lead Received by Nilu Gupta",
-          "time": "02/07/2026, 16:57:31"
+          "by": "System",
+          "at": "02/07/2026, 16:57:31",
+          "time": "02/07/2026, 16:57:31",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782991661091,
+          "id": "1782991661091",
+          "type": "manual",
+          "title": "File deleted: FLOOR PLAN FOR GAURAV RAMANI.pdf",
           "text": "File deleted: FLOOR PLAN FOR GAURAV RAMANI.pdf",
-          "time": "02/07/2026, 16:57:41"
+          "by": "System",
+          "at": "02/07/2026, 16:57:41",
+          "time": "02/07/2026, 16:57:41",
+          "remarks": "",
+          "meta": {}
         }
       ],
       "assignedBy": "Amit Kushwaha",
@@ -1397,7 +1778,7 @@
       "priority": "Normal",
       "notes": [],
       "location": "KANPUR",
-      "taskName": "Floor Plan • SHUBHAM  • KANPUR",
+      "taskName": "Floor Plan \u2022 SHUBHAM  \u2022 KANPUR",
       "reassignmentHistory": [
         {
           "by": "Amit Kushwaha",
@@ -1456,89 +1837,191 @@
       "assignmentVersion": 1782989454268,
       "timeline": [
         {
-          "id": 1782989454268,
-          "text": "Case Created",
-          "time": "02/07/2026, 16:20:54"
-        },
-        {
-          "id": 1782989454269,
-          "text": "1 Source File(s) Attached",
-          "time": "02/07/2026, 16:20:54"
-        },
-        {
-          "id": 1782989585381,
+          "id": "1782989585381",
+          "type": "manual",
+          "title": "Status advanced to Drafting",
           "text": "Status advanced to Drafting",
-          "time": "02/07/2026, 03:53:05"
+          "by": "System",
+          "at": "02/07/2026, 03:53:05",
+          "time": "02/07/2026, 03:53:05",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782990131536.4568,
+          "id": "1782990131536.4568",
+          "type": "manual",
+          "title": "File uploaded: EST FOR MR.RAJNISH KUMAR OJHA JI.pdf",
           "text": "File uploaded: EST FOR MR.RAJNISH KUMAR OJHA JI.pdf",
-          "time": "02/07/2026, 04:02:11"
+          "by": "System",
+          "at": "02/07/2026, 04:02:11",
+          "time": "02/07/2026, 04:02:11",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782990132851.9612,
+          "id": "1782990132851.9612",
+          "type": "manual",
+          "title": "File uploaded: PLAN FOR MR.RAJNISH KUMAR OJHA JI.pdf",
           "text": "File uploaded: PLAN FOR MR.RAJNISH KUMAR OJHA JI.pdf",
-          "time": "02/07/2026, 04:02:12"
+          "by": "System",
+          "at": "02/07/2026, 04:02:12",
+          "time": "02/07/2026, 04:02:12",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782990132854,
+          "id": "1782990132854",
+          "type": "manual",
+          "title": "Completed file uploaded. Task marked Completed.",
           "text": "Completed file uploaded. Task marked Completed.",
-          "time": "02/07/2026, 04:02:12"
+          "by": "System",
+          "at": "02/07/2026, 04:02:12",
+          "time": "02/07/2026, 04:02:12",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782990231822,
+          "id": "1782990231822",
+          "type": "manual",
+          "title": "Status reverted back to Internal Review by Waqar",
           "text": "Status reverted back to Internal Review by Waqar",
-          "time": "02/07/2026, 04:03:51"
+          "by": "System",
+          "at": "02/07/2026, 04:03:51",
+          "time": "02/07/2026, 04:03:51",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782990734211,
-          "text": "Final file approved after internal review by Amit Kushwaha",
-          "time": "02/07/2026, 16:42:14"
-        },
-        {
-          "id": 1782990763684,
-          "text": "Revision requested by Amit Kushwaha: MAP ME STAMP LAGA DO",
-          "time": "02/07/2026, 16:42:43"
-        },
-        {
-          "id": 1782990804964,
-          "text": "File deleted: PLAN FOR MR.RAJNISH KUMAR OJHA JI.pdf",
-          "time": "02/07/2026, 16:43:24"
-        },
-        {
-          "id": 1782990826971,
-          "text": "File deleted: EST FOR MR.RAJNISH KUMAR OJHA JI.pdf",
-          "time": "02/07/2026, 16:43:46"
-        },
-        {
-          "id": 1782990868712,
+          "id": "1782990868712",
+          "type": "manual",
+          "title": "Revision/Sub-task Added: LAGI H\n",
           "text": "Revision/Sub-task Added: LAGI H\n",
-          "time": "02/07/2026, 04:14:28"
+          "by": "System",
+          "at": "02/07/2026, 04:14:28",
+          "time": "02/07/2026, 04:14:28",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782990917668.4202,
+          "id": "1782990917668.4202",
+          "type": "manual",
+          "title": "File uploaded: EST FOR MR.RAJNISH KUMAR OJHA JI.pdf",
           "text": "File uploaded: EST FOR MR.RAJNISH KUMAR OJHA JI.pdf",
-          "time": "02/07/2026, 04:15:17"
+          "by": "System",
+          "at": "02/07/2026, 04:15:17",
+          "time": "02/07/2026, 04:15:17",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782990918996.3977,
+          "id": "1782990918996.3977",
+          "type": "manual",
+          "title": "File uploaded: PLAN FOR MR.RAJNISH KUMAR OJHA JI.pdf",
           "text": "File uploaded: PLAN FOR MR.RAJNISH KUMAR OJHA JI.pdf",
-          "time": "02/07/2026, 04:15:18"
+          "by": "System",
+          "at": "02/07/2026, 04:15:18",
+          "time": "02/07/2026, 04:15:18",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782990918999,
+          "id": "1782990918999",
+          "type": "manual",
+          "title": "Completed file uploaded. Task marked Completed.",
           "text": "Completed file uploaded. Task marked Completed.",
-          "time": "02/07/2026, 04:15:18"
+          "by": "System",
+          "at": "02/07/2026, 04:15:18",
+          "time": "02/07/2026, 04:15:18",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782991011637,
+          "id": "1782991011637",
+          "type": "manual",
+          "title": "Status reverted back to Internal Review by Waqar",
           "text": "Status reverted back to Internal Review by Waqar",
-          "time": "02/07/2026, 04:16:51"
+          "by": "System",
+          "at": "02/07/2026, 04:16:51",
+          "time": "02/07/2026, 04:16:51",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782991065956,
+          "id": "1782989454268",
+          "type": "manual",
+          "title": "Case Created",
+          "text": "Case Created",
+          "by": "System",
+          "at": "02/07/2026, 16:20:54",
+          "time": "02/07/2026, 16:20:54",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782989454269",
+          "type": "manual",
+          "title": "1 Source File(s) Attached",
+          "text": "1 Source File(s) Attached",
+          "by": "System",
+          "at": "02/07/2026, 16:20:54",
+          "time": "02/07/2026, 16:20:54",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782990734211",
+          "type": "manual",
+          "title": "Final file approved after internal review by Amit Kushwaha",
           "text": "Final file approved after internal review by Amit Kushwaha",
-          "time": "02/07/2026, 16:47:45"
+          "by": "System",
+          "at": "02/07/2026, 16:42:14",
+          "time": "02/07/2026, 16:42:14",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782990763684",
+          "type": "manual",
+          "title": "Revision requested by Amit Kushwaha: MAP ME STAMP LAGA DO",
+          "text": "Revision requested by Amit Kushwaha: MAP ME STAMP LAGA DO",
+          "by": "System",
+          "at": "02/07/2026, 16:42:43",
+          "time": "02/07/2026, 16:42:43",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782990804964",
+          "type": "manual",
+          "title": "File deleted: PLAN FOR MR.RAJNISH KUMAR OJHA JI.pdf",
+          "text": "File deleted: PLAN FOR MR.RAJNISH KUMAR OJHA JI.pdf",
+          "by": "System",
+          "at": "02/07/2026, 16:43:24",
+          "time": "02/07/2026, 16:43:24",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782990826971",
+          "type": "manual",
+          "title": "File deleted: EST FOR MR.RAJNISH KUMAR OJHA JI.pdf",
+          "text": "File deleted: EST FOR MR.RAJNISH KUMAR OJHA JI.pdf",
+          "by": "System",
+          "at": "02/07/2026, 16:43:46",
+          "time": "02/07/2026, 16:43:46",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782991065956",
+          "type": "manual",
+          "title": "Final file approved after internal review by Amit Kushwaha",
+          "text": "Final file approved after internal review by Amit Kushwaha",
+          "by": "System",
+          "at": "02/07/2026, 16:47:45",
+          "time": "02/07/2026, 16:47:45",
+          "remarks": "",
+          "meta": {}
         }
       ],
       "type": "Map Estimate",
@@ -1551,7 +2034,7 @@
       "createdAt": 1782989454268,
       "location": "LUCKNOW",
       "notes": [],
-      "taskName": "Map Estimate • SHAGUN MISHRA • LUCKNOW",
+      "taskName": "Map Estimate \u2022 SHAGUN MISHRA \u2022 LUCKNOW",
       "assignedTo": "Waqar",
       "reassignmentHistory": [
         {
@@ -1694,7 +2177,7 @@
       "reportSent": false,
       "assignmentVersion": null,
       "priority": "Normal",
-      "taskName": "Key Route + Map Estimate • SHAGUN SINGH • LUCKNOW",
+      "taskName": "Key Route + Map Estimate \u2022 SHAGUN SINGH \u2022 LUCKNOW",
       "bankerName": "",
       "reassignmentHistory": [],
       "createdAt": 1782990996250,
@@ -1712,9 +2195,15 @@
       "description": "",
       "timeline": [
         {
+          "id": "1782990996250",
+          "type": "manual",
+          "title": "Case Created",
           "text": "Case Created",
+          "by": "System",
+          "at": "02/07/2026, 16:46:36",
           "time": "02/07/2026, 16:46:36",
-          "id": 1782990996250
+          "remarks": "",
+          "meta": {}
         }
       ],
       "ownership": {
@@ -1840,7 +2329,7 @@
       "createdAt": 1782974969798,
       "location": "RAIBARELI",
       "notes": [],
-      "taskName": "Map Estimate • DHEERAJ • RAIBARELI",
+      "taskName": "Map Estimate \u2022 DHEERAJ \u2022 RAIBARELI",
       "reassignmentHistory": [
         {
           "by": "Amit Kushwaha",
@@ -1856,39 +2345,81 @@
       "assignmentVersion": 1782974986042,
       "timeline": [
         {
-          "id": 1782974969798,
+          "id": "1782974969798",
+          "type": "manual",
+          "title": "Case Created",
           "text": "Case Created",
-          "time": "02/07/2026, 12:19:29"
+          "by": "System",
+          "at": "02/07/2026, 12:19:29",
+          "time": "02/07/2026, 12:19:29",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782974969799,
+          "id": "1782974969799",
+          "type": "manual",
+          "title": "1 Source File(s) Attached",
           "text": "1 Source File(s) Attached",
-          "time": "02/07/2026, 12:19:29"
+          "by": "System",
+          "at": "02/07/2026, 12:19:29",
+          "time": "02/07/2026, 12:19:29",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782974986041,
+          "id": "1782974986041",
+          "type": "manual",
+          "title": "Task re-assigned to Nilu Gupta by Amit Kushwaha",
           "text": "Task re-assigned to Nilu Gupta by Amit Kushwaha",
-          "time": "02/07/2026, 12:19:46"
+          "by": "System",
+          "at": "02/07/2026, 12:19:46",
+          "time": "02/07/2026, 12:19:46",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782976108572.2876,
+          "id": "1782976108572.2876",
+          "type": "manual",
+          "title": "File uploaded: EST FOR ARVIND KUMAR TIWARI.pdf",
           "text": "File uploaded: EST FOR ARVIND KUMAR TIWARI.pdf",
-          "time": "02/07/2026, 12:38:28"
+          "by": "System",
+          "at": "02/07/2026, 12:38:28",
+          "time": "02/07/2026, 12:38:28",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782976111982.9841,
+          "id": "1782976111982.9841",
+          "type": "manual",
+          "title": "File uploaded: MAP FOR ARVIND KUMAR TIWARI.pdf",
           "text": "File uploaded: MAP FOR ARVIND KUMAR TIWARI.pdf",
-          "time": "02/07/2026, 12:38:31"
+          "by": "System",
+          "at": "02/07/2026, 12:38:31",
+          "time": "02/07/2026, 12:38:31",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782976111985,
+          "id": "1782976111985",
+          "type": "manual",
+          "title": "Completed file uploaded. Task marked Completed.",
           "text": "Completed file uploaded. Task marked Completed.",
-          "time": "02/07/2026, 12:38:31"
+          "by": "System",
+          "at": "02/07/2026, 12:38:31",
+          "time": "02/07/2026, 12:38:31",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782989770950,
+          "id": "1782989770950",
+          "type": "manual",
+          "title": "Completed file delivered via WhatsApp: MAP FOR ARVIND KUMAR TIWARI.pdf",
           "text": "Completed file delivered via WhatsApp: MAP FOR ARVIND KUMAR TIWARI.pdf",
-          "time": "02/07/2026, 16:26:10"
+          "by": "System",
+          "at": "02/07/2026, 16:26:10",
+          "time": "02/07/2026, 16:26:10",
+          "remarks": "",
+          "meta": {}
         }
       ],
       "type": "Map Estimate",
@@ -1948,154 +2479,334 @@
       "type": "Map Estimate",
       "timeline": [
         {
-          "id": 1782969086419,
+          "id": "1782969086419",
+          "type": "manual",
+          "title": "Case Created",
           "text": "Case Created",
-          "time": "02/07/2026, 10:41:26"
+          "by": "System",
+          "at": "02/07/2026, 10:41:26",
+          "time": "02/07/2026, 10:41:26",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782969086420,
+          "id": "1782969086420",
+          "type": "manual",
+          "title": "3 Source File(s) Attached",
           "text": "3 Source File(s) Attached",
-          "time": "02/07/2026, 10:41:26"
+          "by": "System",
+          "at": "02/07/2026, 10:41:26",
+          "time": "02/07/2026, 10:41:26",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782971115101.197,
-          "text": "File uploaded: EST=MR.MANOJ SAINI.pdf",
-          "time": "7/2/2026, 11:15:15 AM"
-        },
-        {
-          "id": 1782971115104,
-          "text": "Completed file uploaded. Task marked Completed.",
-          "time": "7/2/2026, 11:15:15 AM"
-        },
-        {
-          "id": 1782971129455,
-          "text": "Status reverted back to Internal Review by Khushbu Pandey",
-          "time": "7/2/2026, 11:15:29 AM"
-        },
-        {
-          "id": 1782971166606.1353,
-          "text": "File uploaded: MAP=MR.MANOJ SAINI.pdf",
-          "time": "7/2/2026, 11:16:06 AM"
-        },
-        {
-          "id": 1782971177441.3386,
-          "text": "File uploaded: EST=MR.MANOJ SAINI.pdf",
-          "time": "7/2/2026, 11:16:17 AM"
-        },
-        {
-          "id": 1782971177444,
-          "text": "Completed file uploaded. Task marked Completed.",
-          "time": "7/2/2026, 11:16:17 AM"
-        },
-        {
-          "id": 1782971570021,
+          "id": "1782971570021",
+          "type": "manual",
+          "title": "Revision/Sub-task Added: EAST ME LAND OF GRAM SAMAJ KAR DO",
           "text": "Revision/Sub-task Added: EAST ME LAND OF GRAM SAMAJ KAR DO",
-          "time": "02/07/2026, 11:22:50"
+          "by": "System",
+          "at": "02/07/2026, 11:22:50",
+          "time": "02/07/2026, 11:22:50",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782971924067,
-          "text": "Status advanced to Completed",
-          "time": "7/2/2026, 11:28:44 AM"
-        },
-        {
-          "id": 1782971930642,
-          "text": "Status reverted back to Internal Review by Khushbu Pandey",
-          "time": "7/2/2026, 11:28:50 AM"
-        },
-        {
-          "id": 1782971979151.1946,
-          "text": "File uploaded: MAP-=MR.MANOJ SAIN.pdf",
-          "time": "7/2/2026, 11:29:39 AM"
-        },
-        {
-          "id": 1782971979154,
-          "text": "Completed file uploaded. Task marked Completed.",
-          "time": "7/2/2026, 11:29:39 AM"
-        },
-        {
-          "id": 1782972603381,
+          "id": "1782972603381",
+          "type": "manual",
+          "title": "Completed file delivered via WhatsApp: MAP-=MR.MANOJ SAIN.pdf",
           "text": "Completed file delivered via WhatsApp: MAP-=MR.MANOJ SAIN.pdf",
-          "time": "02/07/2026, 11:40:03"
+          "by": "System",
+          "at": "02/07/2026, 11:40:03",
+          "time": "02/07/2026, 11:40:03",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782972719446,
+          "id": "1782972719446",
+          "type": "manual",
+          "title": "Completed file delivered via WhatsApp: MAP-=MR.MANOJ SAIN.pdf",
           "text": "Completed file delivered via WhatsApp: MAP-=MR.MANOJ SAIN.pdf",
-          "time": "02/07/2026, 11:41:59"
+          "by": "System",
+          "at": "02/07/2026, 11:41:59",
+          "time": "02/07/2026, 11:41:59",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782972740124,
+          "id": "1782972740124",
+          "type": "manual",
+          "title": "Completed file delivered via WhatsApp: MAP-=MR.MANOJ SAIN.pdf",
           "text": "Completed file delivered via WhatsApp: MAP-=MR.MANOJ SAIN.pdf",
-          "time": "02/07/2026, 11:42:20"
+          "by": "System",
+          "at": "02/07/2026, 11:42:20",
+          "time": "02/07/2026, 11:42:20",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782972760087,
+          "id": "1782972760087",
+          "type": "manual",
+          "title": "Completed file delivered via WhatsApp: MAP-=MR.MANOJ SAIN.pdf",
           "text": "Completed file delivered via WhatsApp: MAP-=MR.MANOJ SAIN.pdf",
-          "time": "02/07/2026, 11:42:40"
+          "by": "System",
+          "at": "02/07/2026, 11:42:40",
+          "time": "02/07/2026, 11:42:40",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782972927676,
+          "id": "1782972927676",
+          "type": "manual",
+          "title": "Completed file delivered via WhatsApp: MAP-=MR.MANOJ SAIN.pdf",
           "text": "Completed file delivered via WhatsApp: MAP-=MR.MANOJ SAIN.pdf",
-          "time": "02/07/2026, 11:45:27"
+          "by": "System",
+          "at": "02/07/2026, 11:45:27",
+          "time": "02/07/2026, 11:45:27",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782973073022,
+          "id": "1782973073022",
+          "type": "manual",
+          "title": "File deleted: EST=MR.MANOJ SAINI.pdf",
           "text": "File deleted: EST=MR.MANOJ SAINI.pdf",
-          "time": "02/07/2026, 11:47:53"
+          "by": "System",
+          "at": "02/07/2026, 11:47:53",
+          "time": "02/07/2026, 11:47:53",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782973082802,
+          "id": "1782973082802",
+          "type": "manual",
+          "title": "File deleted: MAP-=MR.MANOJ SAIN.pdf",
           "text": "File deleted: MAP-=MR.MANOJ SAIN.pdf",
-          "time": "02/07/2026, 11:48:02"
+          "by": "System",
+          "at": "02/07/2026, 11:48:02",
+          "time": "02/07/2026, 11:48:02",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782973155439,
+          "id": "1782973155439",
+          "type": "manual",
+          "title": "Completed file delivered via WhatsApp: MAP=MR.MANOJ SAINI.pdf",
           "text": "Completed file delivered via WhatsApp: MAP=MR.MANOJ SAINI.pdf",
-          "time": "02/07/2026, 11:49:15"
+          "by": "System",
+          "at": "02/07/2026, 11:49:15",
+          "time": "02/07/2026, 11:49:15",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782973208867,
+          "id": "1782973208867",
+          "type": "manual",
+          "title": "Completed file delivered via WhatsApp: MAP=MR.MANOJ SAINI.pdf",
           "text": "Completed file delivered via WhatsApp: MAP=MR.MANOJ SAINI.pdf",
-          "time": "02/07/2026, 11:50:08"
+          "by": "System",
+          "at": "02/07/2026, 11:50:08",
+          "time": "02/07/2026, 11:50:08",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782976661632,
+          "id": "1782989657721",
+          "type": "manual",
+          "title": "Status reverted back to Internal Review by Amit Kushwaha",
+          "text": "Status reverted back to Internal Review by Amit Kushwaha",
+          "by": "System",
+          "at": "02/07/2026, 16:24:17",
+          "time": "02/07/2026, 16:24:17",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782989665675",
+          "type": "manual",
+          "title": "Status advanced to Completed",
+          "text": "Status advanced to Completed",
+          "by": "System",
+          "at": "02/07/2026, 16:24:25",
+          "time": "02/07/2026, 16:24:25",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782989669514",
+          "type": "manual",
+          "title": "Status reverted back to Internal Review by Amit Kushwaha",
+          "text": "Status reverted back to Internal Review by Amit Kushwaha",
+          "by": "System",
+          "at": "02/07/2026, 16:24:29",
+          "time": "02/07/2026, 16:24:29",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782989673299",
+          "type": "manual",
+          "title": "Status advanced to Completed",
+          "text": "Status advanced to Completed",
+          "by": "System",
+          "at": "02/07/2026, 16:24:33",
+          "time": "02/07/2026, 16:24:33",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782971115101.197",
+          "type": "manual",
+          "title": "File uploaded: EST=MR.MANOJ SAINI.pdf",
+          "text": "File uploaded: EST=MR.MANOJ SAINI.pdf",
+          "by": "System",
+          "at": "7/2/2026, 11:15:15 AM",
+          "time": "7/2/2026, 11:15:15 AM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782971115104",
+          "type": "manual",
+          "title": "Completed file uploaded. Task marked Completed.",
+          "text": "Completed file uploaded. Task marked Completed.",
+          "by": "System",
+          "at": "7/2/2026, 11:15:15 AM",
+          "time": "7/2/2026, 11:15:15 AM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782971129455",
+          "type": "manual",
+          "title": "Status reverted back to Internal Review by Khushbu Pandey",
           "text": "Status reverted back to Internal Review by Khushbu Pandey",
-          "time": "7/2/2026, 12:47:41 PM"
+          "by": "System",
+          "at": "7/2/2026, 11:15:29 AM",
+          "time": "7/2/2026, 11:15:29 AM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782976683493,
+          "id": "1782971166606.1353",
+          "type": "manual",
+          "title": "File uploaded: MAP=MR.MANOJ SAINI.pdf",
+          "text": "File uploaded: MAP=MR.MANOJ SAINI.pdf",
+          "by": "System",
+          "at": "7/2/2026, 11:16:06 AM",
+          "time": "7/2/2026, 11:16:06 AM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782971177441.3386",
+          "type": "manual",
+          "title": "File uploaded: EST=MR.MANOJ SAINI.pdf",
+          "text": "File uploaded: EST=MR.MANOJ SAINI.pdf",
+          "by": "System",
+          "at": "7/2/2026, 11:16:17 AM",
+          "time": "7/2/2026, 11:16:17 AM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782971177444",
+          "type": "manual",
+          "title": "Completed file uploaded. Task marked Completed.",
+          "text": "Completed file uploaded. Task marked Completed.",
+          "by": "System",
+          "at": "7/2/2026, 11:16:17 AM",
+          "time": "7/2/2026, 11:16:17 AM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782971924067",
+          "type": "manual",
+          "title": "Status advanced to Completed",
           "text": "Status advanced to Completed",
-          "time": "7/2/2026, 12:48:03 PM"
+          "by": "System",
+          "at": "7/2/2026, 11:28:44 AM",
+          "time": "7/2/2026, 11:28:44 AM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782982706758,
+          "id": "1782971930642",
+          "type": "manual",
+          "title": "Status reverted back to Internal Review by Khushbu Pandey",
+          "text": "Status reverted back to Internal Review by Khushbu Pandey",
+          "by": "System",
+          "at": "7/2/2026, 11:28:50 AM",
+          "time": "7/2/2026, 11:28:50 AM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782971979151.1946",
+          "type": "manual",
+          "title": "File uploaded: MAP-=MR.MANOJ SAIN.pdf",
+          "text": "File uploaded: MAP-=MR.MANOJ SAIN.pdf",
+          "by": "System",
+          "at": "7/2/2026, 11:29:39 AM",
+          "time": "7/2/2026, 11:29:39 AM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782971979154",
+          "type": "manual",
+          "title": "Completed file uploaded. Task marked Completed.",
+          "text": "Completed file uploaded. Task marked Completed.",
+          "by": "System",
+          "at": "7/2/2026, 11:29:39 AM",
+          "time": "7/2/2026, 11:29:39 AM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782976661632",
+          "type": "manual",
+          "title": "Status reverted back to Internal Review by Khushbu Pandey",
+          "text": "Status reverted back to Internal Review by Khushbu Pandey",
+          "by": "System",
+          "at": "7/2/2026, 12:47:41 PM",
+          "time": "7/2/2026, 12:47:41 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782976683493",
+          "type": "manual",
+          "title": "Status advanced to Completed",
+          "text": "Status advanced to Completed",
+          "by": "System",
+          "at": "7/2/2026, 12:48:03 PM",
+          "time": "7/2/2026, 12:48:03 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782982706758",
+          "type": "manual",
+          "title": "Status reverted back to Internal Review by Shubham Upadhyay",
           "text": "Status reverted back to Internal Review by Shubham Upadhyay",
-          "time": "7/2/2026, 2:28:26 PM"
+          "by": "System",
+          "at": "7/2/2026, 2:28:26 PM",
+          "time": "7/2/2026, 2:28:26 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782982710193,
+          "id": "1782982710193",
+          "type": "manual",
+          "title": "Final file approved after internal review by Shubham Upadhyay",
           "text": "Final file approved after internal review by Shubham Upadhyay",
-          "time": "7/2/2026, 2:28:30 PM"
-        },
-        {
-          "id": 1782989657721,
-          "text": "Status reverted back to Internal Review by Amit Kushwaha",
-          "time": "02/07/2026, 16:24:17"
-        },
-        {
-          "id": 1782989665675,
-          "text": "Status advanced to Completed",
-          "time": "02/07/2026, 16:24:25"
-        },
-        {
-          "id": 1782989669514,
-          "text": "Status reverted back to Internal Review by Amit Kushwaha",
-          "time": "02/07/2026, 16:24:29"
-        },
-        {
-          "id": 1782989673299,
-          "text": "Status advanced to Completed",
-          "time": "02/07/2026, 16:24:33"
+          "by": "System",
+          "at": "7/2/2026, 2:28:30 PM",
+          "time": "7/2/2026, 2:28:30 PM",
+          "remarks": "",
+          "meta": {}
         }
       ],
       "dueDate": null,
@@ -2110,7 +2821,7 @@
       "assignedTo": "Khushbu Pandey",
       "estimateDetails": "858GF @1400",
       "assignedAt": 1782969086419,
-      "taskName": "Map Estimate • DHEERAJ • RAIBARELI",
+      "taskName": "Map Estimate \u2022 DHEERAJ \u2022 RAIBARELI",
       "createdAt": 1782969086419,
       "updatedAt": 1782989673299,
       "ledger": {},
@@ -2362,9 +3073,15 @@
       "description": "",
       "timeline": [
         {
-          "id": 1782989536257,
+          "id": "1782989536257",
+          "type": "manual",
+          "title": "Case Created",
+          "text": "Case Created",
+          "by": "System",
+          "at": "02/07/2026, 16:22:16",
           "time": "02/07/2026, 16:22:16",
-          "text": "Case Created"
+          "remarks": "",
+          "meta": {}
         }
       ],
       "createdBy": "Amit Kushwaha",
@@ -2380,7 +3097,7 @@
       "reportSent": false,
       "priority": "Normal",
       "bankerName": "",
-      "taskName": "Key Route Map • AKHILESH  • LUCKNOW",
+      "taskName": "Key Route Map \u2022 AKHILESH  \u2022 LUCKNOW",
       "reassignmentHistory": [],
       "createdAt": 1782989536257,
       "documents": [],
@@ -2398,64 +3115,136 @@
       "assignmentVersion": 1782977976945,
       "timeline": [
         {
-          "id": 1782977976945,
-          "text": "Case Created",
-          "time": "02/07/2026, 13:09:36"
-        },
-        {
-          "id": 1782977976946,
-          "text": "1 Source File(s) Attached",
-          "time": "02/07/2026, 13:09:36"
-        },
-        {
-          "id": 1782978154930,
+          "id": "1782978154930",
+          "type": "manual",
+          "title": "Status advanced to Drafting",
           "text": "Status advanced to Drafting",
-          "time": "02/07/2026, 00:42:34"
+          "by": "System",
+          "at": "02/07/2026, 00:42:34",
+          "time": "02/07/2026, 00:42:34",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782979507592.7395,
+          "id": "1782979507592.7395",
+          "type": "manual",
+          "title": "File uploaded: EST FOR MR.RAM BAHADUR MAURYA JI.pdf",
           "text": "File uploaded: EST FOR MR.RAM BAHADUR MAURYA JI.pdf",
-          "time": "02/07/2026, 01:05:07"
+          "by": "System",
+          "at": "02/07/2026, 01:05:07",
+          "time": "02/07/2026, 01:05:07",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782979509221.344,
+          "id": "1782979509221.344",
+          "type": "manual",
+          "title": "File uploaded: PLAN FOR  MR.RAM BAHADUR MAURYA JI.pdf",
           "text": "File uploaded: PLAN FOR  MR.RAM BAHADUR MAURYA JI.pdf",
-          "time": "02/07/2026, 01:05:09"
+          "by": "System",
+          "at": "02/07/2026, 01:05:09",
+          "time": "02/07/2026, 01:05:09",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782979509224,
+          "id": "1782979509224",
+          "type": "manual",
+          "title": "Completed file uploaded. Task marked Completed.",
           "text": "Completed file uploaded. Task marked Completed.",
-          "time": "02/07/2026, 01:05:09"
+          "by": "System",
+          "at": "02/07/2026, 01:05:09",
+          "time": "02/07/2026, 01:05:09",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782979544425,
+          "id": "1782979544425",
+          "type": "manual",
+          "title": "Status reverted back to Internal Review by Waqar",
           "text": "Status reverted back to Internal Review by Waqar",
-          "time": "02/07/2026, 01:05:44"
+          "by": "System",
+          "at": "02/07/2026, 01:05:44",
+          "time": "02/07/2026, 01:05:44",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980216805,
-          "text": "Revision/Sub-task Added: Customer name kishan saini adress mohan lal ganj Lucknow",
-          "time": "02/07/2026, 13:46:56"
-        },
-        {
-          "id": 1782980241895,
-          "text": "File deleted: PLAN FOR  MR.RAM BAHADUR MAURYA JI.pdf",
-          "time": "02/07/2026, 13:47:21"
-        },
-        {
-          "id": 1782980244543,
-          "text": "File deleted: EST FOR MR.RAM BAHADUR MAURYA JI.pdf",
-          "time": "02/07/2026, 13:47:24"
-        },
-        {
-          "id": 1782986189717,
-          "text": "Status reverted back to Drafting by Shubham Upadhyay",
-          "time": "7/2/2026, 3:26:29 PM"
-        },
-        {
-          "id": 1782987448695,
+          "id": "1782987448695",
+          "type": "manual",
+          "title": "Status advanced to Completed",
           "text": "Status advanced to Completed",
-          "time": "02/07/2026, 03:17:28"
+          "by": "System",
+          "at": "02/07/2026, 03:17:28",
+          "time": "02/07/2026, 03:17:28",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782977976945",
+          "type": "manual",
+          "title": "Case Created",
+          "text": "Case Created",
+          "by": "System",
+          "at": "02/07/2026, 13:09:36",
+          "time": "02/07/2026, 13:09:36",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782977976946",
+          "type": "manual",
+          "title": "1 Source File(s) Attached",
+          "text": "1 Source File(s) Attached",
+          "by": "System",
+          "at": "02/07/2026, 13:09:36",
+          "time": "02/07/2026, 13:09:36",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782980216805",
+          "type": "manual",
+          "title": "Revision/Sub-task Added: Customer name kishan saini adress mohan lal ganj Lucknow",
+          "text": "Revision/Sub-task Added: Customer name kishan saini adress mohan lal ganj Lucknow",
+          "by": "System",
+          "at": "02/07/2026, 13:46:56",
+          "time": "02/07/2026, 13:46:56",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782980241895",
+          "type": "manual",
+          "title": "File deleted: PLAN FOR  MR.RAM BAHADUR MAURYA JI.pdf",
+          "text": "File deleted: PLAN FOR  MR.RAM BAHADUR MAURYA JI.pdf",
+          "by": "System",
+          "at": "02/07/2026, 13:47:21",
+          "time": "02/07/2026, 13:47:21",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782980244543",
+          "type": "manual",
+          "title": "File deleted: EST FOR MR.RAM BAHADUR MAURYA JI.pdf",
+          "text": "File deleted: EST FOR MR.RAM BAHADUR MAURYA JI.pdf",
+          "by": "System",
+          "at": "02/07/2026, 13:47:24",
+          "time": "02/07/2026, 13:47:24",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782986189717",
+          "type": "manual",
+          "title": "Status reverted back to Drafting by Shubham Upadhyay",
+          "text": "Status reverted back to Drafting by Shubham Upadhyay",
+          "by": "System",
+          "at": "7/2/2026, 3:26:29 PM",
+          "time": "7/2/2026, 3:26:29 PM",
+          "remarks": "",
+          "meta": {}
         }
       ],
       "type": "Map Estimate",
@@ -2520,7 +3309,7 @@
           "author": "Waqar"
         }
       ],
-      "taskName": "Map Estimate • SHUBHAM  • LUCKNOW",
+      "taskName": "Map Estimate \u2022 SHUBHAM  \u2022 LUCKNOW",
       "assignedTo": "Waqar",
       "reassignmentHistory": [
         {
@@ -2547,54 +3336,114 @@
       "assignmentVersion": 1782979309361,
       "timeline": [
         {
-          "id": 1782979309361,
-          "text": "Case Created",
-          "time": "02/07/2026, 13:31:49"
-        },
-        {
-          "id": 1782979309362,
-          "text": "1 Source File(s) Attached",
-          "time": "02/07/2026, 13:31:49"
-        },
-        {
-          "id": 1782985990793.3042,
-          "text": "File uploaded: Shabbir Ahmed deed.pdf",
-          "time": "7/2/2026, 3:23:10 PM"
-        },
-        {
-          "id": 1782986005273,
-          "text": "File deleted: Shabbir Ahmed deed.pdf",
-          "time": "7/2/2026, 3:23:25 PM"
-        },
-        {
-          "id": 1782986135710.514,
-          "text": "File uploaded: nirmala Srivastava ind civil line Jaunpur (1).pdf",
-          "time": "7/2/2026, 3:25:35 PM"
-        },
-        {
-          "id": 1782986135713,
-          "text": "Completed work file uploaded. Sent for internal review before final approval.",
-          "time": "7/2/2026, 3:25:35 PM"
-        },
-        {
-          "id": 1782986146368,
-          "text": "File deleted: nirmala Srivastava ind civil line Jaunpur (1).pdf",
-          "time": "7/2/2026, 3:25:46 PM"
-        },
-        {
-          "id": 1782987043225.3784,
+          "id": "1782987043225.3784",
+          "type": "manual",
+          "title": "File uploaded: EST FOR MR.KISHAN SAINI JI.pdf",
           "text": "File uploaded: EST FOR MR.KISHAN SAINI JI.pdf",
-          "time": "02/07/2026, 03:10:43"
+          "by": "System",
+          "at": "02/07/2026, 03:10:43",
+          "time": "02/07/2026, 03:10:43",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782987046048.3662,
+          "id": "1782987046048.3662",
+          "type": "manual",
+          "title": "File uploaded: PLAN FOR MR.KISHAN SAINI JI.pdf",
           "text": "File uploaded: PLAN FOR MR.KISHAN SAINI JI.pdf",
-          "time": "02/07/2026, 03:10:46"
+          "by": "System",
+          "at": "02/07/2026, 03:10:46",
+          "time": "02/07/2026, 03:10:46",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782987046051,
+          "id": "1782987046051",
+          "type": "manual",
+          "title": "Completed file uploaded. Task marked Completed.",
           "text": "Completed file uploaded. Task marked Completed.",
-          "time": "02/07/2026, 03:10:46"
+          "by": "System",
+          "at": "02/07/2026, 03:10:46",
+          "time": "02/07/2026, 03:10:46",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782979309361",
+          "type": "manual",
+          "title": "Case Created",
+          "text": "Case Created",
+          "by": "System",
+          "at": "02/07/2026, 13:31:49",
+          "time": "02/07/2026, 13:31:49",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782979309362",
+          "type": "manual",
+          "title": "1 Source File(s) Attached",
+          "text": "1 Source File(s) Attached",
+          "by": "System",
+          "at": "02/07/2026, 13:31:49",
+          "time": "02/07/2026, 13:31:49",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782985990793.3042",
+          "type": "manual",
+          "title": "File uploaded: Shabbir Ahmed deed.pdf",
+          "text": "File uploaded: Shabbir Ahmed deed.pdf",
+          "by": "System",
+          "at": "7/2/2026, 3:23:10 PM",
+          "time": "7/2/2026, 3:23:10 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782986005273",
+          "type": "manual",
+          "title": "File deleted: Shabbir Ahmed deed.pdf",
+          "text": "File deleted: Shabbir Ahmed deed.pdf",
+          "by": "System",
+          "at": "7/2/2026, 3:23:25 PM",
+          "time": "7/2/2026, 3:23:25 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782986135710.514",
+          "type": "manual",
+          "title": "File uploaded: nirmala Srivastava ind civil line Jaunpur (1).pdf",
+          "text": "File uploaded: nirmala Srivastava ind civil line Jaunpur (1).pdf",
+          "by": "System",
+          "at": "7/2/2026, 3:25:35 PM",
+          "time": "7/2/2026, 3:25:35 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782986135713",
+          "type": "manual",
+          "title": "Completed work file uploaded. Sent for internal review before final approval.",
+          "text": "Completed work file uploaded. Sent for internal review before final approval.",
+          "by": "System",
+          "at": "7/2/2026, 3:25:35 PM",
+          "time": "7/2/2026, 3:25:35 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782986146368",
+          "type": "manual",
+          "title": "File deleted: nirmala Srivastava ind civil line Jaunpur (1).pdf",
+          "text": "File deleted: nirmala Srivastava ind civil line Jaunpur (1).pdf",
+          "by": "System",
+          "at": "7/2/2026, 3:25:46 PM",
+          "time": "7/2/2026, 3:25:46 PM",
+          "remarks": "",
+          "meta": {}
         }
       ],
       "type": "Map Estimate",
@@ -2727,7 +3576,7 @@
       "assignedTo": "Waqar",
       "estimateDetails": "",
       "assignedAt": 1782979309361,
-      "taskName": "Map Estimate • VIKRANT • LUCKNOW",
+      "taskName": "Map Estimate \u2022 VIKRANT \u2022 LUCKNOW",
       "history": [],
       "comments": [],
       "revisions": [],
@@ -2757,7 +3606,7 @@
       "assignedTo": "Khushbu Pandey",
       "estimateDetails": "",
       "assignedAt": 1782976759713,
-      "taskName": "Key Route + Map Estimate • PUNEET • JAUNPUR",
+      "taskName": "Key Route + Map Estimate \u2022 PUNEET \u2022 JAUNPUR",
       "status": "Completed",
       "estimate": 0,
       "createdBy": "Amit Kushwaha",
@@ -3016,109 +3865,235 @@
       "assignmentVersion": 1782976759713,
       "timeline": [
         {
-          "id": 1782976759713,
+          "id": "1782976759713",
+          "type": "manual",
+          "title": "Case Created",
           "text": "Case Created",
-          "time": "02/07/2026, 12:49:19"
+          "by": "System",
+          "at": "02/07/2026, 12:49:19",
+          "time": "02/07/2026, 12:49:19",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782976759714,
+          "id": "1782976759714",
+          "type": "manual",
+          "title": "7 Source File(s) Attached",
           "text": "7 Source File(s) Attached",
-          "time": "02/07/2026, 12:49:19"
+          "by": "System",
+          "at": "02/07/2026, 12:49:19",
+          "time": "02/07/2026, 12:49:19",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782977057986,
+          "id": "1782985454654",
+          "type": "manual",
+          "title": "Status advanced to Completed",
+          "text": "Status advanced to Completed",
+          "by": "System",
+          "at": "02/07/2026, 15:14:14",
+          "time": "02/07/2026, 15:14:14",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782977057986",
+          "type": "manual",
+          "title": "Status advanced to Drafting",
           "text": "Status advanced to Drafting",
-          "time": "7/2/2026, 12:54:17 PM"
+          "by": "System",
+          "at": "7/2/2026, 12:54:17 PM",
+          "time": "7/2/2026, 12:54:17 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782977078014.9883,
+          "id": "1782977078014.9883",
+          "type": "manual",
+          "title": "File uploaded: nirmala Srivastava ind civil line Jaunpur (1).pdf",
           "text": "File uploaded: nirmala Srivastava ind civil line Jaunpur (1).pdf",
-          "time": "7/2/2026, 12:54:38 PM"
+          "by": "System",
+          "at": "7/2/2026, 12:54:38 PM",
+          "time": "7/2/2026, 12:54:38 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782977078017,
+          "id": "1782977078017",
+          "type": "manual",
+          "title": "Completed work file uploaded. Sent for internal review before final approval.",
           "text": "Completed work file uploaded. Sent for internal review before final approval.",
-          "time": "7/2/2026, 12:54:38 PM"
+          "by": "System",
+          "at": "7/2/2026, 12:54:38 PM",
+          "time": "7/2/2026, 12:54:38 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782977084926,
+          "id": "1782977084926",
+          "type": "manual",
+          "title": "Final file approved after internal review by Shubham Upadhyay",
           "text": "Final file approved after internal review by Shubham Upadhyay",
-          "time": "7/2/2026, 12:54:44 PM"
+          "by": "System",
+          "at": "7/2/2026, 12:54:44 PM",
+          "time": "7/2/2026, 12:54:44 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782977089806,
+          "id": "1782977089806",
+          "type": "manual",
+          "title": "Status reverted back to Internal Review by Shubham Upadhyay",
           "text": "Status reverted back to Internal Review by Shubham Upadhyay",
-          "time": "7/2/2026, 12:54:49 PM"
+          "by": "System",
+          "at": "7/2/2026, 12:54:49 PM",
+          "time": "7/2/2026, 12:54:49 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782977091298,
+          "id": "1782977091298",
+          "type": "manual",
+          "title": "Status reverted back to Drafting by Shubham Upadhyay",
           "text": "Status reverted back to Drafting by Shubham Upadhyay",
-          "time": "7/2/2026, 12:54:51 PM"
+          "by": "System",
+          "at": "7/2/2026, 12:54:51 PM",
+          "time": "7/2/2026, 12:54:51 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782977094381,
+          "id": "1782977094381",
+          "type": "manual",
+          "title": "Status reverted back to Lead Received by Shubham Upadhyay",
           "text": "Status reverted back to Lead Received by Shubham Upadhyay",
-          "time": "7/2/2026, 12:54:54 PM"
+          "by": "System",
+          "at": "7/2/2026, 12:54:54 PM",
+          "time": "7/2/2026, 12:54:54 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782977099587,
+          "id": "1782977099587",
+          "type": "manual",
+          "title": "File deleted: nirmala Srivastava ind civil line Jaunpur (1).pdf",
           "text": "File deleted: nirmala Srivastava ind civil line Jaunpur (1).pdf",
-          "time": "7/2/2026, 12:54:59 PM"
+          "by": "System",
+          "at": "7/2/2026, 12:54:59 PM",
+          "time": "7/2/2026, 12:54:59 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980888506.025,
+          "id": "1782980888506.025",
+          "type": "manual",
+          "title": "File uploaded: KEY PLAN-MRS.NIRMALA SRIVASTAV.pdf",
           "text": "File uploaded: KEY PLAN-MRS.NIRMALA SRIVASTAV.pdf",
-          "time": "7/2/2026, 1:58:08 PM"
+          "by": "System",
+          "at": "7/2/2026, 1:58:08 PM",
+          "time": "7/2/2026, 1:58:08 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980891112.299,
+          "id": "1782980891112.299",
+          "type": "manual",
+          "title": "File uploaded: MAP-MRS.NIRMALA SRIVASTAV.pdf",
           "text": "File uploaded: MAP-MRS.NIRMALA SRIVASTAV.pdf",
-          "time": "7/2/2026, 1:58:11 PM"
+          "by": "System",
+          "at": "7/2/2026, 1:58:11 PM",
+          "time": "7/2/2026, 1:58:11 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980893992.351,
+          "id": "1782980893992.351",
+          "type": "manual",
+          "title": "File uploaded: EST-MRS.NIRMALA SRIVASTAV.pdf",
           "text": "File uploaded: EST-MRS.NIRMALA SRIVASTAV.pdf",
-          "time": "7/2/2026, 1:58:13 PM"
+          "by": "System",
+          "at": "7/2/2026, 1:58:13 PM",
+          "time": "7/2/2026, 1:58:13 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980893995,
+          "id": "1782980893995",
+          "type": "manual",
+          "title": "Completed work file uploaded. Sent for internal review before final approval.",
           "text": "Completed work file uploaded. Sent for internal review before final approval.",
-          "time": "7/2/2026, 1:58:13 PM"
+          "by": "System",
+          "at": "7/2/2026, 1:58:13 PM",
+          "time": "7/2/2026, 1:58:13 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980976607,
+          "id": "1782980976607",
+          "type": "manual",
+          "title": "Status advanced to Completed",
           "text": "Status advanced to Completed",
-          "time": "7/2/2026, 1:59:36 PM"
+          "by": "System",
+          "at": "7/2/2026, 1:59:36 PM",
+          "time": "7/2/2026, 1:59:36 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782980984088,
+          "id": "1782980984088",
+          "type": "manual",
+          "title": "Status reverted back to Internal Review by Khushbu Pandey",
           "text": "Status reverted back to Internal Review by Khushbu Pandey",
-          "time": "7/2/2026, 1:59:44 PM"
+          "by": "System",
+          "at": "7/2/2026, 1:59:44 PM",
+          "time": "7/2/2026, 1:59:44 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782981519742,
+          "id": "1782981519742",
+          "type": "manual",
+          "title": "Status reverted back to Drafting by Khushbu Pandey",
           "text": "Status reverted back to Drafting by Khushbu Pandey",
-          "time": "7/2/2026, 2:08:39 PM"
+          "by": "System",
+          "at": "7/2/2026, 2:08:39 PM",
+          "time": "7/2/2026, 2:08:39 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782981698428,
+          "id": "1782981698428",
+          "type": "manual",
+          "title": "Status advanced to Internal Review",
           "text": "Status advanced to Internal Review",
-          "time": "7/2/2026, 2:11:38 PM"
+          "by": "System",
+          "at": "7/2/2026, 2:11:38 PM",
+          "time": "7/2/2026, 2:11:38 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782981747026,
+          "id": "1782981747026",
+          "type": "manual",
+          "title": "Status reverted back to Drafting by Khushbu Pandey",
           "text": "Status reverted back to Drafting by Khushbu Pandey",
-          "time": "7/2/2026, 2:12:27 PM"
+          "by": "System",
+          "at": "7/2/2026, 2:12:27 PM",
+          "time": "7/2/2026, 2:12:27 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782982503974,
+          "id": "1782982503974",
+          "type": "manual",
+          "title": "Status advanced to Internal Review",
           "text": "Status advanced to Internal Review",
-          "time": "7/2/2026, 2:25:03 PM"
-        },
-        {
-          "id": 1782985454654,
-          "text": "Status advanced to Completed",
-          "time": "02/07/2026, 15:14:14"
+          "by": "System",
+          "at": "7/2/2026, 2:25:03 PM",
+          "time": "7/2/2026, 2:25:03 PM",
+          "remarks": "",
+          "meta": {}
         }
       ],
       "type": "Key Route + Map Estimate",
@@ -3143,7 +4118,7 @@
       "internalReviewStartedAt": 1782977078014
     },
     {
-      "taskName": "Key Route Map • AYUSH • LUCKNOW",
+      "taskName": "Key Route Map \u2022 AYUSH \u2022 LUCKNOW",
       "reassignmentHistory": [
         {
           "by": "Amit Kushwaha",
@@ -3327,109 +4302,235 @@
       "type": "Key Route Map",
       "timeline": [
         {
-          "id": 1782977054227,
-          "text": "Case Created",
-          "time": "02/07/2026, 12:54:14"
-        },
-        {
-          "id": 1782977247640,
-          "text": "Task re-assigned to Waqar by Amit Kushwaha",
-          "time": "02/07/2026, 12:57:27"
-        },
-        {
-          "id": 1782977497561,
+          "id": "1782977497561",
+          "type": "manual",
+          "title": "Status advanced to Drafting",
           "text": "Status advanced to Drafting",
-          "time": "02/07/2026, 00:31:37"
+          "by": "System",
+          "at": "02/07/2026, 00:31:37",
+          "time": "02/07/2026, 00:31:37",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782977577224,
+          "id": "1782977577224",
+          "type": "manual",
+          "title": "Status reverted back to Lead Received by Waqar",
           "text": "Status reverted back to Lead Received by Waqar",
-          "time": "02/07/2026, 00:32:57"
+          "by": "System",
+          "at": "02/07/2026, 00:32:57",
+          "time": "02/07/2026, 00:32:57",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782977693775,
+          "id": "1782982653855",
+          "type": "manual",
+          "title": "Status advanced to Drafting",
           "text": "Status advanced to Drafting",
-          "time": "7/2/2026, 1:04:53 PM"
+          "by": "System",
+          "at": "02/07/2026, 01:57:33",
+          "time": "02/07/2026, 01:57:33",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782977716324,
-          "text": "Task re-assigned to Unassigned by Amit Kushwaha",
-          "time": "7/2/2026, 1:05:16 PM"
-        },
-        {
-          "id": 1782977804188,
-          "text": "Task re-assigned to Unassigned by Amit Kushwaha",
-          "time": "02/07/2026, 13:06:44"
-        },
-        {
-          "id": 1782977815917,
-          "text": "Task re-assigned to Unassigned by Amit Kushwaha",
-          "time": "02/07/2026, 13:06:55"
-        },
-        {
-          "id": 1782977826084,
+          "id": "1782984757278",
+          "type": "manual",
+          "title": "Status advanced to Completed",
           "text": "Status advanced to Completed",
-          "time": "02/07/2026, 13:07:06"
+          "by": "System",
+          "at": "02/07/2026, 02:32:37",
+          "time": "02/07/2026, 02:32:37",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782977860837,
-          "text": "Status reverted back to Internal Review by Shubham Upadhyay",
-          "time": "7/2/2026, 1:07:40 PM"
-        },
-        {
-          "id": 1782977876747,
-          "text": "Status reverted back to Drafting by Shubham Upadhyay",
-          "time": "7/2/2026, 1:07:56 PM"
-        },
-        {
-          "id": 1782978028642,
-          "text": "Task re-assigned to Unassigned by Amit Kushwaha",
-          "time": "02/07/2026, 13:10:28"
-        },
-        {
-          "id": 1782978453249,
-          "text": "Status reverted back to Lead Received by Shubham Upadhyay",
-          "time": "7/2/2026, 1:17:33 PM"
-        },
-        {
-          "id": 1782981767788.1401,
-          "text": "File uploaded: WhatsApp Image 2026-07-02 at 2.10.59 PM (1).jpeg",
-          "time": "02/07/2026, 14:12:47"
-        },
-        {
-          "id": 1782981772814.013,
-          "text": "File uploaded: WhatsApp Image 2026-07-02 at 2.10.59 PM.jpeg",
-          "time": "02/07/2026, 14:12:52"
-        },
-        {
-          "id": 1782981773984.3044,
-          "text": "File uploaded: WhatsApp Image 2026-07-02 at 2.10.53 PM.jpeg",
-          "time": "02/07/2026, 14:12:53"
-        },
-        {
-          "id": 1782981809742.5222,
-          "text": "File uploaded: Surendra ats.pdf",
-          "time": "02/07/2026, 14:13:29"
-        },
-        {
-          "id": 1782982653855,
-          "text": "Status advanced to Drafting",
-          "time": "02/07/2026, 01:57:33"
-        },
-        {
-          "id": 1782984757278,
-          "text": "Status advanced to Completed",
-          "time": "02/07/2026, 02:32:37"
-        },
-        {
-          "id": 1782985443939.3718,
+          "id": "1782985443939.3718",
+          "type": "manual",
+          "title": "File uploaded: KEY PLAN FOR MR.SURENDRA GAUR JI.pdf",
           "text": "File uploaded: KEY PLAN FOR MR.SURENDRA GAUR JI.pdf",
-          "time": "02/07/2026, 02:44:03"
+          "by": "System",
+          "at": "02/07/2026, 02:44:03",
+          "time": "02/07/2026, 02:44:03",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782985443942,
+          "id": "1782985443942",
+          "type": "manual",
+          "title": "Completed file uploaded. Task marked Completed.",
           "text": "Completed file uploaded. Task marked Completed.",
-          "time": "02/07/2026, 02:44:03"
+          "by": "System",
+          "at": "02/07/2026, 02:44:03",
+          "time": "02/07/2026, 02:44:03",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782977054227",
+          "type": "manual",
+          "title": "Case Created",
+          "text": "Case Created",
+          "by": "System",
+          "at": "02/07/2026, 12:54:14",
+          "time": "02/07/2026, 12:54:14",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782977247640",
+          "type": "manual",
+          "title": "Task re-assigned to Waqar by Amit Kushwaha",
+          "text": "Task re-assigned to Waqar by Amit Kushwaha",
+          "by": "System",
+          "at": "02/07/2026, 12:57:27",
+          "time": "02/07/2026, 12:57:27",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782977804188",
+          "type": "manual",
+          "title": "Task re-assigned to Unassigned by Amit Kushwaha",
+          "text": "Task re-assigned to Unassigned by Amit Kushwaha",
+          "by": "System",
+          "at": "02/07/2026, 13:06:44",
+          "time": "02/07/2026, 13:06:44",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782977815917",
+          "type": "manual",
+          "title": "Task re-assigned to Unassigned by Amit Kushwaha",
+          "text": "Task re-assigned to Unassigned by Amit Kushwaha",
+          "by": "System",
+          "at": "02/07/2026, 13:06:55",
+          "time": "02/07/2026, 13:06:55",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782977826084",
+          "type": "manual",
+          "title": "Status advanced to Completed",
+          "text": "Status advanced to Completed",
+          "by": "System",
+          "at": "02/07/2026, 13:07:06",
+          "time": "02/07/2026, 13:07:06",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782978028642",
+          "type": "manual",
+          "title": "Task re-assigned to Unassigned by Amit Kushwaha",
+          "text": "Task re-assigned to Unassigned by Amit Kushwaha",
+          "by": "System",
+          "at": "02/07/2026, 13:10:28",
+          "time": "02/07/2026, 13:10:28",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782981767788.1401",
+          "type": "manual",
+          "title": "File uploaded: WhatsApp Image 2026-07-02 at 2.10.59 PM (1).jpeg",
+          "text": "File uploaded: WhatsApp Image 2026-07-02 at 2.10.59 PM (1).jpeg",
+          "by": "System",
+          "at": "02/07/2026, 14:12:47",
+          "time": "02/07/2026, 14:12:47",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782981772814.013",
+          "type": "manual",
+          "title": "File uploaded: WhatsApp Image 2026-07-02 at 2.10.59 PM.jpeg",
+          "text": "File uploaded: WhatsApp Image 2026-07-02 at 2.10.59 PM.jpeg",
+          "by": "System",
+          "at": "02/07/2026, 14:12:52",
+          "time": "02/07/2026, 14:12:52",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782981773984.3044",
+          "type": "manual",
+          "title": "File uploaded: WhatsApp Image 2026-07-02 at 2.10.53 PM.jpeg",
+          "text": "File uploaded: WhatsApp Image 2026-07-02 at 2.10.53 PM.jpeg",
+          "by": "System",
+          "at": "02/07/2026, 14:12:53",
+          "time": "02/07/2026, 14:12:53",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782981809742.5222",
+          "type": "manual",
+          "title": "File uploaded: Surendra ats.pdf",
+          "text": "File uploaded: Surendra ats.pdf",
+          "by": "System",
+          "at": "02/07/2026, 14:13:29",
+          "time": "02/07/2026, 14:13:29",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782977693775",
+          "type": "manual",
+          "title": "Status advanced to Drafting",
+          "text": "Status advanced to Drafting",
+          "by": "System",
+          "at": "7/2/2026, 1:04:53 PM",
+          "time": "7/2/2026, 1:04:53 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782977716324",
+          "type": "manual",
+          "title": "Task re-assigned to Unassigned by Amit Kushwaha",
+          "text": "Task re-assigned to Unassigned by Amit Kushwaha",
+          "by": "System",
+          "at": "7/2/2026, 1:05:16 PM",
+          "time": "7/2/2026, 1:05:16 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782977860837",
+          "type": "manual",
+          "title": "Status reverted back to Internal Review by Shubham Upadhyay",
+          "text": "Status reverted back to Internal Review by Shubham Upadhyay",
+          "by": "System",
+          "at": "7/2/2026, 1:07:40 PM",
+          "time": "7/2/2026, 1:07:40 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782977876747",
+          "type": "manual",
+          "title": "Status reverted back to Drafting by Shubham Upadhyay",
+          "text": "Status reverted back to Drafting by Shubham Upadhyay",
+          "by": "System",
+          "at": "7/2/2026, 1:07:56 PM",
+          "time": "7/2/2026, 1:07:56 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782978453249",
+          "type": "manual",
+          "title": "Status reverted back to Lead Received by Shubham Upadhyay",
+          "text": "Status reverted back to Lead Received by Shubham Upadhyay",
+          "by": "System",
+          "at": "7/2/2026, 1:17:33 PM",
+          "time": "7/2/2026, 1:17:33 PM",
+          "remarks": "",
+          "meta": {}
         }
       ],
       "history": [],
@@ -3462,9 +4563,15 @@
       "description": "",
       "timeline": [
         {
-          "id": 1782984052981,
+          "id": "1782984052981",
+          "type": "manual",
+          "title": "Case Created",
+          "text": "Case Created",
+          "by": "System",
+          "at": "02/07/2026, 14:50:52",
           "time": "02/07/2026, 14:50:52",
-          "text": "Case Created"
+          "remarks": "",
+          "meta": {}
         }
       ],
       "ownership": {
@@ -3474,7 +4581,7 @@
       },
       "createdBy": "Amit Kushwaha",
       "priority": "Normal",
-      "taskName": "Key Route Map • PRASHANT • VARANASI",
+      "taskName": "Key Route Map \u2022 PRASHANT \u2022 VARANASI",
       "bankerName": "",
       "notes": [],
       "estimateDetails": "",
@@ -3522,7 +4629,7 @@
         }
       ],
       "assignedTo": "Nilu Gupta",
-      "taskName": "Key Route Map • ANIS  • VARANASI",
+      "taskName": "Key Route Map \u2022 ANIS  \u2022 VARANASI",
       "createdBy": "Amit Kushwaha",
       "estimate": 0,
       "status": "Completed",
@@ -3706,129 +4813,279 @@
       "type": "Key Route Map",
       "timeline": [
         {
-          "id": 1782969829403,
+          "id": "1782969829403",
+          "type": "manual",
+          "title": "Case Created",
           "text": "Case Created",
-          "time": "02/07/2026, 10:53:49"
+          "by": "System",
+          "at": "02/07/2026, 10:53:49",
+          "time": "02/07/2026, 10:53:49",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782969829404,
+          "id": "1782969829404",
+          "type": "manual",
+          "title": "2 Source File(s) Attached",
           "text": "2 Source File(s) Attached",
-          "time": "02/07/2026, 10:53:49"
+          "by": "System",
+          "at": "02/07/2026, 10:53:49",
+          "time": "02/07/2026, 10:53:49",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782969857771,
+          "id": "1782969857771",
+          "type": "manual",
+          "title": "Smart assigned to Md. Faraz by Amit Kushwaha",
           "text": "Smart assigned to Md. Faraz by Amit Kushwaha",
-          "time": "02/07/2026, 10:54:17"
+          "by": "System",
+          "at": "02/07/2026, 10:54:17",
+          "time": "02/07/2026, 10:54:17",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782970055545,
+          "id": "1782970055545",
+          "type": "manual",
+          "title": "Smart assigned to Nilu Gupta by Amit Kushwaha",
           "text": "Smart assigned to Nilu Gupta by Amit Kushwaha",
-          "time": "02/07/2026, 10:57:35"
+          "by": "System",
+          "at": "02/07/2026, 10:57:35",
+          "time": "02/07/2026, 10:57:35",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782972272823.7847,
+          "id": "1782972272823.7847",
+          "type": "manual",
+          "title": "File uploaded: KEY PLAN FOR JYOTI SHARMA.pdf",
           "text": "File uploaded: KEY PLAN FOR JYOTI SHARMA.pdf",
-          "time": "02/07/2026, 11:34:32"
+          "by": "System",
+          "at": "02/07/2026, 11:34:32",
+          "time": "02/07/2026, 11:34:32",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782972272826,
+          "id": "1782972272826",
+          "type": "manual",
+          "title": "Completed file uploaded. Task marked Completed.",
           "text": "Completed file uploaded. Task marked Completed.",
-          "time": "02/07/2026, 11:34:32"
+          "by": "System",
+          "at": "02/07/2026, 11:34:32",
+          "time": "02/07/2026, 11:34:32",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782972736246,
-          "text": "Status reverted back to Internal Review by Ashutosh Rai",
-          "time": "7/2/2026, 11:42:16 AM"
-        },
-        {
-          "id": 1782972752054,
-          "text": "Revision/Sub-task Added: stam hata k upload kro ",
-          "time": "7/2/2026, 11:42:32 AM"
-        },
-        {
-          "id": 1782973245695,
+          "id": "1782973245695",
+          "type": "manual",
+          "title": "Completed file delivered via WhatsApp: KEY PLAN FOR JYOTI SHARMA.pdf",
           "text": "Completed file delivered via WhatsApp: KEY PLAN FOR JYOTI SHARMA.pdf",
-          "time": "02/07/2026, 11:50:45"
+          "by": "System",
+          "at": "02/07/2026, 11:50:45",
+          "time": "02/07/2026, 11:50:45",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782974122173,
-          "text": "Status advanced to Completed",
-          "time": "7/2/2026, 12:05:22 PM"
-        },
-        {
-          "id": 1782974124510,
-          "text": "Status reverted back to Internal Review by Nilu Gupta",
-          "time": "7/2/2026, 12:05:24 PM"
-        },
-        {
-          "id": 1782974125633,
-          "text": "Status advanced to Completed",
-          "time": "7/2/2026, 12:05:25 PM"
-        },
-        {
-          "id": 1782974127030,
-          "text": "Status reverted back to Internal Review by Nilu Gupta",
-          "time": "7/2/2026, 12:05:27 PM"
-        },
-        {
-          "id": 1782974145901,
-          "text": "Status reverted back to Drafting by Nilu Gupta",
-          "time": "7/2/2026, 12:05:45 PM"
-        },
-        {
-          "id": 1782974147990,
-          "text": "Status reverted back to Lead Received by Nilu Gupta",
-          "time": "7/2/2026, 12:05:47 PM"
-        },
-        {
-          "id": 1782974153261,
-          "text": "Status advanced to Drafting",
-          "time": "7/2/2026, 12:05:53 PM"
-        },
-        {
-          "id": 1782974155694,
-          "text": "Status advanced to Completed",
-          "time": "7/2/2026, 12:05:55 PM"
-        },
-        {
-          "id": 1782974157790,
-          "text": "Status reverted back to Internal Review by Nilu Gupta",
-          "time": "7/2/2026, 12:05:57 PM"
-        },
-        {
-          "id": 1782974160870,
-          "text": "Status reverted back to Drafting by Nilu Gupta",
-          "time": "7/2/2026, 12:06:00 PM"
-        },
-        {
-          "id": 1782974241741,
-          "text": "Status advanced to Completed",
-          "time": "7/2/2026, 12:07:21 PM"
-        },
-        {
-          "id": 1782974401521,
+          "id": "1782974401521",
+          "type": "manual",
+          "title": "Revision/Sub-task Added: DIMENSION DALO NILU",
           "text": "Revision/Sub-task Added: DIMENSION DALO NILU",
-          "time": "02/07/2026, 12:10:01"
+          "by": "System",
+          "at": "02/07/2026, 12:10:01",
+          "time": "02/07/2026, 12:10:01",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782974772946.78,
+          "id": "1782974772946.78",
+          "type": "manual",
+          "title": "File uploaded: KEY PLAN FOR JYOTI SHARMA.pdf",
           "text": "File uploaded: KEY PLAN FOR JYOTI SHARMA.pdf",
-          "time": "02/07/2026, 12:16:12"
+          "by": "System",
+          "at": "02/07/2026, 12:16:12",
+          "time": "02/07/2026, 12:16:12",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782974772949,
+          "id": "1782974772949",
+          "type": "manual",
+          "title": "Completed file uploaded. Task marked Completed.",
           "text": "Completed file uploaded. Task marked Completed.",
-          "time": "02/07/2026, 12:16:12"
+          "by": "System",
+          "at": "02/07/2026, 12:16:12",
+          "time": "02/07/2026, 12:16:12",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782982730069,
+          "id": "1782972736246",
+          "type": "manual",
+          "title": "Status reverted back to Internal Review by Ashutosh Rai",
+          "text": "Status reverted back to Internal Review by Ashutosh Rai",
+          "by": "System",
+          "at": "7/2/2026, 11:42:16 AM",
+          "time": "7/2/2026, 11:42:16 AM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782972752054",
+          "type": "manual",
+          "title": "Revision/Sub-task Added: stam hata k upload kro ",
+          "text": "Revision/Sub-task Added: stam hata k upload kro ",
+          "by": "System",
+          "at": "7/2/2026, 11:42:32 AM",
+          "time": "7/2/2026, 11:42:32 AM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782974122173",
+          "type": "manual",
+          "title": "Status advanced to Completed",
+          "text": "Status advanced to Completed",
+          "by": "System",
+          "at": "7/2/2026, 12:05:22 PM",
+          "time": "7/2/2026, 12:05:22 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782974124510",
+          "type": "manual",
+          "title": "Status reverted back to Internal Review by Nilu Gupta",
+          "text": "Status reverted back to Internal Review by Nilu Gupta",
+          "by": "System",
+          "at": "7/2/2026, 12:05:24 PM",
+          "time": "7/2/2026, 12:05:24 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782974125633",
+          "type": "manual",
+          "title": "Status advanced to Completed",
+          "text": "Status advanced to Completed",
+          "by": "System",
+          "at": "7/2/2026, 12:05:25 PM",
+          "time": "7/2/2026, 12:05:25 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782974127030",
+          "type": "manual",
+          "title": "Status reverted back to Internal Review by Nilu Gupta",
+          "text": "Status reverted back to Internal Review by Nilu Gupta",
+          "by": "System",
+          "at": "7/2/2026, 12:05:27 PM",
+          "time": "7/2/2026, 12:05:27 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782974145901",
+          "type": "manual",
+          "title": "Status reverted back to Drafting by Nilu Gupta",
+          "text": "Status reverted back to Drafting by Nilu Gupta",
+          "by": "System",
+          "at": "7/2/2026, 12:05:45 PM",
+          "time": "7/2/2026, 12:05:45 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782974147990",
+          "type": "manual",
+          "title": "Status reverted back to Lead Received by Nilu Gupta",
+          "text": "Status reverted back to Lead Received by Nilu Gupta",
+          "by": "System",
+          "at": "7/2/2026, 12:05:47 PM",
+          "time": "7/2/2026, 12:05:47 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782974153261",
+          "type": "manual",
+          "title": "Status advanced to Drafting",
+          "text": "Status advanced to Drafting",
+          "by": "System",
+          "at": "7/2/2026, 12:05:53 PM",
+          "time": "7/2/2026, 12:05:53 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782974155694",
+          "type": "manual",
+          "title": "Status advanced to Completed",
+          "text": "Status advanced to Completed",
+          "by": "System",
+          "at": "7/2/2026, 12:05:55 PM",
+          "time": "7/2/2026, 12:05:55 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782974157790",
+          "type": "manual",
+          "title": "Status reverted back to Internal Review by Nilu Gupta",
+          "text": "Status reverted back to Internal Review by Nilu Gupta",
+          "by": "System",
+          "at": "7/2/2026, 12:05:57 PM",
+          "time": "7/2/2026, 12:05:57 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782974160870",
+          "type": "manual",
+          "title": "Status reverted back to Drafting by Nilu Gupta",
+          "text": "Status reverted back to Drafting by Nilu Gupta",
+          "by": "System",
+          "at": "7/2/2026, 12:06:00 PM",
+          "time": "7/2/2026, 12:06:00 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782974241741",
+          "type": "manual",
+          "title": "Status advanced to Completed",
+          "text": "Status advanced to Completed",
+          "by": "System",
+          "at": "7/2/2026, 12:07:21 PM",
+          "time": "7/2/2026, 12:07:21 PM",
+          "remarks": "",
+          "meta": {}
+        },
+        {
+          "id": "1782982730069",
+          "type": "manual",
+          "title": "Status reverted back to Internal Review by Shubham Upadhyay",
           "text": "Status reverted back to Internal Review by Shubham Upadhyay",
-          "time": "7/2/2026, 2:28:50 PM"
+          "by": "System",
+          "at": "7/2/2026, 2:28:50 PM",
+          "time": "7/2/2026, 2:28:50 PM",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782982731321,
+          "id": "1782982731321",
+          "type": "manual",
+          "title": "Final file approved after internal review by Shubham Upadhyay",
           "text": "Final file approved after internal review by Shubham Upadhyay",
-          "time": "7/2/2026, 2:28:51 PM"
+          "by": "System",
+          "at": "7/2/2026, 2:28:51 PM",
+          "time": "7/2/2026, 2:28:51 PM",
+          "remarks": "",
+          "meta": {}
         }
       ],
       "assignmentVersion": 1782970055545,
@@ -3867,34 +5124,70 @@
       "type": "Map Estimate",
       "timeline": [
         {
-          "id": 1782906773861,
+          "id": "1782906773861",
+          "type": "manual",
+          "title": "Case Created",
           "text": "Case Created",
-          "time": "1/7/2026, 5:22:53 pm"
+          "by": "System",
+          "at": "1/7/2026, 5:22:53 pm",
+          "time": "1/7/2026, 5:22:53 pm",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782906773862,
+          "id": "1782906773862",
+          "type": "manual",
+          "title": "1 Source File(s) Attached",
           "text": "1 Source File(s) Attached",
-          "time": "1/7/2026, 5:22:53 pm"
+          "by": "System",
+          "at": "1/7/2026, 5:22:53 pm",
+          "time": "1/7/2026, 5:22:53 pm",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782907284468.4468,
+          "id": "1782907284468.4468",
+          "type": "manual",
+          "title": "File uploaded: EST FOR ANITA SRIVASTAVA.pdf",
           "text": "File uploaded: EST FOR ANITA SRIVASTAVA.pdf",
-          "time": "01/07/2026, 17:31:24"
+          "by": "System",
+          "at": "01/07/2026, 17:31:24",
+          "time": "01/07/2026, 17:31:24",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782907284469.243,
+          "id": "1782907284469.243",
+          "type": "manual",
+          "title": "File uploaded: MAP FOR ANITA SRIVASTAVA.pdf",
           "text": "File uploaded: MAP FOR ANITA SRIVASTAVA.pdf",
-          "time": "01/07/2026, 17:31:24"
+          "by": "System",
+          "at": "01/07/2026, 17:31:24",
+          "time": "01/07/2026, 17:31:24",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782907284472,
+          "id": "1782907284472",
+          "type": "manual",
+          "title": "Completed file uploaded. Task marked Completed.",
           "text": "Completed file uploaded. Task marked Completed.",
-          "time": "01/07/2026, 17:31:24"
+          "by": "System",
+          "at": "01/07/2026, 17:31:24",
+          "time": "01/07/2026, 17:31:24",
+          "remarks": "",
+          "meta": {}
         },
         {
-          "id": 1782907383891,
+          "id": "1782907383891",
+          "type": "manual",
+          "title": "Completed file delivered via WhatsApp: MAP FOR ANITA SRIVASTAVA.pdf",
           "text": "Completed file delivered via WhatsApp: MAP FOR ANITA SRIVASTAVA.pdf",
-          "time": "01/07/2026, 17:33:03"
+          "by": "System",
+          "at": "01/07/2026, 17:33:03",
+          "time": "01/07/2026, 17:33:03",
+          "remarks": "",
+          "meta": {}
         }
       ],
       "dueDate": null,
@@ -3992,7 +5285,7 @@
       ],
       "estimateDetails": "",
       "assignedAt": 1782906773861,
-      "taskName": "Map Estimate • YATHARTH • VARANASI",
+      "taskName": "Map Estimate \u2022 YATHARTH \u2022 VARANASI",
       "updatedAt": 1782907383891,
       "ledger": {},
       "createdAt": 1782906773861,
@@ -4832,7 +6125,7 @@
       "caseId": "",
       "purpose": "completed",
       "storedName": "f531b65f-a67e-4d0d-99ff-5270b8dc200b",
-      "uploadedAt": "2026-07-02T16:20:31.359Z",
+      "uploadedAt": "2026-07-05T15:21:38.820Z",
       "uploadedBy": "Nilu Gupta",
       "downloadUrl": "/api/files/1782907284468.3992/download"
     },
@@ -4845,7 +6138,7 @@
       "caseId": "",
       "purpose": "completed",
       "storedName": "1ca9a6c3-275c-4565-a55f-3fbc77ce0647",
-      "uploadedAt": "2026-07-02T16:20:31.359Z",
+      "uploadedAt": "2026-07-05T15:21:38.820Z",
       "uploadedBy": "Nilu Gupta",
       "downloadUrl": "/api/files/1782907284464.0454/download"
     },
@@ -4858,7 +6151,7 @@
       "caseId": "",
       "purpose": "source",
       "storedName": "d60d0c17-ce0f-4668-8218-334df8649c58",
-      "uploadedAt": "2026-07-02T16:20:31.359Z",
+      "uploadedAt": "2026-07-05T15:21:38.820Z",
       "uploadedBy": "Amit Kushwaha",
       "downloadUrl": "/api/files/1782906773857.879/download"
     },
@@ -5050,7 +6343,7 @@
         "createdAt": 1783002112704,
         "active": true,
         "archived": false,
-        "updatedAt": 1783009231357,
+        "updatedAt": 1783264898819,
         "status": "ACTIVE",
         "archivedBy": ""
       },
@@ -5093,7 +6386,7 @@
       },
       "emergencyContact": "",
       "profileCreatedAt": 1783002112704,
-      "profileUpdatedAt": 1783009231357,
+      "profileUpdatedAt": 1783264898819,
       "attendanceProfile": {
         "createdAt": 1783002112704,
         "active": true,
@@ -5141,7 +6434,7 @@
         "archivedBy": "",
         "archivedAt": null,
         "active": true,
-        "updatedAt": 1783009231357,
+        "updatedAt": 1783264898819,
         "createdAt": 1782994303003
       },
       "lastSeenAt": 1782994326871,
@@ -5174,7 +6467,7 @@
         "monthly": {}
       },
       "profileCreatedAt": 1782994303003,
-      "profileUpdatedAt": 1783009231357,
+      "profileUpdatedAt": 1783264898819,
       "attendanceProfile": {
         "createdAt": 1782994303003,
         "active": true,
@@ -5222,7 +6515,7 @@
         "status": "ACTIVE",
         "archived": false,
         "createdAt": 1782854407537,
-        "updatedAt": 1783009231357,
+        "updatedAt": 1783264898819,
         "archivedAt": null,
         "archivedBy": "",
         "restricted": false
@@ -5268,7 +6561,7 @@
       "emergencyContact": "",
       "mobileRegistered": false,
       "profileCreatedAt": 1782854407537,
-      "profileUpdatedAt": 1783009231357,
+      "profileUpdatedAt": 1783264898819,
       "attendanceProfile": {
         "createdAt": 1782854407537,
         "active": true,
@@ -5319,7 +6612,7 @@
         "archivedBy": "",
         "restricted": false,
         "archived": false,
-        "updatedAt": 1783009231357,
+        "updatedAt": 1783264898819,
         "createdAt": 1782898883085
       },
       "panNumber": "LSDPK6767L",
@@ -5362,7 +6655,7 @@
       "mobileRegistered": false,
       "profileCreatedAt": 1782898883085,
       "profilePhotoFile": "1782970224529-0HxUsU-WhatsApp_Image_2026-07-02_at_10.45.41_AM__1_.jpeg",
-      "profileUpdatedAt": 1783009231357,
+      "profileUpdatedAt": 1783264898819,
       "attendanceProfile": {
         "createdAt": 1782898883085,
         "active": true,
@@ -5406,7 +6699,7 @@
       "lifecycle": {
         "status": "ACTIVE",
         "archivedBy": "",
-        "updatedAt": 1783009231357,
+        "updatedAt": 1783264898819,
         "createdAt": 1782886234510,
         "active": true,
         "archived": false,
@@ -5445,7 +6738,7 @@
         "daily": {}
       },
       "profileCreatedAt": 1782886234510,
-      "profileUpdatedAt": 1783009231357,
+      "profileUpdatedAt": 1783264898819,
       "attendanceProfile": {
         "createdAt": 1782886234510,
         "active": true,
@@ -5489,7 +6782,7 @@
         "archivedBy": "",
         "createdAt": 1782889120636,
         "archivedAt": null,
-        "updatedAt": 1783009231357,
+        "updatedAt": 1783264898819,
         "status": "ACTIVE",
         "restricted": false,
         "archived": false,
@@ -5529,7 +6822,7 @@
       },
       "profileCreatedAt": 1782889120636,
       "profilePhotoFile": "1782911421263-9HeijP-download.jpg",
-      "profileUpdatedAt": 1783009231357,
+      "profileUpdatedAt": 1783264898819,
       "attendanceProfile": {
         "createdAt": 1782889120636,
         "active": true,
@@ -5578,7 +6871,7 @@
         "archived": false,
         "status": "ACTIVE",
         "restricted": false,
-        "updatedAt": 1783009231357,
+        "updatedAt": 1783264898819,
         "archivedBy": "",
         "archivedAt": null,
         "createdAt": 1782880198351
@@ -5623,7 +6916,7 @@
       "emergencyContact": "",
       "mobileRegistered": false,
       "profileCreatedAt": 1782880198351,
-      "profileUpdatedAt": 1783009231357,
+      "profileUpdatedAt": 1783264898819,
       "attendanceProfile": {
         "createdAt": 1782880198351,
         "active": true,
@@ -5674,7 +6967,7 @@
         "archivedBy": "",
         "createdAt": 1782887496970,
         "archivedAt": null,
-        "updatedAt": 1783009231357,
+        "updatedAt": 1783264898819,
         "restricted": false,
         "active": true
       },
@@ -5719,7 +7012,7 @@
       "mobileRegistered": false,
       "profileCreatedAt": 1782887496970,
       "profilePhotoFile": "1782978218245-O-o-Mz-WhatsApp_Image_2026-07-01_at_3.46.12_PM.jpeg",
-      "profileUpdatedAt": 1783009231357,
+      "profileUpdatedAt": 1783264898819,
       "attendanceProfile": {
         "createdAt": 1782887496970,
         "active": true,
@@ -6822,7 +8115,7 @@
       ],
       "id": 1782381477587,
       "recipient": "Amit Kushwaha",
-      "text": "📞 Started an Audio Call",
+      "text": "\ud83d\udcde Started an Audio Call",
       "senderRole": "Admin",
       "sentAt": 1782381477587,
       "sender": "Ashutosh Rai",
@@ -6956,7 +8249,7 @@
       "fileName": "",
       "fileType": "",
       "reactions": {
-        "👍": [
+        "\ud83d\udc4d": [
           "Shubham Upadhyay"
         ]
       },
@@ -7208,7 +8501,7 @@
       "recipient": "global",
       "senderRole": "Admin",
       "reactions": {
-        "👍": [
+        "\ud83d\udc4d": [
           "Shubham Upadhyay",
           "Amit Kushwaha"
         ]
@@ -7265,16 +8558,16 @@
       "text": "This message was deleted.",
       "sender": "Shubham Upadhyay",
       "reactions": {
-        "😮": [
+        "\ud83d\ude2e": [
           "Shubham Upadhyay"
         ],
-        "🙏": [
+        "\ud83d\ude4f": [
           "Shubham Upadhyay"
         ],
-        "😂": [
+        "\ud83d\ude02": [
           "Shubham Upadhyay"
         ],
-        "❤️": [
+        "\u2764\ufe0f": [
           "Shubham Upadhyay"
         ]
       },
@@ -7668,7 +8961,7 @@
       "senderRole": "Admin",
       "roomUrl": "https://meet.jit.si/KalpaVriksha_DM_kalpavriksha_production_v1_Ashutosh_Rai_Shubham_Upadhyay?lang=en&userInfo.displayName=Ashutosh+Rai#config.defaultLanguage=\"en\"&config.prejoinPageEnabled=true&config.disableDeepLinking=true&config.enableClosePage=false&config.enableWelcomePage=false&config.readOnlyName=true&config.startWithAudioMuted=false",
       "reactions": {},
-      "text": "🖥️ Started screen sharing / help session",
+      "text": "\ud83d\udda5\ufe0f Started screen sharing / help session",
       "callType": "screen",
       "sender": "Ashutosh Rai",
       "sentAt": 1782488476163,
@@ -7693,7 +8986,7 @@
       "reactions": {},
       "sender": "Shubham Upadhyay",
       "sentAt": 1782488604242,
-      "text": "🖥️ Started screen sharing / help session",
+      "text": "\ud83d\udda5\ufe0f Started screen sharing / help session",
       "callType": "screen",
       "updatedAt": 1782488604242
     },
@@ -7715,7 +9008,7 @@
       "time": "09:13 PM",
       "sentAt": 1782488605063,
       "sender": "Ashutosh Rai",
-      "text": "🖥️ Started screen sharing / help session",
+      "text": "\ud83d\udda5\ufe0f Started screen sharing / help session",
       "callType": "screen",
       "reactions": {},
       "updatedAt": 1782488605063
@@ -7724,7 +9017,7 @@
       "sender": "Shubham Upadhyay",
       "sentAt": 1782812425956,
       "callType": "screen",
-      "text": "🖥️ Started screen sharing / help session",
+      "text": "\ud83d\udda5\ufe0f Started screen sharing / help session",
       "reactions": {},
       "roomUrl": "https://meet.jit.si/KalpaVriksha_DM_kalpavriksha_production_v1_Ashutosh_Rai_Shubham_Upadhyay?lang=en&userInfo.displayName=Shubham+Upadhyay#config.defaultLanguage=\"en\"&config.prejoinPageEnabled=true&config.disableDeepLinking=true&config.enableClosePage=false&config.enableWelcomePage=false&config.readOnlyName=true&config.startWithAudioMuted=false",
       "senderRole": "Admin",
@@ -7744,7 +9037,7 @@
       "updatedAt": 1782812425956
     },
     {
-      "text": "🖥️ Started screen sharing / help session",
+      "text": "\ud83d\udda5\ufe0f Started screen sharing / help session",
       "callType": "screen",
       "sender": "Shubham Upadhyay",
       "sentAt": 1782812744759,
@@ -7784,7 +9077,7 @@
       "recipient": "Ashutosh Rai",
       "reactions": {},
       "callType": "video",
-      "text": "📹 Started a Video Call",
+      "text": "\ud83d\udcf9 Started a Video Call",
       "sender": "Shubham Upadhyay",
       "sentAt": 1782812754027,
       "updatedAt": 1782812754027
@@ -7794,7 +9087,7 @@
       "sentAt": 1782812756671,
       "sender": "Shubham Upadhyay",
       "callType": "video",
-      "text": "📹 Started a Video Call",
+      "text": "\ud83d\udcf9 Started a Video Call",
       "readBy": [
         {
           "name": "Shubham Upadhyay",
@@ -7817,7 +9110,7 @@
       "sentAt": 1782812756782,
       "sender": "Shubham Upadhyay",
       "callType": "video",
-      "text": "📹 Started a Video Call",
+      "text": "\ud83d\udcf9 Started a Video Call",
       "readBy": [
         {
           "name": "Shubham Upadhyay",
@@ -7853,7 +9146,7 @@
       "roomUrl": "https://meet.jit.si/KalpaVriksha_DM_kalpavriksha_production_v1_Ashutosh_Rai_Shubham_Upadhyay?lang=en&userInfo.displayName=Shubham+Upadhyay#config.defaultLanguage=\"en\"&config.prejoinPageEnabled=true&config.disableDeepLinking=true&config.enableClosePage=false&config.enableWelcomePage=false&config.readOnlyName=true&config.startWithAudioMuted=false",
       "reactions": {},
       "callType": "video",
-      "text": "📹 Started a Video Call",
+      "text": "\ud83d\udcf9 Started a Video Call",
       "sentAt": 1782812765339,
       "sender": "Shubham Upadhyay",
       "updatedAt": 1782812765339
@@ -7877,13 +9170,13 @@
       "sender": "Shubham Upadhyay",
       "sentAt": 1782812828198,
       "callType": "screen",
-      "text": "🖥️ Started screen sharing / help session",
+      "text": "\ud83d\udda5\ufe0f Started screen sharing / help session",
       "reactions": {},
       "updatedAt": 1782812828198
     },
     {
       "callType": "video",
-      "text": "📹 Started a Video Call",
+      "text": "\ud83d\udcf9 Started a Video Call",
       "sender": "Shubham Upadhyay",
       "sentAt": 1782813400957,
       "reactions": {},
@@ -7905,7 +9198,7 @@
       "updatedAt": 1782813400957
     },
     {
-      "text": "📹 Started a Video Call",
+      "text": "\ud83d\udcf9 Started a Video Call",
       "callType": "video",
       "sender": "Shubham Upadhyay",
       "sentAt": 1782813920459,
@@ -7947,7 +9240,7 @@
       "sender": "Shubham Upadhyay",
       "sentAt": 1782813920522,
       "callType": "video",
-      "text": "📹 Started a Video Call",
+      "text": "\ud83d\udcf9 Started a Video Call",
       "updatedAt": 1782813920522
     },
     {
@@ -7968,7 +9261,7 @@
       "time": "03:47 PM",
       "sentAt": 1782814641368,
       "sender": "Shubham Upadhyay",
-      "text": "📹 Started a Video Call",
+      "text": "\ud83d\udcf9 Started a Video Call",
       "callType": "video",
       "reactions": {},
       "updatedAt": 1782814641368
@@ -7990,7 +9283,7 @@
       "recipient": "Ashutosh Rai",
       "roomUrl": "https://meet.jit.si/KalpaVriksha_DM_kalpavriksha_production_v1_Ashutosh_Rai_Shubham_Upadhyay?lang=en&userInfo.displayName=Shubham+Upadhyay#config.defaultLanguage=\"en\"&config.prejoinPageEnabled=true&config.disableDeepLinking=true&config.enableClosePage=false&config.enableWelcomePage=false&config.readOnlyName=true&config.startWithAudioMuted=false",
       "reactions": {},
-      "text": "📹 Started a Video Call",
+      "text": "\ud83d\udcf9 Started a Video Call",
       "callType": "video",
       "sender": "Shubham Upadhyay",
       "sentAt": 1782817556558,
@@ -8001,7 +9294,7 @@
       "sentAt": 1782817895924,
       "sender": "Shubham Upadhyay",
       "callType": "video",
-      "text": "📹 Started a Video Call",
+      "text": "\ud83d\udcf9 Started a Video Call",
       "readBy": [
         {
           "name": "Shubham Upadhyay",
@@ -8020,7 +9313,7 @@
       "updatedAt": 1782817895924
     },
     {
-      "text": "📹 Started a LiveKit Video Call",
+      "text": "\ud83d\udcf9 Started a LiveKit Video Call",
       "callType": "video",
       "sentAt": 1782819019026,
       "sender": "Shubham Upadhyay",
@@ -8060,7 +9353,7 @@
         }
       ],
       "callType": "video",
-      "text": "📹 Started a LiveKit Video Call",
+      "text": "\ud83d\udcf9 Started a LiveKit Video Call",
       "sentAt": 1782819080396,
       "sender": "Shubham Upadhyay",
       "livekitRoom": "KalpaVriksha_DM_kalpavriksha_production_v1_Ashutosh_Rai_Shubham_Upadhyay",
@@ -8086,7 +9379,7 @@
       "sender": "Shubham Upadhyay",
       "sentAt": 1782819080460,
       "callType": "video",
-      "text": "📹 Started a LiveKit Video Call",
+      "text": "\ud83d\udcf9 Started a LiveKit Video Call",
       "reactions": {},
       "livekitRoom": "KalpaVriksha_DM_kalpavriksha_production_v1_Ashutosh_Rai_Shubham_Upadhyay",
       "updatedAt": 1782819080460
@@ -8108,7 +9401,7 @@
       ],
       "id": 1782819316679,
       "callType": "video",
-      "text": "📹 Started a LiveKit Video Call",
+      "text": "\ud83d\udcf9 Started a LiveKit Video Call",
       "sender": "Shubham Upadhyay",
       "sentAt": 1782819316679,
       "livekitRoom": "KalpaVriksha_DM_kalpavriksha_production_v1_Ashutosh_Rai_Shubham_Upadhyay",
@@ -8120,7 +9413,7 @@
       "livekitRoom": "KalpaVriksha_DM_kalpavriksha_production_v1_Ashutosh_Rai_Shubham_Upadhyay",
       "sender": "Shubham Upadhyay",
       "sentAt": 1782819379047,
-      "text": "📹 Started a LiveKit Video Call",
+      "text": "\ud83d\udcf9 Started a LiveKit Video Call",
       "callType": "video",
       "readBy": [
         {
@@ -8158,13 +9451,13 @@
       "livekitRoom": "KalpaVriksha_DM_kalpavriksha_production_v1_Ashutosh_Rai_Shubham_Upadhyay",
       "reactions": {},
       "callType": "video",
-      "text": "📹 Started a LiveKit Video Call",
+      "text": "\ud83d\udcf9 Started a LiveKit Video Call",
       "sender": "Shubham Upadhyay",
       "sentAt": 1782819547075,
       "updatedAt": 1782819547075
     },
     {
-      "text": "📹 Started a LiveKit Video Call",
+      "text": "\ud83d\udcf9 Started a LiveKit Video Call",
       "callType": "video",
       "sender": "Shubham Upadhyay",
       "sentAt": 1782819827129,
@@ -8204,7 +9497,7 @@
         }
       ],
       "callType": "video",
-      "text": "📹 Started a LiveKit Video Call",
+      "text": "\ud83d\udcf9 Started a LiveKit Video Call",
       "sentAt": 1782820521663,
       "sender": "Shubham Upadhyay",
       "livekitRoom": "KalpaVriksha_DM_kalpavriksha_production_v1_Ashutosh_Rai_Shubham_Upadhyay",
@@ -8217,7 +9510,7 @@
       "sentAt": 1782821150101,
       "sender": "Shubham Upadhyay",
       "callType": "video",
-      "text": "📹 Started a LiveKit Video Call",
+      "text": "\ud83d\udcf9 Started a LiveKit Video Call",
       "readBy": [
         {
           "name": "Shubham Upadhyay",
@@ -8240,7 +9533,7 @@
       "livekitRoom": "KalpaVriksha_DM_kalpavriksha_production_v1_Ashutosh_Rai_Shubham_Upadhyay",
       "sender": "Ashutosh Rai",
       "sentAt": 1782821173081,
-      "text": "📹 Started a LiveKit Video Call",
+      "text": "\ud83d\udcf9 Started a LiveKit Video Call",
       "callType": "video",
       "id": 1782821173081,
       "readBy": [
@@ -8280,7 +9573,7 @@
       "sentAt": 1782822468620,
       "sender": "Shubham Upadhyay",
       "callType": "video",
-      "text": "📹 Started a LiveKit Video Call",
+      "text": "\ud83d\udcf9 Started a LiveKit Video Call",
       "updatedAt": 1782822468620
     },
     {
@@ -8304,12 +9597,12 @@
       "sender": "Ashutosh Rai",
       "sentAt": 1782822491244,
       "callType": "video",
-      "text": "📹 Started a LiveKit Video Call",
+      "text": "\ud83d\udcf9 Started a LiveKit Video Call",
       "updatedAt": 1782822491244
     },
     {
       "callType": "video",
-      "text": "📹 Started a LiveKit Video Call",
+      "text": "\ud83d\udcf9 Started a LiveKit Video Call",
       "sentAt": 1782823775387,
       "sender": "Shubham Upadhyay",
       "livekitRoom": "KalpaVriksha_DM_kalpavriksha_production_v1_Ashutosh_Rai_Shubham_Upadhyay",
@@ -8334,7 +9627,7 @@
     {
       "livekitRoom": "KalpaVriksha_DM_kalpavriksha_production_v1_Ashutosh_Rai_Shubham_Upadhyay",
       "reactions": {},
-      "text": "📹 Started a LiveKit Video Call",
+      "text": "\ud83d\udcf9 Started a LiveKit Video Call",
       "callType": "video",
       "sender": "Shubham Upadhyay",
       "sentAt": 1782824099490,
@@ -8356,7 +9649,7 @@
       "updatedAt": 1782824099490
     },
     {
-      "text": "📹 Started a LiveKit Video Call",
+      "text": "\ud83d\udcf9 Started a LiveKit Video Call",
       "callType": "video",
       "sender": "Shubham Upadhyay",
       "sentAt": 1782824170902,
@@ -8380,7 +9673,7 @@
       "updatedAt": 1782824170902
     },
     {
-      "text": "📹 Started a LiveKit Video Call",
+      "text": "\ud83d\udcf9 Started a LiveKit Video Call",
       "callType": "video",
       "sentAt": 1782824751248,
       "sender": "Shubham Upadhyay",
@@ -8421,7 +9714,7 @@
       "recipient": "Ashutosh Rai",
       "livekitRoom": "KalpaVriksha_DM_kalpavriksha_production_v1_Ashutosh_Rai_Shubham_Upadhyay",
       "reactions": {},
-      "text": "📹 Started a LiveKit Video Call",
+      "text": "\ud83d\udcf9 Started a LiveKit Video Call",
       "callType": "video",
       "sender": "Shubham Upadhyay",
       "sentAt": 1782825705932,
@@ -8445,7 +9738,7 @@
       "time": "12:18 AM",
       "sender": "Shubham Upadhyay",
       "sentAt": 1782845319398,
-      "text": "📹 Started a Video Call",
+      "text": "\ud83d\udcf9 Started a Video Call",
       "callType": "video",
       "reactions": {},
       "updatedAt": 1782845319398
@@ -8453,7 +9746,7 @@
     {
       "sender": "Shubham Upadhyay",
       "sentAt": 1782851101099,
-      "text": "📞 Started an Audio Call",
+      "text": "\ud83d\udcde Started an Audio Call",
       "callType": "audio",
       "reactions": {},
       "roomUrl": "https://meet.jit.si/KalpaVriksha_DM_kalpavriksha_production_v1_Ashutosh_Rai_Shubham_Upadhyay?lang=en&userInfo.displayName=Shubham+Upadhyay#config.defaultLanguage=\"en\"&config.prejoinPageEnabled=true&config.disableDeepLinking=true&config.enableClosePage=false&config.enableWelcomePage=false&config.readOnlyName=true&config.startWithAudioMuted=false&config.startAudioOnly=true",
@@ -8477,7 +9770,7 @@
       "sentAt": 1782852088954,
       "sender": "Shubham Upadhyay",
       "callType": "screen",
-      "text": "🖥️ Started screen sharing / help session",
+      "text": "\ud83d\udda5\ufe0f Started screen sharing / help session",
       "reactions": {},
       "recipient": "Ashutosh Rai",
       "senderRole": "Admin",
@@ -8541,7 +9834,7 @@
         }
       ],
       "id": 1782894370413,
-      "text": "📹 Started a Video Call",
+      "text": "\ud83d\udcf9 Started a Video Call",
       "callType": "video",
       "sentAt": 1782894370413,
       "sender": "Shubham Upadhyay",
@@ -8550,7 +9843,7 @@
     },
     {
       "callType": "video",
-      "text": "📹 Started a Video Call",
+      "text": "\ud83d\udcf9 Started a Video Call",
       "sender": "Shubham Upadhyay",
       "sentAt": 1782895217133,
       "reactions": {},
@@ -8616,7 +9909,7 @@
     {
       "sender": "Nilu Gupta",
       "sentAt": 1782901433717,
-      "text": "🖥️ Started screen sharing / help session",
+      "text": "\ud83d\udda5\ufe0f Started screen sharing / help session",
       "callType": "screen",
       "reactions": {},
       "senderRole": "Designer",
@@ -9018,7 +10311,7 @@
     },
     {
       "callType": "video",
-      "text": "📹 Started a Video Call",
+      "text": "\ud83d\udcf9 Started a Video Call",
       "sender": "Shubham Upadhyay",
       "sentAt": 1782985633380422,
       "reactions": {},
@@ -9085,7 +10378,7 @@
     },
     {
       "reactions": {},
-      "text": "🖥️ Started screen sharing / help session",
+      "text": "\ud83d\udda5\ufe0f Started screen sharing / help session",
       "callType": "screen",
       "sender": "Amit Kushwaha",
       "sentAt": 1782986352412596,
@@ -9112,7 +10405,7 @@
       "time": "03:31 PM",
       "sentAt": 1782986470120469,
       "reactions": {},
-      "text": "📹 Started a Video Call",
+      "text": "\ud83d\udcf9 Started a Video Call",
       "callType": "video",
       "id": 1782986470120469,
       "recipient": "Amit Kushwaha",
@@ -9286,6 +10579,60 @@
     "DESIGNER": []
   },
   "notifications": [
+    {
+      "id": "llLQPCAt",
+      "to": "Waqar",
+      "text": "New task assigned: KD-LUC-2026-0022",
+      "category": "task",
+      "target": "vwWi00Zt",
+      "status": "UNREAD",
+      "createdAt": "2026-07-05T15:21:38.819Z"
+    },
+    {
+      "id": "t9_8WolR",
+      "to": "MANAGER",
+      "text": "New case KD-LUC-2026-0022 created by Admin",
+      "category": "task",
+      "target": "vwWi00Zt",
+      "status": "UNREAD",
+      "createdAt": "2026-07-05T15:21:38.819Z"
+    },
+    {
+      "id": "GfXQJ-S5",
+      "to": "ADMIN",
+      "text": "New case KD-LUC-2026-0022 created by Admin",
+      "category": "task",
+      "target": "vwWi00Zt",
+      "status": "UNREAD",
+      "createdAt": "2026-07-05T15:21:38.819Z"
+    },
+    {
+      "id": "ocqhP-gh",
+      "to": "Waqar",
+      "text": "New task assigned: KD-LUC-2026-0022",
+      "category": "task",
+      "target": "meY3Fk1h",
+      "status": "UNREAD",
+      "createdAt": "2026-07-05T15:21:03.845Z"
+    },
+    {
+      "id": "PjSA_W4Y",
+      "to": "MANAGER",
+      "text": "New case KD-LUC-2026-0022 created by Admin",
+      "category": "task",
+      "target": "meY3Fk1h",
+      "status": "UNREAD",
+      "createdAt": "2026-07-05T15:21:03.845Z"
+    },
+    {
+      "id": "W7J5wHiF",
+      "to": "ADMIN",
+      "text": "New case KD-LUC-2026-0022 created by Admin",
+      "category": "task",
+      "target": "meY3Fk1h",
+      "status": "UNREAD",
+      "createdAt": "2026-07-05T15:21:03.845Z"
+    },
     {
       "targetRole": "Designer",
       "type": "info",
@@ -9654,7 +11001,7 @@
       "readBy": [
         "Amit Kushwaha"
       ],
-      "title": "New message from Shubham Upadhyay: 📹 Started a Video Call",
+      "title": "New message from Shubham Upadhyay: \ud83d\udcf9 Started a Video Call",
       "time": "3:31:10 PM",
       "priority": "Normal"
     },
@@ -9668,7 +11015,7 @@
       "readBy": [
         "Shubham Upadhyay"
       ],
-      "title": "New message from Amit Kushwaha: 🖥️ Started screen sharing / help session",
+      "title": "New message from Amit Kushwaha: \ud83d\udda5\ufe0f Started screen sharing / help session",
       "id": 1782986352880
     },
     {
@@ -9698,7 +11045,7 @@
       "title": "New message from Shubham Upadhyay: join karo meeting"
     },
     {
-      "title": "New message from Shubham Upadhyay: 📹 Started a Video Call",
+      "title": "New message from Shubham Upadhyay: \ud83d\udcf9 Started a Video Call",
       "readBy": [
         "Amit Kushwaha"
       ],

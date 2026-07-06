@@ -9,6 +9,7 @@ import QRCode from 'qrcode';
 import { fileURLToPath } from 'url';
 import pg from 'pg';
 import nodemailer from 'nodemailer';
+import { addCaseTimelineEvent, mergeTimelineEvents, normalizeCaseTimeline, normalizeTimelineEvent } from './services/timelineService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -181,7 +182,7 @@ function norm(d){
   const deletedSet = new Set(d.deletedProjectIds);
   d.cases = (d.cases || []).filter(c => c && !deletedSet.has(String(c.id || '')) && !deletedSet.has(String(c.caseId || '')));
   d.files ||= [];
-  d.cases.forEach(c=>{ c.documents ||= []; c.completedFiles ||= c.completedFiles || []; c.history ||= []; c.comments ||= []; c.revisions ||= []; c.creatorName ||= c.createdBy || 'Admin'; c.createdAt ||= new Date().toISOString(); });
+  d.cases.forEach(c=>{ c.documents ||= []; c.completedFiles ||= c.completedFiles || []; c.history ||= []; c.comments ||= []; c.revisions ||= []; c.timeline = normalizeCaseTimeline(c); c.creatorName ||= c.createdBy || 'Admin'; c.createdAt ||= new Date().toISOString(); });
   normalizePersistedFileLinks(d);
   return d;
 }
@@ -234,13 +235,23 @@ function mergeCasesPreservingFreshest(existingCases = [], incomingCases = [], de
   // id, caseId and previousTaskIds. This prevents an edited/renamed task from
   // reverting back to an older version for managers/designers after another client
   // saves its stale local copy.
+  const timelineById = new Map();
+  for (const c of [...(Array.isArray(existingCases) ? existingCases : []), ...(Array.isArray(incomingCases) ? incomingCases : [])].filter(Boolean)) {
+    for (const id of getCaseIdentitySet(c)) {
+      const current = timelineById.get(id) || [];
+      timelineById.set(id, mergeTimelineEvents(current, c.timeline, c.history));
+    }
+  }
   const merged = [
     ...(Array.isArray(existingCases) ? existingCases : []),
     ...(Array.isArray(incomingCases) ? incomingCases : [])
   ].filter(Boolean).map(c => {
     const nowStamp = Date.now();
+    const ids = getCaseIdentitySet(c);
+    const timeline = ids.map(id => timelineById.get(id)).find(Boolean) || c.timeline || [];
     return {
       ...c,
+      timeline: mergeTimelineEvents(timeline, c.timeline, c.history),
       updatedAt: c.updatedAt || c.syncVersion || c.assignmentVersion || c.assignedAt || c.completedAt || c.createdAt || nowStamp,
       syncVersion: c.syncVersion || c.updatedAt || nowStamp
     };
@@ -471,6 +482,7 @@ function upsertInlinePaymentLedger(d, c, status, body = {}) {
     }
     c.history.unshift({ at: nowIso, by, action: `Payment status changed to ${computedStatus}${existing ? '; previous paid ledger entry marked reversed' : ''}` });
   }
+  addCaseTimelineEvent(c,{type:'payment_updated',by,title:`Payment ${computedStatus}`,remarks:amount > 0 ? `Amount received: ₹${Number(amount || 0).toLocaleString('en-IN')}` : ''});
   addAudit(d, by, `Inline payment status changed to ${computedStatus}`, caseNo);
   return c;
 }
@@ -1199,17 +1211,40 @@ app.post('/api/cases', uploadAny, async (req,res)=>{
   const d=db(); const body=req.body; const creatorName=body.creatorName||body.createdBy||'Admin';
   let assignee=d.users.find(u=>u.id===body.assigneeId); if(!assignee) assignee=leastBusy(d);
   const manager=sanitizePresenceUsers(d.users).find(u=>normalizeRole(u.role)==='Manager');
-  const c={id:nanoid(8),caseId:nextCaseNo(d,body.city),source:body.source||'Manual',createdByRole:body.createdByRole||'ADMIN',creatorName,customerName:body.customerName||'New Customer',customerPhone:body.customerPhone||'',bankerName:body.bankerName||'',bank:body.bank||'',branch:body.branch||'',serviceType:body.serviceType||'Map Estimate',otherDescription:body.otherDescription||'',city:body.city||'Lucknow',propertyAddress:body.propertyAddress||'',estimateAmount:body.serviceType==='Map Estimate'||body.serviceType?.includes('Estimate')?Number(body.estimateAmount||0):Number(body.estimateAmount||0),priority:body.priority||'Normal',status:'ASSIGNED',assigneeId:assignee?.id,assigneeName:assignee?.name,assigneeRole:assignee?.role,managerId:manager?.id,managerName:manager?.name,createdAt:now(),startedAt:null,completedAt:null,dueAt:body.dueAt||'',paymentStatus:'PENDING',documents:[],comments:[],revisions:[],history:[{at:now(),by:creatorName,action:'Lead created and task assigned'}]};
+  const createdAt = now();
+  const c={id:nanoid(8),caseId:nextCaseNo(d,body.city),source:body.source||'Manual',createdByRole:body.createdByRole||'ADMIN',creatorName,customerName:body.customerName||'New Customer',customerPhone:body.customerPhone||'',bankerName:body.bankerName||'',bank:body.bank||'',branch:body.branch||'',serviceType:body.serviceType||'Map Estimate',otherDescription:body.otherDescription||'',city:body.city||'Lucknow',propertyAddress:body.propertyAddress||'',estimateAmount:body.serviceType==='Map Estimate'||body.serviceType?.includes('Estimate')?Number(body.estimateAmount||0):Number(body.estimateAmount||0),priority:body.priority||'Normal',status:'ASSIGNED',assigneeId:assignee?.id,assigneeName:assignee?.name,assigneeRole:assignee?.role,managerId:manager?.id,managerName:manager?.name,createdAt,startedAt:null,completedAt:null,dueAt:body.dueAt||'',paymentStatus:'PENDING',documents:[],comments:[],revisions:[],history:[{at:createdAt,by:creatorName,action:'Lead created and task assigned'}],timeline:[]};
+  addCaseTimelineEvent(c, { type:'created', by:creatorName, at:createdAt, title:'Case Created', remarks:`${c.caseId} created for ${c.customerName}` });
+  if (assignee) addCaseTimelineEvent(c, { type:'assigned', by:creatorName, at:createdAt, title:`Assigned to ${assignee.name}`, remarks:'Initial smart assignment' });
   for(const f of (req.files||[])) c.documents.push(addFileRegistryEntry(d, docPayload(f,creatorName,body.createdByRole||'ADMIN','SOURCE',c.id)));
+  if ((req.files || []).length) addCaseTimelineEvent(c, { type:'source_uploaded', by:creatorName, title:`${req.files.length} source file(s) uploaded` });
   d.cases.unshift(c); notifyRole(d,'ADMIN',`New case ${c.caseId} created by ${creatorName}`,'task',c.id); notifyRole(d,'MANAGER',`New case ${c.caseId} created by ${creatorName}`,'task',c.id); if(assignee) notifyUser(d,assignee.name,`New task assigned: ${c.caseId}`,'task',c.id); addAudit(d,creatorName,'Case created',c.caseId); save(d); res.json(c);
 });
-app.post('/api/cases/:id/assign',(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const u=d.users.find(x=>x.id===req.body.assigneeId); if(!u) return res.status(400).json({error:'Assignee not found'}); c.assigneeId=u.id; c.assigneeName=u.name; c.assigneeRole=u.role; c.status='ASSIGNED'; c.history.unshift({at:now(),by:req.body.by||'Manager',action:`Assigned to ${u.name}`}); notifyUser(d,u.name,`Task assigned to you: ${c.caseId}`,'task',c.id); addAudit(d,req.body.by||'Manager','Task assigned',c.caseId); save(d); res.json(c); });
-app.post('/api/cases/:id/start',(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); c.status='IN_PROGRESS'; c.startedAt ||= now(); c.history.unshift({at:now(),by:req.body.by||c.assigneeName,action:'Work started'}); save(d); res.json(c); });
-app.post('/api/cases/:id/upload-source', uploadAny,(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); for(const f of req.files||[]) c.documents.push(addFileRegistryEntry(d, docPayload(f,req.body.by||'Admin',req.body.role||'ADMIN','SOURCE',c.id))); c.history.unshift({at:now(),by:req.body.by||'Admin',action:`Uploaded ${req.files?.length||0} source file(s)`}); notifyUser(d,c.assigneeName,`New source files added for ${c.caseId}`,'task',c.id); save(d); res.json(c); });
-app.post('/api/cases/:id/upload-final', uploadAny,(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const isRevision=String(req.body.isRevision||'false')==='true' || c.status==='REOPENED_FOR_REVISION'; for(const f of req.files||[]) { const doc=addFileRegistryEntry(d, docPayload(f,req.body.by||c.assigneeName,req.body.role||'DESIGNER',isRevision?'REVISION_FINAL':'FINAL',c.id)); doc.type = isRevision ? 'Revised File' : 'Completed File'; doc.folder = isRevision ? 'revised-completed' : 'completed'; c.documents.push(doc); }
-  c.status='MANAGER_REVIEW'; c.history.unshift({at:now(),by:req.body.by||c.assigneeName,action:isRevision?'Revised file uploaded':'Completed file uploaded for manager review'}); notifyRole(d,'MANAGER',`${isRevision?'Revised':'Completed'} file uploaded: ${c.caseId}`,'completed',c.id); notifyRole(d,'ADMIN',`${isRevision?'Revised':'Completed'} file uploaded: ${c.caseId}`,'completed',c.id); addAudit(d,req.body.by||c.assigneeName,'Final upload',c.caseId); save(d); res.json(c); });
-app.post('/api/cases/:id/manager-complete', async (req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); c.status='COMPLETED'; c.completedAt=now(); c.history.unshift({at:now(),by:req.body.by||'Manager',action:'Reviewed by manager and marked complete'}); notifyRole(d,'ADMIN',`Case completed after manager review: ${c.caseId}`,'completed',c.id); notifyUser(d,c.assigneeName,`Case marked complete: ${c.caseId}`,'completed',c.id); addAudit(d,req.body.by||'Manager','Case completed',c.caseId); save(d); res.json(c); });
-app.post('/api/cases/:id/revision',(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); c.status='REOPENED_FOR_REVISION'; c.priority='Urgent'; const rev={id:nanoid(8),note:req.body.note||'Banker revision requested',by:req.body.by||'Admin/Manager',createdAt:now()}; c.revisions.unshift(rev); c.history.unshift({at:now(),by:rev.by,action:'Revision opened as urgent'}); notifyUser(d,c.assigneeName,`URGENT revision task: ${c.caseId} - ${rev.note}`,'task',c.id); notifyRole(d,'MANAGER',`URGENT revision opened: ${c.caseId}`,'task',c.id); save(d); res.json(c); });
+app.post('/api/cases/:id/assign',(req,res)=>{ const d=db(); const c=findCaseByAnyId(d.cases, req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const u=d.users.find(x=>x.id===req.body.assigneeId); if(!u) return res.status(400).json({error:'Assignee not found'}); const by=req.body.by||'Manager'; c.assigneeId=u.id; c.assigneeName=u.name; c.assigneeRole=u.role; c.status='ASSIGNED'; c.assignedAt=now(); c.history.unshift({at:now(),by,action:`Assigned to ${u.name}`}); addCaseTimelineEvent(c,{type:'assigned',by,title:`Assigned to ${u.name}`,remarks:req.body.remarks||''}); notifyUser(d,u.name,`Task assigned to you: ${c.caseId}`,'task',c.id); addAudit(d,by,'Task assigned',c.caseId); save(d); res.json(c); });
+app.post('/api/cases/:id/start',(req,res)=>{ const d=db(); const c=findCaseByAnyId(d.cases, req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const by=req.body.by||c.assigneeName||'Designer'; c.status='IN_PROGRESS'; c.startedAt ||= now(); c.history.unshift({at:now(),by,action:'Work started'}); addCaseTimelineEvent(c,{type:'started',by,title:'Designer Started',remarks:req.body.remarks||''}); save(d); res.json(c); });
+app.post('/api/cases/:id/upload-source', uploadAny,(req,res)=>{ const d=db(); const c=findCaseByAnyId(d.cases, req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const by=req.body.by||'Admin'; for(const f of req.files||[]) c.documents.push(addFileRegistryEntry(d, docPayload(f,by,req.body.role||'ADMIN','SOURCE',c.id))); c.history.unshift({at:now(),by,action:`Uploaded ${req.files?.length||0} source file(s)`}); addCaseTimelineEvent(c,{type:'source_uploaded',by,title:`${req.files?.length||0} source file(s) uploaded`}); notifyUser(d,c.assigneeName,`New source files added for ${c.caseId}`,'task',c.id); save(d); res.json(c); });
+app.post('/api/cases/:id/upload-final', uploadAny,(req,res)=>{ const d=db(); const c=findCaseByAnyId(d.cases, req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const by=req.body.by||c.assigneeName||'Designer'; const isRevision=String(req.body.isRevision||'false')==='true' || c.status==='REOPENED_FOR_REVISION'; for(const f of req.files||[]) { const doc=addFileRegistryEntry(d, docPayload(f,by,req.body.role||'DESIGNER',isRevision?'REVISION_FINAL':'FINAL',c.id)); doc.type = isRevision ? 'Revised File' : 'Completed File'; doc.folder = isRevision ? 'revised-completed' : 'completed'; c.documents.push(doc); }
+  c.status='MANAGER_REVIEW'; c.history.unshift({at:now(),by,action:isRevision?'Revised file uploaded':'Completed file uploaded for manager review'}); addCaseTimelineEvent(c,{type:isRevision?'revision_uploaded':'completion_uploaded',by,title:isRevision?'Revision Completion Uploaded':'Completion Uploaded',remarks:`${req.files?.length||0} file(s) uploaded`}); addCaseTimelineEvent(c,{type:'internal_review',by:'System',title:'Internal Review Pending',remarks:'Completion is awaiting manager review'}); notifyRole(d,'MANAGER',`${isRevision?'Revised':'Completed'} file uploaded: ${c.caseId}`,'completed',c.id); notifyRole(d,'ADMIN',`${isRevision?'Revised':'Completed'} file uploaded: ${c.caseId}`,'completed',c.id); addAudit(d,by,'Final upload',c.caseId); save(d); res.json(c); });
+app.post('/api/cases/:id/manager-complete', async (req,res)=>{ const d=db(); const c=findCaseByAnyId(d.cases, req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const by=req.body.by||'Manager'; c.status='COMPLETED'; c.completedAt=now(); c.history.unshift({at:now(),by,action:'Reviewed by manager and marked complete'}); addCaseTimelineEvent(c,{type:'approved',by,title:'Approved',remarks:'Reviewed by manager and marked complete'}); notifyRole(d,'ADMIN',`Case completed after manager review: ${c.caseId}`,'completed',c.id); notifyUser(d,c.assigneeName,`Case marked complete: ${c.caseId}`,'completed',c.id); addAudit(d,by,'Case completed',c.caseId); save(d); res.json(c); });
+app.post('/api/cases/:id/revision',(req,res)=>{ const d=db(); const c=findCaseByAnyId(d.cases, req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); c.status='REOPENED_FOR_REVISION'; c.priority='Urgent'; const rev={id:nanoid(8),note:req.body.note||'Banker revision requested',by:req.body.by||'Admin/Manager',createdAt:now()}; c.revisions.unshift(rev); c.history.unshift({at:now(),by:rev.by,action:'Revision opened as urgent'}); addCaseTimelineEvent(c,{type:'revision_created',by:rev.by,at:rev.createdAt,title:'Revision Created',remarks:rev.note}); notifyUser(d,c.assigneeName,`URGENT revision task: ${c.caseId} - ${rev.note}`,'task',c.id); notifyRole(d,'MANAGER',`URGENT revision opened: ${c.caseId}`,'task',c.id); save(d); res.json(c); });
+
+
+app.get('/api/cases/:id/timeline', (req,res)=>{
+  const d=db();
+  const c=findCaseByAnyId(d.cases || [], req.params.id);
+  if(!c) return res.status(404).json({ok:false,error:'Case not found'});
+  c.timeline = normalizeCaseTimeline(c);
+  res.json({ok:true, caseId:c.id, caseNo:c.caseId, timeline:c.timeline});
+});
+
+app.post('/api/cases/:id/timeline', (req,res)=>{
+  const d=db();
+  const c=findCaseByAnyId(d.cases || [], req.params.id);
+  if(!c) return res.status(404).json({ok:false,error:'Case not found'});
+  const event=addCaseTimelineEvent(c, { type:req.body.type || 'manual', by:req.body.by || req.body.user || 'System', title:req.body.title || req.body.text || 'Timeline Event', remarks:req.body.remarks || req.body.note || '', meta:req.body.meta || {} });
+  addAudit(d,event.by,'Timeline event added',c.caseId);
+  save(d);
+  res.json({ok:true,event,timeline:c.timeline,case:c});
+});
 
 app.post('/api/state/projects/:id/payment-status', (req, res) => {
   if (!isFinanceAdminRequest(req)) return denyFinanceAccess(res);

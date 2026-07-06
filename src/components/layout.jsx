@@ -1,6 +1,7 @@
 import React from 'react';
-import { AlertCircle, Bell, Briefcase, Calendar, CheckCircle, Flag, LayoutDashboard, LogOut, MessageSquare, Search, User, Video, X } from 'lucide-react';
+import { AlertCircle, Archive, BarChart3, Bell, Briefcase, Calculator, Calendar, CheckCircle, ClipboardList, Flag, LayoutDashboard, LogOut, MessageSquare, MoreHorizontal, Search, Settings, User, Users, Video, X } from 'lucide-react';
 import { getProfilePhotoVersion, profilePhotoUrl } from '../utils/profileUtils';
+import { isNotificationReadByUser } from '../services/notificationService';
 
 export const LocalModeBanner = ({ onClose }) => (
   <div className="bg-amber-100 border-b border-amber-200 text-amber-800 p-2.5 text-center text-xs font-bold flex flex-wrap justify-center items-center gap-2 shadow-sm z-50 relative">
@@ -128,7 +129,7 @@ export const TopNavigation = ({
               <div className="max-h-80 overflow-y-auto p-2 space-y-1 custom-scrollbar">
                 {(filteredNotifs || []).length === 0 && <p className="text-xs text-slate-400 font-bold text-center py-6">No notifications found.</p>}
                 {(filteredNotifs || []).map(n => {
-                  const unread = !(n.readBy || []).includes(currentUser.name);
+                  const unread = !isNotificationReadByUser(n, currentUser);
                   return (
                     <div key={n.id} className={`p-3.5 rounded-2xl flex items-start transition-colors group ${unread ? 'bg-indigo-50/50 border border-indigo-100' : 'bg-white hover:bg-slate-50 border border-transparent'}`}>
                       {getNotificationIcon(n)}
@@ -219,8 +220,9 @@ export const MainTabNavigation = ({ currentUser, ROLES, activeTab, setActiveTab 
     {currentUser.role === ROLES.MANAGER && (
       <button {...tabButtonProps('my_tasks')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 flex items-center pointer-events-auto ${activeTab === 'my_tasks' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}><User className="w-4 h-4 mr-1.5" /> My Tasks</button>
     )}
-    <button {...tabButtonProps('productivity')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'productivity' ? 'bg-emerald-100 text-emerald-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Performance</button>
+    <button {...tabButtonProps('productivity')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'productivity' ? 'bg-emerald-100 text-emerald-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Performance Analytics</button>
     {currentUser.role === ROLES.ADMIN && <button {...tabButtonProps('closing')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'closing' ? 'bg-slate-800 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Daily Closing</button>}
+    {currentUser.role === ROLES.ADMIN && <button {...tabButtonProps('reports')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'reports' ? 'bg-indigo-100 text-indigo-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Reports</button>}
     {currentUser.role === ROLES.ADMIN && (
       <button {...tabButtonProps('ledger')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'ledger' ? 'bg-amber-100 text-amber-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Finance</button>
     )}
@@ -229,6 +231,76 @@ export const MainTabNavigation = ({ currentUser, ROLES, activeTab, setActiveTab 
     <button {...tabButtonProps('calculator')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'calculator' ? 'bg-blue-100 text-blue-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Tools</button>
     <button {...tabButtonProps('archive')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'archive' ? 'bg-slate-800 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Archive</button>
     <button {...tabButtonProps('meeting')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 flex items-center pointer-events-auto ${activeTab === 'meeting' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}><Video className="w-4 h-4 mr-1.5" /> Team Meeting</button>
+    {currentUser.role === ROLES.ADMIN && <button {...tabButtonProps('settings')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 flex items-center pointer-events-auto ${activeTab === 'settings' || activeTab === 'qa' ? 'bg-slate-100 text-slate-900 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}><Settings className="w-4 h-4 mr-1.5" /> Settings</button>}
   </div>
+  );
+};
+
+
+export const MobileBottomNavigation = ({ currentUser, ROLES, activeTab, setActiveTab, unreadNotifs = 0 }) => {
+  const [showMore, setShowMore] = React.useState(false);
+  const isAdmin = currentUser?.role === ROLES.ADMIN;
+  const isDesigner = currentUser?.role === ROLES.DESIGNER;
+  const isManager = currentUser?.role === ROLES.MANAGER;
+  const taskTab = isDesigner || isManager ? 'my_tasks' : 'board';
+  const taskLabel = isDesigner || isManager ? 'My Tasks' : 'Operations';
+  const taskIcon = isDesigner || isManager ? User : ClipboardList;
+
+  const primaryTabs = [
+    { key: 'command', label: 'Command', icon: LayoutDashboard },
+    { key: taskTab, label: taskLabel, icon: taskIcon },
+    { key: 'productivity', label: 'Performance', icon: BarChart3 },
+    { key: 'team', label: 'Team', icon: Users },
+  ];
+
+  const moreTabs = [
+    ...(isAdmin ? [{ key: 'ledger', label: 'Finance', icon: Briefcase }, { key: 'closing', label: 'Closing', icon: CheckCircle }, { key: 'reports', label: 'Reports', icon: BarChart3 }, { key: 'settings', label: 'Settings', icon: Settings }] : []),
+    { key: 'attendance', label: 'Attendance', icon: Calendar },
+    { key: 'calculator', label: 'Tools', icon: Calculator },
+    { key: 'archive', label: 'Archive', icon: Archive },
+    { key: 'meeting', label: 'Meeting', icon: Video },
+  ];
+
+  const go = (key) => {
+    setActiveTab(key);
+    setShowMore(false);
+    window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
+  };
+
+  const TabButton = ({ item }) => {
+    const Icon = item.icon;
+    const selected = activeTab === item.key;
+    return (
+      <button type="button" onClick={() => go(item.key)} className={`kalpa-bottom-nav-btn ${selected ? 'is-active' : ''}`} aria-current={selected ? 'page' : undefined}>
+        <span className="kalpa-bottom-nav-icon"><Icon className="w-5 h-5" />{item.key === 'command' && unreadNotifs > 0 && <em>{unreadNotifs > 99 ? '99+' : unreadNotifs}</em>}</span>
+        <span>{item.label}</span>
+      </button>
+    );
+  };
+
+  return (
+    <div className="kalpa-bottom-nav-shell lg:hidden" role="navigation" aria-label="Mobile app navigation">
+      {showMore && (
+        <div className="kalpa-bottom-more-panel">
+          {moreTabs.map(item => {
+            const Icon = item.icon;
+            const selected = activeTab === item.key;
+            return (
+              <button key={item.key} type="button" onClick={() => go(item.key)} className={selected ? 'is-active' : ''}>
+                <Icon className="w-4 h-4" />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <div className="kalpa-bottom-nav-bar">
+        {primaryTabs.map(item => <TabButton key={item.key} item={item} />)}
+        <button type="button" onClick={() => setShowMore(v => !v)} className={`kalpa-bottom-nav-btn ${showMore || moreTabs.some(t => t.key === activeTab) ? 'is-active' : ''}`} aria-expanded={showMore}>
+          <span className="kalpa-bottom-nav-icon"><MoreHorizontal className="w-5 h-5" /></span>
+          <span>More</span>
+        </button>
+      </div>
+    </div>
   );
 };

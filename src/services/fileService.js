@@ -13,8 +13,15 @@ export const absoluteApiUrl = (url = '', version = '') => {
 export const getProjectFileDownloadUrl = (doc = {}) => {
   if (!doc) return '';
   if (doc.downloadUrl) return absoluteApiUrl(doc.downloadUrl);
-  if (doc.id && !String(doc.id).includes('.')) return `${API_BASE}/api/files/${encodeURIComponent(doc.id)}/download`;
+
+  // Prefer the saved URL before guessing from the id. Some older browser-only
+  // records used Date.now()+Math.random() as an id; forcing those ids through
+  // /api/files/:id/download caused false "missing file" errors on mobile/desktop.
   if (doc.url) return absoluteApiUrl(doc.url);
+
+  const id = String(doc.id || '').trim();
+  const looksLikeServerFileId = /^[A-Za-z0-9_-]{6,40}$/.test(id) && !/^\d+(\.\d+)?$/.test(id);
+  if (looksLikeServerFileId) return `${API_BASE}/api/files/${encodeURIComponent(id)}/download`;
   return '';
 };
 
@@ -27,6 +34,29 @@ const readServerMessage = async (res) => {
     return raw || `Request failed (${res.status})`;
   }
 };
+
+const uploadWithXhr = (url, form, onProgress) => new Promise((resolve, reject) => {
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', url, true);
+  xhr.timeout = 30 * 60 * 1000; // allow large PDFs/DWGs on slow mobile data
+
+  xhr.upload.onprogress = (event) => {
+    if (event.lengthComputable && typeof onProgress === 'function') {
+      onProgress(Math.round((event.loaded / event.total) * 100));
+    }
+  };
+
+  xhr.onload = () => {
+    const raw = xhr.responseText || '';
+    let payload = null;
+    try { payload = raw ? JSON.parse(raw) : null; } catch { payload = null; }
+    if (xhr.status >= 200 && xhr.status < 300) return resolve(payload || {});
+    reject(new Error(payload?.error || payload?.message || raw || `Upload failed (${xhr.status})`));
+  };
+  xhr.onerror = () => reject(new Error('Upload failed. Please check internet connection and try again.'));
+  xhr.ontimeout = () => reject(new Error('Upload timed out. Please try again on a stable connection.'));
+  xhr.send(form);
+});
 
 export const uploadProjectFile = async (file, projectId, type, uploadedBy, onProgress) => {
   const baseDoc = {
@@ -46,9 +76,7 @@ export const uploadProjectFile = async (file, projectId, type, uploadedBy, onPro
   form.append('by', uploadedBy || 'Team');
 
   try {
-    const res = await fetch(`${API_BASE}/api/files/upload`, { method: 'POST', body: form });
-    if (!res.ok) throw new Error(await readServerMessage(res));
-    const payload = await res.json();
+    const payload = await uploadWithXhr(`${API_BASE}/api/files/upload`, form, onProgress);
     return {
       ...baseDoc,
       ...payload.file,
@@ -71,32 +99,35 @@ export const downloadProjectFile = async (doc = {}) => {
     alert('This file does not have a valid download link. Please re-upload it once.');
     return;
   }
+
+  // Let the browser stream the file directly instead of buffering it in JS.
+  // This is safer for mobile browsers and large PDFs/DWGs.
+  const fileName = doc.name || doc.fileName || 'download';
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.rel = 'noopener noreferrer';
+  a.target = '_blank';
+  a.style.position = 'fixed';
+  a.style.left = '-9999px';
+  a.style.top = '-9999px';
+  document.body.appendChild(a);
+
   try {
-    const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) {
-      const message = await res.text().catch(() => '');
-      if (res.status === 410 || /unavailable|missing/i.test(message)) {
-        alert(message || 'This file record exists, but the physical file is missing on the server. Please re-upload this file once.');
-        return;
-      }
-      throw new Error(message || `Download failed (${res.status})`);
-    }
-    const blob = await res.blob();
-    if (!blob || blob.size === 0) throw new Error('Downloaded file is empty');
-    const objectUrl = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = objectUrl;
-    a.download = doc.name || 'download';
-    a.style.display = 'none';
-    document.body.appendChild(a);
     a.click();
-    setTimeout(() => {
-      URL.revokeObjectURL(objectUrl);
-      a.remove();
-    }, 1500);
+    if (isMobile) {
+      // Some mobile WebViews ignore programmatic downloads. Opening the same
+      // URL after the tap keeps the file accessible without changing task data.
+      setTimeout(() => {
+        try { window.open(url, '_blank', 'noopener,noreferrer'); } catch {}
+      }, 250);
+    }
   } catch (error) {
-    console.error('File download failed:', error);
-    window.open(url, '_blank', 'noopener,noreferrer');
+    window.location.href = url;
+  } finally {
+    setTimeout(() => a.remove(), 1000);
   }
 };
 

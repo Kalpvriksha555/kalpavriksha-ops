@@ -15,10 +15,34 @@ export const maskEmail = (value = '') => {
 export const profilePhotoUrl = (value = '', version = '') => {
   let url = String(value || '').trim();
   if (!url) return '';
-  if (/^(blob:|data:|https?:\/\/)/i.test(url)) return url;
+
+  // Data/blob URLs are temporary local previews. Keep them untouched while the
+  // user is uploading a new photo. Persisted server URLs are normalized below.
+  if (/^(blob:|data:)/i.test(url)) return url;
+
+  const apiBase = String(API_BASE || '').replace(/\/+$/, '');
+
+  // After moving from Render to VPS, some saved profile photos may still carry
+  // an old absolute backend URL. If the path is one of our own file endpoints,
+  // rebuild it against the current API base instead of trying the old host.
+  try {
+    if (/^https?:\/\//i.test(url)) {
+      const parsed = new URL(url);
+      if (parsed.pathname.startsWith('/api/profile/photo/') || parsed.pathname.startsWith('/uploads/')) {
+        url = `${parsed.pathname}${parsed.search || ''}`;
+      } else {
+        return url;
+      }
+    }
+  } catch (_err) {
+    // Fall through to normal relative URL handling.
+  }
+
   if (url.startsWith('/uploads/')) url = url.replace('/uploads/', '/api/profile/photo/');
   if (url.startsWith('uploads/')) url = url.replace('uploads/', '/api/profile/photo/');
-  const full = url.startsWith('/') ? `${API_BASE}${url}` : `${API_BASE}/${url.replace(/^\/+/, '')}`;
+  if (url.startsWith('api/profile/photo/')) url = `/${url}`;
+
+  const full = url.startsWith('/') ? `${apiBase}${url}` : `${apiBase}/${url.replace(/^\/+/, '')}`;
   return version ? `${full}${full.includes('?') ? '&' : '?'}v=${encodeURIComponent(version)}` : full;
 };
 

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 import { Archive, Calendar, Check, Filter } from 'lucide-react';
 import { formatDateTime } from '../../utils/date';
 import { getEstimateDetails, getLatestCompletedFileName, getTaskDescription } from '../../utils/taskDisplayUtils';
@@ -8,29 +8,14 @@ const getCustomerDisplayName = (project = {}) => project.customerName || 'Custom
 const isAdminUser = (user = {}) => String(user?.role || '').trim().toUpperCase() === 'ADMIN';
 const isRevisionWorkItem = (project = {}) => project.isRevisionWorkItem === true || String(project.id || '').includes('__REV__');
 
-const ArchivePaymentControl = ({ project, currentUser, onPaymentStatusChange }) => {
-  if (!isAdminUser(currentUser)) return null;
-  const status = getPaymentTrackingStatus(project);
-  const handleChange = (event) => {
-    event.stopPropagation();
-    if (typeof onPaymentStatusChange === 'function') onPaymentStatusChange(project, event.target.value);
-  };
-  return (
-    <label className={`kalpa-payment-control ${getPaymentStatusBadgeClass(status)}`} title={`Payment status: ${status}`} onClick={(event) => event.stopPropagation()}>
-      <span className="kalpa-payment-dot" aria-hidden="true" />
-      <select
-        value={status}
-        onClick={(event) => event.stopPropagation()}
-        onChange={handleChange}
-        className="kalpa-payment-select"
-        aria-label={`Payment status for ${project.id}`}
-      >
-        {PAYMENT_TRACKING_OPTIONS.map(option => <option key={option} value={option}>{option}</option>)}
-      </select>
-    </label>
-  );
+const getArchiveRevisionSummary = (project = {}) => {
+  const history = Array.isArray(project.revisionHistory) ? project.revisionHistory : [];
+  const reviewHistory = Array.isArray(project.reviewHistory) ? project.reviewHistory.filter(item => String(item.action || item.comment || '').toLowerCase().includes('revision')) : [];
+  const active = Array.isArray(project.subTasks) ? project.subTasks.filter(item => !['done', 'completed', 'approved', 'closed'].includes(String(item.status || '').toLowerCase())) : [];
+  const total = Math.max(history.length, reviewHistory.length, active.length ? history.length + active.length : history.length);
+  const completed = history.filter(item => ['done', 'completed', 'approved', 'closed'].includes(String(item.status || item.action || '').toLowerCase())).length;
+  return { total, completed, active: active.length };
 };
-
 
 const getCompletedDateKey = (completedAt) => {
   const d = new Date(completedAt);
@@ -72,7 +57,30 @@ const ArchiveFilters = ({ filterMonth, filterDate, months, onMonthChange, onDate
   </div>
 );
 
-const ArchiveTaskMeta = ({ project }) => {
+const ArchivePaymentControl = ({ project, currentUser, onPaymentStatusChange }) => {
+  if (!isAdminUser(currentUser)) return null;
+  const status = getPaymentTrackingStatus(project);
+  const handleChange = (event) => {
+    event.stopPropagation();
+    if (typeof onPaymentStatusChange === 'function') onPaymentStatusChange(project, event.target.value);
+  };
+  return (
+    <label className={`kalpa-payment-control ${getPaymentStatusBadgeClass(status)}`} title={`Payment status: ${status}`} onClick={(event) => event.stopPropagation()}>
+      <span className="kalpa-payment-dot" aria-hidden="true" />
+      <select
+        value={status}
+        onClick={(event) => event.stopPropagation()}
+        onChange={handleChange}
+        className="kalpa-payment-select"
+        aria-label={`Payment status for ${project.id}`}
+      >
+        {PAYMENT_TRACKING_OPTIONS.map(option => <option key={option} value={option}>{option}</option>)}
+      </select>
+    </label>
+  );
+};
+
+const ArchiveTaskMeta = ({ project, currentUser }) => {
   const description = getTaskDescription(project);
   const estimateDetails = getEstimateDetails(project);
   const completedFileName = getLatestCompletedFileName(project);
@@ -96,6 +104,15 @@ const ArchiveTaskMeta = ({ project }) => {
           📄 {completedFileName}
         </p>
       )}
+      {(() => {
+        const revisionSummary = getArchiveRevisionSummary(project);
+        if (!revisionSummary.total && !revisionSummary.active) return null;
+        return (
+          <p className="text-[11px] font-black text-purple-700 bg-purple-50 border border-purple-100 rounded-lg px-2 py-1 w-fit max-w-lg truncate">
+            ↻ Revisions: {revisionSummary.total} total • {revisionSummary.completed} completed{revisionSummary.active ? ` • ${revisionSummary.active} active` : ''}
+          </p>
+        );
+      })()}
     </div>
   );
 };
@@ -107,14 +124,16 @@ const ArchiveTableRow = ({ project, onSelectProject, currentUser, onPaymentStatu
       <p className="text-[11px] font-semibold text-slate-400 mt-1">{project.completedAt ? new Date(project.completedAt).toLocaleTimeString() : ''}</p>
     </td>
     <td className="px-4 py-5 min-w-0">
-      <ArchiveTaskMeta project={project} />
+      <ArchiveTaskMeta project={project} currentUser={currentUser} />
     </td>
     <td className="px-4 py-5 font-medium text-slate-600 truncate">{project.location}</td>
     <td className="px-4 py-5 font-medium text-slate-600 truncate">{project.assignedTo}</td>
     {isAdminUser(currentUser) && (
-      <td className="px-4 py-5 align-middle"><ArchivePaymentControl project={project} currentUser={currentUser} onPaymentStatusChange={onPaymentStatusChange} /></td>
+      <td className="px-4 py-5">
+        <ArchivePaymentControl project={project} currentUser={currentUser} onPaymentStatusChange={onPaymentStatusChange} />
+      </td>
     )}
-    <td className="px-3 py-5 text-right align-middle">
+    <td className="px-6 py-5 text-right">
       <div className="flex items-center justify-end gap-2">
         {project.reportSent && (
           <span className="bg-emerald-50 text-emerald-600 border border-emerald-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider rounded-lg flex items-center mr-2">
@@ -129,9 +148,14 @@ const ArchiveTableRow = ({ project, onSelectProject, currentUser, onPaymentStatu
   </tr>
 );
 
-export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, onPaymentStatusChange }) => {
-  const [filterMonth, setFilterMonth] = useState('All');
-  const [filterDate, setFilterDate] = useState('');
+export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, archiveViewState, setArchiveViewState, onPaymentStatusChange }) => {
+  const filterMonth = archiveViewState?.filterMonth || 'All';
+  const filterDate = archiveViewState?.filterDate || '';
+  const updateArchiveViewState = (patch) => {
+    if (typeof setArchiveViewState === 'function') {
+      setArchiveViewState((prev = {}) => ({ filterMonth: 'All', filterDate: '', ...prev, ...patch }));
+    }
+  };
 
   const archived = useMemo(() => (projects || [])
     .filter((project) => project.status === 'Completed' && !isRevisionWorkItem(project))
@@ -174,31 +198,23 @@ export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, onP
           filterMonth={filterMonth}
           filterDate={filterDate}
           months={uniqueMonths}
-          onMonthChange={(month) => { setFilterMonth(month); setFilterDate(''); }}
-          onDateChange={(date) => { setFilterDate(date); setFilterMonth('All'); }}
-          onClear={() => { setFilterMonth('All'); setFilterDate(''); }}
+          onMonthChange={(month) => updateArchiveViewState({ filterMonth: month, filterDate: '' })}
+          onDateChange={(date) => updateArchiveViewState({ filterDate: date, filterMonth: 'All' })}
+          onClear={() => updateArchiveViewState({ filterMonth: 'All', filterDate: '' })}
         />
       </div>
 
       <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
         <div className="kalpa-archive-table-wrap">
-          <table className="kalpa-archive-table w-full text-left text-sm">
-            <colgroup>
-              <col className="kalpa-archive-col-date" />
-              <col className="kalpa-archive-col-details" />
-              <col className="kalpa-archive-col-location" />
-              <col className="kalpa-archive-col-designer" />
-              {isAdminUser(currentUser) && <col className="kalpa-archive-col-payment" />}
-              <col className="kalpa-archive-col-action" />
-            </colgroup>
+          <table className="w-full text-left text-sm whitespace-nowrap">
             <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
               <tr>
                 <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Date Completed</th>
                 <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Task Details</th>
                 <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Location</th>
                 <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Designer</th>
-                {isAdminUser(currentUser) && <th className="px-4 py-5 font-bold uppercase tracking-wider text-xs">Payment</th>}
-                <th className="px-4 py-5 font-bold uppercase tracking-wider text-xs text-right">Action</th>
+                {isAdminUser(currentUser) && <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Payment</th>}
+                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
