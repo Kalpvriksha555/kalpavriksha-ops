@@ -37,6 +37,8 @@ export const AppMainContent = ({
   handleUpdateUser,
   AttendanceView,
   attendanceLogs,
+  performanceRecords,
+  performanceSummary,
   ProfileView,
   setCurrentUser,
   fileToBase64,
@@ -94,7 +96,7 @@ export const AppMainContent = ({
     ) : activeTab === 'command' ? (
       <CommandCentreView projects={projects} users={activeUsers} currentUser={currentUser} onSelectProject={(p) => { setActiveTab('board'); setSelectedProject(p); }} />
     ) : activeTab === 'productivity' ? (
-      <ProductivityDashboard users={activeUsers} projects={projects} />
+      <ProductivityDashboard users={activeUsers} projects={projects} performanceRecords={performanceRecords || []} performanceSummary={performanceSummary} />
     ) : activeTab === 'closing' && currentUser.role === ROLES.ADMIN ? (
       <DailyClosingReport projects={projects} />
     ) : activeTab === 'ledger' && currentUser.role === ROLES.ADMIN ? (

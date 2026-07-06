@@ -3,6 +3,7 @@ import { LayoutDashboard, Map as MapIcon } from 'lucide-react';
 
 const hindiDigitMap = {
   '०':'0','१':'1','२':'2','३':'3','४':'4','५':'5','६':'6','७':'7','८':'8','९':'9',
+  '۰':'0','۱':'1','۲':'2','۳':'3','۴':'4','۵':'5','۶':'6','۷':'7','۸':'8','۹':'9',
   '0':'0','1':'1','2':'2','3':'3','4':'4','5':'5','6':'6','7':'7','8':'8','9':'9'
 };
 const hindiNumberWords = {
@@ -50,6 +51,7 @@ export const CalculatorView = () => {
   const [widthValue, setWidthValue] = useState('60');
   const [lengthUnit, setLengthUnit] = useState('ft');
   const [hindiInput, setHindiInput] = useState('');
+  const [urduInput, setUrduInput] = useState('');
   const [englishInput, setEnglishInput] = useState('');
   const [calcExpression, setCalcExpression] = useState('');
   const [calcResult, setCalcResult] = useState('0');
@@ -100,14 +102,19 @@ export const CalculatorView = () => {
     ]
   ];
 
-  const hindiDigitRows = [
-    ['०', '0'], ['१', '1'], ['२', '2'], ['३', '3'], ['४', '4'],
-    ['५', '5'], ['६', '6'], ['७', '7'], ['८', '8'], ['९', '9']
+  const digitRows = [
+    { hi: '०', ur: '۰', en: '0' }, { hi: '१', ur: '۱', en: '1' }, { hi: '२', ur: '۲', en: '2' }, { hi: '३', ur: '۳', en: '3' }, { hi: '४', ur: '۴', en: '4' },
+    { hi: '५', ur: '۵', en: '5' }, { hi: '६', ur: '۶', en: '6' }, { hi: '७', ur: '۷', en: '7' }, { hi: '८', ur: '۸', en: '8' }, { hi: '९', ur: '۹', en: '9' }
   ];
+  const hindiDigitRows = digitRows.map(row => [row.hi, row.en]);
 
   const englishToHindiDigits = (input = '') => String(input).split('').map(ch => {
-    const row = hindiDigitRows.find(([, en]) => en === ch);
-    return row ? row[0] : ch;
+    const row = digitRows.find(row => row.en === ch);
+    return row ? row.hi : ch;
+  }).join('');
+  const englishToUrduDigits = (input = '') => String(input).split('').map(ch => {
+    const row = digitRows.find(row => row.en === ch);
+    return row ? row.ur : ch;
   }).join('');
 
   const convertHindiDigitsOnly = (input = '') => String(input).split('').map(ch => hindiDigitMap[ch] ?? ch).join('');
@@ -115,7 +122,9 @@ export const CalculatorView = () => {
   const numericValue = Number(parseHindiNumber(value)) || 0;
   const converted = numericValue * (areaFactorsToSqft[fromUnit] || 1) / (areaFactorsToSqft[toUnit] || 1);
   const hindiConverted = convertHindiDigitsOnly(hindiInput);
+  const urduConverted = convertHindiDigitsOnly(urduInput);
   const englishToHindiConverted = englishToHindiDigits(englishInput);
+  const englishToUrduConverted = englishToUrduDigits(englishInput);
 
   const lengthToFeet = { ft: 1, m: 3.280839895, inch: 1/12, yard: 3 };
   const lengthLabels = { ft: 'Feet', m: 'Metre', inch: 'Inch', yard: 'Yard' };
@@ -237,25 +246,49 @@ export const CalculatorView = () => {
 
         {toolTab === 'basic' && (
           <div className="space-y-4">
-            <h2 className="text-lg sm:text-xl font-black text-slate-800">Hindi / English Digit Tools</h2>
-            <div className="grid grid-cols-5 gap-2">
-              {hindiDigitRows.map(([hi, en]) => (
-                <div key={hi} className="bg-slate-50 border border-slate-100 rounded-2xl p-2 sm:p-4 text-center">
-                  <p className="text-2xl sm:text-4xl font-black text-slate-800">{hi}</p>
-                  <p className="text-xs font-black text-indigo-700 mt-1">{en}</p>
-                </div>
-              ))}
+            <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-2">
+              <div>
+                <h2 className="text-lg sm:text-xl font-black text-slate-800">Hindi / Urdu / English Digit Tools</h2>
+                <p className="text-xs sm:text-sm font-bold text-slate-400 mt-1">Compact reference and instant converter for Devanagari, Urdu and English numerals.</p>
+              </div>
+              <button type="button" onClick={() => navigator.clipboard?.writeText(digitRows.map(row => `${row.hi}  ${row.ur}  ${row.en}`).join('\n'))} className="w-fit rounded-xl bg-slate-900 text-white px-3 py-2 text-xs font-black">Copy Chart</button>
             </div>
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+            <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-sm">
+              <div className="grid grid-cols-3 bg-slate-50 text-[10px] sm:text-xs font-black uppercase tracking-widest text-slate-400">
+                <div className="px-3 py-2 text-center">Hindi</div>
+                <div className="px-3 py-2 text-center">Urdu</div>
+                <div className="px-3 py-2 text-center">English</div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 divide-y sm:divide-y-0 sm:divide-x divide-slate-100">
+                {digitRows.map(row => (
+                  <button key={row.en} type="button" onClick={() => navigator.clipboard?.writeText(`${row.hi} ${row.ur} ${row.en}`)} className="grid grid-cols-3 items-center py-3 px-2 hover:bg-indigo-50 active:bg-indigo-100 transition-colors" title="Click to copy">
+                    <span className="text-2xl font-black text-slate-800">{row.hi}</span>
+                    <span className="text-2xl font-black text-slate-800">{row.ur}</span>
+                    <span className="text-lg font-black text-indigo-700">{row.en}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
               <div>
                 <label className="text-xs font-black text-slate-400 uppercase tracking-widest block mb-2">Hindi digits to English</label>
                 <textarea value={hindiInput} onChange={e => setHindiInput(e.target.value)} rows={3} placeholder="Example: १२३४५६७८९०" className="w-full border-2 border-slate-100 rounded-2xl p-3 font-bold outline-none focus:border-indigo-500 resize-none" />
                 <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-4 mt-3"><p className="text-xs text-indigo-600 font-black uppercase tracking-widest">English output</p><p className="text-2xl font-black text-indigo-800 mt-1 break-all">{hindiConverted || '-'}</p></div>
               </div>
               <div>
-                <label className="text-xs font-black text-slate-400 uppercase tracking-widest block mb-2">English digits to Hindi</label>
+                <label className="text-xs font-black text-slate-400 uppercase tracking-widest block mb-2">Urdu digits to English</label>
+                <textarea value={urduInput} onChange={e => setUrduInput(e.target.value)} rows={3} placeholder="Example: ۱۲۳۴۵۶۷۸۹۰" className="w-full border-2 border-slate-100 rounded-2xl p-3 font-bold outline-none focus:border-purple-500 resize-none" />
+                <div className="bg-purple-50 border border-purple-100 rounded-2xl p-4 mt-3"><p className="text-xs text-purple-600 font-black uppercase tracking-widest">English output</p><p className="text-2xl font-black text-purple-800 mt-1 break-all">{urduConverted || '-'}</p></div>
+              </div>
+              <div>
+                <label className="text-xs font-black text-slate-400 uppercase tracking-widest block mb-2">English digits to Hindi + Urdu</label>
                 <textarea value={englishInput} onChange={e => setEnglishInput(e.target.value)} rows={3} placeholder="Example: 1234567890" className="w-full border-2 border-slate-100 rounded-2xl p-3 font-bold outline-none focus:border-emerald-500 resize-none" />
-                <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-4 mt-3"><p className="text-xs text-emerald-600 font-black uppercase tracking-widest">Hindi output</p><p className="text-2xl font-black text-emerald-800 mt-1 break-all">{englishToHindiConverted || '-'}</p></div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-3">
+                  <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-4"><p className="text-xs text-emerald-600 font-black uppercase tracking-widest">Hindi</p><p className="text-2xl font-black text-emerald-800 mt-1 break-all">{englishToHindiConverted || '-'}</p></div>
+                  <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4"><p className="text-xs text-amber-600 font-black uppercase tracking-widest">Urdu</p><p className="text-2xl font-black text-amber-800 mt-1 break-all">{englishToUrduConverted || '-'}</p></div>
+                </div>
               </div>
             </div>
           </div>

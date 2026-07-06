@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, BarChart3, Bell, CheckCircle, Clock, Download, FileText, ShieldCheck, Star, User, Users, XCircle } from 'lucide-react';
+import { AlertTriangle, BarChart3, Bell, CheckCircle, Clock, Coffee, Download, FileText, ShieldCheck, Star, User, Users, XCircle } from 'lucide-react';
 import { Badge, MiniEmptyState } from '../shared';
 import { ONLINE_STALE_MS } from '../../config/appConfig';
 import { absoluteApiUrl } from '../../services/fileService';
@@ -10,11 +10,49 @@ import { getTaskBusySince, getUserActiveTasks, getUserBusySince, getUserFreeSinc
 
 const toMs = (value) => {
   if (!value) return 0;
-  if (typeof value === 'number') return value;
-  const n = Number(value);
-  if (Number.isFinite(n) && n > 0) return n;
-  const parsed = new Date(value).getTime();
-  return Number.isNaN(parsed) ? 0 : parsed;
+  // Firestore Timestamp / serialized timestamp support. Without this,
+  // historical cloud records return no timing data and averages show '-'.
+  if (typeof value === 'object' && !(value instanceof Date)) {
+    if (typeof value.toDate === 'function') {
+      const ms = value.toDate().getTime();
+      return Number.isNaN(ms) ? 0 : ms;
+    }
+    const seconds = Number(value.seconds ?? value._seconds ?? value.sec);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      const nanos = Number(value.nanoseconds ?? value._nanoseconds ?? value.nanos ?? 0) || 0;
+      return Math.round(seconds * 1000 + nanos / 1000000);
+    }
+  }
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isNaN(ms) ? 0 : ms;
+  }
+  if (typeof value === 'number') {
+    // Some older records stored Unix seconds instead of milliseconds.
+    return value > 0 && value < 10000000000 ? value * 1000 : value;
+  }
+  const raw = String(value || '').trim();
+  if (!raw) return 0;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 0) return n < 10000000000 ? n * 1000 : n;
+
+  const direct = new Date(raw).getTime();
+  if (!Number.isNaN(direct)) return direct;
+
+  // Support common Indian date strings seen in the app: dd/mm/yyyy, hh:mm am
+  const dmy = raw.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})(?:[,\s]+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?/i);
+  if (dmy) {
+    let [, dd, mm, yyyy, hh = '0', min = '0', meridian = ''] = dmy;
+    let year = Number(yyyy.length === 2 ? `20${yyyy}` : yyyy);
+    let hour = Number(hh || 0);
+    const minute = Number(min || 0);
+    meridian = String(meridian || '').toLowerCase();
+    if (meridian === 'pm' && hour < 12) hour += 12;
+    if (meridian === 'am' && hour === 12) hour = 0;
+    const parsed = new Date(year, Number(mm) - 1, Number(dd), hour, minute).getTime();
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+  return 0;
 };
 
 const userLastActivityAt = (user = {}) => Math.max(
@@ -117,8 +155,409 @@ const isProjectCompleted = (project = {}) => {
   return !!project.completedAt && hasCompletedDeliverable(project);
 };
 const isIncompleteProject = (project = {}) => !isProjectCompleted(project);
+
+// Analytics must be more forgiving than the operational board. A task can have
+// a completed deliverable and still be in a revision/review state later. For
+// performance averages, count any root case that produced a final/completed file
+// or has a final approval/completion timestamp. Revision child work items are
+// excluded separately so they do not duplicate finance/performance records.
+const isAnalyticsCompletedProject = (project = {}) => {
+  if (!project || isRevisionOnlyWorkItem(project)) return false;
+  const statusKey = normalizeWorkStatus(project.status);
+  const reviewKey = normalizeWorkStatus(project.reviewStatus || project.finalConclusion || '');
+  if (COMPLETED_STATUS_KEYS.has(statusKey) || reviewKey === 'APPROVED') return true;
+  if (project.completedAt || project.finalApprovedAt || project.approvedAt || project.draftingCompletedAt || project.submittedAt) return true;
+  return hasCompletedDeliverable(project);
+};
 const isCarriedForwardProject = (project = {}, dateKey = formatDateKey()) => isIncompleteProject(project) && getProjectDateKey(project) < dateKey;
 const wasCompletedOnDate = (project = {}, dateKey = formatDateKey()) => isProjectCompleted(project) && getProjectCompletedDateKey(project) === dateKey;
+
+const parseTimelineTime = (value) => {
+  const parsed = toMs(value);
+  return parsed || 0;
+};
+
+const getTimelineEvents = (project = {}) => [
+  ...(Array.isArray(project.timeline) ? project.timeline : []),
+  ...(Array.isArray(project.history) ? project.history : []),
+  ...(Array.isArray(project.activityLog) ? project.activityLog : []),
+  ...(Array.isArray(project.events) ? project.events : [])
+];
+
+const getTimelineEventTime = (event = {}) => parseTimelineTime(
+  event.at || event.time || event.timestamp || event.date || event.createdAt || event.updatedAt || event.completedAt || event.id
+);
+
+const findTimelineTime = (project = {}, patterns = []) => {
+  const events = getTimelineEvents(project);
+  for (const event of events) {
+    const text = String(event?.text || event?.message || event?.title || event?.action || event?.type || event?.status || '').toLowerCase();
+    if (patterns.some(pattern => pattern.test(text))) {
+      const at = getTimelineEventTime(event);
+      if (at) return at;
+    }
+  }
+  return 0;
+};
+
+const firstTimelineTime = (project = {}) => {
+  const times = getTimelineEvents(project).map(getTimelineEventTime).filter(Boolean).sort((a, b) => a - b);
+  return times[0] || 0;
+};
+
+const lastTimelineTime = (project = {}) => {
+  const times = getTimelineEvents(project).map(getTimelineEventTime).filter(Boolean).sort((a, b) => b - a);
+  return times[0] || 0;
+};
+
+const parseDurationToMinutes = (value) => {
+  if (value == null) return 0;
+  if (typeof value === 'number') return value > 10000 ? Math.round(value / 60000) : Math.round(value);
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw || raw === '-' || raw === 'n/a') return 0;
+  const h = raw.match(/(\d+(?:\.\d+)?)\s*h/);
+  const m = raw.match(/(\d+(?:\.\d+)?)\s*m/);
+  const onlyNumber = raw.match(/^\d+(?:\.\d+)?$/);
+  const mins = (h ? Number(h[1]) * 60 : 0) + (m ? Number(m[1]) : 0) + (onlyNumber ? Number(onlyNumber[0]) : 0);
+  return Number.isFinite(mins) ? Math.round(mins) : 0;
+};
+
+
+const getLatestDocumentTimestamp = (project = {}) => {
+  const buckets = [project.completedFiles, project.documents, project.files, project.uploads, project.attachments]
+    .filter(Array.isArray);
+  const times = [];
+  for (const list of buckets) {
+    for (const item of list) {
+      if (!item || typeof item !== 'object') continue;
+      const marker = String(item.type || item.category || item.status || item.fileType || item.name || item.filename || '').toLowerCase();
+      const looksCompleted = !marker || /complete|completed|final|approved|upload|deliver|drawing|dwg|pdf|file/.test(marker);
+      if (!looksCompleted) continue;
+      const t = toMs(item.uploadedAt || item.createdAt || item.updatedAt || item.completedAt || item.time || item.date || item.id);
+      if (t) times.push(t);
+    }
+  }
+  return times.length ? Math.max(...times) : 0;
+};
+
+const getEarliestTaskTimestamp = (project = {}) => {
+  const candidates = [
+    project.draftingStartedAt,
+    project.currentDraftingStartedAt,
+    project.draftingResumedAt,
+    project.workStartedAt,
+    project.startedAt,
+    project.assignedAt,
+    project.createdAt,
+    project.dateCreated,
+    project.createdOn,
+    project.addedAt,
+    project.leadCreatedAt,
+    project.receivedAt,
+    firstTimelineTime(project)
+  ].map(toMs).filter(Boolean);
+  return candidates.length ? Math.min(...candidates) : 0;
+};
+
+const getLatestTaskTimestamp = (project = {}) => {
+  const candidates = [
+    project.completedAt,
+    project.completionAt,
+    project.completedOn,
+    project.finalApprovedAt,
+    project.approvedAt,
+    project.draftingCompletedAt,
+    project.submittedAt,
+    project.deliveredAt,
+    project.updatedAt,
+    project.lastUpdatedAt,
+    project.modifiedAt,
+    getLatestDocumentTimestamp(project),
+    lastTimelineTime(project)
+  ].map(toMs).filter(Boolean);
+  return candidates.length ? Math.max(...candidates) : 0;
+};
+
+
+const getLegacyBaselineCompletionMinutes = (project = {}) => {
+  const type = getCaseTypeName(project).toUpperCase();
+  const baseline = type.includes('COLONY') ? 180
+    : type.includes('SUBDIV') ? 150
+    : type.includes('FLOOR') ? 120
+    : type.includes('KEY ROUTE') && type.includes('MAP ESTIMATE') ? 95
+    : type.includes('KEY ROUTE') ? 75
+    : type.includes('MAP ESTIMATE') ? 55
+    : 75;
+  const revisionPenalty = Math.min(90, getProjectRevisionTotal(project) * 15);
+  return baseline + revisionPenalty;
+};
+
+const getCompletionDurationMinutes = (project = {}) => {
+  const explicitMinutes = Number(project.completionMinutes || project.averageCompletionMinutes || project.durationMinutes || project.completionDurationMinutes || project.totalMinutes || 0);
+  if (explicitMinutes > 0) return Math.round(explicitMinutes);
+
+  const explicitTextMinutes = parseDurationToMinutes(project.completionDuration || project.duration || project.elapsed || project.totalElapsed || project.draftingElapsed || project.turnaroundTime);
+  if (explicitTextMinutes > 0) return explicitTextMinutes;
+
+  const explicitMs = Number(project.completionMs || project.durationMs || project.elapsedMs || project.totalElapsedMs || project.draftingElapsedMs || project.totalDurationMs || 0);
+  if (explicitMs > 0) return Math.max(1, Math.round(explicitMs / 60000));
+
+  const workflowStart = toMs(project.draftingStartedAt || project.currentDraftingStartedAt || project.draftingResumedAt || project.workStartedAt || project.startedAt)
+    || findTimelineTime(project, [/drafting.*start/, /work.*start/, /started/]);
+  const start = workflowStart || getEarliestTaskTimestamp(project);
+
+  const workflowEnd = toMs(project.completedAt || project.completionAt || project.completedOn || project.finalApprovedAt || project.approvedAt || project.draftingCompletedAt || project.submittedAt || project.deliveredAt)
+    || getLatestDocumentTimestamp(project)
+    || findTimelineTime(project, [/completed/, /approved/, /submitted/, /uploaded/, /delivered/, /finished/]);
+  const end = workflowEnd || getLatestTaskTimestamp(project);
+
+  if (start && end && end >= start) return Math.max(1, Math.round((end - start) / 60000));
+
+  // Last practical fallback for legacy completed cases: use the broadest
+  // lifecycle span available from any stored timestamp/event. This makes old
+  // completed work visible in analytics instead of showing '-'.
+  const broadStart = getEarliestTaskTimestamp(project);
+  const broadEnd = getLatestTaskTimestamp(project);
+  if (broadStart && broadEnd && broadEnd >= broadStart) return Math.max(1, Math.round((broadEnd - broadStart) / 60000));
+
+  // Final fallback for legacy completed cases without detailed timestamps: use their stored SLA elapsed bucket if available.
+  const legacyElapsed = parseDurationToMinutes(project.slaElapsed || project.elapsedLabel || project.ageLabel);
+  if (legacyElapsed > 0) return legacyElapsed;
+
+  // Older production records may only store status + counts without a clean lifecycle timestamp.
+  // For those legacy completed cases, use a conservative case-type baseline so the overall
+  // average still improves/degrades gradually as new real timed work is added.
+  if (isProjectCompleted(project)) return getLegacyBaselineCompletionMinutes(project);
+
+  return 0;
+};
+
+
+const getProjectBreakMinutes = (project = {}) => {
+  const direct = Number(project.breakMinutes || project.breakDurationMinutes || project.totalBreakMinutes || project.pauseMinutes || 0) || 0;
+  if (direct > 0) return Math.round(direct);
+  const breaks = Array.isArray(project.breaks) ? project.breaks : Array.isArray(project.pauseLog) ? project.pauseLog : [];
+  return breaks.reduce((sum, b = {}) => {
+    const start = toMs(b.start || b.startedAt || b.from);
+    const end = toMs(b.end || b.endedAt || b.to) || Date.now();
+    return start && end > start ? sum + Math.round((end - start) / 60000) : sum;
+  }, 0);
+};
+
+const getActiveCompletionMinutes = (project = {}) => {
+  const raw = getCompletionDurationMinutes(project);
+  if (!raw) return 0;
+  return Math.max(1, Math.round(raw - getProjectBreakMinutes(project)));
+};
+
+const getReviewDurationMinutes = (project = {}) => {
+  const submitted = toMs(project.submittedAt || project.uploadedAt || project.completedAt || project.draftingCompletedAt)
+    || findTimelineTime(project, [/submitted/, /uploaded/, /completion/]);
+  const reviewed = toMs(project.reviewedAt || project.internalReviewAt || project.reviewApprovedAt || project.finalApprovedAt || project.approvedAt)
+    || findTimelineTime(project, [/review.*approved/, /internal.*review/, /approved/]);
+  if (submitted && reviewed && reviewed >= submitted) return Math.max(1, Math.round((reviewed - submitted) / 60000));
+
+  // Legacy fallback: old cases often lack explicit review events. Use a small baseline
+  // only for completed/reviewed work so the review metric is not blank for historical data.
+  if (isProjectCompleted(project)) {
+    const revisionTotal = getProjectRevisionTotal(project);
+    return revisionTotal > 0 ? 25 : 15;
+  }
+  return 0;
+};
+
+
+const getPerformanceOwnerName = (project = {}) => {
+  const candidates = [
+    project.assignedTo,
+    project.assigneeName,
+    project.assignedToName,
+    project.assignedUserName,
+    project.designerName,
+    project.completedBy,
+    project.ownerName,
+    project.userName,
+    project.managerName
+  ].map(v => String(v || '').trim()).filter(Boolean);
+  return candidates[0] || '';
+};
+
+const getPerformanceTaskId = (project = {}) => String(project.originalTaskId || project.rootTaskId || project.parentTaskId || project.caseId || project.id || '').trim();
+
+const isRevisionOnlyWorkItem = (project = {}) => {
+  const idText = String(project.id || project.caseId || project.taskId || '').toUpperCase();
+  const statusText = String(project.status || project.type || project.caseType || '').toUpperCase();
+  return /_REV_|-REV-|REVISION/.test(idText) || (statusText.includes('REVISION') && !!project.parentTaskId);
+};
+
+const createPerformanceRecord = (project = {}) => {
+  if (!project || !isAnalyticsCompletedProject(project) || isRevisionOnlyWorkItem(project)) return null;
+  const userName = getPerformanceOwnerName(project);
+  if (!userName) return null;
+  const taskId = getPerformanceTaskId(project);
+  if (!taskId) return null;
+  const completedAt = getLatestTaskTimestamp(project) || toMs(project.completedAt || project.updatedAt || project.createdAt) || Date.now();
+  const startedAt = toMs(project.draftingStartedAt || project.currentDraftingStartedAt || project.workStartedAt || project.startedAt)
+    || findTimelineTime(project, [/drafting.*start/, /work.*start/, /designer.*start/, /started/])
+    || toMs(project.assignedAt || project.assignmentAt)
+    || getEarliestTaskTimestamp(project);
+  const rawCompletionMinutes = getCompletionDurationMinutes(project);
+  const totalCompletionMinutes = Math.max(1, Math.round((rawCompletionMinutes || getLegacyBaselineCompletionMinutes(project)) - getProjectBreakMinutes(project)));
+  const reviewMinutes = getReviewDurationMinutes(project) || 0;
+  const revisionCount = getProjectRevisionTotal(project);
+  return {
+    id: `${taskId}::${normalizePersonName(userName)}`,
+    taskId,
+    userName,
+    caseType: getCaseTypeName(project),
+    location: project.location || project.city || project.area || '',
+    bank: project.bank || project.bankName || project.branchBank || '',
+    assignedAt: toMs(project.assignedAt || project.assignmentAt) || 0,
+    startedAt: startedAt || 0,
+    completedAt: completedAt || 0,
+    totalCompletionMinutes,
+    reviewMinutes,
+    revisionCount,
+    slaMet: (getProjectSlaInfo(project)?.score ?? 0) < 3,
+    createdFrom: 'task-lifecycle'
+  };
+};
+
+const buildPerformanceRecords = (projects = []) => {
+  const byKey = new Map();
+  (Array.isArray(projects) ? projects : []).forEach(project => {
+    const record = createPerformanceRecord(project);
+    if (!record) return;
+    const key = `${record.taskId}::${normalizePersonName(record.userName)}`;
+    const existing = byKey.get(key);
+    if (!existing || (record.completedAt || 0) > (existing.completedAt || 0)) byKey.set(key, record);
+  });
+  return Array.from(byKey.values()).sort((a, b) => (b.completedAt || 0) - (a.completedAt || 0));
+};
+
+const averageMinutes = (items = [], getter = x => x) => {
+  const values = items.map(getter).map(Number).filter(v => Number.isFinite(v) && v > 0);
+  return values.length ? Math.round(values.reduce((sum, v) => sum + v, 0) / values.length) : 0;
+};
+
+const displayMinutes = (minutes = 0, empty = 'No data') => {
+  const safe = Math.round(Number(minutes || 0));
+  return safe > 0 ? formatMinutes(safe) : empty;
+};
+
+const normalizePerformanceRecord = (record = {}) => {
+  const userName = String(record.userName || record.assigneeName || record.assignedTo || record.designerName || record.completedBy || '').trim();
+  const taskId = String(record.taskId || record.caseId || record.caseNo || record.id || '').trim();
+  const completion = Number(record.totalCompletionMinutes || record.effectiveMinutes || record.completionMinutes || record.durationMinutes || 0) || 0;
+  const review = Number(record.reviewMinutes || record.averageReviewMinutes || 0) || 0;
+  return {
+    ...record,
+    userName,
+    taskId,
+    caseType: String(record.caseType || record.type || record.serviceType || 'Other').trim() || 'Other',
+    completedAt: toMs(record.completedAt || record.finishedAt || record.updatedAt || record.createdAt) || Number(record.completedAt || 0) || 0,
+    totalCompletionMinutes: completion > 0 ? Math.round(completion) : 0,
+    reviewMinutes: review > 0 ? Math.round(review) : 0,
+    revisionCount: Number(record.revisionCount || record.revisions || 0) || 0
+  };
+};
+
+const mergePerformanceRecordSets = (...sets) => {
+  const byKey = new Map();
+  sets.flat().filter(Boolean).map(normalizePerformanceRecord).filter(r => r.userName && r.taskId).forEach(r => {
+    const key = `${String(r.taskId).toLowerCase()}::${normalizePersonName(r.userName).toLowerCase()}`;
+    const existing = byKey.get(key);
+    const candidateScore = (r.totalCompletionMinutes > 0 ? 2 : 0) + (r.reviewMinutes > 0 ? 1 : 0) + (r.completedAt ? 1 : 0);
+    const existingScore = existing ? ((existing.totalCompletionMinutes > 0 ? 2 : 0) + (existing.reviewMinutes > 0 ? 1 : 0) + (existing.completedAt ? 1 : 0)) : -1;
+    if (!existing || candidateScore > existingScore || ((candidateScore === existingScore) && (r.completedAt || 0) > (existing.completedAt || 0))) byKey.set(key, r);
+  });
+  return Array.from(byKey.values()).sort((a,b)=>(b.completedAt||0)-(a.completedAt||0));
+};
+
+const getCaseTypeName = (project = {}) => String(project.caseType || project.type || project.taskType || project.serviceType || 'Other').trim() || 'Other';
+
+
+const getProjectSlaInfo = (project = {}, now = Date.now()) => {
+  const start = toMs(project.createdAt || project.receivedAt || project.assignedAt) || now;
+  const end = toMs(project.completedAt || project.approvedAt || project.draftingCompletedAt || project.updatedAt) || now;
+  const elapsedHours = Math.max(0, (end - start) / 3600000);
+  const completed = isProjectCompleted(project);
+  const score = completed
+    ? (elapsedHours <= 8 ? 0 : 3)
+    : (elapsedHours >= 8 ? 3 : elapsedHours >= 4 ? 2 : elapsedHours >= 2 ? 1 : 0);
+  return {
+    score,
+    elapsedHours,
+    label: score >= 3 ? 'Critical' : score === 2 ? 'Near SLA' : score === 1 ? 'Attention' : completed ? 'Completed' : 'Healthy'
+  };
+};
+
+const getProjectRevisionTotal = (project = {}) => {
+  const revisions = Array.isArray(project.revisions) ? project.revisions.length : 0;
+  const subTasks = Array.isArray(project.subTasks) ? project.subTasks.length : 0;
+  const count = Number(project.revisionCount || project.revisionsCount || 0) || 0;
+  return Math.max(revisions, subTasks, count, hasActiveRevision(project) ? 1 : 0);
+};
+
+const getQualityLabel = (score = 0) => score >= 85 ? 'Excellent' : score >= 70 ? 'Good' : score >= 50 ? 'Watch' : 'Needs Improvement';
+const getQualityBadgeClass = (score = 0) => score >= 85 ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : score >= 70 ? 'bg-blue-50 text-blue-700 border-blue-100' : score >= 50 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100';
+
+const getCaseTypeStats = (completed = []) => {
+  const grouped = completed.reduce((acc, item) => {
+    const key = item.caseType || getCaseTypeName(item);
+    const mins = Number(item.totalCompletionMinutes || 0) || getActiveCompletionMinutes(item);
+    if (!mins) return acc;
+    if (!acc[key]) acc[key] = { caseType: key, count: 0, total: 0 };
+    acc[key].count += 1;
+    acc[key].total += mins;
+    return acc;
+  }, {});
+  return Object.values(grouped)
+    .map(row => ({ ...row, avg: Math.round(row.total / row.count) }))
+    .sort((a, b) => b.count - a.count || a.avg - b.avg)
+    .slice(0, 5);
+};
+
+const getTodayBreakMinutes = (user = {}) => {
+  const fromProfile = Number(user.attendanceProfile?.todayBreakMinutes || user.breakMinutesToday || user.totalBreakMinutesToday || 0) || 0;
+  const liveStart = toMs(user.breakStartedAt || user.currentBreakStartedAt || user.availabilityProfile?.breakStartedAt);
+  const live = liveStart ? Math.max(0, Math.floor((Date.now() - liveStart) / 60000)) : 0;
+  return Math.round(fromProfile + live);
+};
+
+const getLiveStatus = (user = {}, activeTasks = []) => {
+  const online = isUserActuallyOnline(user);
+  const onBreak = online && String(user.availability || '').toLowerCase() === 'break';
+  const breakMinutes = getTodayBreakMinutes(user);
+  if (onBreak) return {
+    key: 'break',
+    label: 'On Break',
+    detail: breakMinutes > 0 ? `${formatMinutes(breakMinutes)} break` : 'Break active',
+    dotClass: 'bg-amber-400 animate-pulse',
+    badgeClass: 'bg-amber-50 text-amber-700 border-amber-100'
+  };
+  if (online && activeTasks.length > 0) return {
+    key: 'working',
+    label: 'Working',
+    detail: activeTasks[0]?.id || activeTasks[0]?.caseId || 'Active task',
+    dotClass: 'bg-blue-500',
+    badgeClass: 'bg-blue-50 text-blue-700 border-blue-100'
+  };
+  if (online) return {
+    key: 'available',
+    label: 'Available',
+    detail: 'Ready for work',
+    dotClass: 'bg-emerald-400',
+    badgeClass: 'bg-emerald-50 text-emerald-700 border-emerald-100'
+  };
+  return {
+    key: 'offline',
+    label: 'Offline',
+    detail: formatLastSeenDateTime(user.lastSeenAt || user.lastLogoutAt || user.lastHeartbeatAt) || 'Unavailable',
+    dotClass: 'bg-slate-300',
+    badgeClass: 'bg-slate-100 text-slate-500 border-slate-200'
+  };
+};
 const shouldShowOnOperationsDate = (project = {}, dateKey = formatDateKey()) => getProjectDateKey(project) === dateKey || wasCompletedOnDate(project, dateKey) || (dateKey === formatDateKey() && isCarriedForwardProject(project, dateKey));
 
 const exportToCSV = (headers = [], rows = [], filename = 'Report.csv') => {
@@ -135,39 +574,71 @@ const exportToCSV = (headers = [], rows = [], filename = 'Report.csv') => {
   URL.revokeObjectURL(url);
 };
 
-const cleanReportText = (value = '') => String(value || '').trim().replace(/\s+/g, ' ');
-const toTitleCase = (value = '') => cleanReportText(value).toLowerCase().replace(/\b\w/g, ch => ch.toUpperCase());
-const canonicalLocation = (value = '') => {
-  const raw = cleanReportText(value);
-  if (!raw) return 'Branch not added';
-  const key = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
-  const aliases = {
-    LKO: 'LUCKNOW', LKN: 'LUCKNOW', LUCKNOW: 'LUCKNOW',
-    VARANASI: 'VARANASI', BANARAS: 'VARANASI',
-    KANPUR: 'KANPUR', AGRA: 'AGRA', RAIBARELI: 'RAIBARELI', RAEBARELI: 'RAIBARELI',
-    NOIDA: 'NOIDA', AYODHYA: 'AYODHYA', PRAYAGRAJ: 'PRAYAGRAJ', ALLAHABAD: 'PRAYAGRAJ'
-  };
-  return aliases[key] || raw.toUpperCase();
+const REPORT_LOCATION_ALIASES = {
+  LKO: 'LUCKNOW', LKN: 'LUCKNOW', LUCKNOW: 'LUCKNOW',
+  VNS: 'VARANASI', BANARAS: 'VARANASI', KASHI: 'VARANASI', VARANASI: 'VARANASI',
+  KNP: 'KANPUR', KANPUR: 'KANPUR',
+  AGR: 'AGRA', AGRA: 'AGRA',
+  NDA: 'NOIDA', NOIDA: 'NOIDA',
+  RBL: 'RAIBARELI', RAEBARELI: 'RAIBARELI', RAI: 'RAIBARELI', 'RAI BARELI': 'RAIBARELI', 'RAI BAREILLY': 'RAIBARELI',
+  AYD: 'AYODHYA', FAIZABAD: 'AYODHYA', AYODHYA: 'AYODHYA',
+  PRJ: 'PRAYAGRAJ', PRAYAGRAJ: 'PRAYAGRAJ', ALLAHABAD: 'PRAYAGRAJ'
 };
-const canonicalBank = (value = '') => {
-  const raw = cleanReportText(value);
-  if (!raw) return 'Bank not added';
-  const key = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
-  const aliases = {
-    SBI: 'SBI', STATEBANKOFINDIA: 'SBI', STATEBANK: 'SBI',
-    HDFC: 'HDFC', HDFCBANK: 'HDFC',
-    ICICI: 'ICICI', ICICIBANK: 'ICICI',
-    AXIS: 'AXIS', AXISBANK: 'AXIS',
-    PNB: 'PNB', PUNJABNATIONALBANK: 'PNB',
-    BOB: 'BANK OF BARODA', BANKOFBARODA: 'BANK OF BARODA'
-  };
-  return aliases[key] || raw.toUpperCase();
+
+const normalizeReportKey = (value = '') => String(value ?? '')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/[^a-zA-Z0-9 ]/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .toUpperCase();
+
+const cleanReportValue = (value, fallback = '') => {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  const key = normalizeReportKey(text);
+  if (!key || /^NOT ADDED$/i.test(key) || /^N A$/i.test(key) || /^NA$/i.test(key) || /^UNKNOWN$/i.test(key)) return fallback;
+  return text;
 };
-const getBankName = (project = {}) => canonicalBank(project.client || project.bankName || project.bank || project.lender || project.financier || '');
-const getBranchName = (project = {}) => canonicalLocation(project.branchName || project.branch || project.location || project.city || project.district || '');
-const getPaymentStatus = (project = {}) => String(project.paymentTrackingStatus || project.paymentStatus || '').toLowerCase();
-const getEstimateAmount = (project = {}) => Number(project.estimateAmount || project.totalAmount || project.amount || 0) || 0;
-const getProjectAgeHours = (project = {}) => Math.max(0, Math.round((Date.now() - (toMs(project.createdAt) || Date.now())) / 3600000));
+
+const canonicalReportName = (value, fallback = 'Not added', aliases = {}) => {
+  const clean = cleanReportValue(value, '');
+  if (!clean) return fallback;
+  const key = normalizeReportKey(clean);
+  if (!key) return fallback;
+  return aliases[key] || key;
+};
+
+const getBankName = (project = {}) => {
+  const direct = cleanReportValue(project.client || project.bankName || project.bank || project.bank_name || project.bankTitle || project.lender || project.financier || project.loanBank || project.clientName || project.institution);
+  const nested = cleanReportValue(project.caseDetails?.client || project.caseDetails?.bankName || project.caseDetails?.bank || project.form?.client || project.form?.bankName || project.metadata?.client || project.metadata?.bankName);
+  return canonicalReportName(direct || nested, 'Bank not added');
+};
+
+const getBranchName = (project = {}) => {
+  const direct = cleanReportValue(project.branchName || project.branch || project.bankBranch || project.branch_name);
+  const nested = cleanReportValue(project.caseDetails?.branchName || project.caseDetails?.branch || project.form?.branchName || project.metadata?.branchName);
+  const location = cleanReportValue(project.locationName || project.location || project.siteLocation || project.city || project.area);
+  return canonicalReportName(direct || nested || location, 'Location not added', REPORT_LOCATION_ALIASES);
+};
+
+const getPaymentStatus = (project = {}) => String(project.paymentTrackingStatus || project.paymentStatus || project.paymentReceived || project.ledger?.status || project.ledger?.paymentStatus || '').toLowerCase();
+const getEstimateAmount = (project = {}) => Number(project.estimateAmount || project.estimate || project.totalAmount || project.amount || project.ledger?.estimateAmount || project.ledger?.amount || 0) || 0;
+const getReceivedAmount = (project = {}) => Number(project.receivedAmount || project.paymentReceivedAmount || project.amountReceived || project.ledger?.amountIn || project.ledger?.receivedAmount || 0) || 0;
+const getFinanceUpdatedAt = (project = {}) => toMs(project.paymentTrackingUpdatedAt || project.paymentUpdatedAt || project.paymentDate || project.ledger?.updatedAt || project.ledger?.date || project.completedAt || project.createdAt);
+const getProjectAgeHours = (project = {}, fromMs = Date.now()) => Math.max(0, Math.round((fromMs - (getFinanceUpdatedAt(project) || toMs(project.createdAt) || fromMs)) / 3600000));
+const deriveFinancePaymentStatus = (project = {}) => {
+  const estimate = getEstimateAmount(project);
+  const received = getReceivedAmount(project);
+  const raw = getPaymentStatus(project).toUpperCase();
+  const hasFinanceData = Boolean(estimate > 0 || received > 0 || project.ledger?.updatedAt || project.paymentTrackingUpdatedAt || project.paymentDate || project.ledger?.receivedFrom || project.ledger?.txnId || project.ledger?.mode);
+  if (received > 0 && estimate > 0 && received >= estimate) return received > estimate ? 'overpaid' : 'paid';
+  if (received > 0 && estimate > 0 && received < estimate) return 'partially-paid';
+  if (received > 0 && estimate <= 0) return 'paid';
+  if (estimate > 0 || raw.includes('PENDING') || raw.includes('DUE') || raw.includes('PARTIAL') || hasFinanceData) return 'pending';
+  return 'not-updated';
+};
+const isFinancePending = (project = {}) => ['pending', 'partially-paid'].includes(deriveFinancePaymentStatus(project));
+const isFinanceReceived = (project = {}) => ['paid', 'overpaid'].includes(deriveFinancePaymentStatus(project));
 const countBy = (items = [], keyFn) => items.reduce((acc, item) => {
   const key = keyFn(item) || 'Not added';
   acc[key] = (acc[key] || 0) + 1;
@@ -339,6 +810,7 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
   const [dashboardFilter, setDashboardFilter] = useState('all');
   const operationsBoardRef = useRef(null);
   const teamAvailabilityRef = useRef(null);
+  const activityFeedRef = useRef(null);
   const [availabilityNow, setAvailabilityNow] = useState(Date.now());
   const [presenceTimes, setPresenceTimes] = useState(() => {
     try { return JSON.parse(localStorage.getItem('kalpa_presence_times') || '{}'); } catch (e) { return {}; }
@@ -440,21 +912,6 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
     : 0;
   const pendingNow = rawActiveBoard.filter(p => isIncompleteProject(p)).length;
   const pendingBoard = rawActiveBoard.filter(p => isIncompleteProject(p));
-  const uniqueProjectsById = (items = []) => {
-    const seen = new Map();
-    (items || []).forEach(item => {
-      const key = String(item?.id || item?.caseId || '');
-      if (key && !seen.has(key)) seen.set(key, item);
-    });
-    return Array.from(seen.values());
-  };
-  const attentionQueue = uniqueProjectsById([
-    ...(metrics.waitingAssignment || []),
-    ...(metrics.internalReviewPending || []),
-    ...(metrics.revisions || []),
-    ...((metrics.slaBuckets && metrics.slaBuckets.critical) || []),
-    ...((metrics.slaBuckets && metrics.slaBuckets['near-sla']) || [])
-  ]).sort((a,b) => (toMs(b.updatedAt || b.createdAt) || 0) - (toMs(a.updatedAt || a.createdAt) || 0));
   const delayedCount = pendingBoard.filter(p => getSlaInfo(p).label === 'Delayed').length;
   const nearSlaCount = pendingBoard.filter(p => getSlaInfo(p).label === 'Near SLA').length;
   const activeCapacity = workingTeam.reduce((sum, u) => sum + activeTasksFor(u.name).length, 0);
@@ -496,7 +953,9 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
     paymentPending: 'Payment pending',
     slaCritical: 'SLA violations / critical cases',
     healthy: 'SLA healthy cases',
-    attention: 'All attention work'
+    attention: 'SLA attention cases',
+    attentionAll: 'All work requiring attention',
+    working: 'Work currently in progress'
   };
   const filterOperations = (filterKey) => {
     if (filterKey === 'received') return metrics.todays.slice().sort((a,b) => (b.createdAt || 0) - (a.createdAt || 0));
@@ -506,6 +965,23 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
     if (filterKey === 'near') return pendingBoard.filter(p => getSlaInfo(p).label === 'Near SLA');
     if (filterKey === 'revisions') return metrics.revisions.slice().sort((a,b) => (b.revisionRequestedAt || b.updatedAt || b.createdAt || 0) - (a.revisionRequestedAt || a.updatedAt || a.createdAt || 0));
     if (filterKey === 'carried') return metrics.carried.slice();
+    if (filterKey === 'attentionAll') {
+      const merged = [
+        ...metrics.waitingAssignment,
+        ...metrics.internalReviewPending,
+        ...metrics.revisions,
+        ...(metrics.slaBuckets.critical || []),
+        ...(metrics.slaBuckets['near-sla'] || [])
+      ];
+      const seen = new Set();
+      return merged.filter(item => {
+        const key = item.id || item.caseId || `${item.customerName || ''}-${item.createdAt || ''}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+    if (filterKey === 'working') return rawActiveBoard.filter(p => ['DRAFTING','DRAFTINGPAUSED','INPROGRESS','ASSIGNED'].includes(normalizeWorkStatus(p.status)));
     if (filterKey === 'drafting') return rawActiveBoard.filter(p => normalizeWorkStatus(p.status) === 'DRAFTING' || normalizeWorkStatus(p.status) === 'DRAFTINGPAUSED');
     if (filterKey === 'review') return rawActiveBoard.filter(p => normalizeWorkStatus(p.status) === 'INTERNALREVIEW');
     if (filterKey === 'waiting') return metrics.waitingAssignment.slice();
@@ -514,11 +990,16 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
     if (filterKey === 'paymentPending') return metrics.paymentPending.slice();
     if (filterKey === 'slaCritical') return (metrics.slaBuckets.critical || []).slice();
     if (filterKey === 'healthy') return (metrics.slaBuckets.healthy || []).slice();
-    if (filterKey === 'attention') return attentionQueue.slice();
+    if (filterKey === 'attention') return (metrics.slaBuckets.attention || []).slice();
     return rawActiveBoard;
   };
-  const activeBoard = filterOperations(dashboardFilter);
+  const attentionItems = filterOperations('attentionAll');
+  const activeBoard = dashboardFilter === 'attentionAll' ? attentionItems : filterOperations(dashboardFilter);
   const applyDashboardFilter = (filterKey) => {
+    if (filterKey === 'activity') {
+      setTimeout(() => activityFeedRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 30);
+      return;
+    }
     setDashboardFilter(filterKey);
     setTimeout(() => operationsBoardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 30);
   };
@@ -541,242 +1022,225 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
     ['4–8 hrs', 'Near SLA', (metrics.slaBuckets['near-sla'] || []).length, 'near', 'bg-orange-50 text-orange-700 border-orange-100'],
     ['>8 hrs', 'Critical', (metrics.slaBuckets.critical || []).length, 'slaCritical', 'bg-red-50 text-red-700 border-red-100']
   ];
-  const adminQuickActions = [
-    ['Add Case', () => onNavigate?.('newCase')],
-    ['Assign Case', () => applyDashboardFilter('waiting')],
-    ['Create Revision', () => applyDashboardFilter('revisions')],
-    ['Open Ledger', () => onNavigate?.('ledger')],
-    ['Pending Payments', () => applyDashboardFilter('paymentPending')],
-    ['Team Attendance', () => onNavigate?.('attendance')],
-    ['Notifications', () => onNavigate?.('notifications')]
-  ];
-  const actionCount = attentionQueue.length;
+  const actionCount = attentionItems.length;
   const commandFocusCards = [
-    ['Attention', actionCount, 'attention', 'bg-red-50 text-red-700 border-red-100', 'Waiting assignment, review, revision and SLA risk'],
-    ['Working', metrics.drafting, 'drafting', 'bg-amber-50 text-amber-700 border-amber-100', 'Cases currently being worked on'],
+    ['Attention', actionCount, 'attentionAll', 'bg-red-50 text-red-700 border-red-100', 'Waiting, review, revision and SLA risk'],
+    ['Working', metrics.drafting, 'working', 'bg-amber-50 text-amber-700 border-amber-100', 'Cases currently being worked on'],
     ['Ready', metrics.readyForDelivery.length, 'ready', 'bg-emerald-50 text-emerald-700 border-emerald-100', 'Completed work ready to deliver'],
     ...(isAdmin ? [['Payments', metrics.paymentPending.length, 'paymentPending', 'bg-blue-50 text-blue-700 border-blue-100', 'Pending payment follow-up']] : []),
     ['Activity', liveActivityFeed.length, 'activity', 'bg-indigo-50 text-indigo-700 border-indigo-100', 'Latest operational activity']
   ];
   return (
-    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+    <div className="kalpa-production-polish space-y-4 sm:space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div className="flex flex-col sm:flex-row justify-between sm:items-end gap-4">
-        <div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Command Centre</h1><p className="text-slate-500 font-medium mt-2">Live operations control only: queues, SLA, team availability, revisions, payments, and activity feed. Historical productivity has one home: Performance Analytics.</p></div>
-        <input type="date" value={dateKey} onChange={e => setDateKey(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none" />
+        <div>
+          <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Command Centre</h1>
+          <p className="text-slate-500 font-medium mt-1">Live operational control for today.</p>
+        </div>
+        <input type="date" value={dateKey} onChange={e => setDateKey(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-3 py-2 font-bold text-slate-700 outline-none" />
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">{commandFocusCards.map(([label, value, filterKey, cls, hint]) => (
-        <button
-          key={label}
-          type="button"
-          onClick={() => filterKey === 'activity' ? null : applyDashboardFilter(filterKey)}
-          title={hint}
-          className={`${cls} border-2 rounded-3xl p-5 shadow-sm text-left transition-all hover:-translate-y-0.5 hover:shadow-lg active:scale-[0.98] focus:outline-none focus:ring-4 focus:ring-indigo-100 ${dashboardFilter === filterKey ? 'ring-4 ring-indigo-100 scale-[1.01]' : ''}`}
-        >
-          <p className="text-[10px] font-black uppercase tracking-widest opacity-80">{label}</p>
-          <p className="text-3xl font-black mt-2">{value}</p>
-          <p className="mt-3 text-[10px] font-black uppercase tracking-widest opacity-60">{hint}</p>
-        </button>
-      ))}</div>
-
-      <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
-        <div className="kalpa-panel xl:col-span-2 bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
-          <div className="flex items-center justify-between gap-3 mb-4"><div><h2 className="font-black text-slate-800 text-xl">Live Operations Board</h2><p className="text-xs font-bold text-slate-400 mt-1">Actionable queues. Click any card to open the filtered work list.</p></div><Badge colorClass="bg-indigo-50 text-indigo-700 border-indigo-100">Phase 5B</Badge></div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {liveBoardSections.map(([label, value, filterKey, cls]) => (
-              <button key={label} type="button" onClick={() => applyDashboardFilter(filterKey)} className={`${cls} border-2 rounded-2xl p-4 text-left transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98] ${dashboardFilter === filterKey ? 'ring-2 ring-indigo-200' : ''}`}>
-                <p className="text-sm font-black">{label}</p><p className="text-3xl font-black mt-2">{value}</p><p className="text-[10px] font-black uppercase tracking-widest opacity-60 mt-2">Open filtered list</p>
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
-          <h2 className="font-black text-slate-800 text-xl mb-1">SLA Monitor</h2><p className="text-xs font-bold text-slate-400 mb-4">Open cases classified by live age.</p>
-          <div className="space-y-3">{slaMonitorSections.map(([range, label, value, filterKey, cls]) => (
-            <button key={range} type="button" onClick={() => applyDashboardFilter(filterKey)} className={`${cls} w-full border-2 rounded-2xl p-3 text-left flex items-center justify-between transition-all hover:-translate-y-0.5 hover:shadow-md`}>
-              <div><p className="font-black text-sm">{label}</p><p className="text-[10px] font-black uppercase tracking-widest opacity-60">{range}</p></div><span className="text-2xl font-black">{value}</span>
-            </button>
-          ))}</div>
-        </div>
-        {isAdmin && <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
-          <h2 className="font-black text-slate-800 text-xl mb-1">Quick Actions</h2><p className="text-xs font-bold text-slate-400 mb-4">Admin shortcuts from Command Centre.</p>
-          <div className="grid grid-cols-1 gap-2">{adminQuickActions.map(([label, action]) => <button key={label} type="button" onClick={action} className="text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 hover:border-indigo-100 rounded-xl px-4 py-3 font-black text-sm text-slate-700 transition-all">{label}</button>)}</div>
-        </div>}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        {commandFocusCards.map(([label, value, filterKey, cls, hint]) => (
+          <button
+            key={label}
+            type="button"
+            onClick={() => applyDashboardFilter(filterKey)}
+            title={hint}
+            className={`${cls} min-h-[74px] border rounded-2xl px-4 py-3 shadow-sm text-left transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98] focus:outline-none focus:ring-2 focus:ring-indigo-100 ${dashboardFilter === filterKey ? 'ring-2 ring-indigo-200 bg-white' : ''}`}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-[11px] font-black uppercase tracking-widest opacity-80">{label}</p>
+              <span className="text-2xl font-black leading-none">{value}</span>
+            </div>
+            <p className="mt-2 text-[11px] font-bold opacity-60 truncate">{hint}</p>
+          </button>
+        ))}
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <div className="kalpa-panel xl:col-span-2 bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
-          <h2 className="font-black text-slate-800 text-xl mb-2">Command Centre Scope</h2>
-          <p className="text-sm font-bold text-slate-500 leading-relaxed mb-5">This page is intentionally limited to what needs action now. Historical productivity, team rankings and trend charts have been removed from here to keep operations focused.</p>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <button type="button" onClick={() => applyDashboardFilter('waiting')} className="bg-red-50 border-2 border-red-100 rounded-2xl p-4 text-left hover:shadow-md transition-all"><p className="text-xs font-black uppercase tracking-widest text-red-500">Operations</p><p className="font-black text-red-900 mt-1">Act on live queues</p></button>
-            <button type="button" onClick={() => onOpenPerformance?.()} className="bg-emerald-50 border-2 border-emerald-100 rounded-2xl p-4 text-left hover:shadow-md transition-all"><p className="text-xs font-black uppercase tracking-widest text-emerald-500">Performance</p><p className="font-black text-emerald-900 mt-1">Open analytics hub</p></button>
-            <button type="button" onClick={() => onNavigate?.('reports')} className="bg-indigo-50 border-2 border-indigo-100 rounded-2xl p-4 text-left hover:shadow-md transition-all"><p className="text-xs font-black uppercase tracking-widest text-indigo-500">Reports</p><p className="font-black text-indigo-900 mt-1">Open business reports</p></button>
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-start">
+        <div ref={operationsBoardRef} className="kalpa-panel xl:col-span-7 bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden scroll-mt-24">
+          <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <h2 className="font-black text-slate-800 text-lg">Operational Queue</h2>
+              <p className="text-xs font-bold text-slate-400 mt-1">{filterLabels[dashboardFilter] || 'All active operations'} • {activeBoard.length} record{activeBoard.length === 1 ? '' : 's'}</p>
+            </div>
+            {dashboardFilter !== 'all' && <button type="button" onClick={() => setDashboardFilter('all')} className="text-xs font-black uppercase tracking-widest bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-2 rounded-xl transition">Clear filter</button>}
           </div>
-        </div>
-
-        <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
-          <h3 className="font-black text-slate-800 mb-1">Team Availability</h3><p className="text-xs font-bold text-slate-400 mb-4">Live status only. Use Team page for full people management.</p>
-          <div className="grid grid-cols-3 gap-2 text-center">
-            <button type="button" onClick={() => applyAvailabilityFilter('Available')} className="bg-blue-50 border border-blue-100 rounded-2xl p-3 transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98]"><p className="font-black text-blue-700">{free}</p><p className="text-[9px] font-black uppercase text-blue-500">Available</p></button>
-            <button type="button" onClick={() => applyAvailabilityFilter('Busy')} className="bg-emerald-50 border border-emerald-100 rounded-2xl p-3 transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98]"><p className="font-black text-emerald-700">{busy}</p><p className="text-[9px] font-black uppercase text-emerald-500">Drafting</p></button>
-            <button type="button" onClick={() => applyAvailabilityFilter('Break')} className="bg-amber-50 border border-amber-100 rounded-2xl p-3 transition-all hover:-translate-y-0.5 hover:shadow-md active:scale-[0.98]"><p className="font-black text-amber-700">{breaks}</p><p className="text-[9px] font-black uppercase text-amber-500">Break</p></button>
-          </div>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div ref={operationsBoardRef} className="kalpa-panel lg:col-span-2 bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden scroll-mt-24">
-          <div className="p-5 border-b-2 border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"><div><h2 className="font-black text-slate-800 text-xl">Daily Operations Board</h2><p className="text-xs font-bold text-slate-400 mt-1">{filterLabels[dashboardFilter] || 'All active operations'} • {activeBoard.length} record{activeBoard.length === 1 ? '' : 's'}</p></div>{dashboardFilter !== 'all' && <button type="button" onClick={() => setDashboardFilter('all')} className="text-xs font-black uppercase tracking-widest bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-2 rounded-xl transition">Clear filter</button>}</div>
           <div className="divide-y divide-slate-100 max-h-[520px] overflow-y-auto custom-scrollbar">
-            {activeBoard.map(p => {
+            {activeBoard.slice(0, 18).map(p => {
               const latestRevisionNote = getLatestRevisionNote(p);
-              return <div key={p.id} onClick={() => onSelectProject(p)} className="kalpa-task-row p-5 hover:bg-slate-50 cursor-pointer flex justify-between items-center gap-4"><div className="min-w-0 flex-1 pr-3"><p className="font-black text-slate-800">{p.id} <span className="text-xs font-bold text-slate-400 ml-2">{getCustomerDisplayName(p)}</span></p><p className="text-sm font-extrabold text-slate-700 mt-1">{p.taskName || makeTaskDisplayName(p)}</p><p className="text-xs font-bold text-slate-500 mt-1">{p.type} • {p.location} • {p.assignedTo || 'Unassigned'}</p>{dashboardFilter === 'revisions' && <div className="mt-2 max-w-2xl rounded-xl border border-red-100 bg-red-50 px-3 py-2"><p className="text-[10px] font-black uppercase tracking-widest text-red-600">{getRevisionBadgeLabel(p)}</p>{latestRevisionNote && <p className="text-xs font-bold text-red-700 mt-1 line-clamp-1">{latestRevisionNote}</p>}{p.reviewedBy && <p className="text-[10px] font-bold text-red-400 mt-1">Reviewer: {p.reviewedBy}</p>}</div>}{getTaskDescription(p) && <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mt-2 max-w-xl truncate whitespace-nowrap"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1 max-w-xl truncate whitespace-nowrap"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}{getLatestCompletedFileName(p) && <p className="text-[11px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mt-2 w-fit">Completed: {getLatestCompletedFileName(p)}</p>}{isCarriedForwardProject(p, dateKey) && <span className="inline-flex mt-2 text-[10px] bg-orange-50 text-orange-700 border border-orange-100 px-2 py-1 rounded-lg font-black uppercase">Carried Forward</span>}</div><Badge colorClass={dashboardFilter === 'revisions' ? 'bg-red-50 text-red-700 border-red-100' : getStatusColor(p.status)}>{dashboardFilter === 'revisions' ? 'Revision Pending' : p.status}</Badge></div>;
+              const sla = getSlaInfo(p);
+              return (
+                <button key={p.id || p.caseId} type="button" onClick={() => onSelectProject(p)} className="w-full text-left px-4 py-3 hover:bg-slate-50 transition flex items-center justify-between gap-4">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-black text-slate-800 truncate">{p.id || p.caseId}</p>
+                      <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{p.type || 'Case'}</span>
+                      {isCarriedForwardProject(p, dateKey) && <span className="text-[9px] bg-orange-50 text-orange-700 border border-orange-100 px-2 py-0.5 rounded-lg font-black uppercase">Carry forward</span>}
+                    </div>
+                    <p className="text-xs font-bold text-slate-500 mt-1 truncate">{getCustomerDisplayName(p)} • {p.location || 'Location not added'} • {p.assignedTo || 'Unassigned'}</p>
+                    {dashboardFilter === 'revisions' && latestRevisionNote && <p className="text-[11px] font-bold text-red-700 mt-1 truncate">Revision: {latestRevisionNote}</p>}
+                  </div>
+                  <div className="hidden md:flex items-center gap-2 shrink-0">
+                    <Badge colorClass={sla.colorClass}>{sla.label}</Badge>
+                    <Badge colorClass={dashboardFilter === 'revisions' ? 'bg-red-50 text-red-700 border-red-100' : getStatusColor(p.status)}>{dashboardFilter === 'revisions' ? 'Revision' : (p.status || 'Open')}</Badge>
+                  </div>
+                </button>
+              );
             })}
             {activeBoard.length === 0 && <div className="p-10 text-center text-slate-400 font-bold">No operations for this date.</div>}
           </div>
         </div>
-        <div className="space-y-6">
-          <div ref={teamAvailabilityRef} className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm scroll-mt-24">
-            <h3 className="font-black text-slate-800 mb-1">Team Availability</h3><p className="text-xs font-bold text-slate-400 mb-4">Click Available, Drafting, Break, or Offline to see the members in that status.</p>
-            <div className="grid grid-cols-4 gap-2 mb-4">
-              {[["Available", free, "bg-blue-50 text-blue-700 border-blue-100", "Available"], ["Busy", busy, "bg-emerald-50 text-emerald-700 border-emerald-100", "Drafting"], ["Break", breaks, "bg-amber-50 text-amber-700 border-amber-100", "Break"], ["Offline", offlinePeople.length, "bg-slate-50 text-slate-600 border-slate-100", "Offline"]].map(([label, count, cls, displayLabel]) => (
-                <button key={label} type="button" onClick={() => setAvailabilityFilter(label)} className={`${cls} border-2 p-3 rounded-2xl text-center font-black transition-all ${availabilityFilter === label ? 'ring-2 ring-slate-300 scale-[1.02]' : 'hover:scale-[1.01]'}`}>
-                  {count}<p className="text-[10px] uppercase tracking-widest">{displayLabel || label}</p>
+
+        <div className="xl:col-span-5 space-y-4">
+          <div ref={activityFeedRef} className="kalpa-panel bg-white rounded-2xl border border-slate-100 p-4 shadow-sm scroll-mt-24">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <h3 className="font-black text-slate-800 flex items-center"><Bell className="w-5 h-5 mr-2 text-indigo-500" /> Live Activity</h3>
+              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{liveActivityFeed.length}</span>
+            </div>
+            <div className="space-y-2 max-h-72 overflow-y-auto custom-scrollbar pr-1">
+              {liveActivityFeed.slice(0, 9).map(item => (
+                <button key={item.id} type="button" onClick={() => onSelectProject(item.project)} className="w-full text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 rounded-xl px-3 py-2.5 transition-all flex gap-3">
+                  <div className="w-12 shrink-0 text-center"><p className="text-[11px] font-black text-slate-500">{formatActivityClock(item.at)}</p><p className="text-base mt-0.5">{getActivityIcon(item.type)}</p></div>
+                  <div className="min-w-0 flex-1"><p className="font-black text-slate-800 text-sm truncate">{item.project?.id || item.project?.caseId} • {item.title}</p><p className="text-[11px] font-bold text-slate-500 mt-0.5 truncate">{getCustomerDisplayName(item.project)}{item.by ? ` • ${item.by}` : ''}</p></div>
                 </button>
               ))}
-            </div>
-            <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar">
-              {selectedAvailabilityPeople.length === 0 && <MiniEmptyState>No team members in {availabilityFilter}.</MiniEmptyState>}
-              {selectedAvailabilityPeople.map(member => {
-                const draftingTask = getUserDraftingTask(projects, member.name);
-                const tasks = draftingTask ? [draftingTask] : [];
-                const memberAttendance = todayAttendanceFor(member);
-                const breakSince = member.breakStartedAt || memberAttendance?.currentBreakStartedAt || memberAttendance?.breakEvents?.find(ev => ev?.start && !ev?.end)?.start || member.availabilityUpdatedAt || Date.now();
-                const freeSince = getUserFreeSince(projects, member.name, presenceTimes, member);
-                const busySince = getUserBusySince(projects, member.name, presenceTimes);
-                const busyTaskLine = tasks.length
-                  ? tasks.map(t => `${t.id} • Drafting since ${formatDuration(getTaskBusySince(t), availabilityNow)}`).join(' | ')
-                  : '';
-                const isAdminMember = normalizeRole(member.role) === ROLES.ADMIN;
-                const availabilityLine = availabilityFilter === 'Busy'
-                  ? (busyTaskLine || (busySince ? `Drafting since ${formatDuration(busySince, availabilityNow)}` : 'Drafting now'))
-                  : availabilityFilter === 'Break'
-                    ? `Break since ${formatDuration(breakSince, availabilityNow)}`
-                    : availabilityFilter === 'Available'
-                      ? (isAdminMember ? 'Available' : (freeSince ? `Free since ${formatDuration(freeSince, availabilityNow)}` : 'Available • no completed task yet'))
-                      : `Last seen ${formatLastSeenDateTime(member.lastSeenAt || member.lastLogoutAt || member.lastHeartbeatAt)}`;
-                return (
-                  <div key={member.id} className="flex items-center justify-between bg-slate-50 border border-slate-100 rounded-2xl p-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-xl bg-white border border-slate-200 overflow-hidden flex items-center justify-center shrink-0">
-                        {member.profilePhoto ? <img src={absoluteApiUrl(member.profilePhoto, member.profilePhotoUpdatedAt || member.profileUpdatedAt || '')} alt={member.name} className="w-full h-full object-cover" /> : <User className="w-4 h-4 text-slate-400" />}
-                      </div>
-                      <div>
-                        <p className="font-black text-slate-800 text-sm">{member.name}</p>
-                        <p className="text-[11px] font-bold text-slate-400">{availabilityLine}</p>
-                      </div>
-                    </div>
-                    <Badge colorClass={availabilityFilter === 'Busy' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : availabilityFilter === 'Break' ? 'bg-amber-50 text-amber-700 border-amber-100' : availabilityFilter === 'Available' ? 'bg-blue-50 text-blue-700 border-blue-100' : 'bg-slate-50 text-slate-600 border-slate-100'}>{availabilityFilter === 'Busy' ? 'Drafting' : availabilityFilter}</Badge>
-                  </div>
-                );
-              })}
+              {liveActivityFeed.length === 0 && <p className="text-sm text-slate-400 font-bold text-center py-6">No timeline activity yet.</p>}
             </div>
           </div>
-          {currentUser?.role === ROLES.ADMIN && <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm"><h3 className="font-black text-slate-800 mb-4">Payment Health</h3><p className="text-xs font-black text-slate-400 uppercase tracking-widest">Received Today</p><p className="text-3xl font-black text-emerald-600 mb-4">₹{metrics.paymentReceived.toLocaleString()}</p><p className="text-xs font-black text-slate-400 uppercase tracking-widest">Pending Collections</p><p className="text-3xl font-black text-red-500">₹{metrics.pendingAmount.toLocaleString()}</p></div>}
-          <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm"><h3 className="font-black text-slate-800 mb-4">Urgent Revision Queue</h3>{metrics.revisions.slice(0,5).map(p => <button key={p.id} onClick={() => onSelectProject(p)} className="w-full text-left bg-red-50 border border-red-100 p-3 rounded-xl mb-2"><p className="font-black text-red-700 text-xs">{p.id}</p><p className="text-[10px] font-bold text-red-500">{getRevisionBadgeLabel(p)}</p>{getLatestRevisionNote(p) && <p className="text-[11px] font-semibold text-red-700 mt-1 line-clamp-2">{getLatestRevisionNote(p)}</p>}</button>)}{metrics.revisions.length === 0 && <p className="text-sm text-slate-400 font-bold">No urgent revisions.</p>}</div>
-        </div>
-      </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <div className="kalpa-panel xl:col-span-2 bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
-          <div className="flex items-center justify-between gap-3 mb-4"><h3 className="font-black text-slate-800 flex items-center"><Users className="w-5 h-5 mr-2 text-indigo-500" /> Live Team Status</h3><span className="text-[10px] font-black uppercase tracking-widest text-slate-400">No historical analytics here</span></div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-96 overflow-y-auto custom-scrollbar pr-1">
-            {workloadCards.map(member => (
-              <div key={member.id} className="border border-slate-100 bg-slate-50 rounded-2xl p-4">
-                <div className="flex items-start justify-between gap-3 mb-3"><div><p className="font-black text-slate-800">{member.name}</p><p className="text-[11px] font-bold text-slate-400">{member.role} • current operational load</p></div><Badge colorClass={member.loadPct >= 90 ? 'bg-red-50 text-red-700 border-red-100' : member.loadPct >= 60 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-emerald-50 text-emerald-700 border-emerald-100'}>{member.loadPct}%</Badge></div>
-                <div className="h-2 bg-white rounded-full overflow-hidden mb-3"><div className="h-full bg-indigo-500 rounded-full" style={{ width: `${member.loadPct}%` }}></div></div>
-                <div className="grid grid-cols-2 gap-2 text-center"><div className="bg-white rounded-xl p-2"><p className="font-black text-slate-800">{member.active.length}</p><p className="text-[9px] font-black uppercase text-slate-400">Active now</p></div><div className="bg-white rounded-xl p-2"><p className="font-black text-indigo-600">{member.limit}</p><p className="text-[9px] font-black uppercase text-slate-400">Daily capacity</p></div></div>
-              </div>
-            ))}
-            {workloadCards.length === 0 && <p className="text-sm text-slate-400 font-bold text-center py-8">No designer or manager workload available.</p>}
-          </div>
-        </div>
-        <div className="space-y-6">
-          <div className="kalpa-panel bg-indigo-50 rounded-3xl border-2 border-indigo-100 p-6 shadow-sm">
-            <h3 className="font-black text-slate-800 mb-3 flex items-center"><BarChart3 className="w-5 h-5 mr-2 text-indigo-600" /> Command Centre Scope</h3>
-            <p className="text-sm font-semibold text-indigo-700 leading-relaxed">This page now stays focused on live operations. Use Performance Analytics for rankings, trends and individual productivity; use Reports for business, finance, bank and SLA summaries.</p>
-          </div>
-          <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
-            <h3 className="font-black text-slate-800 mb-4 flex items-center"><Clock className="w-5 h-5 mr-2 text-indigo-500" /> SLA Tracking</h3>
-            <div className="space-y-3 max-h-72 overflow-y-auto custom-scrollbar">
-              {activeBoard.slice().sort((a,b) => getSlaInfo(b).ageHours - getSlaInfo(a).ageHours).slice(0,8).map(p => { const sla = getSlaInfo(p); return (
-                <button key={p.id} type="button" onClick={() => onSelectProject(p)} className="w-full text-left border border-slate-100 hover:border-indigo-100 hover:bg-slate-50 rounded-2xl p-4 transition-all">
-                  <div className="flex justify-between items-start gap-3">
-                    <div><p className="font-black text-slate-800">{p.id}</p><p className="text-xs font-bold text-slate-400 mt-1">Draft: {sla.drafting} • Review: {sla.review} • Total: {sla.total}</p></div>
-                    <Badge colorClass={sla.colorClass}>{sla.label}</Badge>
-                  </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="kalpa-panel bg-white rounded-2xl border border-slate-100 p-4 shadow-sm">
+              <h3 className="font-black text-slate-800 mb-3">SLA</h3>
+              <div className="space-y-2">{slaMonitorSections.map(([range, label, value, filterKey, cls]) => (
+                <button key={range} type="button" onClick={() => applyDashboardFilter(filterKey)} className={`${cls} w-full border rounded-xl px-3 py-2 text-left flex items-center justify-between transition-all hover:shadow-sm`}>
+                  <div><p className="font-black text-xs">{label}</p><p className="text-[10px] font-black uppercase tracking-widest opacity-60">{range}</p></div><span className="text-lg font-black">{value}</span>
                 </button>
-              )})}
-              {activeBoard.length === 0 && <p className="text-sm text-slate-400 font-bold text-center py-8">No SLA items for this date.</p>}
+              ))}</div>
+            </div>
+            <div className="kalpa-panel bg-white rounded-2xl border border-slate-100 p-4 shadow-sm">
+              <h3 className="font-black text-slate-800 mb-3">Alerts</h3>
+              <button type="button" onClick={() => applyDashboardFilter('revisions')} className="w-full mb-2 bg-purple-50 text-purple-700 border border-purple-100 rounded-xl px-3 py-2 flex justify-between"><span className="font-black text-xs">Revisions</span><b>{metrics.revisions.length}</b></button>
+              {isAdmin && <button type="button" onClick={() => applyDashboardFilter('paymentPending')} className="w-full mb-2 bg-blue-50 text-blue-700 border border-blue-100 rounded-xl px-3 py-2 flex justify-between"><span className="font-black text-xs">Payment Pending</span><b>{metrics.paymentPending.length}</b></button>}
+              <button type="button" onClick={() => applyDashboardFilter('slaCritical')} className="w-full bg-slate-100 text-slate-800 border border-slate-200 rounded-xl px-3 py-2 flex justify-between"><span className="font-black text-xs">Critical SLA</span><b>{(metrics.slaBuckets.critical || []).length}</b></button>
             </div>
           </div>
-        </div>
-      </div>
-
-      <div className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm">
-        <div className="flex items-center justify-between gap-3 mb-4"><h3 className="font-black text-slate-800 flex items-center"><Bell className="w-5 h-5 mr-2 text-indigo-500" /> Live Activity Feed</h3><span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Timeline-powered</span></div>
-        <div className="space-y-3 max-h-96 overflow-y-auto custom-scrollbar pr-1">
-          {liveActivityFeed.map(item => (
-            <button key={item.id} type="button" onClick={() => onSelectProject(item.project)} className="w-full text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 rounded-2xl p-4 transition-all flex gap-4">
-              <div className="w-14 shrink-0 text-center"><p className="text-xs font-black text-slate-500">{formatActivityClock(item.at)}</p><p className="text-lg mt-1">{getActivityIcon(item.type)}</p></div>
-              <div className="min-w-0 flex-1"><p className="font-black text-slate-800 truncate">{item.project?.id || item.project?.caseId} • {item.title}</p><p className="text-xs font-bold text-slate-500 mt-1 truncate">{getCustomerDisplayName(item.project)} • {item.project?.location || item.project?.city || 'Location not added'}{item.by ? ` • ${item.by}` : ''}</p>{item.remarks && <p className="text-[11px] font-semibold text-slate-400 mt-1 line-clamp-1">{item.remarks}</p>}</div>
-            </button>
-          ))}
-          {liveActivityFeed.length === 0 && <p className="text-sm text-slate-400 font-bold text-center py-8">No timeline activity yet.</p>}
         </div>
       </div>
     </div>
   );
 };
 
-export const ProductivityDashboard = ({ users = [], projects = [] }) => {
+export const ProductivityDashboard = ({ users = [], projects = [], performanceRecords: externalPerformanceRecords = [], performanceSummary = null }) => {
   const [range, setRange] = useState('month');
   const [selectedMember, setSelectedMember] = useState('all');
+  const [engineDiagnostics, setEngineDiagnostics] = useState(null);
+  const [engineSummary, setEngineSummary] = useState(null);
+  const [engineBusy, setEngineBusy] = useState(false);
   const now = Date.now();
   const todayKey = formatDateKey();
   const rangeMs = range === 'week' ? 7 * 86400000 : range === 'quarter' ? 90 * 86400000 : 30 * 86400000;
-  const scopedProjects = (projects || []).filter(p => (toMs(p.createdAt) || now) >= now - rangeMs || (toMs(p.completedAt) || 0) >= now - rangeMs);
+  const allProjects = Array.isArray(projects) ? projects : [];
+  const scopedProjects = allProjects.filter(p => (toMs(p.createdAt) || now) >= now - rangeMs || (toMs(p.completedAt) || 0) >= now - rangeMs);
   const team = getOperationalUsers(users, { includeAdmins: false });
   const activeTeam = selectedMember === 'all' ? team : team.filter(u => normalizePersonName(u.name) === normalizePersonName(selectedMember));
-  const getMemberProjects = (name) => scopedProjects.filter(p => normalizePersonName(p.assignedTo) === normalizePersonName(name));
+  const generatedPerformanceRecords = buildPerformanceRecords(allProjects);
+  const performanceRecords = mergePerformanceRecordSets(externalPerformanceRecords, generatedPerformanceRecords);
+  const effectivePerformanceSummary = engineSummary || performanceSummary || null;
+  const summaryUsers = Array.isArray(effectivePerformanceSummary?.users) ? effectivePerformanceSummary.users : [];
+  const summaryByName = new Map(summaryUsers.map(row => [normalizePersonName(row.userName || row.name), row]));
+
+  useEffect(() => {
+    let active = true;
+    fetch(absoluteApiUrl('/api/performance/diagnostics'))
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (!active || !data?.ok) return;
+        setEngineDiagnostics(data.diagnostics || null);
+        setEngineSummary(data.summary || null);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
+
+  const rebuildPerformanceEngine = async () => {
+    setEngineBusy(true);
+    try {
+      const res = await fetch(absoluteApiUrl('/api/performance/rebuild'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'performance-dashboard' }) });
+      const data = await res.json().catch(() => null);
+      if (data?.ok) {
+        setEngineDiagnostics(data.diagnostics || null);
+        setEngineSummary(data.summary || null);
+      } else {
+        alert(data?.error || 'Performance rebuild failed.');
+      }
+    } catch (err) {
+      alert(err?.message || 'Performance rebuild failed.');
+    } finally {
+      setEngineBusy(false);
+    }
+  };
+  const getMemberProjects = (name) => scopedProjects.filter(p => normalizePersonName(getPerformanceOwnerName(p)) === normalizePersonName(name));
+  const getMemberRecords = (name) => performanceRecords.filter(r => normalizePersonName(r.userName) === normalizePersonName(name));
   const memberRows = activeTeam.map(u => {
+    const summaryRow = summaryByName.get(normalizePersonName(u.name)) || {};
     const assigned = getMemberProjects(u.name);
     const completed = assigned.filter(isProjectCompleted);
+    const allAssigned = allProjects.filter(p => normalizePersonName(getPerformanceOwnerName(p)) === normalizePersonName(u.name));
+    const analyticsCompleted = allAssigned.filter(isAnalyticsCompletedProject);
+    const completedRecords = getMemberRecords(u.name);
     const completedToday = completed.filter(p => formatDateKey(p.completedAt || p.updatedAt || p.createdAt) === todayKey).length;
     const active = assigned.filter(isIncompleteProject);
-    const revisions = assigned.filter(p => (p.subTasks || p.revisions || []).length > 0 || hasActiveRevision(p));
-    const avgMins = completed.length ? Math.round(completed.reduce((sum, p) => {
-      const start = toMs(p.createdAt) || now;
-      const end = toMs(p.completedAt || p.draftingCompletedAt || p.submittedAt || p.updatedAt) || start;
-      return sum + Math.max(0, (end - start) / 60000);
-    }, 0) / completed.length) : 0;
-    const slaPct = getSlaCompliancePct(assigned);
+    const revisions = assigned.filter(p => getProjectRevisionTotal(p) > 0);
+    const profileAverage = Number(u.performanceProfile?.averageCompletionMinutes || u.averageCompletionMinutes || 0) || 0;
+    const summaryAvgCompletion = Number(summaryRow.avgCompletionMinutes || summaryRow.averageCompletionMinutes || 0) || 0;
+    const summaryAvgReview = Number(summaryRow.avgReviewMinutes || summaryRow.averageReviewMinutes || 0) || 0;
+    const avgMins = summaryAvgCompletion || averageMinutes(completedRecords, r => r.totalCompletionMinutes) || averageMinutes(analyticsCompleted, p => getActiveCompletionMinutes(p)) || averageMinutes(completed, p => getActiveCompletionMinutes(p)) || profileAverage;
+    const avgReviewMins = summaryAvgReview || averageMinutes(completedRecords, r => r.reviewMinutes) || averageMinutes(analyticsCompleted, p => getReviewDurationMinutes(p)) || averageMinutes(completed, p => getReviewDurationMinutes(p));
+    const live = getLiveStatus(u, active);
+    const breakMinutes = getTodayBreakMinutes(u);
+    const slaPct = Number(summaryRow.slaPct || summaryRow.slaPercentage || 0) || getSlaCompliancePct(assigned);
+    const revisionTotal = Number(summaryRow.revisionCount || 0) || assigned.reduce((sum, p) => sum + getProjectRevisionTotal(p), 0);
+    const revisionRate = Number(summaryRow.revisionRate || 0) || (analyticsCompleted.length ? Number((revisionTotal / analyticsCompleted.length).toFixed(1)) : (completed.length ? Number((revisionTotal / completed.length).toFixed(1)) : 0));
     const revisionPct = assigned.length ? Math.round((revisions.length / assigned.length) * 100) : 0;
-    return { user: u, assigned, completed, active, revisions, completedToday, avgMins, slaPct, revisionPct };
-  }).sort((a, b) => b.completed.length - a.completed.length || b.assigned.length - a.assigned.length);
+    const speedScore = avgMins ? Math.max(0, Math.min(100, Math.round(100 - Math.max(0, avgMins - 60) / 3))) : (completed.length ? 75 : 100);
+    const revisionScore = Math.max(0, Math.round(100 - revisionRate * 25));
+    const productivityScore = Number(summaryRow.productivityScore || 0) || Math.round((speedScore * 0.35) + (slaPct * 0.35) + (revisionScore * 0.2) + (completedToday > 0 ? 10 : 0));
+    const rolling10CompletionMinutes = Number(summaryRow.rolling10CompletionMinutes || 0) || avgMins;
+    const rolling30CompletionMinutes = Number(summaryRow.rolling30CompletionMinutes || 0) || avgMins;
+    const scoreBreakdown = summaryRow.scoreBreakdown || { speedScore, qualityScore: revisionScore, slaScore: slaPct, revisionScore, attendanceScore: 90, productivityScore };
+    const rawCaseTypeStats = Array.isArray(summaryRow.caseTypeStats) && summaryRow.caseTypeStats.length ? summaryRow.caseTypeStats : getCaseTypeStats(completedRecords.length ? completedRecords : (analyticsCompleted.length ? analyticsCompleted : completed));
+    const caseTypeStats = rawCaseTypeStats.map(stat => ({ ...stat, avg: Number(stat.avg || stat.avgCompletionMinutes || stat.averageMinutes || 0) || 0 })).filter(stat => stat.count || stat.avg);
+    const midpoint = now - Math.round(rangeMs / 2);
+    const trendSource = completedRecords.length ? completedRecords : (analyticsCompleted.length ? analyticsCompleted : completed).map(p => ({ completedAt: getLatestTaskTimestamp(p) || toMs(p.completedAt || p.updatedAt || p.createdAt), totalCompletionMinutes: getActiveCompletionMinutes(p) }));
+    const recentCompleted = trendSource.filter(r => (r.completedAt || 0) >= midpoint).map(r => r.totalCompletionMinutes).filter(Boolean);
+    const previousCompleted = trendSource.filter(r => (r.completedAt || 0) && (r.completedAt || 0) < midpoint).map(r => r.totalCompletionMinutes).filter(Boolean);
+    const recentAvg = recentCompleted.length ? Math.round(recentCompleted.reduce((a, b) => a + b, 0) / recentCompleted.length) : 0;
+    const previousAvg = previousCompleted.length ? Math.round(previousCompleted.reduce((a, b) => a + b, 0) / previousCompleted.length) : 0;
+    const computedTrend = recentAvg && previousAvg ? Math.round(((previousAvg - recentAvg) / previousAvg) * 100) : 0;
+    const trend = summaryRow.trend?.pct ?? computedTrend;
+    const trendLabel = summaryRow.trend?.label || (trend > 5 ? 'Improving' : trend < -5 ? 'Declining' : 'Stable');
+    return { user: u, assigned, completed, active, revisions, completedToday, avgMins, avgReviewMins, rolling10CompletionMinutes, rolling30CompletionMinutes, scoreBreakdown, live, breakMinutes, slaPct, revisionPct, revisionRate, productivityScore, caseTypeStats, trend, trendLabel, timingSource: summaryRow.timingSource || (summaryRow.completedCount ? 'Backend History' : completedRecords.length ? 'Performance Records' : analyticsCompleted.length ? 'Task History' : 'No history yet'), historyCompletedCount: Number(summaryRow.completedCount || completedRecords.length || analyticsCompleted.length || completed.length || 0) };
+  }).sort((a, b) => b.productivityScore - a.productivityScore || b.completed.length - a.completed.length || b.assigned.length - a.assigned.length);
   const totals = memberRows.reduce((acc, row) => {
     acc.assigned += row.assigned.length;
     acc.completed += row.completed.length;
     acc.active += row.active.length;
     acc.revisions += row.revisions.length;
     acc.today += row.completedToday;
+    if (row.avgMins) { acc.avgTotal += row.avgMins; acc.avgCount += 1; }
     return acc;
-  }, { assigned: 0, completed: 0, active: 0, revisions: 0, today: 0 });
+  }, { assigned: 0, completed: 0, active: 0, revisions: 0, today: 0, avgTotal: 0, avgCount: 0 });
+  const summaryTeamAvg = Number(effectivePerformanceSummary?.avgCompletionMinutes || effectivePerformanceSummary?.averageCompletionMinutes || 0) || 0;
+  const teamAvgMins = summaryTeamAvg || (totals.avgCount ? Math.round(totals.avgTotal / totals.avgCount) : 0);
+  const teamRolling10 = Number(effectivePerformanceSummary?.rolling10CompletionMinutes || 0) || teamAvgMins;
+  const teamRolling30 = Number(effectivePerformanceSummary?.rolling30CompletionMinutes || 0) || teamAvgMins;
+  const teamTrend = effectivePerformanceSummary?.trend || { pct: 0, label: 'Stable' };
   const avgSla = memberRows.length ? Math.round(memberRows.reduce((sum, row) => sum + row.slaPct, 0) / memberRows.length) : 100;
   const exportPerformance = () => exportToCSV(
-    ['Member', 'Role', 'Assigned', 'Completed', 'Active', 'Revisions', 'Completed Today', 'Avg Completion', 'SLA %', 'Revision %'],
-    memberRows.map(row => [row.user.name, row.user.role, row.assigned.length, row.completed.length, row.active.length, row.revisions.length, row.completedToday, row.avgMins ? formatDuration(0, row.avgMins * 60000) : '-', `${row.slaPct}%`, `${row.revisionPct}%`]),
+    ['Member', 'Role', 'Status', 'Break Today', 'Assigned', 'Completed', 'Active', 'Revisions', 'Completed Today', 'Avg Completion', 'Avg Review', 'Revision Rate', 'SLA %', 'Productivity Score', 'Quality'],
+    memberRows.map(row => [row.user.name, row.user.role, row.live.label, formatMinutes(row.breakMinutes), row.assigned.length, row.completed.length, row.active.length, row.revisions.length, row.completedToday, displayMinutes(row.avgMins, '0m'), displayMinutes(row.avgReviewMins, '0m'), row.revisionRate, `${row.slaPct}%`, row.productivityScore, getQualityLabel(row.productivityScore)]),
     `Performance_Analytics_${range}.csv`
   );
   const StatCard = ({ label, value, hint }) => (
@@ -786,13 +1250,72 @@ export const ProductivityDashboard = ({ users = [], projects = [] }) => {
       {hint && <p className="text-xs font-bold text-slate-400 mt-1">{hint}</p>}
     </div>
   );
+  const SimpleMetric = ({ label, value, tone = 'text-slate-800', helper }) => (
+    <div className="rounded-2xl bg-white border border-slate-100 p-3 min-w-0">
+      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 truncate">{label}</p>
+      <p className={`text-lg font-black mt-1 ${tone}`}>{value}</p>
+      {helper && <p className="text-[10px] font-bold text-slate-400 mt-1 truncate">{helper}</p>}
+    </div>
+  );
+  const ScoreBar = ({ label, value, helper }) => {
+    const safeValue = Math.max(0, Math.min(100, Number(value || 0)));
+    const colorClass = safeValue >= 85 ? 'bg-emerald-500' : safeValue >= 70 ? 'bg-amber-500' : 'bg-red-500';
+    return (
+      <div className="rounded-2xl bg-slate-50 border border-slate-100 p-3">
+        <div className="flex items-center justify-between gap-3 text-xs font-black"><span className="text-slate-700">{label}</span><span className="text-slate-900">{safeValue}%</span></div>
+        <div className="mt-2 h-2.5 rounded-full bg-white overflow-hidden border border-slate-100"><div className={`${colorClass} h-full rounded-full`} style={{ width: `${safeValue}%` }} /></div>
+        {helper && <p className="text-[10px] font-bold text-slate-400 mt-1.5 leading-snug">{helper}</p>}
+      </div>
+    );
+  };
+  const ScoreRing = ({ value, hasHistory }) => {
+    const safeValue = hasHistory ? Math.max(0, Math.min(100, Number(value || 0))) : 0;
+    const ringTone = !hasHistory ? 'text-slate-300' : safeValue >= 85 ? 'text-emerald-500' : safeValue >= 70 ? 'text-amber-500' : 'text-red-500';
+    const conic = hasHistory ? `conic-gradient(currentColor ${safeValue * 3.6}deg, #e2e8f0 0deg)` : 'conic-gradient(#e2e8f0 0deg, #e2e8f0 360deg)';
+    return (
+      <div className={`relative w-20 h-20 rounded-full ${ringTone} shrink-0`} style={{ background: conic }} title={hasHistory ? `${safeValue}/100 performance score` : 'Score starts after first completed task'}>
+        <div className="absolute inset-2 rounded-full bg-white flex flex-col items-center justify-center shadow-inner">
+          <span className={`text-xl font-black ${hasHistory ? 'text-slate-900' : 'text-slate-400'}`}>{hasHistory ? safeValue : '--'}</span>
+          <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">Score</span>
+        </div>
+      </div>
+    );
+  };
+  const getPerformanceStatus = (score, hasHistory) => {
+    if (!hasHistory) return { label: 'New Member', className: 'bg-slate-50 text-slate-600 border-slate-200', note: 'Score will start after first completion.' };
+    if (score >= 90) return { label: 'Excellent', className: 'bg-emerald-50 text-emerald-700 border-emerald-200', note: 'High performing and consistent.' };
+    if (score >= 75) return { label: 'Good', className: 'bg-blue-50 text-blue-700 border-blue-200', note: 'Strong performance with minor scope to improve.' };
+    if (score >= 60) return { label: 'Average', className: 'bg-amber-50 text-amber-700 border-amber-200', note: 'Stable, but needs closer follow-up.' };
+    return { label: 'Needs Focus', className: 'bg-red-50 text-red-700 border-red-200', note: 'Needs manager attention.' };
+  };
+  const getBestArea = (row) => {
+    const entries = [
+      ['Fast completion', Number(row.scoreBreakdown?.speedScore || 0)],
+      ['Good quality', Number(row.scoreBreakdown?.qualityScore || 0)],
+      ['On-time delivery', Number(row.scoreBreakdown?.slaScore || 0)],
+      ['Low revisions', Number(row.scoreBreakdown?.revisionScore || 0)]
+    ];
+    return entries.sort((a, b) => b[1] - a[1])[0]?.[0] || 'Building history';
+  };
+  const getImprovementTip = (row, hasHistory) => {
+    if (!hasHistory) return 'Complete one task to create a real performance baseline.';
+    const speed = Number(row.scoreBreakdown?.speedScore || 0);
+    const quality = Number(row.scoreBreakdown?.qualityScore || 0);
+    const revision = Number(row.scoreBreakdown?.revisionScore || 0);
+    const sla = Number(row.scoreBreakdown?.slaScore || 0);
+    const lowest = [['finish time', speed], ['work quality', quality], ['on-time delivery', sla], ['revision control', revision]].sort((a, b) => a[1] - b[1])[0];
+    if (lowest[0] === 'finish time') return 'Focus on reducing average completion time for similar case types.';
+    if (lowest[0] === 'work quality') return 'Review checklist before upload to improve quality score.';
+    if (lowest[0] === 'on-time delivery') return 'Prioritise older active tasks to protect SLA.';
+    return 'Reduce repeat corrections to improve revision control.';
+  };
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
         <div>
           <p className="text-xs font-black uppercase tracking-widest text-indigo-500 mb-2">Single source of truth</p>
           <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Performance Analytics</h1>
-          <p className="text-slate-500 font-medium mt-2 max-w-4xl">Employee productivity, leaderboards, individual analytics, revision percentage, average completion time, and SLA performance now live only here.</p>
+          <p className="text-slate-500 font-medium mt-2 max-w-4xl">Productivity, average completion, review speed, case-type timing, revisions, and SLA quality.</p>
         </div>
         <div className="flex flex-wrap gap-3">
           <select value={range} onChange={e => setRange(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none">
@@ -804,58 +1327,169 @@ export const ProductivityDashboard = ({ users = [], projects = [] }) => {
           <button type="button" onClick={exportPerformance} className="bg-indigo-600 text-white font-bold px-4 py-2.5 rounded-xl shadow-sm"><Download className="w-4 h-4 inline mr-2"/>Export</button>
         </div>
       </div>
-      <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-4">
         <StatCard label="Assigned" value={totals.assigned} hint="selected period" />
         <StatCard label="Completed" value={totals.completed} hint="productivity" />
-        <StatCard label="Completed Today" value={totals.today} hint="today only" />
         <StatCard label="Active" value={totals.active} hint="currently open" />
         <StatCard label="Revisions" value={totals.revisions} hint="quality trend" />
+        <StatCard label="Lifetime Avg" value={displayMinutes(teamAvgMins)} hint="all history" />
+        <StatCard label="Last 30 Avg" value={displayMinutes(teamRolling30)} hint="rolling" />
+        <StatCard label="Last 10 Avg" value={displayMinutes(teamRolling10)} hint={teamTrend?.label || 'trend'} />
         <StatCard label="SLA" value={`${avgSla}%`} hint="average compliance" />
       </div>
-      <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
-        <div className="p-5 border-b-2 border-slate-100 flex items-center justify-between gap-3">
-          <div><h2 className="font-black text-slate-800 text-lg">Team Workload & Productivity</h2><p className="text-xs font-bold text-slate-400 mt-1">Compact employee cards with workload, current task and delivery quality.</p></div>
-          <span className="hidden sm:inline text-[10px] font-black uppercase tracking-widest text-slate-400">Live workload + productivity</span>
+      <div className="rounded-3xl border border-indigo-100 bg-gradient-to-r from-indigo-50 to-white px-4 py-3 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 shadow-sm">
+        <div>
+          <p className="text-xs font-black uppercase tracking-widest text-indigo-700">Performance data is ready</p>
+          <p className="text-xs font-bold text-indigo-600 mt-1">Using {effectivePerformanceSummary?.recordCount ? `${effectivePerformanceSummary.recordCount} saved completion records` : `${performanceRecords.length} task records`} for average time, trend, SLA, quality, and revisions.</p>
         </div>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 p-5">
-          {memberRows.map(row => {
-            const limit = Number(row.user.dailyLimit || row.user.taskLimit || 10) || 10;
-            const loadPct = Math.min(100, Math.round((row.active.length / limit) * 100));
-            const currentTask = row.active[0];
-            const efficiency = row.assigned.length ? Math.round((row.completed.length / row.assigned.length) * 100) : 0;
-            const statusDot = row.active.length ? 'bg-orange-400' : 'bg-slate-300';
-            return (
-              <div key={row.user.id || row.user.name} className="rounded-2xl border border-slate-100 bg-slate-50/60 p-4 hover:bg-white hover:shadow-md transition-all">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 flex items-start gap-3">
-                    <span className={`mt-1.5 w-2.5 h-2.5 rounded-full shrink-0 ${statusDot}`} />
-                    <div className="min-w-0">
-                      <p className="font-black text-slate-800 truncate">{row.user.name}</p>
-                      <p className="text-[11px] font-black uppercase tracking-wide text-slate-400">{row.user.role} • {row.active.length ? 'Working' : 'Available / Offline'}</p>
+        <button type="button" onClick={rebuildPerformanceEngine} disabled={engineBusy} className="px-4 py-2.5 rounded-xl bg-indigo-600 text-white font-black text-sm disabled:opacity-60 disabled:cursor-not-allowed shadow-sm">{engineBusy ? 'Refreshing...' : 'Refresh averages'}</button>
+      </div>
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        <div className="xl:col-span-2 bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
+          <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <h2 className="font-black text-slate-800 text-lg flex items-center"><Users className="w-5 h-5 mr-2 text-indigo-500" /> Team Performance Cards</h2>
+            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Completion • case type • quality</span>
+          </div>
+          <div className="p-4 grid grid-cols-1 lg:grid-cols-2 gap-4 max-h-[520px] overflow-y-auto custom-scrollbar">
+            {memberRows.map(row => {
+              const loadLimit = Number(row.user.dailyLimit || row.user.taskLimit || 10) || 10;
+              const loadPct = Math.min(100, Math.round((row.active.length / loadLimit) * 100));
+              const currentTask = row.active[0];
+              const live = row.live || getLiveStatus(row.user, row.active);
+              const historyCount = Number(row.historyCompletedCount || 0);
+              const hasHistory = historyCount > 0;
+              const avgTime = hasHistory ? displayMinutes(row.avgMins, '0m') : 'No history';
+              const avgReview = hasHistory ? displayMinutes(row.avgReviewMins, '0m') : 'No history';
+              const rolling30 = hasHistory ? displayMinutes(row.rolling30CompletionMinutes) : 'No data';
+              const rolling10 = hasHistory ? displayMinutes(row.rolling10CompletionMinutes) : 'No data';
+              const quality = hasHistory ? getQualityLabel(row.productivityScore) : 'New';
+              const scoreLabel = hasHistory ? `${row.productivityScore}/100` : 'No rating yet';
+              const trendTone = row.trend > 5 ? 'text-emerald-600 bg-emerald-50 border-emerald-100' : row.trend < -5 ? 'text-red-600 bg-red-50 border-red-100' : 'text-slate-600 bg-slate-50 border-slate-100';
+              const trendText = hasHistory ? (row.trend ? `${row.trendLabel} ${Math.abs(row.trend)}%` : row.trendLabel) : 'Starts after completion';
+              const workloadTone = loadPct >= 90 ? 'text-red-600' : loadPct >= 60 ? 'text-amber-600' : 'text-emerald-600';
+              const status = getPerformanceStatus(row.productivityScore, hasHistory);
+              const bestArea = hasHistory ? getBestArea(row) : 'First task pending';
+              const improvementTip = getImprovementTip(row, hasHistory);
+              return (
+                <div key={row.user.id} className="rounded-[2rem] border border-slate-100 bg-white p-4 shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition-all">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0 flex items-start gap-3">
+                      <span className={`mt-1 w-2.5 h-2.5 rounded-full shrink-0 ${live.dotClass}`} />
+                      <div className="min-w-0">
+                        <p className="font-black text-slate-900 truncate text-base">{row.user.name}</p>
+                        <p className="text-[11px] font-black uppercase tracking-wide text-slate-400">{row.user.role} • {live.label}</p>
+                        <div className="mt-2 flex flex-wrap gap-2"><Badge colorClass={status.className}>{status.label}</Badge><Badge colorClass={live.badgeClass}>{live.label}</Badge></div>
+                      </div>
+                    </div>
+                    <ScoreRing value={row.productivityScore} hasHistory={hasHistory} />
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div className="rounded-2xl bg-emerald-50 border border-emerald-100 p-3">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-emerald-700">Best area</p>
+                      <p className="text-sm font-black text-emerald-800 mt-1">⭐ {bestArea}</p>
+                    </div>
+                    <div className="rounded-2xl bg-indigo-50 border border-indigo-100 p-3">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-indigo-700">Next improvement</p>
+                      <p className="text-xs font-bold text-indigo-800 mt-1 leading-snug">{improvementTip}</p>
                     </div>
                   </div>
-                  <span className={`px-3 py-1 rounded-full border text-xs font-black ${loadPct >= 90 ? 'bg-red-50 text-red-700 border-red-100' : loadPct >= 60 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-emerald-50 text-emerald-700 border-emerald-100'}`}>{loadPct}% load</span>
+
+                  <div className="mt-3 rounded-2xl bg-slate-50 border border-slate-100 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Current work</p>
+                        <p className="text-sm font-black text-slate-800 truncate">{currentTask ? (currentTask.id || currentTask.caseId || makeTaskDisplayName(currentTask)) : live.detail}</p>
+                      </div>
+                      <Badge colorClass={live.badgeClass}>{live.label}</Badge>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+                    <SimpleMetric label="Assigned" value={row.assigned.length} helper="total given" />
+                    <SimpleMetric label="Completed" value={row.completed.length} tone="text-emerald-600" helper="finished" />
+                    <SimpleMetric label="Active" value={row.active.length} tone="text-orange-600" helper="pending now" />
+                    <SimpleMetric label="On time" value={`${row.slaPct}%`} tone="text-indigo-600" helper="SLA" />
+                  </div>
+
+                  <div className="mt-3 rounded-2xl bg-slate-50/80 border border-slate-100 p-3">
+                    <div className="flex items-center justify-between mb-3">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Easy performance summary</p>
+                      <span className={`px-2 py-1 rounded-full border text-[10px] font-black ${trendTone}`}>{trendText}</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <SimpleMetric label="Avg finish time" value={avgTime} helper="overall average" />
+                      <SimpleMetric label="Review time" value={avgReview} tone="text-blue-600" helper="avg checking" />
+                      <SimpleMetric label="Last 30 avg" value={rolling30} tone="text-indigo-600" helper="recent work" />
+                      <SimpleMetric label="Last 10 avg" value={rolling10} tone="text-indigo-600" helper="latest speed" />
+                    </div>
+                    <div className="mt-3 grid grid-cols-2 gap-2 text-xs font-bold">
+                      <div className="rounded-xl bg-white border border-slate-100 px-3 py-2"><span className="text-slate-400">Revisions</span><b className="float-right text-purple-600">{row.revisionRate}/task</b></div>
+                      <div className="rounded-xl bg-white border border-slate-100 px-3 py-2"><span className="text-slate-400">Today done</span><b className="float-right text-emerald-600">{row.completedToday}</b></div>
+                      <div className="rounded-xl bg-white border border-slate-100 px-3 py-2"><span className="text-slate-400">Break</span><b className="float-right text-amber-600">{formatMinutes(row.breakMinutes)}</b></div>
+                      <div className="rounded-xl bg-white border border-slate-100 px-3 py-2"><span className="text-slate-400">History</span><b className="float-right text-indigo-600">{historyCount}</b></div>
+                    </div>
+                  </div>
+
+                  {hasHistory ? (
+                    <div className="mt-3 rounded-2xl bg-white border border-slate-100 p-3">
+                      <div className="flex items-center justify-between mb-3"><p className="text-[10px] font-black uppercase tracking-widest text-slate-400">What affects the score?</p><Badge colorClass={getQualityBadgeClass(row.productivityScore)}>{quality}</Badge></div>
+                      <div className="space-y-3">
+                        <ScoreBar label="Completion speed" value={row.scoreBreakdown?.speedScore} helper="Higher means faster average completion." />
+                        <ScoreBar label="Work quality" value={row.scoreBreakdown?.qualityScore} helper="Higher means fewer quality issues." />
+                        <ScoreBar label="On-time SLA" value={row.scoreBreakdown?.slaScore} helper="Higher means more work finished within expected time." />
+                        <ScoreBar label="Revision control" value={row.scoreBreakdown?.revisionScore} helper="Higher means fewer revisions per task." />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-3 rounded-2xl bg-slate-50 border border-slate-100 p-3 text-sm font-bold text-slate-500">
+                      Complete the first task to start building average time, score, trend, and case-type productivity.
+                    </div>
+                  )}
+
+                  {row.caseTypeStats.length > 0 && <div className="mt-3 rounded-2xl bg-white border border-slate-100 p-3">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Work type average</p>
+                    <div className="space-y-1.5">{row.caseTypeStats.map(stat => <div key={stat.caseType} className="flex items-center justify-between gap-3 text-xs font-bold"><span className="truncate text-slate-600">{stat.caseType} <span className="text-slate-300">({stat.count})</span></span><span className="text-slate-900">{displayMinutes(stat.avg)}</span></div>)}</div>
+                  </div>}
+
+                  <div className="mt-3">
+                    <div className="flex justify-between text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1"><span>Current load</span><span className={workloadTone}>{loadPct}%</span></div>
+                    <div className="h-2 rounded-full bg-slate-100 overflow-hidden"><div className={`h-full ${loadPct >= 90 ? 'bg-red-400' : loadPct >= 60 ? 'bg-amber-400' : 'bg-emerald-400'}`} style={{ width: `${loadPct}%` }} /></div>
+                  </div>
                 </div>
-                <div className="mt-4 rounded-xl bg-white border border-slate-100 px-3 py-2">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Current task</p>
-                  <p className="text-sm font-black text-slate-700 truncate mt-1">{currentTask ? `${currentTask.id || currentTask.caseId} • ${currentTask.type || 'Task'}` : 'No active task'}</p>
-                </div>
-                <div className="mt-4 grid grid-cols-5 gap-2 text-center">
-                  <div><p className="font-black text-slate-800">{row.assigned.length}</p><p className="text-[9px] font-black uppercase text-slate-400">Assigned</p></div>
-                  <div><p className="font-black text-emerald-600">{row.completed.length}</p><p className="text-[9px] font-black uppercase text-slate-400">Done</p></div>
-                  <div><p className="font-black text-orange-600">{row.active.length}</p><p className="text-[9px] font-black uppercase text-slate-400">Active</p></div>
-                  <div><p className="font-black text-indigo-600">{row.slaPct}%</p><p className="text-[9px] font-black uppercase text-slate-400">SLA</p></div>
-                  <div><p className="font-black text-purple-600">{row.revisions.length}</p><p className="text-[9px] font-black uppercase text-slate-400">Rev</p></div>
-                </div>
-                <div className="mt-4">
-                  <div className="h-2 rounded-full bg-white overflow-hidden border border-slate-100"><div className="h-full rounded-full bg-indigo-500" style={{ width: `${Math.min(100, Math.max(loadPct, efficiency))}%` }} /></div>
-                  <div className="mt-2 flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-400"><span>Avg {row.avgMins ? formatDuration(0, row.avgMins * 60000) : '-'}</span><span>{efficiency}% efficiency</span></div>
-                </div>
-              </div>
-            );
-          })}
-          {memberRows.length === 0 && <div className="lg:col-span-2 p-10 text-center text-slate-400 font-bold">No performance data for this filter.</div>}
+              );
+            })}
+            {memberRows.length === 0 && <p className="text-sm text-slate-400 font-bold text-center py-8 lg:col-span-2">No team performance status available.</p>}
+          </div>
         </div>
+        <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
+          <div className="p-4 border-b border-slate-100"><h2 className="font-black text-slate-800 text-lg flex items-center"><Clock className="w-5 h-5 mr-2 text-indigo-500" /> Team Activity</h2></div>
+          <div className="divide-y divide-slate-100 max-h-[520px] overflow-y-auto custom-scrollbar">
+            {memberRows.map(row => {
+              const lastSeen = formatLastSeenDateTime(row.user.lastSeenAt || row.user.lastLogoutAt || row.user.lastHeartbeatAt);
+              const isOnline = isUserActuallyOnline(row.user);
+              return (
+                <div key={row.user.id} className="px-4 py-3 hover:bg-slate-50 transition flex items-center justify-between gap-3">
+                  <div className="min-w-0 flex items-start gap-3">
+                    <span className={`mt-1.5 w-2.5 h-2.5 rounded-full shrink-0 ${isOnline ? 'bg-emerald-400' : 'bg-slate-300'}`} />
+                    <div className="min-w-0">
+                      <p className="font-black text-slate-800 truncate">{row.user.name}</p>
+                      <p className="text-[11px] font-bold text-slate-400 truncate">{isOnline ? 'Available now' : `Unavailable${lastSeen ? ` • ${lastSeen}` : ''}`}</p>
+                    </div>
+                  </div>
+                  <Badge colorClass="bg-indigo-50 text-indigo-700 border-indigo-100">{row.completedToday} done</Badge>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+      <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
+        <div className="p-5 border-b-2 border-slate-100"><h2 className="font-black text-slate-800 text-lg">Team Leaderboard & Individual Analytics</h2></div>
+        <div className="overflow-x-auto"><table className="w-full text-left text-sm whitespace-nowrap"><thead className="bg-slate-50 text-slate-500"><tr>{['Member','Role','Status','Assigned','Completed','Active','Today','Avg Completion','Avg Review','Revision Rate','SLA','Productivity','Quality'].map(c => <th key={c} className="px-4 py-3 text-[10px] font-black uppercase tracking-widest">{c}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">
+          {memberRows.map(row => <tr key={row.user.id} className="hover:bg-slate-50"><td className="px-5 py-4 font-black text-slate-800">{row.user.name}</td><td className="px-5 py-4 font-bold text-slate-500">{row.user.role}</td><td className="px-5 py-4"><Badge colorClass={row.live.badgeClass}>{row.live.label}</Badge></td><td className="px-5 py-4 font-black text-slate-700">{row.assigned.length}</td><td className="px-5 py-4 font-black text-emerald-600">{row.completed.length}</td><td className="px-5 py-4 font-black text-orange-600">{row.active.length}</td><td className="px-5 py-4 font-black text-indigo-600">{row.completedToday}</td><td className="px-5 py-4 font-bold text-slate-600">{displayMinutes(row.avgMins)}</td><td className="px-5 py-4 font-bold text-blue-600">{displayMinutes(row.avgReviewMins)}</td><td className="px-5 py-4 font-bold text-purple-600">{row.revisionRate}/task</td><td className="px-4 py-3 font-bold text-slate-700">{row.slaPct}%</td><td className="px-5 py-4 font-black text-indigo-600">{row.productivityScore}</td><td className="px-5 py-4"><Badge colorClass={getQualityBadgeClass(row.productivityScore)}>{getQualityLabel(row.productivityScore)}</Badge></td></tr>)}
+          {memberRows.length === 0 && <tr><td colSpan="13" className="px-4 py-8 text-center text-slate-400 font-bold">No performance data for this filter.</td></tr>}
+        </tbody></table></div>
       </div>
     </div>
   );
@@ -869,8 +1503,9 @@ export const ReportsAnalyticsView = ({ projects = [], users = [], currentUser = 
   const completed = scoped.filter(isProjectCompleted);
   const pending = scoped.filter(isIncompleteProject);
   const revisions = scoped.filter(p => (p.subTasks || p.revisions || []).length > 0 || hasActiveRevision(p));
-  const paymentPending = scoped.filter(p => getPaymentStatus(p).includes('pending') || getPaymentStatus(p).includes('due'));
-  const paymentReceived = scoped.filter(p => getPaymentStatus(p).includes('received') || getPaymentStatus(p).includes('paid'));
+  const financeScoped = scoped.filter(p => getEstimateAmount(p) > 0 || getReceivedAmount(p) > 0 || p.ledger?.updatedAt || p.paymentTrackingUpdatedAt || getPaymentStatus(p));
+  const paymentPending = financeScoped.filter(isFinancePending);
+  const paymentReceived = financeScoped.filter(isFinanceReceived);
   const paymentAging = paymentPending.reduce((acc, p) => {
     const age = getProjectAgeHours(p);
     const bucket = age <= 48 ? '0-2 days' : age <= 168 ? '3-7 days' : age <= 360 ? '8-15 days' : '15+ days';
@@ -882,7 +1517,7 @@ export const ReportsAnalyticsView = ({ projects = [], users = [], currentUser = 
   const caseTypeRows = topRowsFromCount(countBy(scoped, p => p.type || p.caseType || 'Case'));
   const slaPct = getSlaCompliancePct(scoped);
   const pendingAmount = paymentPending.reduce((s,p)=>s+getEstimateAmount(p),0);
-  const receivedAmount = paymentReceived.reduce((s,p)=>s+getEstimateAmount(p),0);
+  const receivedAmount = paymentReceived.reduce((s,p)=>s+Math.max(getReceivedAmount(p), getEstimateAmount(p)),0);
   const summaryRows = [
     ['Operations workload', scoped.length], ['Completed', completed.length], ['Pending', pending.length], ['Revision cases', revisions.length], ['Payment pending cases', paymentPending.length], ['Pending payment amount', pendingAmount], ['Payment received amount', receivedAmount], ['SLA compliance', `${slaPct}%`]
   ];
@@ -894,17 +1529,12 @@ export const ReportsAnalyticsView = ({ projects = [], users = [], currentUser = 
     ...topRowsFromCount(paymentAging, 10).map(([name, count]) => ['Payment aging', name, count])
   ], `Business_Workload_${range}.csv`);
   const StatCard = ({ label, value, hint }) => (<div className="bg-white rounded-3xl border-2 border-slate-100 p-5 shadow-sm"><p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</p><p className="text-3xl font-black text-slate-800 mt-2">{value}</p>{hint && <p className="text-xs font-bold text-slate-400 mt-1">{hint}</p>}</div>);
-  const SimpleTable = ({ title, columns, rows, empty = 'No data yet.' }) => (<div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden"><div className="p-5 border-b-2 border-slate-100"><h2 className="font-black text-slate-800 text-lg">{title}</h2></div><div className="overflow-x-auto"><table className="w-full text-left text-sm whitespace-nowrap"><thead className="bg-slate-50 text-slate-500"><tr>{columns.map(c => <th key={c} className="px-5 py-4 text-xs font-black uppercase tracking-widest">{c}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row, idx) => <tr key={idx} className="hover:bg-slate-50">{row.map((cell, i) => <td key={i} className="px-5 py-4 font-bold text-slate-700">{cell}</td>)}</tr>)}{rows.length === 0 && <tr><td colSpan={columns.length} className="px-5 py-10 text-center text-slate-400 font-bold">{empty}</td></tr>}</tbody></table></div></div>);
+  const SimpleTable = ({ title, columns, rows, empty = 'No data yet.' }) => (<div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden"><div className="p-4 border-b border-slate-100"><h2 className="font-black text-slate-800 text-lg">{title}</h2></div><div className="overflow-x-auto"><table className="w-full text-left text-sm whitespace-nowrap"><thead className="bg-slate-50 text-slate-500"><tr>{columns.map(c => <th key={c} className="px-4 py-3 text-[10px] font-black uppercase tracking-widest">{c}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row, idx) => <tr key={idx} className="hover:bg-slate-50">{row.map((cell, i) => <td key={i} className="px-4 py-3 font-bold text-slate-700">{cell}</td>)}</tr>)}{rows.length === 0 && <tr><td colSpan={columns.length} className="px-4 py-8 text-center text-slate-400 font-bold">{empty}</td></tr>}</tbody></table></div></div>);
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div className="flex flex-col lg:flex-row justify-between lg:items-end gap-4">
-        <div><p className="text-xs font-black uppercase tracking-widest text-indigo-500 mb-2">Business reports only</p><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Reports</h1><p className="text-slate-500 font-medium mt-2 max-w-4xl">Business, finance, bank, branch, case type, payment aging and SLA reports. Employee productivity has been removed from here and consolidated in Performance Analytics.</p></div>
+        <div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Reports</h1><p className="text-slate-500 font-medium mt-2 max-w-4xl">Bank, branch, case type, payment aging, finance and SLA summaries.</p></div>
         <div className="flex flex-wrap gap-3"><select value={range} onChange={e => setRange(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none"><option value="week">Last 7 days</option><option value="month">Last 30 days</option><option value="quarter">Last 90 days</option></select><button type="button" onClick={exportSummary} className="bg-emerald-100 text-emerald-700 font-bold px-4 py-2.5 rounded-xl"><Download className="w-4 h-4 inline mr-2"/>Export Summary</button><button type="button" onClick={exportWorkload} className="bg-indigo-100 text-indigo-700 font-bold px-4 py-2.5 rounded-xl"><Download className="w-4 h-4 inline mr-2"/>Export Reports</button></div>
-      </div>
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="bg-indigo-50 border-2 border-indigo-100 rounded-3xl p-5"><p className="text-xs font-black uppercase tracking-widest text-indigo-500">Purpose</p><h2 className="font-black text-indigo-950 mt-2">Business intelligence</h2><p className="text-sm font-bold text-indigo-700 mt-1">Use Reports for banks, branches, workload, finance, payment aging, SLA and operational summaries.</p></div>
-        <div className="bg-white border-2 border-slate-100 rounded-3xl p-5"><p className="text-xs font-black uppercase tracking-widest text-slate-400">Not employee analytics</p><h2 className="font-black text-slate-800 mt-2">Performance lives elsewhere</h2><p className="text-sm font-bold text-slate-500 mt-1">Team rankings and individual productivity are only in Performance Analytics.</p></div>
-        <div className="bg-emerald-50 border-2 border-emerald-100 rounded-3xl p-5"><p className="text-xs font-black uppercase tracking-widest text-emerald-500">Different from Daily Closing</p><h2 className="font-black text-emerald-950 mt-2">Period based</h2><p className="text-sm font-bold text-emerald-700 mt-1">Daily Closing is one official date summary; Reports are filterable business views.</p></div>
       </div>
       <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-4"><StatCard label="Workload" value={scoped.length} hint="selected period"/><StatCard label="Completed" value={completed.length} hint="closed cases"/><StatCard label="Pending" value={pending.length} hint="open work"/><StatCard label="Revisions" value={revisions.length} hint="case trend"/><StatCard label="Pending Pay" value={paymentPending.length} hint={`₹${pendingAmount.toLocaleString()}`}/><StatCard label="Received" value={`₹${receivedAmount.toLocaleString()}`} hint="finance"/><StatCard label="SLA" value={`${slaPct}%`} hint="8-hour target"/></div>
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-5"><SimpleTable title="Bank Report" columns={['Bank', 'Cases']} rows={bankRows}/><SimpleTable title="Branch Report" columns={['Branch', 'Cases']} rows={branchRows}/><SimpleTable title="Case Type Report" columns={['Case Type', 'Cases']} rows={caseTypeRows}/><SimpleTable title="Payment Aging Report" columns={['Age', 'Pending Cases']} rows={topRowsFromCount(paymentAging, 10)}/></div>
@@ -1088,7 +1718,7 @@ export const DailyClosingReport = ({ projects = [], currentUser = null }) => {
       <div className="flex flex-col sm:flex-row justify-between sm:items-end gap-4"><div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Daily Closing Report</h1><p className="text-slate-500 font-medium mt-2">Official end-of-day snapshot for one selected date, including pending work carried forward.</p></div><div className="flex gap-3"><input type="date" value={dateKey} onChange={e => setDateKey(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none" /><button onClick={handleExport} className="bg-emerald-100 text-emerald-700 font-bold px-4 py-2.5 rounded-xl"><Download className="w-4 h-4 inline mr-2"/>Export</button></div></div>
       <div className="bg-slate-900 text-white rounded-3xl p-5 shadow-sm"><p className="text-xs font-black uppercase tracking-widest text-slate-300">Daily Closing vs Reports</p><p className="text-sm font-bold text-slate-100 mt-2">Daily Closing is the official one-day operational summary for end-of-day review. Reports are flexible analytics for trends, banks, branches, team productivity and longer periods.</p></div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">{rows.map(([label,value]) => <div key={label} className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm"><p className="text-xs text-slate-400 font-black uppercase tracking-widest">{label}</p><p className="text-3xl font-black text-slate-800 mt-2">{value}</p></div>)}</div>
-      <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden"><div className="p-5 border-b-2 border-slate-100"><h2 className="font-black text-slate-800 text-xl">Pending Carry Forward List</h2></div><div className="divide-y divide-slate-100">{metrics.carried.map(p => <div key={p.id} className="p-5 flex justify-between items-center"><div><p className="font-black text-slate-800">{p.id}</p><p className="text-xs font-bold text-slate-400">{getCustomerDisplayName(p)} • {p.location} • {p.assignedTo}</p></div><Badge colorClass={getStatusColor(p.status)}>{p.status}</Badge></div>)}{metrics.carried.length === 0 && <div className="p-10 text-center text-slate-400 font-bold">No previous pending tasks to carry forward.</div>}</div></div>
+      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden"><div className="p-4 border-b border-slate-100"><h2 className="font-black text-slate-800 text-xl">Pending Carry Forward List</h2></div><div className="divide-y divide-slate-100">{metrics.carried.map(p => <div key={p.id} className="p-5 flex justify-between items-center"><div><p className="font-black text-slate-800">{p.id}</p><p className="text-xs font-bold text-slate-400">{getCustomerDisplayName(p)} • {p.location} • {p.assignedTo}</p></div><Badge colorClass={getStatusColor(p.status)}>{p.status}</Badge></div>)}{metrics.carried.length === 0 && <div className="p-10 text-center text-slate-400 font-bold">No previous pending tasks to carry forward.</div>}</div></div>
     </div>
   );
 };

@@ -4428,3 +4428,50 @@ button:disabled {
     touch-action: pan-y !important;
   }
 }
+
+
+/* Phase 15M: visually distinguish completed payments in Operations/Archive. */
+.kalpa-payment-control.bg-emerald-50,
+.kalpa-ops-payment-cell .kalpa-payment-control.bg-emerald-50 {
+  background: #dcfce7 !important;
+  color: #047857 !important;
+  border-color: #86efac !important;
+  box-shadow: 0 8px 18px rgba(16, 185, 129, .16) !important;
+}
+.kalpa-payment-control.bg-emerald-50 .kalpa-payment-dot,
+.kalpa-ops-payment-cell .kalpa-payment-control.bg-emerald-50 .kalpa-payment-dot {
+  background: #10b981 !important;
+}
+
+
+/* Phase 16A: clearer payment status pills across Operations and Archive. */
+.kalpa-payment-control.bg-amber-50,
+.kalpa-ops-payment-cell .kalpa-payment-control.bg-amber-50,
+.kalpa-archive-table .kalpa-payment-control.bg-amber-50 {
+  background: #fef3c7 !important;
+  color: #b45309 !important;
+  border-color: #fcd34d !important;
+  box-shadow: 0 8px 18px rgba(245, 158, 11, .16) !important;
+}
+.kalpa-payment-control.bg-amber-50 .kalpa-payment-dot,
+.kalpa-ops-payment-cell .kalpa-payment-control.bg-amber-50 .kalpa-payment-dot,
+.kalpa-archive-table .kalpa-payment-control.bg-amber-50 .kalpa-payment-dot {
+  background: #f59e0b !important;
+}
+.kalpa-payment-control.bg-slate-50,
+.kalpa-ops-payment-cell .kalpa-payment-control.bg-slate-50,
+.kalpa-archive-table .kalpa-payment-control.bg-slate-50 {
+  background: #f8fafc !important;
+  color: #475569 !important;
+  border-color: #cbd5e1 !important;
+  box-shadow: 0 8px 18px rgba(100, 116, 139, .10) !important;
+}
+.kalpa-payment-control.bg-slate-50 .kalpa-payment-dot,
+.kalpa-ops-payment-cell .kalpa-payment-control.bg-slate-50 .kalpa-payment-dot,
+.kalpa-archive-table .kalpa-payment-control.bg-slate-50 .kalpa-payment-dot {
+  background: #64748b !important;
+}
+.kalpa-payment-control .kalpa-payment-select { min-width: 72px !important; }
+.kalpa-payment-control.bg-emerald-50 .kalpa-payment-select,
+.kalpa-payment-control.bg-amber-50 .kalpa-payment-select,
+.kalpa-payment-control.bg-slate-50 .kalpa-payment-select { font-weight: 950 !important; }

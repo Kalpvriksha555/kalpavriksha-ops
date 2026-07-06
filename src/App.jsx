@@ -18,7 +18,7 @@ import { ActiveOperationsView } from './features/operations';
 import { getStatusColor, getPriorityColor } from './services/taskService';
 import { API_BASE, USE_BACKEND_STATE, ONLINE_STALE_MS, MAX_INLINE_DATA_URL_CHARS } from './config/appConfig';
 import { fileToBase64, cleanFileName } from './utils/fileUtils';
-import { absoluteApiUrl, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile } from './services/fileService';
+import { absoluteApiUrl, getProjectFileDownloadUrl, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile } from './services/fileService';
 import { sendRealOtp, verifyRealOtp } from './services/otpService';
 import { buildNotification, getVisibleNotifications, NOTIFICATION_CATEGORIES, getNotificationCategory, getNotificationPriority, buildActivityTimeline, isNotificationForUser } from './services/notificationService';
 import { 
@@ -670,6 +670,32 @@ const normalizeCodeInput = (value = '') => String(value || '')
   .trim()
   .toUpperCase();
 
+
+
+const LOCATION_DISPLAY_ALIASES = {
+  LKO: 'LUCKNOW', LKN: 'LUCKNOW', LUCKNOW: 'LUCKNOW',
+  VNS: 'VARANASI', BANARAS: 'VARANASI', KASHI: 'VARANASI', VARANASI: 'VARANASI',
+  KNP: 'KANPUR', KANPUR: 'KANPUR',
+  AGR: 'AGRA', AGRA: 'AGRA',
+  MTR: 'MATHURA', MATHURA: 'MATHURA',
+  AYD: 'AYODHYA', FAIZABAD: 'AYODHYA', AYODHYA: 'AYODHYA',
+  PRJ: 'PRAYAGRAJ', PRAYAGRAJ: 'PRAYAGRAJ', ALLAHABAD: 'PRAYAGRAJ',
+  NDA: 'NOIDA', NOIDA: 'NOIDA',
+  RBL: 'RAIBARELI', RAEBARELI: 'RAIBARELI', RAEBAREILLY: 'RAIBARELI', 'RAI BARELI': 'RAIBARELI', 'RAI BAREILLY': 'RAIBARELI',
+  BRL: 'BAREILLY', BAREILLY: 'BAREILLY',
+  MRT: 'MEERUT', MEERUT: 'MEERUT',
+  GZB: 'GHAZIABAD', GHAZIABAD: 'GHAZIABAD'
+};
+
+const toTitleCase = (value = '') => String(value || '').toLowerCase().replace(/\w/g, char => char.toUpperCase());
+const canonicalDisplayValue = (value = '', aliases = {}) => {
+  const key = normalizeCodeInput(value);
+  if (!key) return '';
+  return aliases[key] || key;
+};
+const getCanonicalLocationName = (value = '') => canonicalDisplayValue(value, LOCATION_DISPLAY_ALIASES);
+const getCanonicalBankName = (value = '') => canonicalDisplayValue(value, {});
+
 const makeCodePart = (value = '', fallback = 'GEN', maxLength = 4) => {
   const clean = normalizeCodeInput(value);
   if (!clean) return fallback;
@@ -767,6 +793,15 @@ const makeRevisionWorkItem = (project = {}, revision = {}, requestedBy = '') => 
     reviewStatus: 'Revision Pending',
     revisionRequestedAt: now,
     revisionRequestedBy: requestedBy,
+    // A revision work item is operational only. It must not create a second
+    // finance/ledger/payment row and must keep the original task ID as the
+    // business-facing ID.
+    excludeFromLedger: true,
+    isFinanceExcluded: true,
+    estimate: 0,
+    paymentStatus: 'Revision',
+    paymentTrackingStatus: 'Revision',
+    ledger: {},
     documents: revision.attachments ? [...revision.attachments] : [],
     completedFiles: [],
     subTasks: [{ ...revision, id: revision.id || now, status: 'Pending' }],
@@ -894,7 +929,7 @@ const getTodayMetrics = (projects = [], dateKey = formatDateKey()) => {
   const carried = projects.filter(p => isCarriedForwardProject(p, dateKey));
   const activeToday = projects.filter(p => shouldShowOnOperationsDate(p, dateKey));
   const completedToday = projects.filter(p => p.status === 'Completed' && formatDateKey(p.completedAt || p.createdAt) === dateKey);
-  const pendingCollections = projects.filter(p => (Number(p.estimate) || 0) > (Number(p.ledger?.amountIn) || 0));
+  const pendingCollections = projects.filter(p => !isRevisionWorkItem(p) && !p.excludeFromLedger && !p.isFinanceExcluded && (Number(p.estimate) || 0) > (Number(p.ledger?.amountIn) || 0));
   const paymentsToday = projects.filter(p => p.ledger?.updatedAt && formatDateKey(p.ledger.updatedAt) === dateKey);
   const revisions = activeToday.filter(hasActiveRevision);
   return {
@@ -1370,7 +1405,7 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
       logoutTime: log?.logoutTime || '',
       activeMinutes: log?.activeMinutes || 0,
       totalBreakMinutes: log?.totalBreakMinutes || 0,
-      currentBreakStartedAt: log?.currentBreakStartedAt || null,
+      currentBreakStartedAt: log?.currentBreakStartedAt || ((filterDate === new Date().toLocaleDateString('en-CA') && String(user.availability || '').toLowerCase() === 'break') ? (user.currentBreakStartedAt || user.breakStartedAt || user.availabilityProfile?.breakStartedAt || null) : null),
       breakEvents: Array.isArray(log?.breakEvents) ? log.breakEvents : [],
       totalLoggedInMinutes: log?.totalLoggedInMinutes || 0,
       loginAt: log?.loginAt || null,
@@ -1404,7 +1439,7 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
       const isOnline = isUserActuallyOnline(user);
       const lastSeen = formatLastSeenDateTime(user?.lastSeenAt || user?.lastLogoutAt || user?.lastHeartbeatAt);
       return [
-        log.name, log.role, log.date, log.loginTime, isOnline ? "Online" : `Last seen ${lastSeen}`, formatMinutes(getTotalLoggedInMinutesFromLog(log, user)), (getAttendanceActiveTaskMinutes(log, user, projects) / 60).toFixed(1) + " hrs", formatMinutes(getBreakMinutesFromLog(log))
+        log.name, log.role, log.date, log.loginTime, isOnline ? "Online" : `Last seen ${lastSeen}`, formatMinutes(getTotalLoggedInMinutesFromLog(log, user)), (getAttendanceActiveTaskMinutes(log, user, projects) / 60).toFixed(1) + " hrs", formatMinutes(getBreakMinutesFromLog(log, Date.now(), user))
       ];
     });
     exportToCSV(headers, rows, `Attendance_${filterDate}.csv`);
@@ -1543,17 +1578,17 @@ const LedgerView = ({ projects, onSelectProject }) => {
     }
   };
   
-  const baseLedgerProjects = projects.filter(p => (Number(p.estimate) > 0) || (Number(p.ledger?.amountIn) > 0) || p.ledger?.updatedAt || p.paymentTrackingUpdatedAt);
-  const allLocations = [...new Set(baseLedgerProjects.map(p => p.location).filter(Boolean))].sort();
-  const availableClients = [...new Set(baseLedgerProjects.filter(p => selectedLocation === 'All' || p.location === selectedLocation).map(p => p.client).filter(Boolean))].sort();
+  const baseLedgerProjects = projects.filter(p => !isRevisionWorkItem(p) && !p.excludeFromLedger && !p.isFinanceExcluded && ((Number(p.estimate) > 0) || (Number(p.ledger?.amountIn) > 0) || p.ledger?.updatedAt || p.paymentTrackingUpdatedAt));
+  const allLocations = [...new Set(baseLedgerProjects.map(p => getCanonicalLocationName(p.location)).filter(Boolean))].sort();
+  const availableClients = [...new Set(baseLedgerProjects.filter(p => selectedLocation === 'All' || getCanonicalLocationName(p.location) === selectedLocation).map(p => getCanonicalBankName(p.client || p.bankName || p.bank)).filter(Boolean))].sort();
 
   useEffect(() => {
     if (selectedClient !== 'All' && !availableClients.includes(selectedClient)) setSelectedClient('All');
   }, [selectedLocation, availableClients, selectedClient]);
 
   const ledgerProjects = baseLedgerProjects.filter(p => {
-      if (selectedLocation !== 'All' && p.location !== selectedLocation) return false;
-      if (selectedClient !== 'All' && p.client !== selectedClient) return false;
+      if (selectedLocation !== 'All' && getCanonicalLocationName(p.location) !== selectedLocation) return false;
+      if (selectedClient !== 'All' && getCanonicalBankName(p.client || p.bankName || p.bank) !== selectedClient) return false;
       if (selectedPaymentStatus !== 'All' && deriveLedgerPaymentStatus(p) !== selectedPaymentStatus) return false;
       return true;
   }).sort((a,b) => ((b.ledger?.updatedAt || b.completedAt || b.createdAt) || 0) - ((a.ledger?.updatedAt || a.completedAt || a.createdAt) || 0));
@@ -1759,7 +1794,7 @@ const LedgerView = ({ projects, onSelectProject }) => {
                       </td>
                       <td className="px-6 py-5 cursor-pointer group" onClick={() => onSelectProject(p)}>
                         <div className="flex items-center">
-                           <p className="font-bold text-slate-700 group-hover:text-indigo-600 transition-colors">{p.id}</p>
+                           <p className="font-bold text-slate-700 group-hover:text-indigo-600 transition-colors">{getDisplayTaskId(p)}</p>
                            <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded ml-2 font-semibold">Created: {p.createdAt ? formatDateTime(p.createdAt) : '-'}</span>
                         </div>
                         <p className="font-medium text-slate-500 text-xs mt-0.5">{getCustomerDisplayName(p)}</p>
@@ -2035,9 +2070,9 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     };
     const nextSnapshot = {
       type: nextType || project.type,
-      client: String(fd.get('client') || '').trim(),
+      client: getCanonicalBankName(String(fd.get('client') || '').trim()),
       customerName: String(fd.get('customerName') || '').trim(),
-      location: String(fd.get('location') || '').trim(),
+      location: getCanonicalLocationName(String(fd.get('location') || '').trim()),
       description: String(fd.get('description') || '').trim(),
       estimateDetails: String(fd.get('estimateDetails') || '').trim(),
       estimate: String(fd.get('estimate') || '').trim(),
@@ -2527,43 +2562,65 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
       alert('No completed file found for WhatsApp sharing. Please upload the completed PDF/DWG first.');
       return;
     }
-    const docToShare = completedDocs[completedDocs.length - 1];
 
-    try {
-      if (navigator.canShare) {
-        const response = await fetch(docToShare.url);
-        const blob = await response.blob();
-        const file = new File([blob], docToShare.name, { type: blob.type || docToShare.mimeType || 'application/octet-stream' });
-        if (navigator.canShare({ files: [file] })) {
-          await navigator.share({ files: [file], title: docToShare.name });
-          onUpdateProject({
-            ...project,
-            reportSent: true,
-            deliveryLog: [...(project.deliveryLog || []), { via: 'WhatsApp / native share', file: docToShare.name, by: user.name, time: new Date().toLocaleString() }],
-            timeline: [...(project.timeline || []), { id: Date.now(), text: `Completed file delivered via WhatsApp: ${docToShare.name}`, time: new Date().toLocaleString() }]
-          }, project);
-          return;
-        }
-      }
-    } catch (e) {
-      console.log('Native file share unavailable, using WhatsApp Web fallback.', e);
+    const docToShare = completedDocs[completedDocs.length - 1];
+    const fileName = docToShare.name || docToShare.fileName || `${project.id || project.caseId || 'completed'}-file.pdf`;
+    const downloadUrl = getProjectFileDownloadUrl(docToShare);
+
+    if (!downloadUrl) {
+      alert('This completed file does not have a valid server download link. Please re-upload the final PDF once.');
+      return;
     }
 
-    if (docToShare.url) {
+    const markPrepared = (via) => onUpdateProject({
+      ...project,
+      reportSent: true,
+      deliveryLog: [...(project.deliveryLog || []), { via, file: fileName, by: user.name, time: new Date().toLocaleString() }],
+      timeline: [...(project.timeline || []), { id: Date.now(), text: `Completed file prepared for WhatsApp delivery: ${fileName}`, time: new Date().toLocaleString() }]
+    }, project);
+
+    try {
+      const response = await fetch(downloadUrl, { cache: 'no-store' });
+      if (!response.ok) {
+        const serverText = await response.text().catch(() => '');
+        throw new Error(serverText || `Download failed (${response.status})`);
+      }
+
+      const contentType = (response.headers.get('content-type') || docToShare.mimeType || docToShare.mime || '').toLowerCase();
+      const blob = await response.blob();
+      const looksLikePdf = /\.pdf$/i.test(fileName) || contentType.includes('pdf');
+      const looksLikeServerError = contentType.includes('text/html') || contentType.includes('application/json') || contentType.includes('text/plain');
+
+      if (looksLikeServerError && looksLikePdf) {
+        throw new Error('Server returned an error page instead of the PDF. Please re-upload the completed file.');
+      }
+      if (looksLikePdf && blob.size < 1200) {
+        throw new Error('The PDF received from server is too small and may be corrupt. Please re-upload the completed PDF once.');
+      }
+
+      const shareType = looksLikePdf ? 'application/pdf' : (blob.type || docToShare.mimeType || docToShare.mime || 'application/octet-stream');
+      const file = new File([blob], fileName, { type: shareType });
+
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: fileName, text: `Kalpvriksha Designs completed file: ${project.id || project.caseId || ''}`.trim() });
+        markPrepared('WhatsApp / native file share');
+        return;
+      }
+
+      const objectUrl = URL.createObjectURL(blob);
       const link = document.createElement('a');
-      link.href = docToShare.url;
-      link.download = docToShare.name || `${project.id}-completed-file`;
+      link.href = objectUrl;
+      link.download = fileName;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
+      markPrepared('Downloaded verified file for WhatsApp Web');
+      window.open('https://web.whatsapp.com/', '_blank', 'noopener,noreferrer');
+    } catch (e) {
+      console.error('WhatsApp PDF share failed:', e);
+      alert(`Unable to prepare this PDF for WhatsApp. ${e?.message || 'Please re-upload the completed PDF and try again.'}`);
     }
-    onUpdateProject({
-      ...project,
-      reportSent: true,
-      deliveryLog: [...(project.deliveryLog || []), { via: 'WhatsApp Web fallback', file: docToShare.name, by: user.name, time: new Date().toLocaleString() }],
-      timeline: [...(project.timeline || []), { id: Date.now(), text: `Completed file prepared for WhatsApp delivery: ${docToShare.name}`, time: new Date().toLocaleString() }]
-    }, project);
-    window.open('https://web.whatsapp.com/', '_blank');
   };
 
   const completedDocs = getCompletedDocuments(project);
@@ -3234,9 +3291,12 @@ function AppShell() {
     try { return localStorage.getItem('kalpa_desktop_notifications') === 'true'; } catch(e) { return false; }
   });
   const [attendanceLogs, setAttendanceLogs] = useState([]);
+  const [performanceRecords, setPerformanceRecords] = useState([]);
+  const [performanceSummary, setPerformanceSummary] = useState(null);
   const [backendStateReady, setBackendStateReady] = useState(false);
   
   const [selectedProject, setSelectedProject] = useState(null);
+  const [archiveViewState, setArchiveViewState] = useState({ filterMonth: 'All', filterDate: '', searchText: '', sortOrder: 'newest', scrollTop: 0 });
   const [taskDetailReturnTab, setTaskDetailReturnTab] = useState('board');
   const openTaskDetail = (project, returnTab = activeTab || 'board') => {
     setTaskDetailReturnTab(returnTab);
@@ -3319,6 +3379,8 @@ function AppShell() {
         }
         if (Array.isArray(data.notifications)) setNotifications(data.notifications);
         if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(data.attendanceLogs);
+        if (Array.isArray(data.performanceRecords)) setPerformanceRecords(data.performanceRecords);
+        if (data.performanceSummary && typeof data.performanceSummary === 'object') setPerformanceSummary(data.performanceSummary);
         setBackendStateReady(true);
         setIsDbReady(true);
         setDbError(null);
@@ -3363,6 +3425,8 @@ function AppShell() {
           });
         }
         if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(data.attendanceLogs);
+        if (Array.isArray(data.performanceRecords)) setPerformanceRecords(data.performanceRecords);
+        if (data.performanceSummary && typeof data.performanceSummary === 'object') setPerformanceSummary(data.performanceSummary);
       } catch (e) {}
     };
     refreshPresence();
@@ -3953,8 +4017,7 @@ function AppShell() {
     const projectId = typeof projectOrId === 'string' ? projectOrId : (projectOrId?.id || projectOrId?.caseId || '');
     const target = (projects || []).find(p => String(p.id) === String(projectId) || String(p.caseId || '') === String(projectId)) || (typeof projectOrId === 'object' ? projectOrId : null);
     if (!target) return;
-    setActiveTab('board');
-    setSelectedProject(target);
+    openTaskDetail(target, activeTab || 'board');
   };
 
   const handleMarkMessagesRead = async (activeChannel) => {
@@ -4435,7 +4498,7 @@ function AppShell() {
                 <div className="flex items-center justify-between mb-2"><h3 className="text-xs font-black text-slate-500 uppercase tracking-widest">Cases</h3><span className="text-[10px] font-black text-indigo-600 bg-indigo-50 px-2 py-1 rounded-full">{globalCaseResults.length}</span></div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   {globalCaseResults.slice(0, 10).map(p => (
-                    <button key={p.id} type="button" onClick={() => setSelectedProject(p)} className="kalpa-task-row text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 hover:border-indigo-100 rounded-2xl p-4 transition-all">
+                    <button key={p.id} type="button" onClick={() => openTaskDetail(p, activeTab || 'board')} className="kalpa-task-row text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 hover:border-indigo-100 rounded-2xl p-4 transition-all">
                       <p className="font-black text-slate-800">{p.id}</p>
                       <p className="text-xs font-bold text-slate-500 mt-1">{getCustomerDisplayName(p)} • {p.location}</p>
                       <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase">{p.type} • {p.assignedTo || 'Unassigned'} • {p.status}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mt-2 line-clamp-2"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1 line-clamp-2"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}
@@ -4483,7 +4546,7 @@ function AppShell() {
         ) : activeTab === 'command' ? (
           <CommandCentreView projects={projects} users={activeUsers} attendanceLogs={attendanceLogs} currentUser={currentUser} onOpenPerformance={() => setActiveTab('productivity')} onSelectProject={(p) => openTaskDetail(p, 'command')} onNavigate={(target) => { if (target === 'newCase') { setShowNewLead(true); return; } if (target === 'notifications') { setShowNotifs(true); return; } setActiveTab(target); }} />
         ) : activeTab === 'productivity' ? (
-          <ProductivityDashboard users={activeUsers} projects={projects} />
+          <ProductivityDashboard users={activeUsers} projects={projects} performanceRecords={performanceRecords} performanceSummary={performanceSummary} />
         ) : activeTab === 'closing' && currentUser.role === ROLES.ADMIN ? (
           <DailyClosingReport projects={projects} currentUser={currentUser} />
         ) : activeTab === 'reports' && currentUser.role === ROLES.ADMIN ? (
@@ -4493,7 +4556,7 @@ function AppShell() {
         ) : activeTab === 'ledger' && currentUser.role === ROLES.ADMIN ? (
           <LedgerView projects={projects} onSelectProject={(p) => openTaskDetail(p, 'ledger')} />
         ) : activeTab === 'archive' ? (
-          <HistoryArchiveView projects={projects} currentUser={currentUser} onSelectProject={(p) => openTaskDetail(p, 'archive')} onPaymentStatusChange={handlePaymentStatusChange} />
+          <HistoryArchiveView projects={projects} currentUser={currentUser} archiveViewState={archiveViewState} setArchiveViewState={setArchiveViewState} onSelectProject={(p) => openTaskDetail(p, 'archive')} onPaymentStatusChange={handlePaymentStatusChange} />
         ) : activeTab === 'team' ? (
           <TeamPerformanceView users={activeUsers} projects={projects} onUpdateUser={handleUpdateUser} currentUser={currentUser} onOpenPerformance={() => setActiveTab('productivity')} />
         ) : activeTab === 'attendance' ? (
@@ -4518,6 +4581,7 @@ function AppShell() {
             projects={projects}
             activeUsers={activeUsers}
             setSelectedProject={setSelectedProject}
+            onSelectProject={(p) => openTaskDetail(p, activeTab || 'board')}
             nowTick={nowTick}
             ROLES={ROLES}
             currentUser={currentUser}

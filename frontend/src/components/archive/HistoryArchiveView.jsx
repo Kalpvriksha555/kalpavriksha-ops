@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Archive, Calendar, Check, Filter } from 'lucide-react';
 import { formatDateTime } from '../../utils/date';
 import { getEstimateDetails, getLatestCompletedFileName, getTaskDescription } from '../../utils/taskDisplayUtils';
@@ -154,9 +154,20 @@ export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, arc
   const filterMonth = effectiveArchiveViewState?.filterMonth || 'All';
   const filterDate = effectiveArchiveViewState?.filterDate || '';
   const updateArchiveViewState = (patch) => {
-    const updater = (prev = {}) => ({ filterMonth: 'All', filterDate: '', ...prev, ...patch });
+    const updater = (prev = {}) => ({ filterMonth: 'All', filterDate: '', searchText: '', sortOrder: 'newest', scrollTop: 0, ...prev, ...patch });
     if (typeof setArchiveViewState === 'function') setArchiveViewState(updater);
     else setLocalArchiveViewState(updater);
+  };
+  const archiveTableRef = useRef(null);
+  useEffect(() => {
+    const node = archiveTableRef.current;
+    if (!node) return;
+    const savedScrollTop = Number(effectiveArchiveViewState?.scrollTop || 0);
+    if (savedScrollTop > 0) requestAnimationFrame(() => { node.scrollTop = savedScrollTop; });
+  }, [filterMonth, filterDate]);
+  const rememberArchiveScroll = () => {
+    const node = archiveTableRef.current;
+    if (node) updateArchiveViewState({ scrollTop: node.scrollTop });
   };
 
   const archived = useMemo(() => (projects || [])
@@ -200,14 +211,14 @@ export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, arc
           filterMonth={filterMonth}
           filterDate={filterDate}
           months={uniqueMonths}
-          onMonthChange={(month) => updateArchiveViewState({ filterMonth: month, filterDate: '' })}
-          onDateChange={(date) => updateArchiveViewState({ filterDate: date, filterMonth: 'All' })}
-          onClear={() => updateArchiveViewState({ filterMonth: 'All', filterDate: '' })}
+          onMonthChange={(month) => updateArchiveViewState({ filterMonth: month, filterDate: '', scrollTop: 0 })}
+          onDateChange={(date) => updateArchiveViewState({ filterDate: date, filterMonth: 'All', scrollTop: 0 })}
+          onClear={() => updateArchiveViewState({ filterMonth: 'All', filterDate: '', scrollTop: 0 })}
         />
       </div>
 
       <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
-        <div className="kalpa-archive-table-wrap">
+        <div ref={archiveTableRef} onScroll={rememberArchiveScroll} className="kalpa-archive-table-wrap">
           <table className="w-full text-left text-sm whitespace-nowrap">
             <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
               <tr>
@@ -221,7 +232,7 @@ export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, arc
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filteredArchived.map((project) => (
-                <ArchiveTableRow key={project.id} project={project} onSelectProject={onSelectProject} currentUser={currentUser} onPaymentStatusChange={onPaymentStatusChange} />
+                <ArchiveTableRow key={project.id} project={project} onSelectProject={(p) => { rememberArchiveScroll(); onSelectProject(p); }} currentUser={currentUser} onPaymentStatusChange={onPaymentStatusChange} />
               ))}
               {filteredArchived.length === 0 && (
                 <tr><td colSpan={isAdminUser(currentUser) ? 6 : 5} className="px-6 py-16 text-center text-slate-400 font-medium">No completed tasks found for this period.</td></tr>

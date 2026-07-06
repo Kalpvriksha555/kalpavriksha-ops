@@ -97,7 +97,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
 
     (explicitRefs || []).forEach(ref => {
       const key = normalizeTaskToken(ref?.id || ref?.caseId || ref?.taskId);
-      addProject(taskLookup.get(key));
+      addProject(taskLookup.get(key) || (ref && (ref.id || ref.caseId || ref.taskId) ? ref : null));
     });
 
     const haystack = ` ${String(text || '').toUpperCase()} `;
@@ -127,6 +127,25 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     assignedTo: project.assignedTo || project.assigneeName || ''
   }));
 
+  const moveComposerCaretToEnd = (value = '') => {
+    const target = composerRef.current;
+    if (!target) return;
+    const position = String(value || '').length;
+    target.focus?.();
+    try { target.setSelectionRange(position, position); } catch(e) {}
+  };
+
+  const appendToComposerSafely = (textToAppend = '') => {
+    let nextValue = '';
+    setMsg(prev => {
+      const base = String(prev || '').trimEnd();
+      nextValue = base ? `${base} ${textToAppend}` : textToAppend;
+      return nextValue;
+    });
+    window.requestAnimationFrame(() => moveComposerCaretToEnd(nextValue));
+    window.setTimeout(() => moveComposerCaretToEnd(nextValue), 80);
+  };
+
   useEffect(() => {
     const openTaskDiscussion = (event) => {
       const detail = event?.detail || {};
@@ -139,8 +158,8 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       setReplyTo(null);
       setForwardMessageData(null);
       setChatSearch('');
-      setMsg(prev => prev?.trim() ? `${prev.trim()} #${taskId} ` : `#${taskId} `);
-      window.setTimeout(() => composerRef.current?.focus?.(), 80);
+      const assignedMention = project?.assignedTo && !String(project.assignedTo).toLowerCase().includes('unassigned') ? ` @${project.assignedTo}` : '';
+      appendToComposerSafely(`#${taskId}${assignedMention} `);
     };
     window.addEventListener('kalpa:discuss-task', openTaskDiscussion);
     return () => window.removeEventListener('kalpa:discuss-task', openTaskDiscussion);
@@ -348,8 +367,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   }, [chatMessages, hasUnreadGlobalMention, isOpen]);
 
   const addEmojiToMessage = (emoji) => {
-    setMsg(prev => `${prev}${prev && !prev.endsWith(' ') ? ' ' : ''}${emoji} `);
-    composerRef.current?.focus?.();
+    appendToComposerSafely(`${emoji} `);
   };
 
   const clearComposerContext = () => {
@@ -399,9 +417,10 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   };
 
   const insertMention = (name) => {
-    setMsg(prev => prev.slice(0, -1) + `@${name} `);
+    const nextValue = String(msg || '').slice(0, -1) + `@${name} `;
+    setMsg(nextValue);
     setShowMentions(false);
-    composerRef.current?.focus?.();
+    window.requestAnimationFrame(() => moveComposerCaretToEnd(nextValue));
   };
 
   const createBaseMessage = (overrides = {}) => {
@@ -830,15 +849,21 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     if (!text) return null;
     const knownTaskIds = Array.from(taskLookup.keys()).filter(Boolean).sort((a, b) => b.length - a.length);
     const escapedTaskPattern = knownTaskIds.map(id => id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-    const mentionPattern = `@${String(currentUser.name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}|@all`;
+    const mentionNames = Array.from(new Set([currentUser?.name, ...(users || []).map(u => u.name), 'all'].filter(Boolean)));
+    const escapeForRegex = (value = '') => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const mentionPattern = mentionNames.map(name => `@${escapeForRegex(name)}`).join('|');
     const pattern = escapedTaskPattern ? new RegExp(`(#?(?:${escapedTaskPattern})|${mentionPattern})`, 'gi') : new RegExp(`(${mentionPattern})`, 'gi');
     const parts = String(text).split(pattern).filter(part => part !== '');
     return parts.map((part, i) => {
       const lower = part.toLowerCase();
       const task = taskLookup.get(normalizeTaskToken(part));
       if (task) return <button key={i} type="button" onClick={(e) => { e.stopPropagation(); openTaskFromChat(task); }} className="inline-flex items-center gap-1 px-2 py-0.5 mx-0.5 rounded-md font-extrabold align-baseline bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-100"><ClipboardList className="w-3 h-3" />#{getTaskDisplayId(task)}</button>;
-      if (lower === `@${currentUser.name.toLowerCase()}`) return <strong key={i} className="text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded-md font-extrabold">{part}</strong>;
-      if (lower === `@all`) return <strong key={i} className="text-red-700 bg-red-100 px-1.5 py-0.5 rounded-md font-extrabold">{part}</strong>;
+      if (lower === `@all`) return <strong key={i} className="inline-flex items-center text-red-700 bg-red-100 px-1.5 py-0.5 rounded-md font-extrabold">{part}</strong>;
+      if (lower.startsWith('@')) {
+        const mentioned = (users || []).find(u => samePerson(part.slice(1), u.name) || samePerson(part.slice(1), u.username));
+        const isMe = samePerson(part.slice(1), currentUser?.name) || samePerson(part.slice(1), currentUser?.username);
+        return <strong key={i} className={`inline-flex items-center px-1.5 py-0.5 rounded-md font-extrabold ${isMe ? 'text-purple-700 bg-purple-100' : 'text-indigo-700 bg-indigo-50'}`}>{mentioned ? `@${mentioned.name}` : part}</strong>;
+      }
       return part;
     });
   };
@@ -882,7 +907,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       <div className="rounded-2xl border border-indigo-100 bg-indigo-50/80 p-3 space-y-2">
         <div className="flex items-center justify-between gap-2">
           <p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Task reference ready</p>
-          <span className="text-[10px] font-black text-indigo-400">Will become clickable after send</span>
+          <span className="text-[10px] font-black text-indigo-400">Protected task tag</span>
         </div>
         {refs.map(task => {
           const taskId = getTaskDisplayId(task);

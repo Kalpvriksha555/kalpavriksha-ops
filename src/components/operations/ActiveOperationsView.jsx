@@ -288,6 +288,7 @@ export const ActiveOperationsView = ({
   projects,
   activeUsers,
   setSelectedProject,
+  onSelectProject,
   nowTick,
   ROLES,
   getCustomerDisplayName,
@@ -297,7 +298,12 @@ export const ActiveOperationsView = ({
   onDiscussTask,
   currentUser,
   onPaymentStatusChange,
-}) => (
+}) => {
+  const selectTask = (project) => {
+    if (typeof onSelectProject === 'function') onSelectProject(project);
+    else if (typeof setSelectedProject === 'function') setSelectedProject(project);
+  };
+  return (
   <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
     <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-6">
       <div>
@@ -324,20 +330,21 @@ export const ActiveOperationsView = ({
       </div>
     </div>
 
-    <RevisionQueuePanel projects={displayedProjects} onSelectProject={setSelectedProject} getCustomerDisplayName={getCustomerDisplayName} />
+    <RevisionQueuePanel projects={displayedProjects} onSelectProject={selectTask} getCustomerDisplayName={getCustomerDisplayName} />
 
     <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px] gap-5 sm:gap-8">
       <div className="w-full min-w-0">
         {boardViewMode === 'kanban' ? (
-          <OperationsKanban projects={displayedProjects} onSelectProject={setSelectedProject} getCustomerDisplayName={getCustomerDisplayName} onDiscussTask={onDiscussTask} currentUser={currentUser} onPaymentStatusChange={onPaymentStatusChange} />
+          <OperationsKanban projects={displayedProjects} onSelectProject={selectTask} getCustomerDisplayName={getCustomerDisplayName} onDiscussTask={onDiscussTask} currentUser={currentUser} onPaymentStatusChange={onPaymentStatusChange} />
         ) : (
-          <OperationsTable projects={displayedProjects} onSelectProject={setSelectedProject} getCustomerDisplayName={getCustomerDisplayName} getDraftElapsed={getDraftElapsed} nowTick={nowTick} onDiscussTask={onDiscussTask} currentUser={currentUser} onPaymentStatusChange={onPaymentStatusChange} />
+          <OperationsTable projects={displayedProjects} onSelectProject={selectTask} getCustomerDisplayName={getCustomerDisplayName} getDraftElapsed={getDraftElapsed} nowTick={nowTick} onDiscussTask={onDiscussTask} currentUser={currentUser} onPaymentStatusChange={onPaymentStatusChange} />
         )}
       </div>
 
-      <TeamActivityPanel users={activeUsers} projects={projects} nowTick={nowTick} ROLES={ROLES} onSelectProject={setSelectedProject} getOperationalUsers={getOperationalUsers} isUserActuallyOnline={isUserActuallyOnline} />
+      <TeamActivityPanel users={activeUsers} projects={projects} nowTick={nowTick} ROLES={ROLES} onSelectProject={selectTask} getOperationalUsers={getOperationalUsers} isUserActuallyOnline={isUserActuallyOnline} />
     </div>
   </div>
-);
+  );
+};
 
 export default ActiveOperationsView;

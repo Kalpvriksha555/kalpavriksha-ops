@@ -87,7 +87,7 @@ const seed = {
     { id: 6, name: 'Nilu Gupta', username: 'nilu', password: '123', role: 'Designer', status: 'APPROVED' },
     { id: 7, name: 'Khushbu Pandey', username: 'khushbu', password: '123', role: 'Designer', status: 'APPROVED' }
   ],
-  cases:[], deletedProjectIds:[], payments:[], notifications:[], teamChat:[], whatsappInbox:[], audit:[], attendanceLogs:[], chatReads:{ADMIN:[],MANAGER:[],DESIGNER:[]}
+  cases:[], deletedProjectIds:[], payments:[], performanceRecords:[], notifications:[], teamChat:[], whatsappInbox:[], audit:[], attendanceLogs:[], chatReads:{ADMIN:[],MANAGER:[],DESIGNER:[]}
 };
 
 async function ensurePostgres() {
@@ -178,13 +178,279 @@ function norm(d){
   d ||= structuredClone(seed);
   d.users ||= seed.users; d.cases ||= d.projects || []; d.deletedProjectIds ||= []; d.payments ||= []; d.notifications ||= []; d.teamChat ||= d.chatMessages || []; d.whatsappInbox ||= []; d.audit ||= []; d.attendanceLogs ||= []; d.chatReads ||= {ADMIN:[],MANAGER:[],DESIGNER:[]};
   d.users = cleanTeamUsers(d.users);
+  d.performanceRecords = Array.isArray(d.performanceRecords) ? d.performanceRecords : [];
   d.deletedProjectIds = [...new Set((d.deletedProjectIds || []).map(x => String(x)).filter(Boolean))];
   const deletedSet = new Set(d.deletedProjectIds);
   d.cases = (d.cases || []).filter(c => c && !deletedSet.has(String(c.id || '')) && !deletedSet.has(String(c.caseId || '')));
   d.files ||= [];
   d.cases.forEach(c=>{ c.documents ||= []; c.completedFiles ||= c.completedFiles || []; c.history ||= []; c.comments ||= []; c.revisions ||= []; c.timeline = normalizeCaseTimeline(c); c.creatorName ||= c.createdBy || 'Admin'; c.createdAt ||= new Date().toISOString(); });
+  d.performanceRecords = mergePerformanceRecords(d.performanceRecords, buildPerformanceRecordsFromCases(d.cases));
   normalizePersistedFileLinks(d);
   return d;
+}
+
+
+function parseDateMs(value){
+  if(!value) return 0;
+  if(value instanceof Date) return Number.isNaN(value.getTime()) ? 0 : value.getTime();
+  if(typeof value === 'object'){
+    if(typeof value.toDate === 'function') return value.toDate().getTime();
+    const sec = Number(value.seconds ?? value._seconds ?? value.sec);
+    if(Number.isFinite(sec) && sec > 0) return Math.round(sec * 1000 + (Number(value.nanoseconds ?? value._nanoseconds ?? 0) || 0) / 1000000);
+  }
+  if(typeof value === 'number') return value > 0 && value < 10000000000 ? value * 1000 : value;
+  const raw=String(value).trim();
+  const num=Number(raw);
+  if(Number.isFinite(num) && num > 0) return num < 10000000000 ? num * 1000 : num;
+  const direct=new Date(raw).getTime();
+  if(!Number.isNaN(direct)) return direct;
+  const dmy=raw.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})(?:[,\s]+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?/i);
+  if(dmy){
+    let [,dd,mm,yyyy,hh='0',min='0',meridian='']=dmy;
+    let hour=Number(hh||0); meridian=String(meridian).toLowerCase();
+    if(meridian==='pm' && hour<12) hour+=12; if(meridian==='am' && hour===12) hour=0;
+    const parsed=new Date(Number(yyyy.length===2?`20${yyyy}`:yyyy), Number(mm)-1, Number(dd), hour, Number(min||0)).getTime();
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+  return 0;
+}
+
+function caseStatusKey(c={}){ return String(c.status || c.reviewStatus || c.finalConclusion || '').toUpperCase().replace(/[^A-Z0-9]/g,''); }
+function hasCompletedDeliverableForPerf(c={}){ return (Array.isArray(c.completedFiles) && c.completedFiles.length > 0) || (Array.isArray(c.documents) && c.documents.some(d => ['completed','final','completed file','revised file'].includes(String(d?.type || d?.purpose || '').toLowerCase()))); }
+function isCompletedCaseForPerf(c={}){ const k=caseStatusKey(c); return ['COMPLETED','APPROVED','FINALAPPROVED','CLOSED'].includes(k) || !!c.completedAt || hasCompletedDeliverableForPerf(c); }
+function isRevisionLedgerClone(c={}){ const id=String(c.id || c.caseId || '').toUpperCase(); return /_REV_|-REV-|REVISION/.test(id) && !!c.parentTaskId; }
+function perfOwner(c={}){ return String(c.assigneeName || c.assignedTo || c.assignedToName || c.assignedUserName || c.designerName || c.completedBy || c.ownerName || c.userName || '').trim(); }
+function perfTaskId(c={}){ return String(c.originalTaskId || c.rootTaskId || c.parentTaskId || c.caseId || c.id || '').trim(); }
+function perfCaseType(c={}){ return String(c.caseType || c.type || c.taskType || c.serviceType || 'Other').trim() || 'Other'; }
+function timelineTimes(c={}){ return [...(Array.isArray(c.timeline)?c.timeline:[]), ...(Array.isArray(c.history)?c.history:[])].map(e=>parseDateMs(e.at||e.time||e.timestamp||e.createdAt||e.date)).filter(Boolean); }
+function perfBaselineMinutes(c={}){ const t=perfCaseType(c).toUpperCase(); return t.includes('COLONY') ? 180 : t.includes('SUBDIV') ? 150 : t.includes('FLOOR') ? 120 : t.includes('KEY ROUTE') && t.includes('MAP ESTIMATE') ? 95 : t.includes('KEY ROUTE') ? 75 : t.includes('MAP ESTIMATE') ? 55 : 75; }
+function perfBreakMinutes(c={}){ const direct=Number(c.breakMinutes || c.breakDurationMinutes || c.totalBreakMinutes || 0) || 0; if(direct>0) return Math.round(direct); return 0; }
+function perfRevisionCount(c={}){ return Math.max(Number(c.revisionCount||c.revisionsCount||0)||0, Array.isArray(c.revisions)?c.revisions.length:0, Array.isArray(c.subTasks)?c.subTasks.length:0); }
+function buildPerformanceRecordsFromCases(cases=[]){
+  const records=[];
+  for(const c of Array.isArray(cases)?cases:[]){
+    if(!c || !isCompletedCaseForPerf(c) || isRevisionLedgerClone(c)) continue;
+    const userName=perfOwner(c); const taskId=perfTaskId(c); if(!userName || !taskId) continue;
+    const times=[parseDateMs(c.createdAt), parseDateMs(c.assignedAt), parseDateMs(c.startedAt), parseDateMs(c.draftingStartedAt), parseDateMs(c.completedAt), parseDateMs(c.updatedAt), ...timelineTimes(c)].filter(Boolean);
+    const start=parseDateMs(c.startedAt||c.draftingStartedAt||c.workStartedAt) || parseDateMs(c.assignedAt) || (times.length?Math.min(...times):0);
+    const latestDocTime = Array.isArray(c.documents) ? Math.max(0, ...c.documents.map(d => parseDateMs(d.uploadedAt || d.createdAt || d.date)).filter(Boolean)) : 0;
+    const latestCompletedFileTime = Array.isArray(c.completedFiles) ? Math.max(0, ...c.completedFiles.map(f => parseDateMs(f.uploadedAt || f.createdAt || f.date || f.completedAt)).filter(Boolean)) : 0;
+    const end=parseDateMs(c.completedAt||c.finalApprovedAt||c.approvedAt||c.draftingCompletedAt||c.submittedAt||c.updatedAt) || latestCompletedFileTime || latestDocTime || (times.length?Math.max(...times):0);
+    let mins=Number(c.completionMinutes||c.durationMinutes||c.completionDurationMinutes||0)||0;
+    if(!mins && start && end && end>=start) mins=Math.max(1, Math.round((end-start)/60000));
+    if(!mins) mins=perfBaselineMinutes(c);
+    mins=Math.max(1, Math.round(mins - perfBreakMinutes(c)));
+    const submitted=parseDateMs(c.submittedAt||c.uploadedAt||c.draftingCompletedAt||c.completedAt);
+    const reviewed=parseDateMs(c.reviewedAt||c.reviewApprovedAt||c.finalApprovedAt||c.approvedAt);
+    const reviewMinutes=submitted && reviewed && reviewed>=submitted ? Math.max(1, Math.round((reviewed-submitted)/60000)) : (isCompletedCaseForPerf(c) ? (perfRevisionCount(c)>0?25:15) : 0);
+    records.push({ id:`${taskId}::${userName}`.toLowerCase(), taskId, userName, caseType:perfCaseType(c), location:c.location||c.city||'', bank:c.bank||c.bankName||'', assignedAt:parseDateMs(c.assignedAt)||0, startedAt:start||0, completedAt:end||0, totalCompletionMinutes:mins, reviewMinutes, revisionCount:perfRevisionCount(c), slaMet:true, createdFrom:'backend-lifecycle' });
+  }
+  return records;
+}
+function performanceRecordKey(r = {}){
+  return String(r.id || `${r.taskId || r.caseId || ''}::${r.userName || r.assigneeName || r.assignedTo || r.designerName || ''}`).toLowerCase();
+}
+function hasUsefulTiming(r = {}){
+  return recordCompletionMinutes(r) > 0 || recordReviewMinutes(r) > 0 || Number(r.totalCompletionMinutes || r.effectiveMinutes || r.activeMinutes || r.durationMinutes || 0) > 0;
+}
+function enrichPerformanceRecord(base = {}, incoming = {}){
+  const merged = { ...(base || {}) };
+  const directTimingFields = ['effectiveMinutes','totalCompletionMinutes','completionMinutes','activeMinutes','durationMinutes','reviewMinutes','reviewDurationMinutes'];
+  const dateFields = ['assignedAt','startedAt','draftStartedAt','createdAt','completedAt','finishedAt','approvedAt','updatedAt','reviewStartedAt','reviewCompletedAt','reviewApprovedAt','finalApprovedAt'];
+  const identityFields = ['id','taskId','userName','assigneeName','assignedTo','designerName','caseType','type','location','bank','createdFrom','timingSource'];
+  for (const key of [...identityFields, ...dateFields]) {
+    if ((merged[key] === undefined || merged[key] === null || merged[key] === '') && incoming[key] !== undefined && incoming[key] !== null && incoming[key] !== '') merged[key] = incoming[key];
+  }
+  // Prefer any positive calculated timing over a blank/zero legacy record. This is the
+  // critical backfill path for old records that had counts but no durations.
+  for (const key of directTimingFields) {
+    const current = Number(merged[key] || 0) || 0;
+    const next = Number(incoming[key] || 0) || 0;
+    if (current <= 0 && next > 0) merged[key] = Math.round(next);
+  }
+  // Keep the latest completion timestamp, but never discard useful timing from the other row.
+  const currentDone = parseDateMs(merged.completedAt || merged.finishedAt || merged.updatedAt);
+  const nextDone = parseDateMs(incoming.completedAt || incoming.finishedAt || incoming.updatedAt);
+  if (nextDone > currentDone) {
+    merged.completedAt = incoming.completedAt || incoming.finishedAt || incoming.updatedAt || merged.completedAt;
+  }
+  const currentRevisions = Number(merged.revisionCount || 0) || 0;
+  const nextRevisions = Number(incoming.revisionCount || 0) || 0;
+  merged.revisionCount = Math.max(currentRevisions, nextRevisions);
+  if (merged.slaMet === undefined && incoming.slaMet !== undefined) merged.slaMet = incoming.slaMet;
+  if (!hasUsefulTiming(merged) && hasUsefulTiming(incoming)) return { ...incoming, ...merged };
+  return merged;
+}
+function mergePerformanceRecords(existing=[], generated=[]){
+  const map=new Map();
+  [...existing, ...generated].filter(Boolean).forEach(r=>{
+    const key=performanceRecordKey(r);
+    if(!key || key === '::') return;
+    const old=map.get(key);
+    if(!old) { map.set(key, r); return; }
+    const enriched = enrichPerformanceRecord(old, r);
+    const oldTiming = hasUsefulTiming(old);
+    const newTiming = hasUsefulTiming(r);
+    const oldDone = parseDateMs(old.completedAt || old.finishedAt || old.updatedAt);
+    const newDone = parseDateMs(r.completedAt || r.finishedAt || r.updatedAt);
+    // If one side has timing and the other does not, keep the timed/enriched version.
+    // Otherwise prefer the freshest metadata after enrichment.
+    if ((!oldTiming && newTiming) || newDone >= oldDone) map.set(key, enriched);
+    else map.set(key, enrichPerformanceRecord(r, old));
+  });
+  return Array.from(map.values());
+}
+
+
+function avgRounded(values = []){
+  const nums = values.map(Number).filter(v => Number.isFinite(v) && v > 0);
+  return nums.length ? Math.round(nums.reduce((a,b)=>a+b,0) / nums.length) : 0;
+}
+function recordCompletionMinutes(r = {}){
+  const direct = Number(r.effectiveMinutes || r.totalCompletionMinutes || r.completionMinutes || r.activeMinutes || r.durationMinutes || 0) || 0;
+  if (direct > 0) return Math.max(1, Math.round(direct));
+  const start = parseDateMs(r.startedAt || r.draftStartedAt || r.assignedAt || r.createdAt);
+  const end = parseDateMs(r.completedAt || r.finishedAt || r.approvedAt || r.updatedAt);
+  return start && end && end >= start ? Math.max(1, Math.round((end - start) / 60000)) : 0;
+}
+function recordReviewMinutes(r = {}){
+  const direct = Number(r.reviewMinutes || r.avgReviewMinutes || r.reviewDurationMinutes || 0) || 0;
+  if (direct > 0) return Math.max(1, Math.round(direct));
+  const start = parseDateMs(r.reviewStartedAt || r.submittedAt || r.completedAt);
+  const end = parseDateMs(r.reviewCompletedAt || r.reviewApprovedAt || r.finalApprovedAt || r.approvedAt);
+  return start && end && end >= start ? Math.max(1, Math.round((end - start) / 60000)) : 0;
+}
+function buildPerformanceDiagnostics(cases = [], records = []){
+  const caseList = Array.isArray(cases) ? cases : [];
+  const recordList = Array.isArray(records) ? records : [];
+  const completedCandidates = caseList.filter(c => isCompletedCaseForPerf(c) && !isRevisionLedgerClone(c));
+  const withOwner = completedCandidates.filter(c => !!perfOwner(c));
+  const withTiming = recordList.filter(r => recordCompletionMinutes(r) > 0);
+  const byReason = {
+    totalCases: caseList.length,
+    completedCandidates: completedCandidates.length,
+    withOwner: withOwner.length,
+    generatedRecords: recordList.length,
+    recordsWithTiming: withTiming.length,
+    skippedWithoutOwner: Math.max(0, completedCandidates.length - withOwner.length),
+    revisionWorkExcluded: caseList.filter(c => isRevisionLedgerClone(c)).length
+  };
+  const sampleMissing = completedCandidates.filter(c => !perfOwner(c)).slice(0, 5).map(c => ({ id: perfTaskId(c), status: c.status, assignedTo: c.assignedTo, completedBy: c.completedBy, designerName: c.designerName }));
+  return { ...byReason, sampleMissingOwner: sampleMissing };
+}
+
+function getRecordCompletedMs(r = {}) {
+  return parseDateMs(r.completedAt || r.finishedAt || r.reviewCompletedAt || r.updatedAt || r.createdAt) || 0;
+}
+function rollingAverageFromRecords(rows = [], size = 10) {
+  return avgRounded((rows || []).slice(0, size).map(recordCompletionMinutes));
+}
+function trendFromRecordRows(rows = [], size = 10) {
+  const clean = (rows || []).filter(r => recordCompletionMinutes(r) > 0);
+  const recent = clean.slice(0, size).map(recordCompletionMinutes).filter(Boolean);
+  const previous = clean.slice(size, size * 2).map(recordCompletionMinutes).filter(Boolean);
+  const recentAvg = avgRounded(recent);
+  const previousAvg = avgRounded(previous);
+  const pct = recentAvg && previousAvg ? Math.round(((previousAvg - recentAvg) / previousAvg) * 100) : 0;
+  return { recentAvg, previousAvg, pct, label: pct > 5 ? 'Improving' : pct < -5 ? 'Declining' : 'Stable' };
+}
+function scoreFromAvg(avgCompletionMinutes = 0, baseline = 60) {
+  if (!avgCompletionMinutes) return 70;
+  return Math.max(0, Math.min(100, Math.round(100 - Math.max(0, avgCompletionMinutes - baseline) / 3 + Math.max(0, baseline - avgCompletionMinutes) / 6)));
+}
+function buildPerformanceSummary(records = [], users = []){
+  const grouped = new Map();
+  const cleanName = (name='') => String(name || '').trim().replace(/\s+/g, ' ');
+  const recordList = Array.isArray(records) ? records : [];
+  for (const r of recordList) {
+    const userName = cleanName(r.userName || r.assigneeName || r.assignedTo || r.designerName || r.completedBy || r.user || '');
+    if (!userName) continue;
+    const completionMinutes = recordCompletionMinutes(r);
+    if (!completionMinutes) continue;
+    const reviewMinutes = recordReviewMinutes(r);
+    const key = userName.toLowerCase();
+    if (!grouped.has(key)) grouped.set(key, { userName, records: [], completion: [], review: [], revisions: 0, slaMet: 0, caseTypes: {} });
+    const row = grouped.get(key);
+    row.records.push(r);
+    row.completion.push(completionMinutes);
+    if (reviewMinutes) row.review.push(reviewMinutes);
+    row.revisions += Number(r.revisionCount || 0) || 0;
+    if (r.slaMet !== false) row.slaMet += 1;
+    const caseType = String(r.caseType || r.type || r.serviceType || 'Other').trim() || 'Other';
+    row.caseTypes[caseType] ||= { caseType, count: 0, total: 0, revisions: 0, slaMet: 0, review: [] };
+    row.caseTypes[caseType].count += 1;
+    row.caseTypes[caseType].total += completionMinutes;
+    row.caseTypes[caseType].revisions += Number(r.revisionCount || 0) || 0;
+    if (r.slaMet !== false) row.caseTypes[caseType].slaMet += 1;
+    if (reviewMinutes) row.caseTypes[caseType].review.push(reviewMinutes);
+  }
+  const userSummaries = Array.from(grouped.values()).map(row => {
+    const sortedRecords = row.records.slice().sort((a,b)=>getRecordCompletedMs(b)-getRecordCompletedMs(a));
+    const completedCount = row.completion.length;
+    const avgCompletionMinutes = avgRounded(row.completion);
+    const avgReviewMinutes = avgRounded(row.review);
+    const rolling10CompletionMinutes = rollingAverageFromRecords(sortedRecords, 10);
+    const rolling30CompletionMinutes = rollingAverageFromRecords(sortedRecords, 30);
+    const trend = trendFromRecordRows(sortedRecords, 10);
+    const revisionRate = completedCount ? Number((row.revisions / completedCount).toFixed(2)) : 0;
+    const slaPct = completedCount ? Math.round((row.slaMet / completedCount) * 100) : 100;
+    const speedScore = scoreFromAvg(rolling10CompletionMinutes || avgCompletionMinutes, 60);
+    const qualityScore = Math.max(0, Math.round(100 - revisionRate * 30));
+    const slaScore = Math.max(0, Math.min(100, slaPct));
+    const revisionScore = Math.max(0, Math.round(100 - revisionRate * 25));
+    const attendanceScore = 90;
+    const productivityScore = Math.round((speedScore * 0.40) + (qualityScore * 0.25) + (slaScore * 0.20) + (revisionScore * 0.10) + (attendanceScore * 0.05));
+    const scoreBreakdown = { speedScore, qualityScore, slaScore, revisionScore, attendanceScore, productivityScore };
+    const caseTypeStats = Object.values(row.caseTypes).map(ct => {
+      const avg = Math.round(ct.total / ct.count);
+      const reviewAvg = avgRounded(ct.review);
+      return { ...ct, avg, avgCompletionMinutes: avg, avgReviewMinutes: reviewAvg, revisionRate: ct.count ? Number((ct.revisions / ct.count).toFixed(2)) : 0, slaPct: ct.count ? Math.round((ct.slaMet / ct.count) * 100) : 100 };
+    }).sort((a,b)=>b.count-a.count || a.avg-b.avg).slice(0, 6);
+    return {
+      userName: row.userName,
+      completedCount,
+      avgCompletionMinutes,
+      avgReviewMinutes,
+      rolling10CompletionMinutes,
+      rolling30CompletionMinutes,
+      trend,
+      revisionCount: row.revisions,
+      revisionRate,
+      slaPct,
+      productivityScore,
+      scoreBreakdown,
+      caseTypeStats,
+      timingSource: 'backend-summary-v2'
+    };
+  }).sort((a,b)=>b.productivityScore-a.productivityScore || b.completedCount-a.completedCount);
+  const allCompletionMinutes = recordList.map(recordCompletionMinutes).filter(Boolean);
+  const allReviewMinutes = recordList.map(recordReviewMinutes).filter(Boolean);
+  const sortedAll = recordList.slice().sort((a,b)=>getRecordCompletedMs(b)-getRecordCompletedMs(a));
+  const validation = {
+    invalidDurations: recordList.filter(r => recordCompletionMinutes(r) <= 0).length,
+    missingUser: recordList.filter(r => !cleanName(r.userName || r.assigneeName || r.assignedTo || r.designerName || r.completedBy || r.user || '')).length,
+    duplicateTaskRecords: Math.max(0, recordList.length - new Set(recordList.map(r => String(r.taskId || r.id || '').toLowerCase())).size)
+  };
+  return {
+    generatedAt: now(),
+    version: '17E-enterprise-analytics',
+    recordCount: recordList.length,
+    userCount: userSummaries.length,
+    avgCompletionMinutes: avgRounded(allCompletionMinutes),
+    avgReviewMinutes: avgRounded(allReviewMinutes),
+    rolling10CompletionMinutes: rollingAverageFromRecords(sortedAll, 10),
+    rolling30CompletionMinutes: rollingAverageFromRecords(sortedAll, 30),
+    trend: trendFromRecordRows(sortedAll, 10),
+    users: userSummaries,
+    validation,
+    diagnostics: {
+      usersWithRecords: userSummaries.length,
+      recordsWithTiming: allCompletionMinutes.length,
+      recordsWithReviewTiming: allReviewMinutes.length,
+      teamUsers: Array.isArray(users) ? users.filter(u => String(u.role || '').toUpperCase() !== 'ADMIN').length : 0,
+      validation
+    }
+  };
 }
 
 function filterDeletedCases(cases = [], deletedProjectIds = []){
@@ -1118,6 +1384,8 @@ app.get('/api/state',(req,res)=>{
     attendanceLogs:d.attendanceLogs || [],
     payments:d.payments || [],
     audit:d.audit || [],
+    performanceRecords: mergePerformanceRecords(d.performanceRecords || [], buildPerformanceRecordsFromCases(d.cases || [])),
+    performanceSummary: buildPerformanceSummary(mergePerformanceRecords(d.performanceRecords || [], buildPerformanceRecordsFromCases(d.cases || [])), d.users || []),
     savedAt:now()
   };
   if (!isAdmin) {
@@ -1125,8 +1393,34 @@ app.get('/api/state',(req,res)=>{
     payload.projects = sanitized.cases || [];
     delete payload.payments;
     delete payload.audit;
+    // Performance records are non-financial operational analytics and are safe for the team dashboards.
   }
   res.json(payload);
+});
+
+app.get('/api/performance-records', (req, res) => {
+  const d = db();
+  const generated = buildPerformanceRecordsFromCases(d.cases || []);
+  const records = mergePerformanceRecords(d.performanceRecords || [], generated);
+  const summary = buildPerformanceSummary(records, d.users || []);
+  res.json({ ok: true, records, summary, diagnostics: buildPerformanceDiagnostics(d.cases || [], records) });
+});
+
+app.get('/api/performance/diagnostics', (req, res) => {
+  const d = db();
+  const generated = buildPerformanceRecordsFromCases(d.cases || []);
+  const records = mergePerformanceRecords(d.performanceRecords || [], generated);
+  res.json({ ok: true, diagnostics: buildPerformanceDiagnostics(d.cases || [], records), summary: buildPerformanceSummary(records, d.users || []) });
+});
+
+app.post('/api/performance/rebuild', (req, res) => {
+  const d = db();
+  const generated = buildPerformanceRecordsFromCases(d.cases || []);
+  const records = mergePerformanceRecords([], generated);
+  d.performanceRecords = records;
+  save(d);
+  const summary = buildPerformanceSummary(records, d.users || []);
+  res.json({ ok: true, rebuilt: records.length, records, summary, diagnostics: buildPerformanceDiagnostics(d.cases || [], records) });
 });
 
 app.get('/api/app-state', async (req, res) => {
@@ -1203,7 +1497,8 @@ app.post('/api/state',(req,res)=>{
   d.payments = isFinanceAdmin && Array.isArray(body.payments) ? body.payments : d.payments;
   d.audit = isFinanceAdmin && Array.isArray(body.audit) ? body.audit : d.audit;
   save(d);
-  res.json({ok:true, database: USE_POSTGRES ? 'postgresql' : 'json-file', savedAt:now(), deletedProjectIds:d.deletedProjectIds || [], counts:{users:d.users.length, cases:d.cases.length, chatMessages:d.teamChat.length, notifications:d.notifications.length, attendanceLogs:d.attendanceLogs.length}});
+  const performanceRecords = mergePerformanceRecords(d.performanceRecords || [], buildPerformanceRecordsFromCases(d.cases || []));
+  res.json({ok:true, database: USE_POSTGRES ? 'postgresql' : 'json-file', savedAt:now(), deletedProjectIds:d.deletedProjectIds || [], performanceRecords, counts:{users:d.users.length, cases:d.cases.length, performanceRecords:performanceRecords.length, chatMessages:d.teamChat.length, notifications:d.notifications.length, attendanceLogs:d.attendanceLogs.length}});
 });
 
 
@@ -1331,8 +1626,12 @@ app.get('/api/files/:id/download',(req,res)=>{
   if(!fp.startsWith(path.resolve(UPLOAD_DIR))) return res.status(400).send('Invalid file path');
   res.setHeader('Access-Control-Expose-Headers','Content-Disposition, Content-Length, Content-Type');
   res.setHeader('Cache-Control','private, max-age=0, must-revalidate');
-  res.setHeader('Content-Length', String(fs.statSync(fp).size));
-  res.download(fp, doc.name || doc.fileName || stored);
+  const fileSize = fs.statSync(fp).size;
+  const fileName = doc.name || doc.fileName || stored;
+  res.setHeader('Content-Length', String(fileSize));
+  if (/\.pdf$/i.test(fileName) || String(doc.mime || doc.mimeType || '').toLowerCase().includes('pdf')) res.type('application/pdf');
+  else if (doc.mime || doc.mimeType) res.type(doc.mime || doc.mimeType);
+  res.download(fp, fileName);
 });
 
 app.delete('/api/files/:id',(req,res)=>{
@@ -1388,7 +1687,28 @@ app.delete('/api/files/:id',(req,res)=>{
   if (removed) save(d);
   res.json({ ok: true, removed });
 });
-app.get('/api/cases/:id/share-whatsapp',(req,res)=>{ const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const finalDocs=(c.documents||[]).filter(doc=>doc.purpose==='FINAL' || doc.purpose==='REVISION_FINAL'); if(!finalDocs.length) return res.status(400).json({error:'No completed document available to share'}); const latestOriginal=finalDocs.filter(x=>x.purpose==='FINAL').slice(-1); const docs=latestOriginal.length?latestOriginal:finalDocs.slice(-1); const links=docs.map(x=>`${publicUrl().replace(':5173',':8080')}/api/files/${x.id}/download`).join('\n'); const msg=`Kalpvriksha Designs completed document for ${c.caseId}\nCustomer: ${c.customerName}\n${links}`; res.json({message:msg,waLink:`https://wa.me/?text=${encodeURIComponent(msg)}`,documents:docs}); });
+app.get('/api/cases/:id/share-whatsapp',(req,res)=>{
+  const d=db();
+  const c=findCaseByAnyId(d.cases || [], req.params.id);
+  if(!c) return res.status(404).json({error:'Case not found'});
+  const finalDocs=[...(c.completedFiles || []), ...(c.documents||[])]
+    .filter(doc => ['FINAL','REVISION_FINAL'].includes(String(doc.purpose || '').toUpperCase()) || ['completed file','revised file','completed'].includes(String(doc.type || '').toLowerCase()));
+  if(!finalDocs.length) return res.status(400).json({error:'No completed document available to share'});
+
+  const validDocs = finalDocs.map(doc => {
+    const resolved = resolveStoredUploadFile(doc);
+    const fileSize = resolved ? fs.statSync(resolved.fp).size : Number(doc.size || 0);
+    const fileName = doc.name || doc.fileName || doc.storedName || 'completed-file.pdf';
+    const isPdf = /\.pdf$/i.test(fileName) || String(doc.mime || doc.mimeType || '').toLowerCase().includes('pdf');
+    return { doc, resolved, fileSize, fileName, isPdf };
+  }).filter(x => x.resolved && (!x.isPdf || x.fileSize >= 1200));
+
+  if(!validDocs.length) return res.status(410).json({error:'Completed PDF is missing or appears corrupt on the server. Please re-upload the completed PDF once.'});
+  const selected = validDocs.slice(-1);
+  const links = selected.map(x => `${publicUrl().replace(':5173',':8080')}/api/files/${x.doc.id}/download`).join('\n');
+  const msg=`Kalpvriksha Designs completed document for ${c.caseId || c.id}\nCustomer: ${c.customerName || 'Customer'}\n${links}`;
+  res.json({message:msg,waLink:`https://wa.me/?text=${encodeURIComponent(msg)}`,documents:selected.map(x=>({...x.doc, size:x.fileSize, downloadUrl:`/api/files/${x.doc.id}/download`}))});
+});
 
 function normalizeTaskReferenceId(value='') { return String(value || '').replace(/^#/, '').trim().toUpperCase(); }
 function compactTaskReference(c={}) {

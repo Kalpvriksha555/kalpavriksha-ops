@@ -57,7 +57,7 @@ export const getPaymentStatusBadgeClass = (status = 'Not Updated') => {
     case 'Pending':
       return 'bg-amber-50 text-amber-700 border-amber-100';
     default:
-      return 'bg-rose-50 text-rose-700 border-rose-100';
+      return 'bg-slate-50 text-slate-600 border-slate-200';
   }
 };
 

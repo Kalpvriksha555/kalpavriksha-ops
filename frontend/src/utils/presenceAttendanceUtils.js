@@ -123,7 +123,7 @@ export const deriveAttendanceSession = (log = {}, user = null, now = Date.now())
   const start = getAttendanceSessionStartMs(log, user);
   const end = getAttendanceSessionEndMs(log, user, now);
   const online = !!(user && isPresenceUserOnline(user, now));
-  const breakMinutes = getBreakMinutesFromLog(log, now);
+  const breakMinutes = getBreakMinutesFromLog(log, now, user);
   const savedTotal = Math.max(0, Math.floor(Number(log.totalLoggedInMinutes) || 0));
   const computedTotal = start && end && end >= start ? Math.floor((end - start) / 60000) : 0;
 
@@ -145,9 +145,13 @@ export const deriveAttendanceSession = (log = {}, user = null, now = Date.now())
   };
 };
 
-export const getBreakMinutesFromLog = (log = {}, now = Date.now()) => {
-  const stored = Number(log.totalBreakMinutes) || 0;
-  const openBreak = log.currentBreakStartedAt ? Math.floor(Math.max(0, now - Number(log.currentBreakStartedAt)) / 60000) : 0;
+export const getBreakMinutesFromLog = (log = {}, now = Date.now(), user = null) => {
+  const stored = Number(log.totalBreakMinutes || log.breakMinutes || log.breakMinutesToday || 0) || 0;
+  const logBreakStart = toMs(log.currentBreakStartedAt || log.breakStartedAt);
+  const userBreakStart = toMs(user?.currentBreakStartedAt || user?.breakStartedAt || user?.availabilityProfile?.breakStartedAt);
+  const userOnBreak = String(user?.availability || '').toLowerCase() === 'break';
+  const activeStart = logBreakStart || (userOnBreak ? userBreakStart : 0);
+  const openBreak = activeStart ? Math.floor(Math.max(0, now - activeStart) / 60000) : 0;
   return stored + openBreak;
 };
 
