@@ -14,7 +14,10 @@
     "prod": "npm run build && npm run serve",
     "preflight": "node scripts/preflight.mjs",
     "db:health": "node backend/scripts/db-health.mjs",
-    "go-live:check": "npm run build && npm run smoke && npm run db:health"
+    "go-live:check": "npm run build && npm run smoke && npm run db:health",
+    "desktop:dev": "KV_DESKTOP_DEV_URL=http://localhost:5173 electron desktop/main.cjs",
+    "desktop:build": "npm run build && electron-builder --dir",
+    "desktop:pack": "npm run build && electron-builder"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
@@ -32,6 +35,31 @@
     "eslint-plugin-react-refresh": "^0.5.3",
     "globals": "^17.7.0",
     "postcss": "^8.5.15",
-    "tailwindcss": "^3.4.17"
+    "tailwindcss": "^3.4.17",
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  },
+  "main": "desktop/main.cjs",
+  "build": {
+    "appId": "in.co.kalpvriksha.ops",
+    "productName": "Kalpavriksha Ops",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "desktop/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   }
 }

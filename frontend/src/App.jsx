@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { formatLastSeenDateTime, formatCallDuration, formatDateKey, formatDateTime, formatDuration, formatMinutes } from './utils/date';
 import { allProjectDocs, getCompletedDocuments, getLatestCompletedFileName, getTaskDescription, getEstimateDetails, getCompletedFileBadge } from './utils/taskDisplayUtils';
 import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass, buildPaymentTrackingUpdate, getPaymentEstimateAmount, getPaymentReceivedAmount, derivePaymentTrackingStatusFromData } from './features/finance';
@@ -15,10 +16,11 @@ import { CommunicationHub } from './features/chat';
 import { HistoryArchiveView } from './features/archive';
 import { CommandCentreView, ProductivityDashboard, DailyClosingReport, ReportsAnalyticsView, ProductionQAView, SystemSettingsView } from './features/command-centre';
 import { ActiveOperationsView } from './features/operations';
+import { UnifiedFileViewer } from './components/files/UnifiedFileViewer';
 import { getStatusColor, getPriorityColor } from './services/taskService';
 import { API_BASE, USE_BACKEND_STATE, ONLINE_STALE_MS, MAX_INLINE_DATA_URL_CHARS } from './config/appConfig';
 import { fileToBase64, cleanFileName } from './utils/fileUtils';
-import { absoluteApiUrl, getProjectFileDownloadUrl, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile } from './services/fileService';
+import { absoluteApiUrl, getProjectFileDownloadUrl, getProjectFilePreviewUrl, isProjectFilePdf, isProjectFileImage, getProjectFileKind, canPreviewProjectFile, fetchProjectFilePreview, releaseProjectFilePreview, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile, getProjectFileCacheKey, listCachedProjectFiles, openCachedProjectFile, clearCachedProjectFile, pruneExpiredProjectFileCache } from './services/fileService';
 import { sendRealOtp, verifyRealOtp } from './services/otpService';
 import { buildNotification, getVisibleNotifications, NOTIFICATION_CATEGORIES, getNotificationCategory, getNotificationPriority, buildActivityTimeline, isNotificationForUser } from './services/notificationService';
 import { 
@@ -1474,7 +1476,10 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
     const present = Boolean(logHasSession || engineRow?.session?.start || engineRow?.totalLoggedInMinutes > 0 || engineRow?.productiveMinutes > 0);
     const productive = Math.max(0, Math.floor(Number(engineRow?.productiveMinutes) || 0));
     const logged = Math.max(0, Math.floor(Number(engineRow?.totalLoggedInMinutes) || 0));
-    return { present, productive, logged, label: present ? (productive ? formatMinutes(productive) : 'Present') : 'Absent' };
+    const todayKey = new Date(nowMs).toLocaleDateString('en-CA');
+    const isFuture = String(date) > String(todayKey);
+    const isToday = String(date) === String(todayKey);
+    return { present, productive, logged, isFuture, isToday, label: isFuture ? 'Upcoming' : present ? (productive ? formatMinutes(productive) : 'Present') : 'Absent' };
   };
 
   const statusStyle = (status) => {
@@ -1587,7 +1592,7 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
       </div>
 
       <div className="bg-white rounded-3xl border border-slate-100 shadow-sm p-5">
-        <div className="flex items-center justify-between mb-4"><div><h3 className="font-black text-slate-800 text-lg">Monthly Attendance Sheet</h3><p className="text-xs font-semibold text-slate-400">Green = present, red = absent/no login record.</p></div><span className="text-xs font-black bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1.5 rounded-xl">{monthKey}</span></div>
+        <div className="flex items-center justify-between mb-4"><div><h3 className="font-black text-slate-800 text-lg">Monthly Attendance Sheet</h3><p className="text-xs font-semibold text-slate-400">Green = present, red = past absent/no login record, grey = upcoming future date.</p></div><span className="text-xs font-black bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1.5 rounded-xl">{monthKey}</span></div>
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs whitespace-nowrap">
             <thead>
@@ -1604,8 +1609,8 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
                     const cell = getMonthlyAttendanceCell(user, day);
                     return (
                       <td key={day} className="py-3 px-2 text-center">
-                        <span title={`${user.name} • ${day} • ${cell.label}`} className={`inline-flex h-6 min-w-6 items-center justify-center rounded-full px-1.5 text-[10px] font-black border ${cell.present ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-rose-50 text-rose-400 border-rose-100'}`}>
-                          {cell.present ? (cell.productive ? 'P' : '✓') : 'A'}
+                        <span title={`${user.name} • ${day} • ${cell.label}`} className={`inline-flex h-6 min-w-6 items-center justify-center rounded-full px-1.5 text-[10px] font-black border ${cell.isFuture ? 'bg-slate-50 text-slate-300 border-slate-100' : cell.isToday ? 'bg-indigo-50 text-indigo-700 border-indigo-100' : cell.present ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-rose-50 text-rose-400 border-rose-100'}`}>
+                          {cell.isFuture ? '—' : cell.isToday && !cell.present ? '•' : cell.present ? (cell.productive ? 'P' : '✓') : 'A'}
                         </span>
                       </td>
                     );
@@ -2104,18 +2109,69 @@ const LedgerView = ({ projects, onSelectProject }) => {
   );
 };
 
-const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, projects = [], onDeleteTask }) => {
+const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, projects = [], onDeleteTask, onPreviewFile }) => {
   const [newSubTask, setNewSubTask] = useState('');
   const [newNote, setNewNote] = useState('');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showEditCase, setShowEditCase] = useState(false);
   const [isUploadingFinal, setIsUploadingFinal] = useState(false);
   const [fileTransfer, setFileTransfer] = useState({ active: false, phase: '', label: '', fileName: '', progress: 0, message: '', loaded: 0, total: 0, speedBps: 0, etaSeconds: 0, startedAt: 0, transferType: '', fileId: '' });
+  const [downloadedFileMap, setDownloadedFileMap] = useState(() => listCachedProjectFiles());
+  const [filePreview, setFilePreview] = useState(null);
+  const [filePreviewUi, setFilePreviewUi] = useState({ zoom: 1, rotation: 0 });
+  const filePreviewAbortRef = useRef(null);
+
+  const closeFilePreview = useCallback(() => {
+    if (filePreviewAbortRef.current) {
+      try { filePreviewAbortRef.current.abort(); } catch {}
+      filePreviewAbortRef.current = null;
+    }
+    setFilePreview((current) => {
+      releaseProjectFilePreview(current);
+      return null;
+    });
+    setFilePreviewUi({ zoom: 1, rotation: 0 });
+  }, []);
+
+  useEffect(() => () => {
+    if (filePreviewAbortRef.current) {
+      try { filePreviewAbortRef.current.abort(); } catch {}
+      filePreviewAbortRef.current = null;
+    }
+    releaseProjectFilePreview(filePreview);
+  }, [filePreview]);
+
   const [subTaskAttachments, setSubTaskAttachments] = useState([]);
   const [noteAttachments, setNoteAttachments] = useState([]);
   const [isUploadingRevisionAttachment, setIsUploadingRevisionAttachment] = useState(false);
   const [isUploadingNoteAttachment, setIsUploadingNoteAttachment] = useState(false);
   const completedFileInputRef = useRef(null);
+
+  const refreshDownloadedFileMap = useCallback(() => {
+    setDownloadedFileMap(listCachedProjectFiles());
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    pruneExpiredProjectFileCache().finally(() => {
+      if (alive) refreshDownloadedFileMap();
+    });
+    const onStorage = (event) => {
+      if (!event.key || event.key === 'kalpavriksha_downloaded_file_index_v1') refreshDownloadedFileMap();
+    };
+    const onFocus = () => refreshDownloadedFileMap();
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+    return () => {
+      alive = false;
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+    };
+  }, [refreshDownloadedFileMap]);
+
+  const isDocDownloaded = useCallback((doc = {}) => Boolean(downloadedFileMap[getProjectFileCacheKey(doc)]), [downloadedFileMap]);
   
   const canManage = user.role === ROLES.ADMIN || user.role === ROLES.MANAGER;
   const isAssignedToMe = samePerson(project.assignedTo, user.name);
@@ -2427,8 +2483,25 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
 
   const renderInlineFileTransferBar = (extraClass = '') => renderWhatsAppTransferBar(`mt-3 ${extraClass}`);
 
+
+  const handlePreviewFile = (doc = {}) => {
+    if (typeof onPreviewFile === 'function') {
+      onPreviewFile(doc);
+      return;
+    }
+    const kind = getProjectFileKind(doc);
+    if (kind === 'file') {
+      alert('Preview is not available for this file type yet. Please download this file to open it.');
+      return;
+    }
+  };
+
   const handleTrackedDownload = async (doc) => {
     const fileName = doc?.name || doc?.fileName || 'file';
+    if (isDocDownloaded(doc)) {
+      await handleOpenDownloadedFile(doc);
+      return;
+    }
     if (fileTransfer.active && fileTransfer.phase !== 'complete' && fileTransfer.phase !== 'error') {
       alert(`${fileTransfer.label || 'File transfer'} is already in progress. Please wait until it completes before starting another upload/download.`);
       return;
@@ -2453,11 +2526,49 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
           message: meta.total ? `${safePct}% downloaded` : 'Downloading file...',
         });
       });
-      updateFileTransfer({ active: true, phase: 'complete', label: 'Download complete', fileName, fileId: doc?.id || doc?.fileId || '', transferType: 'download', progress: 100, etaSeconds: 0, message: 'Download started in your browser.' });
+      refreshDownloadedFileMap();
+      updateFileTransfer({ active: true, phase: 'complete', label: 'Download complete', fileName, fileId: doc?.id || doc?.fileId || '', transferType: 'download', progress: 100, etaSeconds: 0, message: 'Saved for quick open in this browser for 7 days.' });
       window.setTimeout(() => resetFileTransfer(), 2600);
     } catch (error) {
       updateFileTransfer({ active: true, phase: 'error', label: 'Download needs attention', fileName, fileId: doc?.id || doc?.fileId || '', transferType: 'download', progress: 100, etaSeconds: 0, message: error?.message || 'Could not start download. Please try again.' });
     }
+  };
+
+  const handleOpenDownloadedFile = async (doc) => {
+    const fileName = doc?.name || doc?.fileName || 'file';
+    try {
+      updateFileTransfer({ active: true, phase: 'complete', label: 'Opening downloaded file', fileName, fileId: doc?.id || doc?.fileId || '', transferType: 'download', progress: 100, etaSeconds: 0, message: 'Opening saved copy from this browser.' });
+      await openCachedProjectFile(doc);
+      window.setTimeout(() => resetFileTransfer(), 1400);
+    } catch (error) {
+      await clearCachedProjectFile(doc).catch(() => {});
+      refreshDownloadedFileMap();
+      updateFileTransfer({ active: true, phase: 'error', label: 'Saved copy missing', fileName, fileId: doc?.id || doc?.fileId || '', transferType: 'download', progress: 100, etaSeconds: 0, message: 'Saved copy is missing or older than 7 days. Please download again.' });
+    }
+  };
+
+  const renderFileActionButtons = (doc, downloadClassName, deleteClassName = '') => {
+    const downloaded = isDocDownloaded(doc);
+    const canPreview = canPreviewProjectFile(doc);
+    return (
+      <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
+        {canPreview && (
+          <button
+            type="button"
+            onClick={(event) => { event.preventDefault(); event.stopPropagation(); handlePreviewFile(doc); }}
+            className="text-xs font-black text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 px-4 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1.5"
+            title="Preview inside Kalpavriksha Ops without downloading"
+          >
+            <Eye className="w-3.5 h-3.5" /> Preview
+          </button>
+        )}
+        <button type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); downloaded ? handleOpenDownloadedFile(doc) : handleTrackedDownload(doc); }} className={downloadClassName}>
+          {downloaded ? 'Open' : 'Download'}
+        </button>
+        {downloaded && <span className="text-[10px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 px-2 py-1 rounded-lg whitespace-nowrap">Downloaded • 7d cache</span>}
+        {canDeleteProjectFile(doc, user) && <button type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); handleFileDelete(doc); }} title="Delete file" className={deleteClassName || "text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"}><Trash2 className="w-3.5 h-3.5" /> Delete</button>}
+      </div>
+    );
   };
 
   const handleFileUpload = async (type, e) => {
@@ -2894,6 +3005,78 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
 
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+      {filePreview && createPortal((
+        <div className="fixed inset-0 z-[9999] bg-slate-950/75 backdrop-blur-sm p-2 sm:p-5 flex items-center justify-center">
+          <div className="bg-white w-full max-w-7xl h-[92vh] rounded-[1.75rem] shadow-2xl border border-slate-200 overflow-hidden flex flex-col">
+            <div className="px-4 sm:px-6 py-3 border-b border-slate-100 flex items-center justify-between gap-3 bg-slate-50/90">
+              <div className="min-w-0 flex items-center gap-3">
+                <div className={`${filePreview.kind === 'image' ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-red-50 text-red-600 border-red-100'} w-10 h-10 rounded-2xl flex items-center justify-center border shrink-0`}>
+                  {filePreview.kind === 'image' ? <ImageIcon className="w-5 h-5" /> : <FileText className="w-5 h-5" />}
+                </div>
+                <div className="min-w-0">
+                  <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">{filePreview.kind === 'image' ? 'Image Preview' : 'PDF Preview'}</p>
+                  <h3 className="text-sm sm:text-base font-black text-slate-900 truncate">{filePreview.name}</h3>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {filePreview.kind === 'image' && !filePreview.loading && !filePreview.error && (
+                  <div className="hidden sm:flex items-center gap-1 bg-white border border-slate-200 rounded-xl p-1">
+                    <button type="button" onClick={() => setFilePreviewUi(v => ({ ...v, zoom: Math.max(0.5, Number((v.zoom - 0.25).toFixed(2))) }))} className="px-2 py-1 rounded-lg text-xs font-black hover:bg-slate-100">−</button>
+                    <span className="text-[11px] font-black text-slate-500 min-w-12 text-center">{Math.round(filePreviewUi.zoom * 100)}%</span>
+                    <button type="button" onClick={() => setFilePreviewUi(v => ({ ...v, zoom: Math.min(3, Number((v.zoom + 0.25).toFixed(2))) }))} className="px-2 py-1 rounded-lg text-xs font-black hover:bg-slate-100">+</button>
+                    <button type="button" onClick={() => setFilePreviewUi(v => ({ ...v, rotation: (Number(v.rotation || 0) + 90) % 360 }))} className="px-2 py-1 rounded-lg text-xs font-black hover:bg-slate-100">Rotate</button>
+                  </div>
+                )}
+                {filePreview.url && !filePreview.loading && !filePreview.error && <button type="button" onClick={() => window.open(filePreview.url, '_blank', 'noopener,noreferrer')} className="hidden sm:flex text-xs font-black text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 px-4 py-2 rounded-xl items-center gap-1.5">Open tab</button>}
+                <button type="button" onClick={() => handleTrackedDownload(filePreview.doc)} className="hidden sm:flex text-xs font-black text-indigo-700 bg-white hover:bg-indigo-50 border border-indigo-100 px-4 py-2 rounded-xl items-center gap-1.5"><Download className="w-3.5 h-3.5" /> Download</button>
+                <button type="button" onClick={closeFilePreview} className="p-2.5 rounded-xl bg-white hover:bg-slate-100 border border-slate-200"><X className="w-5 h-5" /></button>
+              </div>
+            </div>
+            <div className="flex-1 bg-slate-100 min-h-0">
+              {filePreview.loading ? (
+                <div className="w-full h-full flex flex-col items-center justify-center gap-4 text-slate-500">
+                  <div className="w-12 h-12 rounded-full border-4 border-slate-200 border-t-indigo-500 animate-spin" />
+                  <p className="text-sm font-black">Preparing preview...</p>
+                </div>
+              ) : filePreview.error ? (
+                <div className="w-full h-full flex items-center justify-center p-6">
+                  <div className="max-w-xl w-full bg-white rounded-3xl border border-rose-100 shadow-sm p-6 text-center">
+                    <AlertCircle className="w-10 h-10 mx-auto text-rose-500 mb-3" />
+                    <h4 className="font-black text-slate-900 text-lg">Preview could not open</h4>
+                    <p className="text-sm font-semibold text-slate-500 mt-2 break-words">{filePreview.error}</p>
+                    <div className="mt-5 flex flex-col sm:flex-row justify-center gap-2">
+                      {filePreview.url && <button type="button" onClick={() => window.open(filePreview.url, '_blank', 'noopener,noreferrer')} className="text-xs font-black text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 px-4 py-2 rounded-xl">Try browser preview</button>}
+                      <button type="button" onClick={() => handleTrackedDownload(filePreview.doc)} className="text-xs font-black text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-4 py-2 rounded-xl">Download file</button>
+                    </div>
+                  </div>
+                </div>
+              ) : filePreview.kind === 'image' ? (
+                <div className="w-full h-full flex items-center justify-center bg-slate-950 overflow-auto p-4">
+                  <img
+                    src={filePreview.url}
+                    alt={filePreview.name || 'Image Preview'}
+                    style={{ transform: `scale(${filePreviewUi.zoom}) rotate(${filePreviewUi.rotation}deg)`, transition: 'transform 160ms ease' }}
+                    className="max-w-full max-h-full object-contain rounded-xl shadow-2xl"
+                  />
+                </div>
+              ) : (
+                <iframe
+                  title={filePreview.name || 'PDF Preview'}
+                  src={filePreview.url}
+                  className="w-full h-full bg-white"
+                />
+              )}
+            </div>
+            <div className="px-4 py-3 bg-white border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <p className="text-xs font-bold text-slate-500">Preview streams the file inline inside Kalpavriksha Ops. Download only when a local copy is needed.</p>
+              <div className="sm:hidden grid grid-cols-2 gap-2">
+                {filePreview.kind === 'image' && !filePreview.loading && !filePreview.error && <button type="button" onClick={() => setFilePreviewUi(v => ({ ...v, rotation: (Number(v.rotation || 0) + 90) % 360 }))} className="text-xs font-black text-slate-700 bg-slate-50 border border-slate-200 px-4 py-2 rounded-xl">Rotate</button>}
+                <button type="button" onClick={() => handleTrackedDownload(filePreview.doc)} className="text-xs font-black text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-4 py-2 rounded-xl flex items-center justify-center gap-1.5"><Download className="w-3.5 h-3.5" /> Download</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ), document.body)}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-5 bg-white p-5 rounded-3xl border-2 border-slate-100 shadow-sm">
         <div className="flex items-center space-x-5">
           <button type="button" onClick={onBack} className="p-3 bg-slate-50 hover:bg-slate-100 rounded-xl transition-colors flex-shrink-0 border border-slate-200">
@@ -3159,7 +3342,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                      <span className="font-bold ml-4 truncate">{doc.name}</span>
                    </div>
                    {doc.url ? (
-                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => handleTrackedDownload(doc)} className="text-xs font-bold text-indigo-600 bg-white border border-slate-200 hover:bg-indigo-50 px-4 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
+                     renderFileActionButtons(doc, "text-xs font-bold text-indigo-600 bg-white border border-slate-200 hover:bg-indigo-50 px-4 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm")
                    ) : (
                      <button type="button" className="text-xs font-bold text-slate-400 bg-slate-50 px-4 py-2 rounded-xl whitespace-nowrap cursor-not-allowed border border-slate-200">Unavailable</button>
                    )}
@@ -3188,7 +3371,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                      <span className="text-[11px] font-bold ml-3 text-blue-600 bg-blue-100 px-2 py-1 rounded-lg whitespace-nowrap hidden sm:inline-block border border-blue-200">by {doc.uploadedBy}</span>
                    </div>
                    {doc.url ? (
-                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => handleTrackedDownload(doc)} className="text-xs font-bold text-blue-700 bg-white hover:bg-blue-50 shadow-sm border border-blue-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
+                     renderFileActionButtons(doc, "text-xs font-bold text-blue-700 bg-white hover:bg-blue-50 shadow-sm border border-blue-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors")
                    ) : (
                      <button type="button" className="text-xs font-bold text-slate-400 bg-slate-50 px-4 py-2 rounded-xl whitespace-nowrap cursor-not-allowed border border-slate-200">Unavailable</button>
                    )}
@@ -3211,7 +3394,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                      <span className="text-[11px] font-bold ml-3 text-emerald-600 bg-emerald-100 px-2 py-1 rounded-lg whitespace-nowrap hidden sm:inline-block border border-emerald-200">by {doc.uploadedBy}</span>
                    </div>
                    {doc.url && (
-                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => handleTrackedDownload(doc)} className="text-xs font-bold text-emerald-700 bg-white hover:bg-emerald-50 shadow-sm border border-emerald-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
+                     renderFileActionButtons(doc, "text-xs font-bold text-emerald-700 bg-white hover:bg-emerald-50 shadow-sm border border-emerald-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors")
                    )}
                    </div>
                    {isCurrentTransferForDoc(doc) && renderInlineFileTransferBar()}
@@ -3233,7 +3416,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                              <p className="text-[11px] font-bold text-purple-500">Latest revision upload • by {doc.uploadedBy || 'Team'}</p>
                            </div>
                          </div>
-                         <button type="button" onClick={() => handleTrackedDownload(doc)} className="text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-100 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>
+                         {renderFileActionButtons(doc, "text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-100 px-4 py-2 rounded-xl whitespace-nowrap transition-colors")}
                          </div>
                          {isCurrentTransferForDoc(doc) && renderInlineFileTransferBar()}
                        </div>
@@ -3543,6 +3726,20 @@ class AppErrorBoundary extends React.Component {
 }
 
 function AppShell() {
+  const [globalPreviewFile, setGlobalPreviewFile] = useState(null);
+  const openUnifiedPreview = useCallback((file = {}) => {
+    if (!file) return;
+    setGlobalPreviewFile({ ...file, _previewKey: `${Date.now()}_${Math.random().toString(36).slice(2)}` });
+  }, []);
+  const closeUnifiedPreview = useCallback(() => setGlobalPreviewFile(null), []);
+  const downloadFromUnifiedPreview = useCallback(async (file = {}) => {
+    try {
+      await downloadProjectFile(file);
+      setTimeout(() => pruneExpiredProjectFileCache().catch(() => {}), 100);
+    } catch (error) {
+      alert(error?.message || 'Download failed. Please try again.');
+    }
+  }, []);
   const [currentUser, setCurrentUser] = useState(null);
   const currentUserRef = useRef(null);
   useEffect(() => { currentUserRef.current = currentUser; }, [currentUser]);
@@ -4914,7 +5111,7 @@ function AppShell() {
         )}
 
         {selectedProject ? (
-          <TaskDetailView project={selectedProject} user={currentUser} onBack={closeTaskDetail} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} />
+          <TaskDetailView project={selectedProject} user={currentUser} onBack={closeTaskDetail} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} onPreviewFile={openUnifiedPreview} />
         ) : activeTab === 'command' ? (
           <CommandCentreView projects={projects} users={activeUsers} attendanceLogs={attendanceLogs} currentUser={currentUser} onOpenPerformance={() => setActiveTab('productivity')} onSelectProject={(p) => openTaskDetail(p, 'command')} onNavigate={(target) => { if (target === 'newCase') { setShowNewLead(true); return; } if (target === 'notifications') { setShowNotifs(true); return; } setActiveTab(target); }} />
         ) : activeTab === 'productivity' ? (
@@ -4967,7 +5164,9 @@ function AppShell() {
         )}
       </main>
 
-      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} projects={projects} onOpenTaskReference={openTaskReferenceFromChat} />}
+      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} projects={projects} onOpenTaskReference={openTaskReferenceFromChat} onPreviewFile={openUnifiedPreview} />}
+
+      <UnifiedFileViewer file={globalPreviewFile} onClose={closeUnifiedPreview} onDownload={downloadFromUnifiedPreview} />
 
       {!selectedProject && !showNewLead && <MobileBottomNavigation currentUser={currentUser} ROLES={ROLES} activeTab={activeTab} setActiveTab={setActiveTab} unreadNotifs={unreadNotifs} />}
 

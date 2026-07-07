@@ -1267,7 +1267,7 @@ function classify(name='', mime=''){
 }
 function docPayload(file, uploadedBy, role, purpose='SOURCE', caseId=''){
   const id = nanoid(8);
-  return {id,caseId,name:file.originalname,storedName:file.filename,mime:file.mimetype,size:file.size,type:classify(file.originalname,file.mimetype),purpose,uploadedBy,uploadedByRole:role,uploadedAt:now(),url:`/api/uploads/${file.filename}`,downloadUrl:`/api/files/${id}/download`};
+  return {id,caseId,name:file.originalname,storedName:file.filename,mime:file.mimetype,size:file.size,type:classify(file.originalname,file.mimetype),purpose,uploadedBy,uploadedByRole:role,uploadedAt:now(),url:`/api/uploads/${file.filename}`,previewUrl:`/api/files/${id}/preview`,downloadUrl:`/api/files/${id}/download`};
 }
 
 function fileBaseName(value=''){
@@ -1296,10 +1296,12 @@ function addFileRegistryEntry(d, doc={}){
     uploadedBy: doc.uploadedBy || doc.by || 'Team',
     uploadedAt: doc.uploadedAt || now(),
     url: doc.url || (doc.storedName ? `/uploads/${doc.storedName}` : ''),
+    previewUrl: `/api/files/${doc.id}/preview`,
     downloadUrl: `/api/files/${doc.id}/download`
   };
   if (existing) Object.assign(existing, entry);
   else d.files.unshift(entry);
+  doc.previewUrl = entry.previewUrl;
   doc.downloadUrl = entry.downloadUrl;
   if (!doc.url && entry.url) doc.url = entry.url;
   if (!doc.storedName && entry.storedName) doc.storedName = entry.storedName;
@@ -1359,6 +1361,7 @@ function normalizePersistedFileLinks(d){
   d.files ||= [];
   for (const doc of allKnownFileDocs(d)) {
     if (!doc || !doc.id) continue;
+    doc.previewUrl = `/api/files/${doc.id}/preview`;
     doc.downloadUrl = `/api/files/${doc.id}/download`;
     addFileRegistryEntry(d, doc);
   }
@@ -1458,7 +1461,25 @@ app.get('/api/uploads/:filename', (req, res) => {
     if (!filename) return res.status(404).send('File not found');
     const fp = path.resolve(UPLOAD_DIR, filename);
     if (!fp.startsWith(path.resolve(UPLOAD_DIR)) || !fs.existsSync(fp)) return res.status(404).send('File not found');
+    const mode = String(req.query.mode || '').toLowerCase();
+    const lowerName = filename.toLowerCase();
+    const isPdf = lowerName.endsWith('.pdf');
+    const imageMimeByExt = lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg') ? 'image/jpeg'
+      : lowerName.endsWith('.png') ? 'image/png'
+      : lowerName.endsWith('.gif') ? 'image/gif'
+      : lowerName.endsWith('.webp') ? 'image/webp'
+      : lowerName.endsWith('.bmp') ? 'image/bmp'
+      : lowerName.endsWith('.svg') ? 'image/svg+xml'
+      : '';
+    const isImage = Boolean(imageMimeByExt);
+    res.setHeader('Access-Control-Expose-Headers','Content-Disposition, Content-Length, Content-Type, Accept-Ranges');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    if (isPdf) res.type('application/pdf');
+    else if (isImage) res.type(imageMimeByExt);
+    if (mode === 'preview') {
+      if (!isPdf && !isImage) return res.status(415).send('Preview is available for PDF and image files only.');
+      res.setHeader('Content-Disposition', `inline; filename="${String(filename).replace(/"/g, '')}"`);
+    }
     res.sendFile(fp);
   } catch (err) {
     res.status(500).send('Unable to load file');
@@ -1781,37 +1802,158 @@ app.post('/api/files/upload', uploadAny, (req, res) => {
   save(d);
   res.json({ ok: true, file });
 });
+function safeDownloadFileName(value='file') {
+  return String(value || 'file').replace(/[\r\n"]/g, '').trim() || 'file';
+}
+function fileMimeByName(fileName='', fallback='') {
+  const lowerName = String(fileName || '').toLowerCase();
+  const fallbackMime = String(fallback || '').toLowerCase();
+  if (/\.pdf$/i.test(lowerName) || fallbackMime.includes('pdf')) return 'application/pdf';
+  if (/\.jpe?g$/i.test(lowerName)) return 'image/jpeg';
+  if (/\.png$/i.test(lowerName)) return 'image/png';
+  if (/\.gif$/i.test(lowerName)) return 'image/gif';
+  if (/\.webp$/i.test(lowerName)) return 'image/webp';
+  if (/\.svg$/i.test(lowerName)) return 'image/svg+xml';
+  if (/\.bmp$/i.test(lowerName)) return 'image/bmp';
+  if (/\.txt$/i.test(lowerName) || /\.log$/i.test(lowerName)) return 'text/plain; charset=utf-8';
+  if (/\.json$/i.test(lowerName)) return 'application/json; charset=utf-8';
+  if (/\.xml$/i.test(lowerName)) return 'application/xml; charset=utf-8';
+  if (/\.csv$/i.test(lowerName)) return 'text/csv; charset=utf-8';
+  if (/\.docx$/i.test(lowerName)) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (/\.xlsx$/i.test(lowerName)) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  if (/\.pptx$/i.test(lowerName)) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+  if (/\.doc$/i.test(lowerName)) return 'application/msword';
+  if (/\.xls$/i.test(lowerName)) return 'application/vnd.ms-excel';
+  if (/\.ppt$/i.test(lowerName)) return 'application/vnd.ms-powerpoint';
+  return fallbackMime || 'application/octet-stream';
+}
+function getPreviewKind(fileName='', mime='') {
+  const name = String(fileName || '').toLowerCase();
+  const type = String(mime || '').toLowerCase();
+  if (/\.dwg$/i.test(name)) return 'metadata';
+  if (/\.pdf$/i.test(name) || type.includes('pdf')) return 'inline';
+  if (/\.(jpg|jpeg|png|webp|gif|svg|bmp)$/i.test(name) || type.startsWith('image/')) return 'inline';
+  if (/\.(txt|json|xml|csv|log)$/i.test(name) || type.startsWith('text/')) return 'inline';
+  if (/\.(doc|docx|xls|xlsx|ppt|pptx)$/i.test(name)) return 'inline';
+  return 'metadata';
+}
+function resolveFileRequest(req, res) {
+  const d = db();
+  const { doc, resolved } = resolveFileById(d, req.params.id);
+  if (!doc) {
+    res.status(404).send('File record not found. It may be an older unsaved upload. Please refresh the page or re-upload the file.');
+    return null;
+  }
+  if (!resolved) {
+    res.status(410).send('File unavailable on server. The record exists, but the physical file is missing. Please re-upload this file once.');
+    return null;
+  }
+  const { stored, fp } = resolved;
+  if (!fp.startsWith(path.resolve(UPLOAD_DIR))) {
+    res.status(400).send('Invalid file path');
+    return null;
+  }
+  const fileName = safeDownloadFileName(doc.name || doc.fileName || stored);
+  const contentType = fileMimeByName(fileName, doc.mime || doc.mimeType || '');
+  const fileSize = fs.statSync(fp).size;
+  return { doc, stored, fp, fileName, contentType, fileSize };
+}
+function sendUnifiedFileResponse(req, res, mode='preview') {
+  const info = resolveFileRequest(req, res);
+  if (!info) return;
+  const disposition = mode === 'download' ? 'attachment' : 'inline';
+  if (mode === 'preview' && getPreviewKind(info.fileName, info.contentType) === 'metadata') {
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    return res.json({
+      ok: true,
+      previewType: 'metadata',
+      id: req.params.id,
+      name: info.fileName,
+      mime: info.contentType,
+      size: info.fileSize,
+      downloadUrl: `/api/files/${info.doc.id || req.params.id}/download`,
+      message: 'This file type cannot be rendered safely in-browser yet. Download is available.'
+    });
+  }
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length, Content-Type, Accept-Ranges, Cache-Control');
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Cache-Control', mode === 'preview' ? 'private, max-age=86400' : 'private, max-age=604800');
+  res.setHeader('Content-Type', info.contentType);
+  res.setHeader('Content-Length', String(info.fileSize));
+  res.setHeader('Content-Disposition', `${disposition}; filename="${info.fileName}"`);
+  return res.sendFile(info.fp);
+}
+
+app.get('/api/files/:id/preview-data', (req, res) => {
+  const info = resolveFileRequest(req, res);
+  if (!info) return;
+  const previewKind = getPreviewKind(info.fileName, info.contentType);
+  res.setHeader('Access-Control-Expose-Headers', 'Cache-Control, Content-Type');
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+  res.setHeader('Content-Disposition', 'inline');
+  if (previewKind === 'metadata') {
+    return res.json({
+      ok: true,
+      previewType: 'metadata',
+      id: req.params.id,
+      name: info.fileName,
+      mime: info.contentType,
+      size: info.fileSize,
+      downloadUrl: `/api/files/${info.doc.id || req.params.id}/download`,
+      message: 'This file type cannot be rendered safely in-browser yet. Download is available.'
+    });
+  }
+  const maxPreviewDataBytes = Number(process.env.MAX_PREVIEW_DATA_BYTES || 25 * 1024 * 1024);
+  if (info.fileSize > maxPreviewDataBytes) {
+    return res.status(413).json({
+      ok: false,
+      error: 'Preview is too large for safe in-app data preview. Please use Download or Open tab.',
+      name: info.fileName,
+      mime: info.contentType,
+      size: info.fileSize,
+      downloadUrl: `/api/files/${info.doc.id || req.params.id}/download`
+    });
+  }
+  try {
+    const base64 = fs.readFileSync(info.fp).toString('base64');
+    return res.json({
+      ok: true,
+      previewType: 'data',
+      id: req.params.id,
+      name: info.fileName,
+      mime: info.contentType,
+      size: info.fileSize,
+      base64,
+      downloadUrl: `/api/files/${info.doc.id || req.params.id}/download`
+    });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: 'Unable to prepare preview data.' });
+  }
+});
+
+app.get('/api/files/:id/preview', (req, res) => sendUnifiedFileResponse(req, res, 'preview'));
+app.get('/api/files/:id/download', (req, res) => sendUnifiedFileResponse(req, res, 'download'));
 app.get('/api/files/:id/status',(req,res)=>{
   const d = db();
   const { doc, resolved } = resolveFileById(d, req.params.id);
+  const effectiveId = doc?.id || req.params.id;
   res.json({
     ok: true,
     found: !!doc,
     available: !!resolved,
     id: req.params.id,
     name: doc?.name || doc?.fileName || doc?.storedName || '',
-    downloadUrl: doc ? `/api/files/${doc.id || req.params.id}/download` : ''
+    mime: doc?.mime || doc?.mimeType || '',
+    size: Number(doc?.size || 0),
+    previewUrl: doc ? `/api/files/${effectiveId}/preview` : '',
+    downloadUrl: doc ? `/api/files/${effectiveId}/download` : ''
   });
 });
-app.get('/api/files/:id/download',(req,res)=>{
-  const d=db();
-  const { doc, resolved } = resolveFileById(d, req.params.id);
-  if(!doc) {
-    return res.status(404).send('File record not found. It may be an older unsaved upload. Please refresh the page or re-upload the file.');
-  }
-  if(!resolved) {
-    return res.status(410).send('File unavailable on server. The record exists, but the physical file is missing. Please re-upload this file once.');
-  }
-  const { stored, fp } = resolved;
-  if(!fp.startsWith(path.resolve(UPLOAD_DIR))) return res.status(400).send('Invalid file path');
-  res.setHeader('Access-Control-Expose-Headers','Content-Disposition, Content-Length, Content-Type');
-  res.setHeader('Cache-Control','private, max-age=0, must-revalidate');
-  const fileSize = fs.statSync(fp).size;
-  const fileName = doc.name || doc.fileName || stored;
-  res.setHeader('Content-Length', String(fileSize));
-  if (/\.pdf$/i.test(fileName) || String(doc.mime || doc.mimeType || '').toLowerCase().includes('pdf')) res.type('application/pdf');
-  else if (doc.mime || doc.mimeType) res.type(doc.mime || doc.mimeType);
-  res.download(fp, fileName);
+app.get('/api/files/:id',(req,res)=>{
+  const mode = String(req.query.mode || '').toLowerCase();
+  if (mode === 'preview') return sendUnifiedFileResponse(req, res, 'preview');
+  if (mode === 'download') return sendUnifiedFileResponse(req, res, 'download');
+  return res.status(400).json({ ok:false, error:'Use /api/files/:id/preview or /api/files/:id/download' });
 });
 
 app.delete('/api/files/:id',(req,res)=>{

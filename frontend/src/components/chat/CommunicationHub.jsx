@@ -6,9 +6,10 @@ import { createSafeMeetingRoomName, buildJitsiUrl } from '../../utils/meeting';
 import { copyTextToClipboard } from '../../utils/clipboard';
 import { MiniEmptyState } from '../shared';
 import { getVisibleNotifications } from '../../services/notificationService';
+import { canPreviewProjectFile } from '../../services/fileService';
 import { CHAT_API_BASE, absoluteChatUrl, makeMessageId, QUICK_EMOJIS, isUserActuallyOnline, getOperationalUsers, identityKey, samePerson, readEntryName, ROLES, normalizeChannelKey, chatEmojiGroups, reactionEmojis } from '../../utils/chatUtils';
 
-export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onDeleteMessage, onUpdateMessage, onMarkMessagesRead, appId, projects = [], onOpenTaskReference }) => {
+export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onDeleteMessage, onUpdateMessage, onMarkMessagesRead, appId, projects = [], onOpenTaskReference, onPreviewFile }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [presenceNow, setPresenceNow] = useState(Date.now());
   const [activeChannel, setActiveChannel] = useState('global');
@@ -955,19 +956,53 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   };
 
   const renderAttachmentPreview = (m, isMine) => {
-    const fileUrl = absoluteChatUrl(m.downloadUrl || m.fileUrl || m.files?.[0]?.downloadUrl || m.files?.[0]?.url || '');
+    const sourceFile = m.files?.[0] || {};
+    const rawUrl = m.fileUrl || sourceFile.url || m.downloadUrl || sourceFile.downloadUrl || '';
+    const fileUrl = absoluteChatUrl(rawUrl);
     if (!fileUrl) return null;
-    const fileName = m.fileName || m.files?.[0]?.name || 'Attachment';
-    const fileType = m.fileType || m.files?.[0]?.mime || m.files?.[0]?.mimeType || '';
+    const fileName = m.fileName || sourceFile.name || sourceFile.fileName || 'Attachment';
+    const fileType = m.fileType || sourceFile.mime || sourceFile.mimeType || sourceFile.type || '';
     const lower = String(fileName).toLowerCase();
-    const isImage = String(fileType).startsWith('image/') || /\.(jpg|jpeg|png|gif|webp)$/i.test(lower);
+    const isImage = String(fileType).startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(lower);
     const isVideo = String(fileType).startsWith('video/') || /\.(mp4|mov|avi|mkv|webm)$/i.test(lower);
     const isAudio = String(fileType).startsWith('audio/') || /\.(webm|mp3|wav|m4a|ogg)$/i.test(lower);
     const isPdf = /\.pdf$/i.test(lower) || String(fileType).includes('pdf');
     const label = getAttachmentLabel(fileName, fileType);
+    const previewDoc = {
+      ...(sourceFile || {}),
+      id: sourceFile.id || m.fileId || '',
+      fileId: m.fileId || sourceFile.fileId || sourceFile.id || '',
+      messageId: m.id,
+      name: fileName,
+      fileName,
+      mimeType: fileType,
+      type: fileType,
+      url: m.fileUrl || sourceFile.url || fileUrl,
+      fileUrl: m.fileUrl || sourceFile.url || fileUrl,
+      downloadUrl: m.downloadUrl || sourceFile.downloadUrl || fileUrl,
+      size: m.fileSize || sourceFile.size || 0,
+      _previewSource: 'chat',
+    };
+    const previewable = canPreviewProjectFile(previewDoc);
+    const openInViewer = (event) => {
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      if (typeof onPreviewFile === 'function' && previewable) {
+        onPreviewFile(previewDoc);
+      }
+    };
+    const openExternal = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      window.open(fileUrl, '_blank', 'noopener,noreferrer');
+    };
+    const downloadExternal = (event) => {
+      event.stopPropagation();
+    };
+
     return (
       <div className={`kalpa-chat-attachment mt-3 rounded-2xl border overflow-hidden ${isMine ? 'border-indigo-300 bg-indigo-500/20' : 'border-slate-100 bg-slate-50'}`}>
-        {isImage && <a href={fileUrl} target="_blank" rel="noreferrer" className="block"><img src={fileUrl} alt={fileName} loading="lazy" className="kalpa-chat-attachment-image block max-h-64 w-full object-contain bg-black/5" /></a>}
+        {isImage && <button type="button" onClick={openInViewer} className="block w-full text-left cursor-zoom-in" title="Preview image"><img src={fileUrl} alt={fileName} loading="lazy" className="kalpa-chat-attachment-image block max-h-64 w-full object-contain bg-black/5" /></button>}
         {isVideo && <video src={fileUrl} controls preload="metadata" className="block max-h-64 w-full bg-black" />}
         {isAudio && <div className="p-3"><div className={`text-[10px] font-black uppercase tracking-widest mb-2 ${isMine ? 'text-indigo-100' : 'text-indigo-600'}`}>{m.isVoiceNote ? 'Voice note' : 'Audio attachment'}</div><audio src={fileUrl} controls preload="metadata" className="w-full" /></div>}
         {!isImage && !isVideo && !isAudio && (
@@ -975,22 +1010,23 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
             <div className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 ${isMine ? 'bg-white/15 text-white' : 'bg-indigo-50 text-indigo-600'}`}><FileIcon className="w-5 h-5" /></div>
             <div className="min-w-0 flex-1">
               <p className={`text-sm font-black truncate ${isMine ? 'text-white' : 'text-slate-800'}`}>{fileName}</p>
-              <p className={`text-[10px] font-bold uppercase tracking-wider ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>{label}{getReadableFileSize(m.fileSize || m.files?.[0]?.size) ? ` • ${getReadableFileSize(m.fileSize || m.files?.[0]?.size)}` : ''}</p>
+              <p className={`text-[10px] font-bold uppercase tracking-wider ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>{label}{getReadableFileSize(m.fileSize || sourceFile.size) ? ` • ${getReadableFileSize(m.fileSize || sourceFile.size)}` : ''}</p>
             </div>
           </div>
         )}
-        {isPdf && <div className={`px-3 pb-3 ${isMine ? 'bg-indigo-500/20' : 'bg-white'}`}><object data={fileUrl} type="application/pdf" className="w-full h-40 rounded-xl border border-slate-200 bg-white"><p className="text-xs text-slate-400 p-3">PDF preview unavailable. Open the file below.</p></object></div>}
-        <div className={`p-3 flex items-center justify-between gap-3 border-t ${isMine ? 'border-indigo-300/40' : 'border-slate-100'}`}>
+        {isPdf && <div className={`px-3 pb-3 ${isMine ? 'bg-indigo-500/20' : 'bg-white'}`}><button type="button" onClick={openInViewer} className="w-full h-24 rounded-xl border border-slate-200 bg-slate-50 hover:bg-indigo-50 flex items-center justify-center text-xs font-black text-slate-500">Preview this PDF inside Kalpvriksha Ops</button></div>}
+        <div className={`p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-t ${isMine ? 'border-indigo-300/40' : 'border-slate-100'}`}>
           <div className="min-w-0 flex items-center gap-2">
             <FileIcon className={`w-4 h-4 shrink-0 ${isMine ? 'text-white' : 'text-indigo-500'}`} />
             <div className="min-w-0">
               <p className={`text-xs font-black truncate ${isMine ? 'text-white' : 'text-slate-700'}`}>{fileName}</p>
-              <p className={`text-[10px] font-bold ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>{label} {getReadableFileSize(m.fileSize || m.files?.[0]?.size) ? `• ${getReadableFileSize(m.fileSize || m.files?.[0]?.size)}` : ''}{m.localPreviewOnly ? ' • local preview' : ''}</p>
+              <p className={`text-[10px] font-bold ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>{label} {getReadableFileSize(m.fileSize || sourceFile.size) ? `• ${getReadableFileSize(m.fileSize || sourceFile.size)}` : ''}{m.localPreviewOnly ? ' • local preview' : ''}</p>
             </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <a href={fileUrl} target="_blank" rel="noreferrer" className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white/90 text-slate-700' : 'bg-white text-indigo-700 border border-indigo-100'}`}>Open</a>
-            <a href={fileUrl} download={fileName} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white text-indigo-700' : 'bg-indigo-600 text-white'}`}>Download</a>
+          <div className="flex items-center gap-2 shrink-0 flex-wrap">
+            {previewable && <button type="button" onClick={openInViewer} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white/90 text-slate-700' : 'bg-white text-slate-700 border border-slate-200'}`}>Preview</button>}
+            <button type="button" onClick={openExternal} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white/90 text-slate-700' : 'bg-white text-indigo-700 border border-indigo-100'}`}>Open</button>
+            <a href={fileUrl} download={fileName} onClick={downloadExternal} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white text-indigo-700' : 'bg-indigo-600 text-white'}`}>Download</a>
           </div>
         </div>
       </div>
