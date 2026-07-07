@@ -86,10 +86,13 @@ export const isSessionDateMatch = (ms, dateKey) => {
 
 export const getAttendanceSessionStartMs = (log = {}, user = null) => {
   const dateKey = log.date || new Date().toLocaleDateString('en-CA');
-  const explicit = toMs(log.loginAt) || toMs(log.firstLoginAt);
-  if (explicit) return explicit;
+  const explicitCandidates = [toMs(log.loginAt), toMs(log.firstLoginAt)].filter(Boolean);
+  const sameDayExplicit = explicitCandidates.find(ms => isSessionDateMatch(ms, dateKey));
+  if (sameDayExplicit) return sameDayExplicit;
 
   // When an attendance row exists but has no persisted loginAt, recover from the user's live session.
+  // Never use a previous day's login timestamp for today's row; it creates impossible
+  // combinations like "First login today" with "Last seen three days ago".
   const userLogin = toMs(user?.lastLoginAt);
   if (isSessionDateMatch(userLogin, dateKey)) return userLogin;
 
@@ -101,6 +104,7 @@ export const getAttendanceSessionEndMs = (log = {}, user = null, now = Date.now(
   const online = user && isPresenceUserOnline(user, now);
   if (online) return now;
 
+  const dateKey = log.date || (start ? localDateKeyFromMs(start) : new Date().toLocaleDateString('en-CA'));
   const candidates = [
     toMs(log.logoutAt),
     toMs(log.lastTick),
@@ -108,7 +112,7 @@ export const getAttendanceSessionEndMs = (log = {}, user = null, now = Date.now(
     toMs(user?.lastSeenAt),
     toMs(user?.lastHeartbeatAt),
     parseDateTimeFromLogClock(log.date, log.logoutTime)
-  ].filter(Boolean).filter(ms => !start || ms >= start);
+  ].filter(Boolean).filter(ms => (!start || ms >= start) && (!dateKey || isSessionDateMatch(ms, dateKey)));
 
   if (candidates.length) return Math.max(...candidates);
   return start || 0;
@@ -375,4 +379,143 @@ export const buildAttendanceAccrual = (log = {}, now = Date.now(), isOnBreak = f
     totalBreakMinutes: (Number(log.totalBreakMinutes) || 0) + (isOnBreak ? delta : 0),
     lastTick: now
   };
+};
+
+
+export const normalizeBreakEvents = (events = [], now = Date.now()) => (
+  (Array.isArray(events) ? events : [])
+    .map((ev, index) => {
+      const start = toMs(ev.start || ev.startAt || ev.breakStartedAt);
+      const end = toMs(ev.end || ev.endAt || ev.breakEndedAt);
+      if (!start) return null;
+      const open = !end;
+      const effectiveEnd = end || now;
+      const minutes = Math.max(0, Math.floor(Number(ev.minutes || ev.durationMinutes || 0) || ((effectiveEnd - start) / 60000)));
+      return {
+        ...ev,
+        id: ev.id || `break_${start}_${index}`,
+        start,
+        end: end || null,
+        open,
+        minutes,
+        startTime: ev.startTime || formatClockTimeFromMs(start),
+        endTime: ev.endTime || (end ? formatClockTimeFromMs(end) : ''),
+        label: open ? `${formatClockTimeFromMs(start)} → Live` : `${formatClockTimeFromMs(start)} → ${formatClockTimeFromMs(end)}`,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.start - a.start)
+);
+
+export const getOpenBreakEvent = (events = [], now = Date.now()) => normalizeBreakEvents(events, now).find(ev => ev.open) || null;
+
+
+export const buildAttendanceEngineV3 = ({ attendanceLogs = [], users = [], projects = [], dateKey = localDateKeyFromMs(Date.now()), now = Date.now() } = {}) => {
+  const operationalUsers = (Array.isArray(users) ? users : [])
+    .filter(user => user && String(user.status || 'APPROVED').toUpperCase() === 'APPROVED')
+    .filter(user => normalizeRole(user.role) !== PRESENCE_ROLES.ADMIN);
+  const safeLogs = Array.isArray(attendanceLogs) ? attendanceLogs : [];
+
+  const findLogForUser = (user) => safeLogs
+    .filter(log => log && log.date === dateKey && (String(log.userId || '') === String(user.id || '') || samePerson(log.name, user.name)))
+    .sort((a, b) => Math.max(toMs(b.lastTick), toMs(b.logoutAt), toMs(b.updatedAt), toMs(b.loginAt), toMs(b.firstLoginAt)) - Math.max(toMs(a.lastTick), toMs(a.logoutAt), toMs(a.updatedAt), toMs(a.loginAt), toMs(a.firstLoginAt)))[0] || null;
+
+  const rows = operationalUsers.map(user => {
+    const log = findLogForUser(user);
+    const baseBreakEvents = Array.isArray(log?.breakEvents) ? log.breakEvents : [];
+    const inferredBreakStart = ((dateKey === localDateKeyFromMs(now) && String(user.availability || '').toLowerCase() === 'break') ? (user.currentBreakStartedAt || user.breakStartedAt || user.availabilityProfile?.breakStartedAt || null) : null);
+    const openBreakExists = baseBreakEvents.some(ev => ev && (ev.start || ev.startAt) && !(ev.end || ev.endAt));
+    const rowBase = {
+      ...(log || {}),
+      id: log?.id || `${user.id || identityKey(user.name)}_${dateKey}_empty`,
+      userId: user.id,
+      name: user.name,
+      role: normalizeRole(user.role),
+      date: dateKey,
+      breakEvents: inferredBreakStart && !openBreakExists ? [...baseBreakEvents, { start: inferredBreakStart, startTime: formatClockTimeFromMs(inferredBreakStart) }] : baseBreakEvents,
+      currentBreakStartedAt: log?.currentBreakStartedAt || inferredBreakStart,
+    };
+
+    const session = deriveAttendanceSession(rowBase, user, now);
+    const hasLogin = !!session.start;
+    const isToday = dateKey === localDateKeyFromMs(now);
+    const latestPresenceMs = Math.max(toMs(user.lastHeartbeatAt), toMs(user.lastSeenAt), toMs(rowBase.lastTick), toMs(rowBase.logoutAt));
+    const freshPresence = isToday && !!latestPresenceMs && (now - latestPresenceMs) <= ONLINE_STALE_MS;
+    const onlineNow = isToday && hasLogin && (isPresenceUserOnline(user, now) || (!!rowBase.isOnline && freshPresence));
+    const onBreak = onlineNow && (String(user.availability || rowBase.status || '').toLowerCase().includes('break') || !!rowBase.currentBreakStartedAt);
+    const activeTasks = getUserActiveTasks(projects, user.name || rowBase.name);
+    const taskBusyMinutes = getAttendanceActiveTaskMinutes(rowBase, user, projects, now);
+    const savedProductiveCandidates = [
+      rowBase.productiveMinutes,
+      rowBase.productiveMinutesV3,
+      rowBase.taskBusyMinutes,
+      rowBase.activeTaskMinutes,
+      rowBase.activeMinutes,
+    ].map(v => Math.max(0, Math.floor(Number(v) || 0))).filter(Number.isFinite);
+
+    const totalLoggedInMinutes = Math.max(
+      0,
+      Math.floor(Number(rowBase.totalLoggedInMinutes) || 0),
+      session.totalLoggedInMinutes
+    );
+    const breakEvents = normalizeBreakEvents(rowBase.breakEvents, now);
+    const openBreak = getOpenBreakEvent(breakEvents, now);
+    const eventBreakMinutes = breakEvents.reduce((sum, ev) => sum + Math.max(0, Number(ev.minutes) || 0), 0);
+    const breakMinutes = Math.max(0, Math.min(totalLoggedInMinutes, Math.max(session.breakMinutes, eventBreakMinutes)));
+    // V3 rule: each daily counter is monotonic. The UI may reconstruct a lower
+    // value while projects/presence are still loading, but it must never erase a
+    // higher valid value already saved for the same user/day.
+    const rawProductive = Math.max(0, taskBusyMinutes, ...savedProductiveCandidates);
+    const productiveMinutes = Math.max(0, Math.min(rawProductive, totalLoggedInMinutes));
+    const idleMinutes = Math.max(0, totalLoggedInMinutes - productiveMinutes - breakMinutes);
+    const productivePct = totalLoggedInMinutes > 0 ? Math.min(100, Math.round((productiveMinutes / totalLoggedInMinutes) * 100)) : 0;
+    const working = onlineNow && !onBreak && (activeTasks.length > 0 || productivePct >= 90 && productiveMinutes > 0);
+    const status = onBreak ? 'On Break' : working ? 'Working' : onlineNow ? 'Online / Idle' : hasLogin ? 'Offline' : 'No Login';
+    const lastSeenMs = onlineNow ? latestPresenceMs : (session.lastSeenMs || latestPresenceMs || 0);
+    const lastSeen = onlineNow ? 'Live now' : (lastSeenMs && lastSeenMs > session.start ? formatClockTimeFromMs(lastSeenMs) : (hasLogin ? 'Offline' : 'No login today'));
+    const alert = !hasLogin
+      ? 'No login record'
+      : (!onlineNow && isToday ? 'Heartbeat stale' : (totalLoggedInMinutes >= 60 && productiveMinutes === 0 ? 'No productive time recorded' : (idleMinutes >= 30 ? `${idleMinutes}m idle` : 'Stable')));
+
+    return {
+      ...rowBase,
+      user,
+      session,
+      loginTime: getAttendanceFirstLoginLabel(rowBase, user),
+      firstLoginLabel: getAttendanceFirstLoginLabel(rowBase, user),
+      totalLoggedInMinutes,
+      productiveMinutes,
+      taskMinutes: productiveMinutes,
+      activeMinutes: productiveMinutes,
+      breakMinutes,
+      breakEvents,
+      breakCount: breakEvents.length,
+      openBreak,
+      lastBreak: breakEvents[0] || null,
+      idleMinutes,
+      productivePct,
+      onlineNow,
+      onBreak,
+      activeTasks,
+      status,
+      lastSeen,
+      lastSeenMs,
+      alert,
+      source: 'attendance-engine-v3'
+    };
+  }).sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+
+  const summary = rows.reduce((acc, row) => {
+    acc.present += row.session.start ? 1 : 0;
+    acc.online += row.onlineNow ? 1 : 0;
+    acc.working += row.status === 'Working' ? 1 : 0;
+    acc.onBreak += row.onBreak ? 1 : 0;
+    acc.totalLogged += row.totalLoggedInMinutes;
+    acc.totalActive += row.productiveMinutes;
+    acc.totalBreak += row.breakMinutes;
+    return acc;
+  }, { present: 0, online: 0, working: 0, onBreak: 0, totalLogged: 0, totalActive: 0, totalBreak: 0 });
+
+  const mostProductive = rows.slice().sort((a, b) => b.productiveMinutes - a.productiveMinutes)[0] || null;
+  return { rows, summary, mostProductive, dateKey, source: 'attendance-engine-v3' };
 };

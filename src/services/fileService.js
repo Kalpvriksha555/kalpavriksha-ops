@@ -40,9 +40,17 @@ const uploadWithXhr = (url, form, onProgress) => new Promise((resolve, reject) =
   xhr.open('POST', url, true);
   xhr.timeout = 30 * 60 * 1000; // allow large PDFs/DWGs on slow mobile data
 
+  const startedAt = Date.now();
   xhr.upload.onprogress = (event) => {
-    if (event.lengthComputable && typeof onProgress === 'function') {
-      onProgress(Math.round((event.loaded / event.total) * 100));
+    if (typeof onProgress === 'function') {
+      const loaded = Number(event.loaded || 0);
+      const total = Number(event.total || 0);
+      const percent = event.lengthComputable && total > 0 ? Math.round((loaded / total) * 100) : 0;
+      const elapsedSeconds = Math.max(0.5, (Date.now() - startedAt) / 1000);
+      const speedBps = loaded > 0 ? loaded / elapsedSeconds : 0;
+      const remainingBytes = total > loaded ? total - loaded : 0;
+      const etaSeconds = speedBps > 0 && remainingBytes > 0 ? Math.ceil(remainingBytes / speedBps) : 0;
+      onProgress({ percent, loaded, total, speedBps, etaSeconds });
     }
   };
 
@@ -93,41 +101,80 @@ export const uploadProjectFile = async (file, projectId, type, uploadedBy, onPro
   }
 };
 
-export const downloadProjectFile = async (doc = {}) => {
-  const url = getProjectFileDownloadUrl(doc);
-  if (!url) {
-    alert('This file does not have a valid download link. Please re-upload it once.');
-    return;
-  }
-
-  // Let the browser stream the file directly instead of buffering it in JS.
-  // This is safer for mobile browsers and large PDFs/DWGs.
-  const fileName = doc.name || doc.fileName || 'download';
-  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
-
+const triggerBrowserDownload = (url, fileName = 'download') => {
   const a = document.createElement('a');
   a.href = url;
   a.download = fileName;
   a.rel = 'noopener noreferrer';
-  a.target = '_blank';
-  a.style.position = 'fixed';
-  a.style.left = '-9999px';
-  a.style.top = '-9999px';
   document.body.appendChild(a);
+  a.click();
+  setTimeout(() => a.remove(), 1500);
+};
+
+export const downloadProjectFile = async (doc = {}, onProgress) => {
+  const url = getProjectFileDownloadUrl(doc);
+  if (!url) {
+    throw new Error('This file does not have a valid download link. Please re-upload it once.');
+  }
+
+  const fileName = doc.name || doc.fileName || 'download';
+  const startedAt = Date.now();
 
   try {
-    a.click();
-    if (isMobile) {
-      // Some mobile WebViews ignore programmatic downloads. Opening the same
-      // URL after the tap keeps the file accessible without changing task data.
-      setTimeout(() => {
-        try { window.open(url, '_blank', 'noopener,noreferrer'); } catch {}
-      }, 250);
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) {
+      const msg = await readServerMessage(res).catch(() => `Download failed (${res.status})`);
+      throw new Error(msg);
     }
+
+    const total = Number(res.headers.get('content-length') || doc.size || 0);
+    const reader = res.body?.getReader?.();
+    if (!reader) {
+      const blob = await res.blob();
+      if (typeof onProgress === 'function') onProgress({ percent: 100, loaded: blob.size || total, total: blob.size || total, speedBps: 0, etaSeconds: 0 });
+      const blobUrl = URL.createObjectURL(blob);
+      triggerBrowserDownload(blobUrl, fileName);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1500);
+      return { ok: true, method: 'blob' };
+    }
+
+    const chunks = [];
+    let loaded = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        loaded += value.byteLength || 0;
+        if (typeof onProgress === 'function') {
+          const elapsedSeconds = Math.max(0.5, (Date.now() - startedAt) / 1000);
+          const speedBps = loaded > 0 ? loaded / elapsedSeconds : 0;
+          const percent = total > 0 ? Math.round((loaded / total) * 100) : 0;
+          const remainingBytes = total > loaded ? total - loaded : 0;
+          const etaSeconds = speedBps > 0 && remainingBytes > 0 ? Math.ceil(remainingBytes / speedBps) : 0;
+          onProgress({ percent, loaded, total, speedBps, etaSeconds });
+        }
+      }
+    }
+
+    const blob = new Blob(chunks, { type: res.headers.get('content-type') || doc.mimeType || 'application/octet-stream' });
+    if (typeof onProgress === 'function') onProgress({ percent: 100, loaded: blob.size || loaded, total: total || blob.size || loaded, speedBps: 0, etaSeconds: 0 });
+    const blobUrl = URL.createObjectURL(blob);
+    triggerBrowserDownload(blobUrl, fileName);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1500);
+    return { ok: true, method: 'blob' };
   } catch (error) {
-    window.location.href = url;
-  } finally {
-    setTimeout(() => a.remove(), 1000);
+    // If the browser/network blocks streamed fetch even though the file URL is valid,
+    // fall back to the normal browser download flow instead of showing a false failure.
+    // Real server errors above (404/500 with a response) still throw before this block.
+    if (error instanceof TypeError || /failed to fetch|network|load failed|aborted/i.test(String(error?.message || ''))) {
+      console.warn('Tracked download stream failed; falling back to direct browser download:', error);
+      if (typeof onProgress === 'function') onProgress({ percent: 100, loaded: Number(doc.size || 0), total: Number(doc.size || 0), speedBps: 0, etaSeconds: 0, fallback: true });
+      triggerBrowserDownload(url, fileName);
+      return { ok: true, method: 'direct-fallback' };
+    }
+    console.error('Download failed:', error);
+    throw error;
   }
 };
 

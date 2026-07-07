@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { formatLastSeenDateTime, formatCallDuration, formatDateKey, formatDateTime, formatDuration, formatMinutes } from './utils/date';
 import { allProjectDocs, getCompletedDocuments, getLatestCompletedFileName, getTaskDescription, getEstimateDetails, getCompletedFileBadge } from './utils/taskDisplayUtils';
 import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass, buildPaymentTrackingUpdate, getPaymentEstimateAmount, getPaymentReceivedAmount, derivePaymentTrackingStatusFromData } from './features/finance';
-import { getBreakMinutesFromLog, getTaskBusySince, getUserActiveTasks, getUserLastCompletedAt, getUserFreeSince, getUserBusySince, getDraftingElapsedMs, getTotalLoggedInMinutesFromLog, getActiveMinutesFromLog, getAttendanceActiveTaskMinutes, buildAttendanceAccrual, deriveAttendanceSession, getAttendanceFirstLoginLabel } from './features/attendance';
+import { getBreakMinutesFromLog, getTaskBusySince, getUserActiveTasks, getUserLastCompletedAt, getUserFreeSince, getUserBusySince, getDraftingElapsedMs, getTotalLoggedInMinutesFromLog, getActiveMinutesFromLog, getAttendanceActiveTaskMinutes, buildAttendanceAccrual, deriveAttendanceSession, getAttendanceFirstLoginLabel, buildAttendanceEngineV3 } from './features/attendance';
 import { createSafeMeetingRoomName, buildJitsiUrl } from './utils/meeting';
 import { copyTextToClipboard } from './utils/clipboard';
 import { Badge, PageLoadingScreen, EmptyState, MiniEmptyState } from './components/shared';
@@ -487,13 +487,44 @@ const normalizeTeamUser = (u = {}) => {
   return createEmployeeLifecycleProfile(presenceSafe, u);
 };
 
+const getPresenceMs = (u = {}) => Math.max(
+  Number(u.lastHeartbeatAt) || 0,
+  Number(u.lastSeenAt) || 0,
+  Number(u.lastLoginAt) || 0,
+  Number(u.availabilityUpdatedAt) || 0,
+  Number(u.lastLogoutAt) || 0
+);
+
+const mergeTeamUserPresenceSafely = (prev = {}, incoming = {}) => {
+  const prevTs = getPresenceMs(prev);
+  const incomingTs = getPresenceMs(incoming);
+  const merged = { ...prev, ...incoming, id: prev.id || incoming.id };
+  const prevOnlineFresh = !!prev.isOnline && prevTs && (Date.now() - prevTs) <= ONLINE_STALE_MS;
+  const incomingStaleOffline = !incoming.isOnline && String(incoming.availability || '').toLowerCase() === 'unavailable';
+
+  // A delayed /api/state response or another idle tab must not erase a fresher
+  // live heartbeat already seen by this browser. This was the main cause of the
+  // Attendance screen jumping between two contradictory states.
+  if (prevTs > incomingTs || (prevOnlineFresh && incomingStaleOffline)) {
+    merged.isOnline = prev.isOnline;
+    merged.availability = prev.availability;
+    merged.lastSeenAt = prev.lastSeenAt;
+    merged.lastHeartbeatAt = prev.lastHeartbeatAt;
+    merged.lastLoginAt = prev.lastLoginAt;
+    merged.lastLogoutAt = prev.lastLogoutAt;
+    merged.availabilityUpdatedAt = prev.availabilityUpdatedAt;
+    merged.breakStartedAt = prev.breakStartedAt;
+  }
+  return merged;
+};
+
 const normalizeTeamUsers = (list = []) => {
   const source = (Array.isArray(list) && list.length ? list : INITIAL_USERS).map(normalizeTeamUser);
   const byKey = new Map();
   source.forEach(u => {
     const key = String(u.username || identityKey(u.name) || u.id);
     const prev = byKey.get(key) || {};
-    byKey.set(key, normalizeTeamUser({ ...prev, ...u, id: prev.id || u.id }));
+    byKey.set(key, normalizeTeamUser(mergeTeamUserPresenceSafely(prev, u)));
   });
   return [...byKey.values()];
 };
@@ -501,6 +532,40 @@ const normalizeTeamUsers = (list = []) => {
 const normalizePersonName = (name = '') => normalizeTeamUser({ name, username: name }).name || name;
 const identityKey = (value = '') => normalizePersonName(String(value || '')).toLowerCase().replace(/[^a-z0-9]/g, '');
 const samePerson = (a = '', b = '') => identityKey(a) === identityKey(b);
+
+const attendanceLogKey = (log = {}) => `${String(log.userId || log.name || log.id || '').toLowerCase().trim()}_${log.date || ''}`;
+const attendanceLogFreshness = (log = {}) => Math.max(
+  Number(log.lastTick) || 0,
+  Number(log.logoutAt) || 0,
+  Number(log.updatedAt) || 0,
+  Number(log.loginAt) || 0,
+  Number(log.firstLoginAt) || 0
+);
+const mergeAttendanceLogsStable = (existing = [], incoming = []) => {
+  const byKey = new Map();
+  [...(Array.isArray(existing) ? existing : []), ...(Array.isArray(incoming) ? incoming : [])].filter(Boolean).forEach(log => {
+    const key = attendanceLogKey(log);
+    if (!key || key === '_') return;
+    const prev = byKey.get(key);
+    if (!prev) { byKey.set(key, log); return; }
+    const prevFresh = attendanceLogFreshness(prev);
+    const nextFresh = attendanceLogFreshness(log);
+    const fresher = nextFresh >= prevFresh ? log : prev;
+    const older = nextFresh >= prevFresh ? prev : log;
+    byKey.set(key, {
+      ...older,
+      ...fresher,
+      totalLoggedInMinutes: Math.max(Number(prev.totalLoggedInMinutes) || 0, Number(log.totalLoggedInMinutes) || 0),
+      activeMinutes: Math.max(Number(prev.activeMinutes) || 0, Number(log.activeMinutes) || 0),
+      productiveMinutes: Math.max(Number(prev.productiveMinutes) || 0, Number(log.productiveMinutes) || 0),
+      totalBreakMinutes: Math.max(Number(prev.totalBreakMinutes || prev.breakMinutes) || 0, Number(log.totalBreakMinutes || log.breakMinutes) || 0),
+      loginAt: (Number(prev.loginAt) && Number(log.loginAt)) ? Math.min(Number(prev.loginAt), Number(log.loginAt)) : (Number(prev.loginAt) || Number(log.loginAt) || null),
+      firstLoginAt: (Number(prev.firstLoginAt) && Number(log.firstLoginAt)) ? Math.min(Number(prev.firstLoginAt), Number(log.firstLoginAt)) : (Number(prev.firstLoginAt) || Number(log.firstLoginAt) || null),
+      loginTime: prev.loginTime || log.loginTime || fresher.loginTime || ''
+    });
+  });
+  return [...byKey.values()];
+};
 
 const readEntryName = (entry) => typeof entry === 'string' ? entry : (entry?.name || '');
 const hasReadBy = (message, userName) => (message?.readBy || []).some(r => samePerson(readEntryName(r), userName));
@@ -774,10 +839,14 @@ const makeRevisionWorkItem = (project = {}, revision = {}, requestedBy = '') => 
     displayId: baseId,
     originalTaskId: baseId,
     isRevisionWorkItem: true,
+    showInMyTasks: true,
+    revisionAssignedAt: now,
     revisionNumber,
     revisionCode: `R${revisionNumber}`,
     taskName: `${project.taskName || makeTaskDisplayName(project)} • Revision ${revisionNumber}`,
     status: 'Revision Pending',
+    assignedAt: now,
+    assignmentVersion: now,
     priority: 'Urgent',
     createdAt: now,
     updatedAt: now,
@@ -1169,7 +1238,7 @@ const LoginScreen = ({ onLogin, users, onRecoverPassword }) => {
 };
 
 
-const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser, onOpenPerformance }) => {
+const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser, onOpenPerformance, onSelectProject }) => {
   const [selectedUser, setSelectedUser] = useState(null);
   const [newUser, setNewUser] = useState({ name: '', username: '', password: '', role: ROLES.DESIGNER });
   const [showAddForm, setShowAddForm] = useState(false);
@@ -1219,11 +1288,12 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser, onOpe
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
-            <div className="bg-slate-50 border border-slate-100 rounded-2xl p-5">
+            <button type="button" disabled={!currentTask} onClick={() => currentTask && onSelectProject?.(currentTask)} className="bg-slate-50 border border-slate-100 rounded-2xl p-5 text-left hover:border-indigo-200 hover:bg-indigo-50/40 transition-all disabled:cursor-default disabled:hover:bg-slate-50 disabled:hover:border-slate-100">
               <p className="text-xs font-black uppercase tracking-widest text-slate-400">Current Task</p>
               <p className="font-black text-slate-800 mt-2">{currentTask ? (currentTask.id || currentTask.caseId || 'Assigned case') : 'No active task'}</p>
               <p className="text-xs font-bold text-slate-400 mt-1">{currentTask ? `${currentTask.client || currentTask.customerName || 'Case'} • ${currentTask.location || currentTask.city || 'Location'}` : 'Live status only'}</p>
-            </div>
+              {currentTask && <p className="text-[10px] font-black text-indigo-500 uppercase tracking-widest mt-3">Open case</p>}
+            </button>
             <div className="bg-slate-50 border border-slate-100 rounded-2xl p-5">
               <p className="text-xs font-black uppercase tracking-widest text-slate-400">Open Work</p>
               <p className="font-black text-slate-800 mt-2">{activeTasks.length} active case{activeTasks.length === 1 ? '' : 's'}</p>
@@ -1239,11 +1309,11 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser, onOpe
           <h3 className="text-lg font-extrabold text-slate-800 mb-3 tracking-tight">Active Assignments</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {activeTasks.slice(0, 6).map(t => (
-              <div key={t.id || t.caseId} className="border-2 border-slate-100 rounded-2xl p-4 bg-white">
+              <button type="button" key={t.id || t.caseId} onClick={() => onSelectProject?.(t)} className="border-2 border-slate-100 rounded-2xl p-4 bg-white text-left hover:border-indigo-200 hover:shadow-md hover:-translate-y-0.5 transition-all">
                 <p className="font-black text-slate-800">{t.id || t.caseId}</p>
                 <p className="text-xs font-bold text-slate-500 mt-1">{t.type || t.caseType || 'Case'} • {t.location || t.city || 'Location'}</p>
-                <p className="text-[10px] font-black uppercase tracking-widest text-indigo-500 mt-3">{t.status || 'Assigned'}</p>
-              </div>
+                <p className="text-[10px] font-black uppercase tracking-widest text-indigo-500 mt-3">{t.status || 'Assigned'} • Open</p>
+              </button>
             ))}
             {activeTasks.length === 0 && <div className="md:col-span-2 text-center bg-slate-50 border border-slate-100 rounded-2xl p-8 text-slate-400 font-bold">No active assignments.</div>}
           </div>
@@ -1285,7 +1355,7 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser, onOpe
                    <tr key={u.id} className="hover:bg-slate-50">
                       <td className="px-6 py-4"><button type="button" onClick={() => setSelectedUser(u)} className="font-bold text-slate-800 hover:text-indigo-600 text-left">{u.name} <span className="text-xs text-slate-400 font-medium ml-2">({u.role})</span></button></td>
                       <td className="px-6 py-4 text-center"><span className={`px-3 py-1.5 rounded-lg border text-xs font-black ${statusClass}`}>{statusLabel}</span></td>
-                      <td className="px-6 py-4"><p className="font-black text-slate-700">{currentTask?.id || '-'}</p><p className="text-xs font-bold text-slate-400">{currentTask ? `${currentTask.type || 'Task'} • ${currentTask.location || ''}` : 'No active task'}</p></td>
+                      <td className="px-6 py-4">{currentTask ? <button type="button" onClick={() => onSelectProject?.(currentTask)} className="text-left group"><p className="font-black text-slate-700 group-hover:text-indigo-600">{currentTask?.id || '-'}</p><p className="text-xs font-bold text-slate-400">{currentTask ? `${currentTask.type || 'Task'} • ${currentTask.location || ''}` : 'No active task'}</p></button> : <><p className="font-black text-slate-700">-</p><p className="text-xs font-bold text-slate-400">No active task</p></>}</td>
                       <td className="px-6 py-4 text-center font-black text-slate-800">{activeTasks.length}</td>
                       <td className="px-6 py-4 text-center"><button type="button" onClick={() => setSelectedUser(u)} className="px-3 py-1.5 rounded-lg text-xs font-black bg-indigo-50 text-indigo-700 border border-indigo-100">Open</button></td>
                    </tr>
@@ -1384,73 +1454,58 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser, onOpe
 const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
   const [filterDate, setFilterDate] = useState(new Date().toLocaleDateString('en-CA'));
   const [monthKey, setMonthKey] = useState(new Date().toLocaleDateString('en-CA').slice(0, 7));
+  const nowMs = Date.now();
+  const teamMembers = getOperationalUsers(users && users.length ? users : INITIAL_USERS, { includeAdmins: false });
+  const attendanceEngine = buildAttendanceEngineV3({ attendanceLogs, users: teamMembers, projects, dateKey: filterDate, now: nowMs });
+  const attendanceRows = attendanceEngine.rows;
+  const attendanceSummary = attendanceEngine.summary;
+  const mostProductive = attendanceEngine.mostProductive;
   const safeLogs = Array.isArray(attendanceLogs) ? attendanceLogs : [];
-  const filteredLogs = safeLogs.filter(log => log.date === filterDate && normalizeRole(log.role) !== ROLES.ADMIN);
   const daysInMonth = (() => {
     const [year, month] = monthKey.split('-').map(Number);
     const count = new Date(year, month, 0).getDate();
     return Array.from({ length: count }, (_, i) => `${monthKey}-${String(i + 1).padStart(2, '0')}`);
   })();
-  const teamMembers = getOperationalUsers(users && users.length ? users : INITIAL_USERS, { includeAdmins: false });
-  const isPresent = (user, date) => safeLogs.some(log => String(log.userId) === String(user.id) && log.date === date);
-  const attendanceRows = teamMembers.map(user => {
-    const log = safeLogs.find(l => l.date === filterDate && (String(l.userId) === String(user.id) || samePerson(l.name, user.name)));
-    const rowBase = {
-      ...(log || {}),
-      id: log?.id || `${user.id}_${filterDate}_empty`,
-      userId: user.id,
-      name: user.name,
-      role: user.role,
-      date: filterDate,
-      logoutTime: log?.logoutTime || '',
-      activeMinutes: log?.activeMinutes || 0,
-      totalBreakMinutes: log?.totalBreakMinutes || 0,
-      currentBreakStartedAt: log?.currentBreakStartedAt || ((filterDate === new Date().toLocaleDateString('en-CA') && String(user.availability || '').toLowerCase() === 'break') ? (user.currentBreakStartedAt || user.breakStartedAt || user.availabilityProfile?.breakStartedAt || null) : null),
-      breakEvents: Array.isArray(log?.breakEvents) ? log.breakEvents : [],
-      totalLoggedInMinutes: log?.totalLoggedInMinutes || 0,
-      loginAt: log?.loginAt || null,
-      logoutAt: log?.logoutAt || null,
-      lastTick: log?.lastTick || null
-    };
-    return {
-      ...rowBase,
-      loginTime: getAttendanceFirstLoginLabel(rowBase, user)
-    };
-  }).sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  const monthlyRowFor = (user, date) => buildAttendanceEngineV3({ attendanceLogs: safeLogs, users: [user], projects, dateKey: date, now: nowMs }).rows[0] || null;
+  const getMonthlyAttendanceCell = (user, date) => {
+    const matchingLogs = safeLogs.filter(log => log && log.date === date && (String(log.userId || '') === String(user.id || '') || String(log.name || '').trim().toLowerCase() === String(user.name || '').trim().toLowerCase()));
+    const logHasSession = matchingLogs.some(log => log.loginAt || log.firstLoginAt || log.loginTime || log.firstLogin || log.totalLoggedInMinutes || log.activeMinutes || log.productiveMinutes || log.lastTick || log.logoutAt);
+    const engineRow = monthlyRowFor(user, date);
+    const present = Boolean(logHasSession || engineRow?.session?.start || engineRow?.totalLoggedInMinutes > 0 || engineRow?.productiveMinutes > 0);
+    const productive = Math.max(0, Math.floor(Number(engineRow?.productiveMinutes) || 0));
+    const logged = Math.max(0, Math.floor(Number(engineRow?.totalLoggedInMinutes) || 0));
+    return { present, productive, logged, label: present ? (productive ? formatMinutes(productive) : 'Present') : 'Absent' };
+  };
 
-  const attendanceSummary = attendanceRows.reduce((acc, log) => {
-    const user = getAttendanceUser(log, users);
-    const session = deriveAttendanceSession(log, user);
-    const logged = session.totalLoggedInMinutes;
-    const active = getAttendanceActiveTaskMinutes(log, user, projects);
-    const breaks = session.breakMinutes;
-    acc.totalLogged += logged;
-    acc.totalActive += active;
-    acc.totalBreak += breaks;
-    if (log.loginTime && log.loginTime !== '-') acc.present += 1;
-    if (isUserActuallyOnline(user)) acc.online += 1;
-    return acc;
-  }, { present: 0, online: 0, totalLogged: 0, totalActive: 0, totalBreak: 0 });
+  const statusStyle = (status) => {
+    if (status === 'Working') return 'bg-emerald-50 text-emerald-700 border-emerald-100';
+    if (status === 'Online / Idle') return 'bg-sky-50 text-sky-700 border-sky-100';
+    if (status === 'On Break') return 'bg-amber-50 text-amber-700 border-amber-100';
+    if (status === 'No Login') return 'bg-rose-50 text-rose-600 border-rose-100';
+    return 'bg-slate-50 text-slate-600 border-slate-100';
+  };
+  const statusDot = (status) => {
+    if (status === 'Working') return 'bg-emerald-500';
+    if (status === 'Online / Idle') return 'bg-sky-500';
+    if (status === 'On Break') return 'bg-amber-500';
+    if (status === 'No Login') return 'bg-rose-400';
+    return 'bg-slate-400';
+  };
 
   const handleExport = () => {
-    const headers = ["Name", "Role", "Date", "First Login", "Online/Last Seen", "Total Logged-in Time", "Active Hours", "Break Time"];
-    const rows = attendanceRows.map(log => {
-      const user = getAttendanceUser(log, users);
-      const isOnline = isUserActuallyOnline(user);
-      const lastSeen = formatLastSeenDateTime(user?.lastSeenAt || user?.lastLogoutAt || user?.lastHeartbeatAt);
-      return [
-        log.name, log.role, log.date, log.loginTime, isOnline ? "Online" : `Last seen ${lastSeen}`, formatMinutes(getTotalLoggedInMinutesFromLog(log, user)), (getAttendanceActiveTaskMinutes(log, user, projects) / 60).toFixed(1) + " hrs", formatMinutes(getBreakMinutesFromLog(log, Date.now(), user))
-      ];
-    });
+    const headers = ["Name", "Role", "Date", "First Login", "Status", "Last Seen", "Logged-in Time", "Productive Time", "Idle Time", "Break Time", "Productivity %", "Alert", "Source"];
+    const rows = attendanceRows.map(log => [
+      log.name, log.role, log.date, log.loginTime, log.status, log.lastSeen, formatMinutes(log.totalLoggedInMinutes), formatMinutes(log.productiveMinutes), formatMinutes(log.idleMinutes), formatMinutes(log.breakMinutes), `${log.productivePct}%`, log.alert, log.source
+    ]);
     exportToCSV(headers, rows, `Attendance_${filterDate}.csv`);
   };
 
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
-      <div className="flex flex-col sm:flex-row justify-between sm:items-end gap-4">
+      <div className="flex flex-col xl:flex-row justify-between xl:items-end gap-4">
         <div>
            <h2 className="text-3xl font-extrabold text-slate-800 tracking-tight flex items-center"><Users className="w-8 h-8 mr-3 text-indigo-500"/> Team Attendance</h2>
-           <p className="text-slate-500 mt-2 font-medium">Daily log and monthly present/absent snapshot visible to everyone.</p>
+           <p className="text-slate-500 mt-2 font-medium">Attendance Engine V3: one source for presence, logged-in, productive and break time.</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <input type="date" value={filterDate} onChange={(e) => setFilterDate(e.target.value)} className="border-2 border-slate-200 rounded-xl p-2.5 font-bold text-slate-700 outline-none" />
@@ -1460,80 +1515,101 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
-        <div className="bg-white rounded-2xl border-2 border-slate-100 p-4 shadow-sm"><p className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Present</p><p className="text-2xl font-black text-slate-800 mt-1">{attendanceSummary.present}/{attendanceRows.length}</p></div>
-        <div className="bg-white rounded-2xl border-2 border-emerald-100 p-4 shadow-sm"><p className="text-[11px] font-black text-emerald-500 uppercase tracking-widest">Online Now</p><p className="text-2xl font-black text-emerald-700 mt-1">{attendanceSummary.online}</p></div>
-        <div className="bg-white rounded-2xl border-2 border-slate-100 p-4 shadow-sm"><p className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Logged-in Time</p><p className="text-2xl font-black text-slate-800 mt-1">{formatMinutes(attendanceSummary.totalLogged)}</p></div>
-        <div className="bg-white rounded-2xl border-2 border-indigo-100 p-4 shadow-sm"><p className="text-[11px] font-black text-indigo-500 uppercase tracking-widest">Active Time</p><p className="text-2xl font-black text-indigo-700 mt-1">{formatMinutes(attendanceSummary.totalActive)}</p></div>
-        <div className="bg-white rounded-2xl border-2 border-amber-100 p-4 shadow-sm"><p className="text-[11px] font-black text-amber-500 uppercase tracking-widest">Break Time</p><p className="text-2xl font-black text-amber-700 mt-1">{formatMinutes(attendanceSummary.totalBreak)}</p></div>
+        <div className="bg-white rounded-3xl border border-slate-100 p-4 shadow-sm"><p className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Present Today</p><p className="text-2xl font-black text-slate-800 mt-1">{attendanceSummary.present}/{attendanceRows.length}</p><p className="text-[11px] font-bold text-slate-400 mt-1">Non-admin team</p></div>
+        <div className="bg-white rounded-3xl border border-emerald-100 p-4 shadow-sm"><p className="text-[11px] font-black text-emerald-500 uppercase tracking-widest">Working Now</p><p className="text-2xl font-black text-emerald-700 mt-1">{attendanceSummary.working}</p><p className="text-[11px] font-bold text-slate-400 mt-1">{attendanceSummary.online} online, {attendanceSummary.onBreak} break</p></div>
+        <div className="bg-white rounded-3xl border border-indigo-100 p-4 shadow-sm"><p className="text-[11px] font-black text-indigo-500 uppercase tracking-widest">Productive Time</p><p className="text-2xl font-black text-indigo-700 mt-1">{formatMinutes(attendanceSummary.totalActive)}</p><p className="text-[11px] font-bold text-slate-400 mt-1">Single V3 total</p></div>
+        <div className="bg-white rounded-3xl border border-slate-100 p-4 shadow-sm"><p className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Logged-in Time</p><p className="text-2xl font-black text-slate-800 mt-1">{formatMinutes(attendanceSummary.totalLogged)}</p><p className="text-[11px] font-bold text-slate-400 mt-1">Login to logout/live</p></div>
+        <div className="bg-white rounded-3xl border border-amber-100 p-4 shadow-sm"><p className="text-[11px] font-black text-amber-500 uppercase tracking-widest">Break Time</p><p className="text-2xl font-black text-amber-700 mt-1">{formatMinutes(attendanceSummary.totalBreak)}</p><p className="text-[11px] font-bold text-slate-400 mt-1">Approved pauses</p></div>
       </div>
 
-
-      <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm whitespace-nowrap">
-            <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
-              <tr>
-                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Team Member</th>
-                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">First Login</th>
-                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Online / Logout</th>
-                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Total Logged-in</th>
-                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Active Duration</th>
-                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Break Time</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {attendanceRows.map(log => {
-                const user = getAttendanceUser(log, users);
-                const isOnline = isUserActuallyOnline(user);
-                const session = deriveAttendanceSession(log, user);
-                const safeMinutes = getAttendanceActiveTaskMinutes(log, user, projects);
-                const hours = Math.floor(safeMinutes / 60);
-                const mins = Math.floor(safeMinutes % 60);
-                const breakMinutes = session.breakMinutes;
-                const totalLoggedInMinutes = session.totalLoggedInMinutes;
-                const breakEvents = Array.isArray(log.breakEvents) ? log.breakEvents : [];
-                return (
-                  <tr key={log.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-6 py-5"><p className="font-bold text-slate-800 text-base">{log.name}</p><p className="text-xs font-semibold text-slate-400 mt-0.5">{log.role}</p></td>
-                    <td className="px-6 py-5 font-bold text-emerald-600">{log.loginTime}</td>
-                    <td className="px-6 py-5 font-bold text-slate-600">{isOnline ? <span className="inline-flex items-center gap-2 text-emerald-600"><span className="w-2 h-2 rounded-full bg-emerald-500"></span>Online</span> : <span className="text-slate-500">Last seen {formatLastSeenDateTime(user?.lastSeenAt || user?.lastLogoutAt || user?.lastHeartbeatAt)}</span>}</td>
-                    <td className="px-6 py-5 text-right"><span className="bg-slate-50 text-slate-700 px-3 py-1.5 rounded-lg font-black">{formatMinutes(totalLoggedInMinutes)}</span></td>
-                    <td className="px-6 py-5 text-right"><span className="bg-indigo-50 text-indigo-700 px-3 py-1.5 rounded-lg font-black">{hours}h {mins}m</span></td>
-                    <td className="px-6 py-5 text-right"><span className="bg-amber-50 text-amber-700 px-3 py-1.5 rounded-lg font-black">{formatMinutes(breakMinutes)}</span>{breakEvents.length > 0 && <p className="text-[10px] text-slate-400 font-bold mt-1">{breakEvents.length} break{breakEvents.length > 1 ? 's' : ''} taken</p>}</td>
-                  </tr>
-                )
-              })}
-              {attendanceRows.length === 0 && (<tr><td colSpan={6} className="px-6 py-16 text-center text-slate-400 font-bold">No approved non-admin team members found.</td></tr>)}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
-        <div className="p-6 border-b-2 border-slate-100 flex justify-between items-center">
-          <div>
-            <h3 className="text-xl font-black text-slate-800">Monthly Attendance Sheet</h3>
-            <p className="text-sm text-slate-500 font-medium">Green = present, red = absent/no login record.</p>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="lg:col-span-2 bg-white rounded-3xl border border-slate-100 shadow-sm p-5">
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <div><h3 className="font-black text-slate-800 text-lg">Live Team Status</h3><p className="text-xs font-semibold text-slate-400">All numbers below come from Attendance Engine V3.</p></div>
+            <span className="text-xs font-black bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1.5 rounded-xl">{filterDate}</span>
           </div>
-          <span className="text-xs font-black bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1.5 rounded-xl">{monthKey}</span>
+          <div className="hidden sm:block overflow-x-auto">
+            <table className="w-full text-left text-sm whitespace-nowrap">
+              <thead className="text-slate-400 border-b border-slate-100"><tr><th className="px-3 py-3 font-black uppercase tracking-wider text-xs">Member</th><th className="px-3 py-3 font-black uppercase tracking-wider text-xs">Status</th><th className="px-3 py-3 font-black uppercase tracking-wider text-xs">Timeline</th><th className="px-3 py-3 font-black uppercase tracking-wider text-xs text-right">Logged</th><th className="px-3 py-3 font-black uppercase tracking-wider text-xs text-right">Productive</th><th className="px-3 py-3 font-black uppercase tracking-wider text-xs text-right">Break</th><th className="px-3 py-3 font-black uppercase tracking-wider text-xs">Break Record</th></tr></thead>
+              <tbody className="divide-y divide-slate-100">
+                {attendanceRows.map(log => (
+                  <tr key={log.id} className="hover:bg-slate-50/80 transition-colors">
+                    <td className="px-3 py-4"><p className="font-black text-slate-800 text-base">{log.name}</p><p className="text-xs font-semibold text-slate-400 mt-0.5">{log.role}{(log.activeTasks || [])[0]?.caseId ? ` • ${(log.activeTasks || [])[0].caseId}` : ''}</p></td>
+                    <td className="px-3 py-4"><span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-black ${statusStyle(log.status)}`}><span className={`w-2 h-2 rounded-full ${statusDot(log.status)}`}></span>{log.status}</span><p className={`text-[11px] font-bold mt-2 ${log.alert === 'Stable' ? 'text-slate-400' : 'text-amber-600'}`}>{log.alert}</p></td>
+                    <td className="px-3 py-4"><p className="font-black text-slate-700">{log.loginTime || '-'} <span className="text-slate-300">→</span> {log.onlineNow ? 'Live' : log.lastSeen}</p><div className="mt-2 h-2 rounded-full bg-slate-100 overflow-hidden"><div className="h-full bg-indigo-500 rounded-full" style={{width: `${log.productivePct}%`}}></div></div><p className="text-[10px] font-bold text-slate-400 mt-1">Productivity {log.productivePct}%</p></td>
+                    <td className="px-3 py-4 text-right"><span className="bg-slate-50 text-slate-700 px-3 py-1.5 rounded-lg font-black">{formatMinutes(log.totalLoggedInMinutes)}</span></td>
+                    <td className="px-3 py-4 text-right"><span className="bg-indigo-50 text-indigo-700 px-3 py-1.5 rounded-lg font-black">{formatMinutes(log.productiveMinutes)}</span></td>
+                    <td className="px-3 py-4 text-right"><span className="bg-amber-50 text-amber-700 px-3 py-1.5 rounded-lg font-black">{formatMinutes(log.breakMinutes)}</span>{log.breakEvents.length > 0 && <p className="text-[10px] text-slate-400 font-bold mt-1">{log.breakEvents.length} break{log.breakEvents.length > 1 ? 's' : ''}</p>}</td>
+                    <td className="px-3 py-4 min-w-[180px]">
+                      {log.breakEvents.length > 0 ? (
+                        <div className="space-y-1">
+                          {log.breakEvents.slice(0, 2).map(ev => (
+                            <div key={ev.id || ev.start} className={`flex items-center justify-between gap-2 rounded-lg px-2 py-1 text-[11px] font-bold ${ev.open ? 'bg-amber-50 text-amber-700 border border-amber-100' : 'bg-slate-50 text-slate-500'}`}>
+                              <span>{ev.open ? 'Live break' : 'Break'}</span>
+                              <span>{ev.label} • {formatMinutes(ev.minutes)}</span>
+                            </div>
+                          ))}
+                          {log.breakEvents.length > 2 && <p className="text-[10px] font-bold text-slate-400">+{log.breakEvents.length - 2} more break record{log.breakEvents.length - 2 > 1 ? 's' : ''}</p>}
+                        </div>
+                      ) : <span className="text-xs font-bold text-slate-300">No break taken</span>}
+                    </td>
+                  </tr>
+                ))}
+                {attendanceRows.length === 0 && (<tr><td colSpan={7} className="px-6 py-16 text-center text-slate-400 font-bold">No approved non-admin team members found.</td></tr>)}
+              </tbody>
+            </table>
+          </div>
+          <div className="sm:hidden space-y-3">
+            {attendanceRows.map(log => (<div key={log.id} className="rounded-2xl border border-slate-100 p-4 shadow-sm bg-white"><div className="flex items-start justify-between gap-3"><div><p className="font-black text-slate-800">{log.name}</p><p className="text-xs font-bold text-slate-400">{log.role}</p></div><span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-black ${statusStyle(log.status)}`}><span className={`w-2 h-2 rounded-full ${statusDot(log.status)}`}></span>{log.status}</span></div><p className="mt-3 text-sm font-black text-slate-700">{log.loginTime || '-'} <span className="text-slate-300">→</span> {log.onlineNow ? 'Live' : log.lastSeen}</p><div className="grid grid-cols-3 gap-2 mt-3 text-center"><div className="bg-slate-50 rounded-xl p-2"><p className="text-[10px] font-black text-slate-400 uppercase">Logged</p><p className="font-black text-slate-700">{formatMinutes(log.totalLoggedInMinutes)}</p></div><div className="bg-indigo-50 rounded-xl p-2"><p className="text-[10px] font-black text-indigo-400 uppercase">Productive</p><p className="font-black text-indigo-700">{formatMinutes(log.productiveMinutes)}</p></div><div className="bg-amber-50 rounded-xl p-2"><p className="text-[10px] font-black text-amber-400 uppercase">Break</p><p className="font-black text-amber-700">{formatMinutes(log.breakMinutes)}</p></div></div>{log.breakEvents.length > 0 && <div className="mt-3 rounded-xl bg-amber-50 border border-amber-100 p-2 text-[11px] font-bold text-amber-700">{log.breakEvents[0].open ? 'Live break' : 'Last break'}: {log.breakEvents[0].label} • {formatMinutes(log.breakEvents[0].minutes)}</div>}<p className="text-[11px] font-bold text-slate-400 mt-3">{log.alert}</p></div>))}
+          </div>
         </div>
+
+        <div className="bg-white rounded-3xl border border-slate-100 shadow-sm p-5">
+          <h3 className="font-black text-slate-800 text-lg">Today's Insight</h3>
+          <p className="text-xs font-semibold text-slate-400 mb-4">Same V3 rows, no separate calculation.</p>
+          <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-4 mb-4">
+            <p className="text-[11px] font-black text-emerald-600 uppercase tracking-widest">Most Productive</p>
+            <p className="text-xl font-black text-slate-800 mt-2">{mostProductive?.name || '-'}</p>
+            <p className="text-sm font-black text-emerald-700 mt-2">{formatMinutes(mostProductive?.productiveMinutes || 0)}</p>
+          </div>
+          <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4 mb-4">
+            <p className="text-[11px] font-black text-amber-600 uppercase tracking-widest">Break Visibility</p>
+            <p className="text-sm font-black text-slate-800 mt-2">{attendanceSummary.onBreak > 0 ? `${attendanceSummary.onBreak} team member${attendanceSummary.onBreak > 1 ? 's' : ''} on break now` : 'No one is on break now'}</p>
+            <p className="text-xs font-bold text-amber-700 mt-1">Total today: {formatMinutes(attendanceSummary.totalBreak)}</p>
+          </div>
+          <div className="bg-slate-50 rounded-2xl p-4 text-sm text-slate-600 font-semibold space-y-3">
+            <p><span className="text-slate-800 font-black">Logged-in:</span> total time from first login to logout/live.</p>
+            <p><span className="text-slate-800 font-black">Productive:</span> V3 stable daily productive counter, capped by logged-in time.</p>
+            <p><span className="text-slate-800 font-black">Break:</span> approved break duration only.</p>
+            <p><span className="text-slate-800 font-black">Engine:</span> {attendanceEngine.source}</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-3xl border border-slate-100 shadow-sm p-5">
+        <div className="flex items-center justify-between mb-4"><div><h3 className="font-black text-slate-800 text-lg">Monthly Attendance Sheet</h3><p className="text-xs font-semibold text-slate-400">Green = present, red = absent/no login record.</p></div><span className="text-xs font-black bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1.5 rounded-xl">{monthKey}</span></div>
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs whitespace-nowrap">
-            <thead className="bg-slate-50 text-slate-500 border-b border-slate-100">
-              <tr>
-                <th className="px-4 py-4 font-black uppercase tracking-widest sticky left-0 bg-slate-50 z-10">Member</th>
-                {daysInMonth.map(d => <th key={d} className="px-2 py-4 text-center font-black">{Number(d.slice(-2))}</th>)}
+            <thead>
+              <tr className="text-slate-400 border-b border-slate-100">
+                <th className="py-2 pr-4 font-black uppercase sticky left-0 bg-white z-10">Team Member</th>
+                {daysInMonth.map(day => <th key={day} className="py-2 px-2 font-black text-center">{day.slice(-2)}</th>)}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {teamMembers.map(u => (
-                <tr key={u.id} className="hover:bg-slate-50">
-                  <td className="px-4 py-4 font-black text-slate-800 sticky left-0 bg-white z-10">{u.name}<p className="text-[10px] text-slate-400 font-bold">{u.role}</p></td>
-                  {daysInMonth.map(d => (
-                    <td key={d} className="px-2 py-4 text-center">
-                      <span className={`inline-flex w-6 h-6 rounded-full items-center justify-center text-[10px] font-black ${isPresent(u, d) ? 'bg-emerald-100 text-emerald-700' : 'bg-red-50 text-red-400'}`}>{isPresent(u, d) ? 'P' : 'A'}</span>
-                    </td>
-                  ))}
+              {teamMembers.map(user => (
+                <tr key={user.id}>
+                  <td className="py-3 pr-4 font-black text-slate-700 sticky left-0 bg-white z-10">{user.name}</td>
+                  {daysInMonth.map(day => {
+                    const cell = getMonthlyAttendanceCell(user, day);
+                    return (
+                      <td key={day} className="py-3 px-2 text-center">
+                        <span title={`${user.name} • ${day} • ${cell.label}`} className={`inline-flex h-6 min-w-6 items-center justify-center rounded-full px-1.5 text-[10px] font-black border ${cell.present ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-rose-50 text-rose-400 border-rose-100'}`}>
+                          {cell.present ? (cell.productive ? 'P' : '✓') : 'A'}
+                        </span>
+                      </td>
+                    );
+                  })}
                 </tr>
               ))}
             </tbody>
@@ -2034,6 +2110,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showEditCase, setShowEditCase] = useState(false);
   const [isUploadingFinal, setIsUploadingFinal] = useState(false);
+  const [fileTransfer, setFileTransfer] = useState({ active: false, phase: '', label: '', fileName: '', progress: 0, message: '', loaded: 0, total: 0, speedBps: 0, etaSeconds: 0, startedAt: 0 });
   const [subTaskAttachments, setSubTaskAttachments] = useState([]);
   const [noteAttachments, setNoteAttachments] = useState([]);
   const [isUploadingRevisionAttachment, setIsUploadingRevisionAttachment] = useState(false);
@@ -2252,47 +2329,187 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     }
   };
 
+  const resetFileTransferLater = (delay = 2200) => {
+    window.setTimeout(() => setFileTransfer(prev => prev.active ? prev : { active: false, phase: '', label: '', fileName: '', progress: 0, message: '', loaded: 0, total: 0, speedBps: 0, etaSeconds: 0, startedAt: 0, transferType: '', fileId: '' }), delay);
+  };
+
+  const updateFileTransfer = (patch = {}) => {
+    setFileTransfer(prev => ({ ...prev, ...patch }));
+  };
+
+  const resetFileTransfer = () => setFileTransfer({ active: false, phase: '', label: '', fileName: '', progress: 0, message: '', loaded: 0, total: 0, speedBps: 0, etaSeconds: 0, startedAt: 0 });
+
+  const normalizeTransferProgress = (progressInfo) => {
+    if (typeof progressInfo === 'number') return { percent: progressInfo };
+    if (!progressInfo || typeof progressInfo !== 'object') return { percent: 0 };
+    return {
+      percent: Number(progressInfo.percent || progressInfo.progress || 0),
+      loaded: Number(progressInfo.loaded || 0),
+      total: Number(progressInfo.total || 0),
+      speedBps: Number(progressInfo.speedBps || 0),
+      etaSeconds: Number(progressInfo.etaSeconds || 0),
+    };
+  };
+
+  const formatTransferBytes = (bytes = 0) => {
+    const n = Number(bytes || 0);
+    if (!n) return '';
+    if (n < 1024) return `${Math.round(n)} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(n < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+  };
+
+  const formatTransferEta = (seconds = 0) => {
+    const s = Math.max(0, Math.round(Number(seconds || 0)));
+    if (!s) return 'Almost done';
+    if (s < 60) return `${s}s left`;
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return r ? `${m}m ${r}s left` : `${m}m left`;
+  };
+
+  const renderWhatsAppTransferBar = (extraClass = '') => {
+    if (!fileTransfer.active) return null;
+    const progress = Math.max(0, Math.min(100, Math.round(fileTransfer.progress || 0)));
+    const isWorking = fileTransfer.phase === 'uploading' || fileTransfer.phase === 'downloading';
+    const isUpload = fileTransfer.phase === 'uploading';
+    const isDownload = fileTransfer.phase === 'downloading';
+    const tone = fileTransfer.phase === 'error' ? 'red' : fileTransfer.phase === 'complete' ? 'emerald' : 'indigo';
+    const loadedText = fileTransfer.loaded && fileTransfer.total ? `${formatTransferBytes(fileTransfer.loaded)} / ${formatTransferBytes(fileTransfer.total)}` : fileTransfer.total ? formatTransferBytes(fileTransfer.total) : '';
+    const etaText = isWorking ? formatTransferEta(fileTransfer.etaSeconds) : (fileTransfer.phase === 'complete' ? 'Complete' : fileTransfer.phase === 'error' ? 'Failed' : 'Working');
+    return (
+      <div className={`rounded-2xl border shadow-sm overflow-hidden ${tone === 'red' ? 'bg-red-50 border-red-100' : tone === 'emerald' ? 'bg-emerald-50 border-emerald-100' : 'bg-white border-indigo-100'} ${extraClass}`}>
+        <div className="p-3 sm:p-4">
+          <div className="flex items-center gap-3">
+            <div className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 ${tone === 'red' ? 'bg-red-100 text-red-600' : tone === 'emerald' ? 'bg-emerald-100 text-emerald-700' : 'bg-indigo-50 text-indigo-700'}`}>
+              {isDownload ? <Download className="w-5 h-5" /> : <Paperclip className="w-5 h-5" />}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className={`text-[11px] font-black uppercase tracking-widest ${tone === 'red' ? 'text-red-600' : tone === 'emerald' ? 'text-emerald-700' : 'text-indigo-700'}`}>{fileTransfer.label || 'File transfer'}</p>
+                  <p className="text-sm font-black text-slate-900 truncate">{fileTransfer.fileName || 'File'}</p>
+                </div>
+                <div className="text-right shrink-0">
+                  <p className="text-sm font-black text-slate-900">{progress}%</p>
+                  <p className="text-[10px] font-bold text-slate-500">{etaText}</p>
+                </div>
+              </div>
+              <div className="mt-2 h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                <div className={`h-full rounded-full transition-all duration-300 ${tone === 'red' ? 'bg-red-500' : tone === 'emerald' ? 'bg-emerald-500' : 'bg-indigo-600'}`} style={{ width: `${Math.max(isWorking ? 4 : 0, progress)}%` }} />
+              </div>
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] font-bold text-slate-500">
+                <span>{fileTransfer.message || (isUpload ? 'Uploading...' : isDownload ? 'Downloading...' : 'Working...')}</span>
+                {loadedText && <span>{loadedText}</span>}
+              </div>
+            </div>
+          </div>
+          {isUpload && <p className="text-[11px] font-bold text-indigo-600 mt-3">Keep this page open. Do not select the same file again while upload is running.</p>}
+        </div>
+      </div>
+    );
+  };
+
+  const handleTrackedDownload = async (doc) => {
+    const fileName = doc?.name || doc?.fileName || 'file';
+    if (fileTransfer.active && fileTransfer.phase !== 'complete' && fileTransfer.phase !== 'error') {
+      alert(`${fileTransfer.label || 'File transfer'} is already in progress. Please wait until it completes before starting another upload/download.`);
+      return;
+    }
+    updateFileTransfer({ active: true, phase: 'downloading', label: 'Downloading file', fileName, progress: 1, loaded: 0, total: Number(doc?.size || 0), speedBps: 0, etaSeconds: 0, startedAt: Date.now(), message: 'Preparing download...' });
+    try {
+      await downloadProjectFile(doc, (info) => {
+        const meta = normalizeTransferProgress(info);
+        const safePct = Math.max(1, Math.min(99, Number(meta.percent) || 1));
+        updateFileTransfer({
+          active: true,
+          phase: 'downloading',
+          label: 'Downloading file',
+          fileName,
+          progress: safePct,
+          loaded: meta.loaded || 0,
+          total: meta.total || Number(doc?.size || 0),
+          speedBps: meta.speedBps || 0,
+          etaSeconds: meta.etaSeconds || 0,
+          message: meta.total ? `${safePct}% downloaded` : 'Downloading file...',
+        });
+      });
+      updateFileTransfer({ active: true, phase: 'complete', label: 'Download complete', fileName, progress: 100, etaSeconds: 0, message: 'Download started in your browser.' });
+      window.setTimeout(() => resetFileTransfer(), 2600);
+    } catch (error) {
+      updateFileTransfer({ active: true, phase: 'error', label: 'Download needs attention', fileName, progress: 100, etaSeconds: 0, message: error?.message || 'Could not start download. Please try again.' });
+    }
+  };
+
   const handleFileUpload = async (type, e) => {
-    const files = e.target.files;
+    const files = Array.from(e?.target?.files || []);
     if (!files || files.length === 0) return;
+    if (fileTransfer.active && fileTransfer.phase !== 'complete' && fileTransfer.phase !== 'error') {
+      alert(`${fileTransfer.label || 'File transfer'} is already in progress. Please wait until it completes before starting another upload/download.`);
+      if (e?.target) e.target.value = '';
+      return;
+    }
     if (type === 'completed') setIsUploadingFinal(true);
 
-    try {
-    const updatedProject = { ...project };
-    if (!updatedProject.documents) updatedProject.documents = [];
-    if (!updatedProject.completedFiles) updatedProject.completedFiles = [];
+    const totalFiles = files.length;
+    const totalUploadBytes = files.reduce((sum, f) => sum + Number(f.size || 0), 0);
+    const transferStartedAt = Date.now();
+    const currentLabel = type === 'completed' ? 'Uploading final file' : type === 'working' ? 'Uploading work file' : 'Uploading source file';
+    updateFileTransfer({ active: true, phase: 'uploading', label: currentLabel, fileName: files[0]?.name || 'file', progress: 1, loaded: 0, total: totalUploadBytes, speedBps: 0, etaSeconds: 0, startedAt: transferStartedAt, message: totalFiles > 1 ? `Uploading 1 of ${totalFiles}` : 'Upload started. Please do not upload again.' });
 
-    for (const file of Array.from(files)) {
-        const uploadedDoc = await uploadProjectFile(file, project.id, type, user.name);
+    try {
+      const updatedProject = { ...project };
+      if (!updatedProject.documents) updatedProject.documents = [];
+      if (!updatedProject.completedFiles) updatedProject.completedFiles = [];
+
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        updateFileTransfer({ active: true, phase: 'uploading', label: currentLabel, fileName: file.name, message: totalFiles > 1 ? `Uploading ${index + 1} of ${totalFiles}` : 'Uploading...' });
+        const uploadedDoc = await uploadProjectFile(file, project.id, type, user.name, (info) => {
+          const meta = normalizeTransferProgress(info);
+          const safePct = Math.max(1, Math.min(99, Number(meta.percent) || 1));
+          const aggregatePct = Math.round(((index / totalFiles) * 100) + (safePct / totalFiles));
+          const previousBytes = files.slice(0, index).reduce((sum, f) => sum + Number(f.size || 0), 0);
+          const totalBytes = totalUploadBytes;
+          const loadedBytes = previousBytes + Number(meta.loaded || 0);
+          const elapsedSeconds = Math.max(0.5, (Date.now() - transferStartedAt) / 1000);
+          const speedBps = loadedBytes > 0 ? loadedBytes / elapsedSeconds : 0;
+          const remainingBytes = Math.max(0, totalBytes - loadedBytes);
+          const etaSeconds = speedBps > 0 && remainingBytes > 0 ? Math.ceil(remainingBytes / speedBps) : 0;
+          updateFileTransfer({ progress: Math.max(1, Math.min(99, aggregatePct)), loaded: loadedBytes, total: totalBytes, speedBps, etaSeconds, message: totalFiles > 1 ? `Uploading ${index + 1} of ${totalFiles} • ${safePct}%` : `${safePct}% uploaded` });
+        });
         updatedProject.documents.push(uploadedDoc);
 
         if (type === 'completed') {
           updatedProject.completedFiles.push(uploadedDoc);
         }
 
-        updatedProject.timeline = [...(updatedProject.timeline||[]), { 
-          id: Date.now() + Math.random(), 
-          text: `File uploaded: ${file.name}`, 
-          time: new Date().toLocaleString() 
+        updatedProject.timeline = [...(updatedProject.timeline||[]), {
+          id: Date.now() + Math.random(),
+          text: `File uploaded: ${file.name}`,
+          time: new Date().toLocaleString()
         }];
-    }
+      }
 
-    if (type === 'completed') {
-      updatedProject.status = 'Internal Review';
-      updatedProject.submittedAt = updatedProject.submittedAt || Date.now();
-      updatedProject.draftingCompletedAt = updatedProject.draftingCompletedAt || Date.now();
-      updatedProject.internalReviewStartedAt = updatedProject.internalReviewStartedAt || Date.now();
-      updatedProject.completedAt = null;
-      updatedProject.finalConclusion = 'Pending Internal Review';
-      updatedProject.reviewStatus = 'Pending';
-      updatedProject.subTasks = (updatedProject.subTasks || []).map(st => isSubTaskOpen(st) ? { ...st, status: 'Done', completedBy: user.name, completedAt: Date.now() } : st);
-      updatedProject.timeline.push({ id: Date.now()+3, text: 'Completed work file uploaded. Sent for internal review before final approval.', time: new Date().toLocaleString() });
-    }
+      if (type === 'completed') {
+        updatedProject.status = 'Internal Review';
+        updatedProject.submittedAt = updatedProject.submittedAt || Date.now();
+        updatedProject.draftingCompletedAt = updatedProject.draftingCompletedAt || Date.now();
+        updatedProject.internalReviewStartedAt = updatedProject.internalReviewStartedAt || Date.now();
+        updatedProject.completedAt = null;
+        updatedProject.finalConclusion = 'Pending Internal Review';
+        updatedProject.reviewStatus = 'Pending';
+        updatedProject.subTasks = (updatedProject.subTasks || []).map(st => isSubTaskOpen(st) ? { ...st, status: 'Done', completedBy: user.name, completedAt: Date.now() } : st);
+        updatedProject.timeline.push({ id: Date.now()+3, text: 'Completed work file uploaded. Sent for internal review before final approval.', time: new Date().toLocaleString() });
+      }
 
-    if (e?.target) e.target.value = '';
-    onUpdateProject(updatedProject, project);
+      if (e?.target) e.target.value = '';
+      onUpdateProject(updatedProject, project);
+      updateFileTransfer({ active: true, phase: 'complete', label: 'Upload complete', progress: 100, message: `${totalFiles} file${totalFiles > 1 ? 's' : ''} uploaded successfully.` });
+      window.setTimeout(() => resetFileTransfer(), 2600);
     } catch (error) {
       console.error('File upload failed:', error);
+      updateFileTransfer({ active: true, phase: 'error', label: 'Upload failed', progress: 100, message: error?.message || 'Please check your internet connection and try again.' });
       alert(`File upload failed: ${error?.message || 'Please check your internet connection and try again.'}`);
     } finally {
       if (type === 'completed') setIsUploadingFinal(false);
@@ -2306,10 +2523,15 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     const files = Array.from(event?.target?.files || []);
     if (files.length === 0) return;
     setUploading(true);
+    updateFileTransfer({ active: true, phase: 'uploading', label: attachmentType === 'revision' ? 'Uploading revision attachment' : 'Uploading attachment', fileName: files[0]?.name || 'attachment', progress: 1, loaded: 0, total: files.reduce((sum, f) => sum + Number(f.size || 0), 0), speedBps: 0, etaSeconds: 0, startedAt: Date.now(), message: 'Upload started. Please wait.' });
     try {
       const uploadedDocs = [];
       for (const file of files) {
-        const uploadedDoc = await uploadProjectFile(file, project.id, attachmentType, user.name);
+        const uploadedDoc = await uploadProjectFile(file, project.id, attachmentType, user.name, (info) => {
+          const meta = normalizeTransferProgress(info);
+          const safePct = Math.max(1, Math.min(99, Number(meta.percent) || 1));
+          updateFileTransfer({ active: true, phase: 'uploading', label: attachmentType === 'revision' ? 'Uploading revision attachment' : 'Uploading attachment', fileName: file.name, progress: safePct, loaded: meta.loaded || 0, total: meta.total || Number(file.size || 0), speedBps: meta.speedBps || 0, etaSeconds: meta.etaSeconds || 0, message: `${safePct}% uploaded` });
+        });
         uploadedDocs.push({
           ...uploadedDoc,
           id: uploadedDoc.id || `${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -2319,8 +2541,11 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
         });
       }
       setAttachments(prev => [...prev, ...uploadedDocs]);
+      updateFileTransfer({ active: true, phase: 'complete', label: 'Upload complete', progress: 100, message: `${uploadedDocs.length} attachment${uploadedDocs.length > 1 ? 's' : ''} uploaded successfully.` });
+      window.setTimeout(() => resetFileTransfer(), 2200);
     } catch (error) {
       console.error(`${attachmentType} attachment upload failed:`, error);
+      updateFileTransfer({ active: true, phase: 'error', label: 'Upload failed', progress: 100, message: error?.message || 'Please check your internet connection and try again.' });
       alert(`Attachment upload failed: ${error?.message || 'Please check your internet connection and try again.'}`);
     } finally {
       setUploading(false);
@@ -2350,7 +2575,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
           <button
             key={doc.id || `${doc.name}-${idx}`}
             type="button"
-            onClick={() => downloadProjectFile(doc)}
+            onClick={() => handleTrackedDownload(doc)}
             className="inline-flex items-center max-w-full text-xs font-black text-indigo-700 bg-white hover:bg-indigo-50 border border-indigo-100 px-3 py-2 rounded-xl transition-colors shadow-sm"
             title={doc.name}
           >
@@ -2428,6 +2653,10 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
       // Keep archived completed cases completed/permanent. The active revision is created as a temporary work item.
       priority: isArchivedCompletedCase ? project.priority : 'Urgent',
       status: isArchivedCompletedCase ? project.status : 'Revision Pending',
+      showInMyTasks: true,
+      revisionAssignedAt: now,
+      assignedAt: isArchivedCompletedCase ? project.assignedAt : now,
+      assignmentVersion: now,
       reviewStatus: isArchivedCompletedCase ? project.reviewStatus : 'Reverted',
       revisionRequestedAt: now,
       reviewedBy: user.name,
@@ -2885,6 +3114,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                   </label>
                 )}
              </div>
+             {renderWhatsAppTransferBar('mb-5')}
              <div className="mb-5 bg-slate-50 border border-slate-100 rounded-2xl p-4">
                <div className="flex justify-between items-center mb-3">
                  <p className="text-xs font-black text-slate-500 uppercase tracking-widest">Document readiness</p>
@@ -2907,7 +3137,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                      <span className="font-bold ml-4 truncate">{doc.name}</span>
                    </div>
                    {doc.url ? (
-                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-indigo-600 bg-white border border-slate-200 hover:bg-indigo-50 px-4 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
+                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => handleTrackedDownload(doc)} className="text-xs font-bold text-indigo-600 bg-white border border-slate-200 hover:bg-indigo-50 px-4 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
                    ) : (
                      <button type="button" className="text-xs font-bold text-slate-400 bg-slate-50 px-4 py-2 rounded-xl whitespace-nowrap cursor-not-allowed border border-slate-200">Unavailable</button>
                    )}
@@ -2930,7 +3160,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                      <span className="text-[11px] font-bold ml-3 text-blue-600 bg-blue-100 px-2 py-1 rounded-lg whitespace-nowrap hidden sm:inline-block border border-blue-200">by {doc.uploadedBy}</span>
                    </div>
                    {doc.url ? (
-                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-blue-700 bg-white hover:bg-blue-50 shadow-sm border border-blue-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
+                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => handleTrackedDownload(doc)} className="text-xs font-bold text-blue-700 bg-white hover:bg-blue-50 shadow-sm border border-blue-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
                    ) : (
                      <button type="button" className="text-xs font-bold text-slate-400 bg-slate-50 px-4 py-2 rounded-xl whitespace-nowrap cursor-not-allowed border border-slate-200">Unavailable</button>
                    )}
@@ -2950,7 +3180,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                      <span className="text-[11px] font-bold ml-3 text-emerald-600 bg-emerald-100 px-2 py-1 rounded-lg whitespace-nowrap hidden sm:inline-block border border-emerald-200">by {doc.uploadedBy}</span>
                    </div>
                    {doc.url && (
-                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-emerald-700 bg-white hover:bg-emerald-50 shadow-sm border border-emerald-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
+                     <div className="flex items-center gap-2 shrink-0"><button type="button" onClick={() => handleTrackedDownload(doc)} className="text-xs font-bold text-emerald-700 bg-white hover:bg-emerald-50 shadow-sm border border-emerald-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>{canDeleteProjectFile(doc, user) && <button type="button" onClick={() => handleFileDelete(doc)} title="Delete file" className="text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Delete</button>}</div>
                    )}
                  </div>
                ))}
@@ -2969,7 +3199,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                              <p className="text-[11px] font-bold text-purple-500">Latest revision upload • by {doc.uploadedBy || 'Team'}</p>
                            </div>
                          </div>
-                         <button type="button" onClick={() => downloadProjectFile(doc)} className="text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-100 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>
+                         <button type="button" onClick={() => handleTrackedDownload(doc)} className="text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-100 px-4 py-2 rounded-xl whitespace-nowrap transition-colors">Download</button>
                        </div>
                      ))}
                    </div>
@@ -3076,6 +3306,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
             <div className="bg-gradient-to-b from-indigo-50 to-white p-1 rounded-3xl shadow-sm border border-indigo-100">
               <div className="bg-white p-6 rounded-[1.4rem]">
                 <h2 className="text-lg font-extrabold mb-4 text-slate-800">Submit Work</h2>
+                {fileTransfer.active && fileTransfer.phase === 'uploading' && renderWhatsAppTransferBar('mb-4')}
                 <button type="button" disabled={isUploadingFinal} onClick={() => completedFileInputRef.current?.click()} className="w-full border-2 border-dashed border-indigo-200 rounded-2xl p-8 flex flex-col items-center justify-center text-center hover:bg-indigo-50 transition-colors cursor-pointer bg-slate-50/50 disabled:opacity-70 disabled:cursor-wait">
                   <div className="bg-indigo-100 p-4 rounded-2xl mb-4 shadow-sm"><Upload className="w-8 h-8 text-indigo-600" /></div>
                   <p className="font-bold text-slate-700 mb-1 text-lg">{isUploadingFinal ? 'Uploading...' : 'Upload Final File'}</p>
@@ -3275,6 +3506,8 @@ class AppErrorBoundary extends React.Component {
 
 function AppShell() {
   const [currentUser, setCurrentUser] = useState(null);
+  const currentUserRef = useRef(null);
+  useEffect(() => { currentUserRef.current = currentUser; }, [currentUser]);
   const [firebaseUser, setFirebaseUser] = useState(null);
   const [isDbReady, setIsDbReady] = useState(false);
   const [isAuthReady, setIsAuthReady] = useState(false);
@@ -3354,6 +3587,42 @@ function AppShell() {
     ...financeSafeHeaders
   }), [financeSafeHeaders]);
 
+  const postPresenceUpdate = useCallback((action = 'heartbeat', userPatch = currentUser) => {
+    if (!USE_BACKEND_STATE || !backendStateReady || !userPatch) return;
+    const identity = {
+      id: userPatch.id,
+      name: userPatch.name,
+      username: userPatch.username,
+      email: userPatch.email,
+      role: userPatch.role,
+      availability: userPatch.availability,
+      isOnline: action === 'logout' ? false : true,
+      breakStartedAt: userPatch.breakStartedAt || null
+    };
+    fetch(`${API_BASE}/api/presence`, {
+      method: 'POST',
+      headers: jsonFinanceSafeHeaders,
+      body: JSON.stringify({ action, user: identity })
+    }).then(async res => {
+      if (!res.ok) return;
+      const data = await res.json().catch(() => null);
+      // Heartbeat is a writer only. Attendance Engine V3 is painted from a
+      // single reader (/api/state). Updating users/logs from both /api/presence
+      // and /api/state was the slow flicker: two valid-but-different snapshots
+      // alternated on screen every 25-30 seconds.
+      if (action === 'heartbeat') return;
+      if (data?.user) {
+        setUsers(prev => normalizeTeamUsers((prev || []).map(u => String(u.id) === String(data.user.id) ? { ...u, ...data.user } : u)));
+        const own = currentUserRef.current;
+        if (own && String(own.id) === String(data.user.id) && action !== 'logout') {
+          setCurrentUser(prev => prev ? { ...prev, ...data.user } : prev);
+        }
+      }
+      if (Array.isArray(data?.users)) setUsers(prev => normalizeTeamUsers([...(prev || []), ...data.users]));
+      if (Array.isArray(data?.attendanceLogs)) setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, data.attendanceLogs));
+    }).catch(() => {});
+  }, [USE_BACKEND_STATE, backendStateReady, jsonFinanceSafeHeaders]);
+
   // Central production persistence: hydrate and save operational state through backend.
   // When DATABASE_URL is configured in backend/.env, this is persisted in PostgreSQL.
   useEffect(() => {
@@ -3378,7 +3647,7 @@ function AppShell() {
           try { localStorage.setItem('kalpa_chats', JSON.stringify(incomingChats)); } catch(e) {}
         }
         if (Array.isArray(data.notifications)) setNotifications(data.notifications);
-        if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(data.attendanceLogs);
+        if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, data.attendanceLogs));
         if (Array.isArray(data.performanceRecords)) setPerformanceRecords(data.performanceRecords);
         if (data.performanceSummary && typeof data.performanceSummary === 'object') setPerformanceSummary(data.performanceSummary);
         setBackendStateReady(true);
@@ -3424,7 +3693,7 @@ function AppShell() {
             return Array.from(byId.values()).sort((a,b) => Number(b.id || 0) - Number(a.id || 0));
           });
         }
-        if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(data.attendanceLogs);
+        if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, data.attendanceLogs));
         if (Array.isArray(data.performanceRecords)) setPerformanceRecords(data.performanceRecords);
         if (data.performanceSummary && typeof data.performanceSummary === 'object') setPerformanceSummary(data.performanceSummary);
       } catch (e) {}
@@ -3445,12 +3714,16 @@ function AppShell() {
     if (!USE_BACKEND_STATE || !backendStateReady || !isDbReady) return;
     const timer = setTimeout(() => {
       const payload = {
-        users: normalizeTeamUsers(users && users.length ? users : INITIAL_USERS),
+        // Attendance Engine V3 presence is owned by /api/presence.
+        // Never POST client users back through /api/state; that created a
+        // second writer which fought the heartbeat stream and caused slow flicker.
         projects: sanitizeProjectsForCache(filterDeletedProjects(projects || [])),
         deletedProjectIds: getDeletedProjectIds(),
         chatMessages: sanitizeChatsForCache(chatMessages || []),
         notifications: notifications || [],
-        attendanceLogs: attendanceLogs || []
+        // Attendance is owned by /api/presence in backend mode. Posting it here
+        // created a feedback loop where stale client snapshots overwrote fresh
+        // backend counters and made the page flicker.
       };
       fetch(`${API_BASE}/api/state`, {
         method: 'POST',
@@ -3459,7 +3732,7 @@ function AppShell() {
       }).catch(err => console.warn('Backend/PostgreSQL state save failed:', err.message));
     }, 900);
     return () => clearTimeout(timer);
-  }, [backendStateReady, isDbReady, users, projects, chatMessages, notifications, attendanceLogs, currentUser?.role, jsonFinanceSafeHeaders]);
+  }, [backendStateReady, isDbReady, projects, chatMessages, notifications, currentUser?.role, jsonFinanceSafeHeaders]);
 
   // Keep assignment/status changes live across tabs without creating storage-event loops.
   // Important: never write back to localStorage while handling an incoming sync event;
@@ -3567,7 +3840,7 @@ function AppShell() {
   }, []);
 
   useEffect(() => {
-    if (!firebaseUser || !isAuthReady) return;
+    if (!firebaseUser || !isAuthReady || USE_BACKEND_STATE) return;
 
     if (isLocalMock) {
       const savedUsers = localStorage.getItem('kalpa_users');
@@ -3661,7 +3934,7 @@ function AppShell() {
 
 
   useEffect(() => {
-    if (!firebaseUser || !isAuthReady || isLocalMock) return;
+    if (!firebaseUser || !isAuthReady || isLocalMock || USE_BACKEND_STATE) return;
     const refreshProjects = async () => {
       try {
         const snap = await getDocs(collection(db, 'artifacts', safeAppId, 'public', 'data', 'projects'));
@@ -3684,98 +3957,112 @@ function AppShell() {
   }, [firebaseUser, isAuthReady, isLocalMock]);
 
   useEffect(() => {
-    if (!currentUser || !isDbReady) return;
-    
+    if (!currentUser?.id || !isDbReady) return;
+
     const today = new Date().toLocaleDateString('en-CA');
     const logId = `${currentUser.id}_${today}`;
-    
-    const track = async () => {
-        let currentLog = attendanceLogs.find(l => l.id === logId);
-        const now = Date.now();
-        const timeStr = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
 
-        if (!currentLog) {
-            currentLog = {
-                id: logId,
-                userId: currentUser.id,
-                name: currentUser.name,
-                role: currentUser.role,
-                date: today,
-                loginTime: timeStr,
-                logoutTime: timeStr,
-                loginAt: now,
-                logoutAt: now,
-                totalLoggedInMinutes: 0,
-                activeMinutes: 0,
-                totalBreakMinutes: 0,
-                currentBreakStartedAt: currentUser.availability === 'Break' ? (currentUser.breakStartedAt || now) : null,
-                breakEvents: currentUser.availability === 'Break' ? [{ start: currentUser.breakStartedAt || now, startTime: timeStr }] : [],
-                isOnline: true,
-                status: currentUser.availability === 'Break' ? 'On Break' : 'Online',
-                lastTick: now
-            };
-            if (isLocalMock) {
-                setAttendanceLogs(prev => {
-                   const next = [...prev, currentLog];
-                   localStorage.setItem('kalpa_attendance', JSON.stringify(next));
-                   return next;
-                });
-            } else if (firebaseUser) {
-                try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'attendanceLogs', logId), currentLog); } catch(e){}
-            }
-        }
+    if (USE_BACKEND_STATE) {
+      // Backend mode: the server is the only writer for attendance counters.
+      // The browser only sends presence beats. Local timer-based mutation caused
+      // race conditions between /api/state and /api/presence and made rows jump
+      // between old/new values.
+      postPresenceUpdate('login', currentUser);
+      const heartbeatTimer = setInterval(() => {
+        const liveUser = currentUserRef.current || currentUser;
+        if (!liveUser?.id) return;
+        const beatNow = Date.now();
+        const refreshed = { ...liveUser, isOnline: true, lastSeenAt: beatNow, lastHeartbeatAt: beatNow };
+        currentUserRef.current = refreshed;
+        // Do not mutate UI users from the heartbeat loop. /api/state is the
+        // only reader that paints Attendance V3; this prevents alternating
+        // local/server snapshots from flickering the table.
+        postPresenceUpdate('heartbeat', refreshed);
+      }, 25000);
+      return () => clearInterval(heartbeatTimer);
+    }
+
+    const ensureLocalAttendanceRow = () => {
+      const liveUser = currentUserRef.current || currentUser;
+      const now = Date.now();
+      const timeStr = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+      setAttendanceLogs(prev => {
+        if ((prev || []).some(l => l.id === logId)) return prev;
+        const currentLog = {
+          id: logId,
+          userId: liveUser.id,
+          name: liveUser.name,
+          role: liveUser.role,
+          date: today,
+          loginTime: timeStr,
+          logoutTime: timeStr,
+          loginAt: liveUser.lastLoginAt || now,
+          logoutAt: now,
+          totalLoggedInMinutes: 0,
+          activeMinutes: 0,
+          totalBreakMinutes: 0,
+          currentBreakStartedAt: liveUser.availability === 'Break' ? (liveUser.breakStartedAt || now) : null,
+          breakEvents: liveUser.availability === 'Break' ? [{ start: liveUser.breakStartedAt || now, startTime: timeStr }] : [],
+          isOnline: true,
+          status: liveUser.availability === 'Break' ? 'On Break' : 'Online',
+          lastTick: now
+        };
+        const next = [...(prev || []), currentLog];
+        if (isLocalMock) localStorage.setItem('kalpa_attendance', JSON.stringify(next));
+        return next;
+      });
     };
-    track();
 
-    const interval = setInterval(() => {
-        setAttendanceLogs(prev => {
-            const currentLog = prev.find(l => l.id === logId);
-            if (!currentLog) return prev;
-            
-            const now = Date.now();
-            const isOnBreak = currentUser.availability === 'Break';
-            const accrued = buildAttendanceAccrual(currentLog, now, isOnBreak);
-            const breakStart = isOnBreak ? (currentLog.currentBreakStartedAt || currentUser.breakStartedAt || now) : null;
-            const existingEvents = Array.isArray(currentLog.breakEvents) ? currentLog.breakEvents : [];
-            const hasOpenBreak = existingEvents.some(ev => ev.start && !ev.end);
-            const breakEvents = isOnBreak && !hasOpenBreak
-                ? [...existingEvents, { start: breakStart, startTime: new Date(breakStart).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) }]
-                : existingEvents;
-            
-            const updated = {
-                ...currentLog,
-                logoutTime: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
-                logoutAt: now,
-                totalLoggedInMinutes: accrued.totalLoggedInMinutes,
-                activeMinutes: accrued.activeMinutes,
-                totalBreakMinutes: accrued.totalBreakMinutes,
-                currentBreakStartedAt: breakStart,
-                breakEvents,
-                isOnline: true,
-                status: isOnBreak ? 'On Break' : 'Online',
-                lastTick: now
-            };
+    ensureLocalAttendanceRow();
+    postPresenceUpdate('login', currentUser);
 
-            if (isLocalMock) {
-                const next = prev.map(l => l.id === logId ? updated : l);
-                localStorage.setItem('kalpa_attendance', JSON.stringify(next));
-                return next;
-            } else {
-                if (firebaseUser) setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'attendanceLogs', logId), updated).catch(e=>{});
-                return prev; 
-            }
-        });
-    }, 60000); 
-
-    const userHeartbeat = setInterval(() => {
-      const beatNow = Date.now();
-      const refreshed = { ...currentUser, isOnline: true, lastSeenAt: beatNow, lastHeartbeatAt: beatNow };
-      setCurrentUser(refreshed);
-      handleUpdateUser(refreshed);
+    const attendanceTimer = setInterval(() => {
+      const liveUser = currentUserRef.current || currentUser;
+      setAttendanceLogs(prev => {
+        const currentLog = (prev || []).find(l => l.id === logId);
+        if (!currentLog) return prev;
+        const now = Date.now();
+        const isOnBreak = liveUser.availability === 'Break';
+        const accrued = buildAttendanceAccrual(currentLog, now, isOnBreak);
+        const breakStart = isOnBreak ? (currentLog.currentBreakStartedAt || liveUser.breakStartedAt || now) : null;
+        const existingEvents = Array.isArray(currentLog.breakEvents) ? currentLog.breakEvents : [];
+        const hasOpenBreak = existingEvents.some(ev => ev.start && !ev.end);
+        const breakEvents = isOnBreak && !hasOpenBreak
+          ? [...existingEvents, { start: breakStart, startTime: new Date(breakStart).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) }]
+          : existingEvents;
+        const updated = {
+          ...currentLog,
+          logoutTime: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
+          logoutAt: now,
+          totalLoggedInMinutes: accrued.totalLoggedInMinutes,
+          activeMinutes: accrued.activeMinutes,
+          totalBreakMinutes: accrued.totalBreakMinutes,
+          currentBreakStartedAt: breakStart,
+          breakEvents,
+          isOnline: true,
+          status: isOnBreak ? 'On Break' : 'Online',
+          lastTick: now
+        };
+        const next = prev.map(l => l.id === logId ? updated : l);
+        if (isLocalMock) localStorage.setItem('kalpa_attendance', JSON.stringify(next));
+        if (!isLocalMock && firebaseUser) setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'attendanceLogs', logId), updated).catch(e=>{});
+        return next;
+      });
     }, 30000);
 
-    return () => { clearInterval(interval); clearInterval(userHeartbeat); };
-  }, [currentUser, isDbReady, firebaseUser]);
+    const heartbeatTimer = setInterval(() => {
+      const liveUser = currentUserRef.current || currentUser;
+      if (!liveUser?.id) return;
+      const beatNow = Date.now();
+      const refreshed = { ...liveUser, isOnline: true, lastSeenAt: beatNow, lastHeartbeatAt: beatNow };
+      currentUserRef.current = refreshed;
+      setUsers(prev => normalizeTeamUsers((prev || []).map(u => String(u.id) === String(refreshed.id) ? { ...u, ...refreshed } : u)));
+      if (!USE_BACKEND_STATE && firebaseUser) handleUpdateUser(refreshed);
+      postPresenceUpdate('heartbeat', refreshed);
+    }, 25000);
+
+    return () => { clearInterval(attendanceTimer); clearInterval(heartbeatTimer); };
+  }, [currentUser?.id, isDbReady, firebaseUser, postPresenceUpdate]);
 
 
   const saveLocal = (key, data) => {
@@ -4131,6 +4418,8 @@ function AppShell() {
     }
   };
 
+
+
   const handleUpdateUser = async (u) => {
     let normalizedUser = normalizeTeamUser(u);
     const changedBy = currentUser?.name || normalizedUser.name || 'System';
@@ -4160,6 +4449,45 @@ function AppShell() {
     try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'users', normalizedUser.id.toString()), normalizedUser); } catch(e){}
   };
 
+
+  const recordLoginAttendance = async (user, loginNow = Date.now()) => {
+    if (!user) return;
+    const today = new Date(loginNow).toLocaleDateString('en-CA');
+    const logId = `${user.id}_${today}`;
+    const timeStr = new Date(loginNow).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+    let updatedLog = null;
+    setAttendanceLogs(prev => {
+      const existing = prev.find(l => l.id === logId);
+      updatedLog = {
+        ...(existing || {}),
+        id: logId,
+        userId: user.id,
+        name: user.name,
+        role: user.role,
+        date: today,
+        loginTime: existing?.loginTime || timeStr,
+        firstLogin: existing?.firstLogin || existing?.loginTime || timeStr,
+        loginAt: existing?.loginAt || loginNow,
+        firstLoginAt: existing?.firstLoginAt || existing?.loginAt || loginNow,
+        logoutTime: '',
+        logoutAt: null,
+        isOnline: true,
+        status: 'Online',
+        currentBreakStartedAt: null,
+        totalLoggedInMinutes: Math.max(0, Number(existing?.totalLoggedInMinutes) || 0),
+        activeMinutes: Math.max(0, Number(existing?.activeMinutes) || 0),
+        totalBreakMinutes: Math.max(0, Number(existing?.totalBreakMinutes) || 0),
+        breakEvents: Array.isArray(existing?.breakEvents) ? existing.breakEvents : [],
+        lastTick: loginNow
+      };
+      const next = existing ? prev.map(l => l.id === logId ? updatedLog : l) : [...prev, updatedLog];
+      if (isLocalMock) localStorage.setItem('kalpa_attendance', JSON.stringify(next));
+      return next;
+    });
+    if (!isLocalMock && firebaseUser && updatedLog) {
+      try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'attendanceLogs', logId), updatedLog); } catch(e){}
+    }
+  };
 
   const updateTodayAttendance = async (patcher) => {
     if (!currentUser) return;
@@ -4204,6 +4532,7 @@ function AppShell() {
     const loginNow = Date.now();
     const onlineUser = { ...user, isOnline: true, availability: 'Available', lastLoginAt: loginNow, lastSeenAt: loginNow, lastHeartbeatAt: loginNow, availabilityUpdatedAt: loginNow, breakStartedAt: null };
     setCurrentUser(onlineUser);
+    recordLoginAttendance(onlineUser, loginNow);
     handleUpdateUser(onlineUser);
   };
 
@@ -4227,7 +4556,9 @@ function AppShell() {
         };
       });
       const logoutNow = Date.now();
-      handleUpdateUser({ ...currentUser, isOnline: false, availability: 'Unavailable', lastLogoutAt: logoutNow, lastSeenAt: logoutNow, lastHeartbeatAt: logoutNow, availabilityUpdatedAt: logoutNow, breakStartedAt: null });
+      const offlineUser = { ...currentUser, isOnline: false, availability: 'Unavailable', lastLogoutAt: logoutNow, lastSeenAt: logoutNow, lastHeartbeatAt: logoutNow, availabilityUpdatedAt: logoutNow, breakStartedAt: null };
+      handleUpdateUser(offlineUser);
+      postPresenceUpdate('logout', offlineUser);
     }
     setCurrentUser(null);
     setSelectedProject(null);
@@ -4266,6 +4597,7 @@ function AppShell() {
     });
     setCurrentUser(updated);
     handleUpdateUser(updated);
+    postPresenceUpdate(onBreak ? 'resume' : 'break', updated);
   };
 
   const handleLeadFileChange = (e) => {
@@ -4378,9 +4710,11 @@ function AppShell() {
     .filter(p => {
       if (activeTab === 'my_tasks') {
         if (normalizePersonName(p.assignedTo) !== normalizePersonName(currentUser.name)) return false;
-        // Carry-forward fix: every assigned pending task remains in My Tasks until completed,
-        // even if it was created on a previous date. Completed tasks still follow the selected date.
-        if (p.status !== 'Completed') return true;
+        const statusKey = normalizeWorkStatusForRevision(p.status || p.reviewStatus || '');
+        const isRevisionForMe = p.showInMyTasks || isRevisionWorkItem(p) || statusKey.includes('REVISION') || hasActiveRevision(p);
+        // Every assigned pending/revision task must appear instantly in My Tasks until completion,
+        // regardless of selected date. This includes temporary revision work items created from Archive.
+        if (p.status !== 'Completed' || isRevisionForMe) return true;
         if (!shouldShowOnOperationsDate(p, selectedBoardDate)) return false;
       } else if (activeTab === 'board' && !shouldShowOnOperationsDate(p, selectedBoardDate)) return false;
       const q = globalSearch.trim().toLowerCase();
@@ -4558,7 +4892,7 @@ function AppShell() {
         ) : activeTab === 'archive' ? (
           <HistoryArchiveView projects={projects} currentUser={currentUser} archiveViewState={archiveViewState} setArchiveViewState={setArchiveViewState} onSelectProject={(p) => openTaskDetail(p, 'archive')} onPaymentStatusChange={handlePaymentStatusChange} />
         ) : activeTab === 'team' ? (
-          <TeamPerformanceView users={activeUsers} projects={projects} onUpdateUser={handleUpdateUser} currentUser={currentUser} onOpenPerformance={() => setActiveTab('productivity')} />
+          <TeamPerformanceView users={activeUsers} projects={projects} onUpdateUser={handleUpdateUser} currentUser={currentUser} onOpenPerformance={() => setActiveTab('productivity')} onSelectProject={(p) => openTaskDetail(p, 'team')} />
         ) : activeTab === 'attendance' ? (
           <AttendanceView attendanceLogs={attendanceLogs} users={activeUsers} projects={projects} />
         ) : activeTab === 'profile' ? (
@@ -4672,7 +5006,9 @@ function AppShell() {
                        deletedProjectIds: getDeletedProjectIds(),
                        chatMessages: sanitizeChatsForCache(chatMessages || []),
                        notifications: notifications || [],
-                       attendanceLogs: attendanceLogs || []
+                       // Attendance is owned by /api/presence in backend mode. Posting it here
+        // created a feedback loop where stale client snapshots overwrote fresh
+        // backend counters and made the page flicker.
                      })
                    });
                    if (!saveRes.ok) throw new Error(`Backend save failed: ${saveRes.status}`);

@@ -1289,13 +1289,22 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
     return { label: 'Needs Focus', className: 'bg-red-50 text-red-700 border-red-200', note: 'Needs manager attention.' };
   };
   const getBestArea = (row) => {
+    const activeCount = Array.isArray(row.active) ? row.active.length : 0;
+    const completedCount = Array.isArray(row.completed) ? row.completed.length : 0;
+    const revisionRate = Number(row.revisionRate || 0);
+    const bestCaseType = (Array.isArray(row.caseTypeStats) ? row.caseTypeStats : [])
+      .filter(stat => Number(stat.count || 0) > 0 && Number(stat.avg || 0) > 0)
+      .slice()
+      .sort((a, b) => Number(a.avg || 0) - Number(b.avg || 0))[0];
     const entries = [
-      ['Fast completion', Number(row.scoreBreakdown?.speedScore || 0)],
-      ['Good quality', Number(row.scoreBreakdown?.qualityScore || 0)],
-      ['On-time delivery', Number(row.scoreBreakdown?.slaScore || 0)],
-      ['Low revisions', Number(row.scoreBreakdown?.revisionScore || 0)]
+      { label: bestCaseType ? `Fastest on ${bestCaseType.caseType}` : 'Fast completion', value: Number(row.scoreBreakdown?.speedScore || 0), tie: completedCount },
+      { label: revisionRate <= 0.1 ? 'Clean work with very low revisions' : 'Revision control', value: Number(row.scoreBreakdown?.revisionScore || 0), tie: 100 - Math.round(revisionRate * 20) },
+      { label: Number(row.slaPct || 0) >= 95 ? 'Reliable on-time delivery' : 'SLA discipline', value: Number(row.scoreBreakdown?.slaScore || 0), tie: Number(row.slaPct || 0) },
+      { label: 'Quality consistency', value: Number(row.scoreBreakdown?.qualityScore || 0), tie: Number(row.productivityScore || 0) },
+      { label: activeCount > 0 ? 'Handles active workload' : 'Ready for new work', value: activeCount > 0 ? Math.max(60, 100 - activeCount * 8) : 70, tie: activeCount }
     ];
-    return entries.sort((a, b) => b[1] - a[1])[0]?.[0] || 'Building history';
+    const best = entries.sort((a, b) => (b.value - a.value) || (b.tie - a.tie))[0];
+    return best?.label || 'Building history';
   };
   const getImprovementTip = (row, hasHistory) => {
     if (!hasHistory) return 'Complete one task to create a real performance baseline.';
@@ -1303,11 +1312,22 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
     const quality = Number(row.scoreBreakdown?.qualityScore || 0);
     const revision = Number(row.scoreBreakdown?.revisionScore || 0);
     const sla = Number(row.scoreBreakdown?.slaScore || 0);
-    const lowest = [['finish time', speed], ['work quality', quality], ['on-time delivery', sla], ['revision control', revision]].sort((a, b) => a[1] - b[1])[0];
-    if (lowest[0] === 'finish time') return 'Focus on reducing average completion time for similar case types.';
-    if (lowest[0] === 'work quality') return 'Review checklist before upload to improve quality score.';
-    if (lowest[0] === 'on-time delivery') return 'Prioritise older active tasks to protect SLA.';
-    return 'Reduce repeat corrections to improve revision control.';
+    const avg = Number(row.avgMins || 0);
+    const review = Number(row.avgReviewMins || 0);
+    const activeCount = Array.isArray(row.active) ? row.active.length : 0;
+    const revisionRate = Number(row.revisionRate || 0);
+    const slowCaseType = (Array.isArray(row.caseTypeStats) ? row.caseTypeStats : [])
+      .filter(stat => Number(stat.count || 0) > 0 && Number(stat.avg || 0) > 0)
+      .slice()
+      .sort((a, b) => Number(b.avg || 0) - Number(a.avg || 0))[0];
+    const options = [
+      { key: 'finish', score: speed, text: slowCaseType ? `Reduce ${slowCaseType.caseType} average time from ${displayMinutes(slowCaseType.avg)}.` : `Reduce average finish time from ${displayMinutes(avg)}.` },
+      { key: 'quality', score: quality, text: 'Use a final checklist before upload to improve quality consistency.' },
+      { key: 'review', score: Math.max(0, 100 - Math.min(100, Math.round(review / 3))), text: `Shorten review turnaround from ${displayMinutes(review)} by catching errors earlier.` },
+      { key: 'sla', score: sla, text: activeCount > 0 ? `Prioritise ${activeCount} active case${activeCount === 1 ? '' : 's'} to protect SLA.` : 'Keep fresh assignments moving so SLA does not slip.' },
+      { key: 'revision', score: revision, text: revisionRate > 0 ? `Lower revisions from ${revisionRate}/task with pre-submit checks.` : 'Maintain low revisions while increasing speed.' }
+    ];
+    return options.sort((a, b) => a.score - b.score)[0]?.text || 'Keep performance stable and avoid late task buildup.';
   };
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">

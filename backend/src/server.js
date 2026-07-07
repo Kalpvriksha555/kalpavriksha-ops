@@ -883,6 +883,184 @@ function mergeUsersPreservingLatestPresence(existing = [], incoming = []) {
   return sanitizePresenceUsers([...byId.values()]);
 }
 
+function localDateKeyFromMsServer(value) {
+  const ms = toMs(value);
+  if (!ms) return '';
+  try { return new Date(ms).toLocaleDateString('en-CA'); } catch { return ''; }
+}
+function parseAttendanceClockServer(dateKey, clockValue = '') {
+  if (!dateKey || !clockValue || clockValue === '-') return 0;
+  const raw = String(clockValue || '').trim();
+  if (!raw) return 0;
+  const direct = new Date(`${dateKey} ${raw}`).getTime();
+  if (!Number.isNaN(direct)) return direct;
+  const match24 = raw.match(/^(\d{1,2}):(\d{2})$/);
+  if (match24) {
+    const ms = new Date(`${dateKey}T${String(match24[1]).padStart(2, '0')}:${match24[2]}:00`).getTime();
+    return Number.isNaN(ms) ? 0 : ms;
+  }
+  return 0;
+}
+function normalizeAttendanceLogsForSave(logs = [], users = []) {
+  const userMap = new Map((users || []).map(u => [String(u.id), u]));
+  const byId = new Map();
+  (Array.isArray(logs) ? logs : []).forEach(raw => {
+    if (!raw) return;
+    const dateKey = raw.date || localDateKeyFromMsServer(raw.loginAt || raw.firstLoginAt || Date.now());
+    const user = userMap.get(String(raw.userId)) || (users || []).find(u => String(u.name || '').toLowerCase().trim() === String(raw.name || '').toLowerCase().trim()) || {};
+    const parsedLogin = parseAttendanceClockServer(dateKey, raw.loginTime || raw.firstLogin);
+    let loginAt = toMs(raw.loginAt) || toMs(raw.firstLoginAt) || parsedLogin;
+    if (loginAt && localDateKeyFromMsServer(loginAt) !== dateKey) loginAt = parsedLogin || 0;
+    let logoutAt = toMs(raw.logoutAt) || toMs(raw.lastTick) || parseAttendanceClockServer(dateKey, raw.logoutTime);
+    if (logoutAt && localDateKeyFromMsServer(logoutAt) !== dateKey) logoutAt = 0;
+    if (loginAt && logoutAt && logoutAt < loginAt) logoutAt = loginAt;
+    const id = raw.id || `${raw.userId || user.id || raw.name}_${dateKey}`;
+    const normalized = {
+      ...raw,
+      id,
+      userId: raw.userId || user.id || '',
+      name: raw.name || user.name || '',
+      role: normalizeRole(raw.role || user.role || 'Designer'),
+      date: dateKey,
+      loginAt: loginAt || null,
+      firstLoginAt: toMs(raw.firstLoginAt) || loginAt || null,
+      loginTime: raw.loginTime || (loginAt ? new Date(loginAt).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' }) : ''),
+      firstLogin: raw.firstLogin || raw.loginTime || (loginAt ? new Date(loginAt).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' }) : ''),
+      logoutAt: logoutAt || null,
+      logoutTime: raw.logoutTime || (logoutAt && logoutAt !== loginAt ? new Date(logoutAt).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' }) : ''),
+      totalLoggedInMinutes: Math.max(0, Math.floor(Number(raw.totalLoggedInMinutes) || 0)),
+      activeMinutes: Math.max(0, Math.floor(Number(raw.activeMinutes) || 0)),
+      totalBreakMinutes: Math.max(0, Math.floor(Number(raw.totalBreakMinutes || raw.breakMinutes || 0) || 0), (Array.isArray(raw.breakEvents) ? raw.breakEvents : []).reduce((sum, ev) => sum + Math.max(0, Math.floor(Number(ev?.minutes || 0) || ((toMs(ev?.end) && toMs(ev?.start)) ? (toMs(ev.end) - toMs(ev.start)) / 60000 : 0))), 0)),
+      breakEvents: Array.isArray(raw.breakEvents) ? raw.breakEvents : [],
+      currentBreakStartedAt: raw.currentBreakStartedAt || null,
+      lastTick: toMs(raw.lastTick) && localDateKeyFromMsServer(raw.lastTick) === dateKey ? raw.lastTick : (logoutAt || loginAt || null)
+    };
+    const prev = byId.get(id);
+    if (!prev || toMs(normalized.lastTick) >= toMs(prev.lastTick)) byId.set(id, normalized);
+  });
+  return [...byId.values()];
+}
+
+function attendanceFreshness(log = {}) {
+  return Math.max(toMs(log.lastTick), toMs(log.logoutAt), toMs(log.updatedAt), toMs(log.loginAt), toMs(log.firstLoginAt));
+}
+function attendanceIdentityKey(log = {}) {
+  const dateKey = log.date || localDateKeyFromMsServer(log.loginAt || log.firstLoginAt || Date.now());
+  const userKey = log.userId || log.name || log.id || '';
+  return `${String(userKey).toLowerCase().trim()}_${dateKey}`;
+}
+function mergeAttendanceLogsPreservingLatest(existingLogs = [], incomingLogs = [], users = []) {
+  const normalizedExisting = normalizeAttendanceLogsForSave(existingLogs || [], users || []);
+  const normalizedIncoming = normalizeAttendanceLogsForSave(incomingLogs || [], users || []);
+  const byKey = new Map();
+  for (const log of [...normalizedExisting, ...normalizedIncoming].filter(Boolean)) {
+    const key = attendanceIdentityKey(log);
+    const prev = byKey.get(key);
+    if (!prev) {
+      byKey.set(key, log);
+      continue;
+    }
+
+    const prevFresh = attendanceFreshness(prev);
+    const logFresh = attendanceFreshness(log);
+    const fresher = logFresh >= prevFresh ? log : prev;
+    const older = logFresh >= prevFresh ? prev : log;
+
+    // Attendance counters are cumulative for a day. A fresher heartbeat/state
+    // payload may sometimes miss activeMinutes/totalLoggedInMinutes while the
+    // UI is hydrating; never allow that transient lower number to erase already
+    // accrued productive time. Preserve the maximum counter values for the same
+    // user/day and use the freshest row only for presence fields.
+    byKey.set(key, {
+      ...older,
+      ...fresher,
+      totalLoggedInMinutes: Math.max(Number(prev.totalLoggedInMinutes) || 0, Number(log.totalLoggedInMinutes) || 0),
+      activeMinutes: Math.max(Number(prev.activeMinutes) || 0, Number(log.activeMinutes) || 0),
+      totalBreakMinutes: Math.max(Number(prev.totalBreakMinutes || prev.breakMinutes) || 0, Number(log.totalBreakMinutes || log.breakMinutes) || 0),
+      firstLoginAt: toMs(prev.firstLoginAt) && toMs(log.firstLoginAt) ? Math.min(toMs(prev.firstLoginAt), toMs(log.firstLoginAt)) : (toMs(prev.firstLoginAt) || toMs(log.firstLoginAt) || null),
+      loginAt: toMs(prev.loginAt) && toMs(log.loginAt) ? Math.min(toMs(prev.loginAt), toMs(log.loginAt)) : (toMs(prev.loginAt) || toMs(log.loginAt) || null),
+      loginTime: prev.loginTime || log.loginTime || fresher.loginTime || ''
+    });
+  }
+  return normalizeAttendanceLogsForSave([...byKey.values()], users || []);
+}
+
+
+function serverTodayKey(ms = Date.now()) {
+  try { return new Date(ms).toLocaleDateString('en-CA', { timeZone: process.env.ATTENDANCE_TIMEZONE || 'Asia/Kolkata' }); } catch { return localDateKeyFromMsServer(ms); }
+}
+function serverClockTime(ms = Date.now()) {
+  try { return new Date(ms).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', timeZone: process.env.ATTENDANCE_TIMEZONE || 'Asia/Kolkata' }); } catch { return new Date(ms).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' }); }
+}
+function findAttendanceLogIndex(logs = [], user = {}, dateKey = serverTodayKey()) {
+  const id = `${user.id || user.username || user.name}_${dateKey}`;
+  const nameKey = String(user.name || '').toLowerCase().trim();
+  return (logs || []).findIndex(l => String(l.id) === id || (String(l.userId || '') && String(l.userId) === String(user.id || '') && l.date === dateKey) || (nameKey && String(l.name || '').toLowerCase().trim() === nameKey && l.date === dateKey));
+}
+function upsertAttendanceFromPresence(d, user = {}, action = 'heartbeat', nowMs = Date.now()) {
+  d.attendanceLogs = Array.isArray(d.attendanceLogs) ? d.attendanceLogs : [];
+  const role = normalizeRole(user.role || 'Designer');
+  if (role === 'Admin') return null;
+  const dateKey = serverTodayKey(nowMs);
+  const timeStr = serverClockTime(nowMs);
+  const idx = findAttendanceLogIndex(d.attendanceLogs, user, dateKey);
+  const existing = idx >= 0 ? d.attendanceLogs[idx] : null;
+  const lastTick = toMs(existing?.lastTick) || toMs(existing?.logoutAt) || toMs(existing?.loginAt) || nowMs;
+  const loginAt = toMs(existing?.loginAt) || toMs(existing?.firstLoginAt) || (action === 'login' ? nowMs : toMs(user.lastLoginAt)) || nowMs;
+  const previousBreakStart = toMs(existing?.currentBreakStartedAt) || toMs(user.breakStartedAt);
+  const wasOnBreak = !!previousBreakStart || String(existing?.status || '').toLowerCase().includes('break');
+  const isBreakAction = action === 'break' || String(user.availability || '').toLowerCase() === 'break';
+  const elapsed = Math.max(0, Math.floor((nowMs - Math.max(lastTick, loginAt)) / 60000));
+  let totalLoggedInMinutes = Math.max(0, Math.floor(Number(existing?.totalLoggedInMinutes) || 0));
+  let activeMinutes = Math.max(0, Math.floor(Number(existing?.activeMinutes) || 0));
+  let totalBreakMinutes = Math.max(0, Math.floor(Number(existing?.totalBreakMinutes || existing?.breakMinutes || 0) || 0));
+  if (existing && action !== 'login') {
+    totalLoggedInMinutes += elapsed;
+    if (wasOnBreak) totalBreakMinutes += elapsed; else activeMinutes += elapsed;
+  }
+  const events = Array.isArray(existing?.breakEvents) ? [...existing.breakEvents] : [];
+  if (action === 'break' && !events.some(ev => ev.start && !ev.end)) {
+    events.push({ id: `break_${nowMs}`, start: nowMs, startTime: timeStr, source: 'presence' });
+  }
+  if ((action === 'resume' || action === 'logout') && events.some(ev => ev.start && !ev.end)) {
+    for (const ev of events) {
+      if (ev.start && !ev.end) {
+        ev.end = nowMs;
+        ev.endTime = timeStr;
+        ev.minutes = Math.floor(Math.max(0, nowMs - Number(ev.start)) / 60000);
+        ev.source = ev.source || 'presence';
+      }
+    }
+  }
+  const isLogout = action === 'logout';
+  const log = {
+    ...(existing || {}),
+    id: existing?.id || `${user.id || user.username || user.name}_${dateKey}`,
+    userId: existing?.userId || user.id || '',
+    name: existing?.name || user.name || user.username || '',
+    role,
+    date: dateKey,
+    loginAt,
+    firstLoginAt: toMs(existing?.firstLoginAt) || loginAt,
+    loginTime: existing?.loginTime || serverClockTime(loginAt),
+    firstLogin: existing?.firstLogin || existing?.loginTime || serverClockTime(loginAt),
+    logoutAt: nowMs,
+    logoutTime: timeStr,
+    totalLoggedInMinutes,
+    activeMinutes,
+    totalBreakMinutes,
+    currentBreakStartedAt: isBreakAction && !isLogout ? (previousBreakStart || nowMs) : null,
+    breakEvents: events,
+    isOnline: !isLogout,
+    status: isLogout ? 'Logged Out' : (isBreakAction ? 'On Break' : 'Online'),
+    lastTick: nowMs,
+    presenceSource: 'backend-heartbeat-v3'
+  };
+  if (idx >= 0) d.attendanceLogs[idx] = log; else d.attendanceLogs.push(log);
+  d.attendanceLogs = normalizeAttendanceLogsForSave(d.attendanceLogs, d.users || []);
+  return log;
+}
+
 function findUserIndexByIdentity(users = [], identity = {}) {
   const wantedKeys = new Set([
     teamIdentityKey(identity),
@@ -930,7 +1108,9 @@ function applyPresenceUpdate(d, userPatch = {}, action = 'heartbeat') {
   }
   if (idx >= 0) d.users[idx] = next; else d.users.push(next);
   d.users = sanitizePresenceUsers(d.users);
-  return next;
+  const savedUser = d.users[findUserIndexByIdentity(d.users, next)] || next;
+  upsertAttendanceFromPresence(d, savedUser, action, nowMs);
+  return savedUser;
 }
 
 
@@ -1471,7 +1651,7 @@ app.post('/api/presence', (req, res) => {
     const safeAction = ['login','heartbeat','break','resume','logout'].includes(action) ? action : 'heartbeat';
     const user = applyPresenceUpdate(d, userPatch, safeAction);
     save(d);
-    res.json({ ok:true, user, users:sanitizePresenceUsers(d.users || []) });
+    res.json({ ok:true, user, users:sanitizePresenceUsers(d.users || []), attendanceLogs:d.attendanceLogs || [] });
   } catch (e) {
     res.status(500).json({ ok:false, error:e.message || 'Presence update failed.' });
   }
@@ -1493,7 +1673,7 @@ app.post('/api/state',(req,res)=>{
     : dedupeRenamedCases(filterDeletedCases(d.cases || [], d.deletedProjectIds || []), d.deletedProjectIds || []);
   d.teamChat = Array.isArray(body.chatMessages) ? body.chatMessages : (Array.isArray(body.teamChat) ? body.teamChat : d.teamChat);
   d.notifications = Array.isArray(body.notifications) ? body.notifications : d.notifications;
-  d.attendanceLogs = Array.isArray(body.attendanceLogs) ? body.attendanceLogs : d.attendanceLogs;
+  d.attendanceLogs = Array.isArray(body.attendanceLogs) ? mergeAttendanceLogsPreservingLatest(d.attendanceLogs || [], body.attendanceLogs, d.users || []) : normalizeAttendanceLogsForSave(d.attendanceLogs || [], d.users || []);
   d.payments = isFinanceAdmin && Array.isArray(body.payments) ? body.payments : d.payments;
   d.audit = isFinanceAdmin && Array.isArray(body.audit) ? body.audit : d.audit;
   save(d);
