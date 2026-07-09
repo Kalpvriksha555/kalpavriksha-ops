@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { createPortal } from 'react-dom';
 import { formatLastSeenDateTime, formatCallDuration, formatDateKey, formatDateTime, formatDuration, formatMinutes } from './utils/date';
 import { allProjectDocs, getCompletedDocuments, getLatestCompletedFileName, getTaskDescription, getEstimateDetails, getCompletedFileBadge } from './utils/taskDisplayUtils';
 import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass, buildPaymentTrackingUpdate, getPaymentEstimateAmount, getPaymentReceivedAmount, derivePaymentTrackingStatusFromData } from './features/finance';
@@ -8,6 +7,7 @@ import { createSafeMeetingRoomName, buildJitsiUrl } from './utils/meeting';
 import { copyTextToClipboard } from './utils/clipboard';
 import { Badge, PageLoadingScreen, EmptyState, MiniEmptyState } from './components/shared';
 import { LocalModeBanner, DatabasePermissionBanner, TopNavigation, MobileSearchBar, MainTabNavigation, MobileBottomNavigation } from './components/layout';
+import { PortalLayer } from './components/ui/LayerPortal';
 import { ActiveToasts } from './features/notifications';
 import { ProfileView } from './features/profile';
 import { CalculatorView } from './features/calculator';
@@ -16,7 +16,7 @@ import { CommunicationHub } from './features/chat';
 import { HistoryArchiveView } from './features/archive';
 import { CommandCentreView, ProductivityDashboard, DailyClosingReport, ReportsAnalyticsView, ProductionQAView, SystemSettingsView } from './features/command-centre';
 import { ActiveOperationsView } from './features/operations';
-import { getStatusColor, getPriorityColor } from './services/taskService';
+import { getStatusColor, getPriorityColor, fetchBackendState, createTaskApi, saveBackendStateApi, deleteTaskApi, mergeTaskLists, persistTasksToLocalCache } from './services/taskService';
 import { API_BASE, USE_BACKEND_STATE, ONLINE_STALE_MS, MAX_INLINE_DATA_URL_CHARS } from './config/appConfig';
 import { fileToBase64, cleanFileName } from './utils/fileUtils';
 import { absoluteApiUrl, getProjectFileDownloadUrl, getProjectFilePreviewUrl, isProjectFilePdf, isProjectFileImage, getProjectFileKind, canPreviewProjectFile, fetchProjectFilePreview, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile, getProjectFileCacheKey, listCachedProjectFiles, openCachedProjectFile, clearCachedProjectFile, pruneExpiredProjectFileCache } from './services/fileService';
@@ -740,13 +740,13 @@ const mergeProjectsByFreshness = (current = [], incoming = []) => {
 };
 
 const persistAndBroadcastProjects = (projects) => {
-  const normalized = filterDeletedProjects(applyAssignmentLedgerToProjects(normalizeProjectRecords(projects)));
+  const normalized = filterDeletedProjects(applyAssignmentLedgerToProjects(normalizeProjectRecords(mergeTaskLists([], projects))));
   normalized.forEach(recordAssignmentLedger);
-  const compact = sanitizeProjectsForCache(normalized);
-  try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(compact)); } catch(e) {}
-  try { localStorage.setItem('kalpa_projects', JSON.stringify(compact)); } catch(e) {}
-  broadcastProjectsSync(compact);
-  return normalized;
+  return persistTasksToLocalCache(normalized, {
+    sanitize: sanitizeProjectsForCache,
+    filterDeleted: filterDeletedProjects,
+    broadcast: broadcastProjectsSync
+  });
 };
 
 const getFileIcon = (filename) => {
@@ -3108,9 +3108,9 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
 
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
-      {filePreview && createPortal((
-        <div className="fixed inset-0 z-[9999] bg-slate-950/75 backdrop-blur-sm p-2 sm:p-5 flex items-center justify-center">
-          <div className="bg-white w-full max-w-7xl h-[92vh] rounded-[1.75rem] shadow-2xl border border-slate-200 overflow-hidden flex flex-col">
+      {filePreview && (
+        <PortalLayer isOpen={Boolean(filePreview)} className="kalpa-preview-layer fixed inset-0 bg-slate-950/75 backdrop-blur-sm p-2 sm:p-5 flex items-center justify-center" lockScrollClass="kalpa-preview-open" role="dialog" ariaModal={true} ariaLabel="File preview">
+          <div className="kalpa-preview-card bg-white w-full max-w-7xl h-[92vh] rounded-[1.75rem] shadow-2xl border border-slate-200 overflow-hidden flex flex-col">
             <div className="px-4 sm:px-6 py-3 border-b border-slate-100 flex items-center justify-between gap-3 bg-slate-50/90">
               <div className="min-w-0 flex items-center gap-3">
                 <div className={`${filePreview.kind === 'image' ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-red-50 text-red-600 border-red-100'} w-10 h-10 rounded-2xl flex items-center justify-center border shrink-0`}>
@@ -3178,8 +3178,8 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
               </div>
             </div>
           </div>
-        </div>
-      ), document.body)}
+        </PortalLayer>
+      )}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-5 bg-white p-5 rounded-3xl border-2 border-slate-100 shadow-sm">
         <div className="flex items-center space-x-5">
           <button type="button" onClick={onBack} className="p-3 bg-slate-50 hover:bg-slate-100 rounded-xl transition-colors flex-shrink-0 border border-slate-200">
@@ -3971,6 +3971,28 @@ function AppShell() {
     }).catch(() => {});
   }, [USE_BACKEND_STATE, backendStateReady, jsonFinanceSafeHeaders]);
 
+  const applyProjectSnapshot = useCallback((incomingProjects = [], options = {}) => {
+    if (!Array.isArray(incomingProjects)) return;
+    const { persistCache = true, updateSelected = true, source = 'unknown' } = options;
+    const incoming = filterDeletedProjects(sanitizeProjectsForCache(incomingProjects));
+    confirmPendingCreatedProjectsAgainstServer(incoming);
+    setProjects(prev => {
+      const merged = filterDeletedProjects(protectRecentlyCreatedProjects(incoming, prev));
+      const prevFingerprint = (prev || []).map(p => `${p.id}:${p.updatedAt || 0}:${p.assignmentVersion || 0}:${p.assignedTo || ''}:${p.status || ''}`).sort().join('|');
+      const mergedFingerprint = (merged || []).map(p => `${p.id}:${p.updatedAt || 0}:${p.assignmentVersion || 0}:${p.assignedTo || ''}:${p.status || ''}`).sort().join('|');
+      if (mergedFingerprint === prevFingerprint) return prev;
+      if (persistCache) {
+        try {
+          const compact = sanitizeProjectsForCache(merged);
+          localStorage.setItem('kalpa_projects_backup', JSON.stringify(compact));
+          localStorage.setItem('kalpa_projects', JSON.stringify(compact));
+        } catch(e) {}
+      }
+      if (updateSelected) setSelectedProject(sel => sel ? (merged.find(project => String(project.id) === String(sel.id)) || sel) : sel);
+      return merged;
+    });
+  }, []);
+
   // Central production persistence: hydrate and save operational state through backend.
   // When DATABASE_URL is configured in backend/.env, this is persisted in PostgreSQL.
   useEffect(() => {
@@ -3978,20 +4000,12 @@ function AppShell() {
     let cancelled = false;
     const hydrate = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/state`, { cache: 'no-store', headers: financeSafeHeaders });
-        if (!res.ok) throw new Error(`Backend state failed: ${res.status}`);
-        const data = await res.json();
+        const data = await fetchBackendState({ apiBase: API_BASE, headers: financeSafeHeaders });
         if (cancelled) return;
         if (Array.isArray(data.users) && data.users.length) setUsers(normalizeTeamUsers(data.users));
         if (Array.isArray(data.deletedProjectIds)) rememberDeletedProjects(data.deletedProjectIds);
         if (Array.isArray(data.projects)) {
-          const incoming = filterDeletedProjects(sanitizeProjectsForCache(data.projects));
-          confirmPendingCreatedProjectsAgainstServer(incoming);
-          setProjects(prev => {
-            const merged = filterDeletedProjects(protectRecentlyCreatedProjects(incoming, prev));
-            try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(sanitizeProjectsForCache(merged))); localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(merged))); } catch(e) {}
-            return merged;
-          });
+          applyProjectSnapshot(data.projects, { source: 'backend-hydrate' });
         }
         if (Array.isArray(data.chatMessages)) {
           const incomingChats = sanitizeChatsForCache(data.chatMessages);
@@ -4012,7 +4026,7 @@ function AppShell() {
     };
     hydrate();
     return () => { cancelled = true; };
-  }, [financeSafeHeaders]);
+  }, [financeSafeHeaders, applyProjectSnapshot]);
 
   // Production presence poll: all roles use the same backend truth for users,
   // so Admin/Manager/Designer screens do not disagree about online/offline state.
@@ -4021,19 +4035,12 @@ function AppShell() {
     let cancelled = false;
     const refreshPresence = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/state`, { cache: 'no-store', headers: financeSafeHeaders });
-        const data = await res.json().catch(() => ({}));
+        const data = await fetchBackendState({ apiBase: API_BASE, headers: financeSafeHeaders });
         if (cancelled || !Array.isArray(data.users)) return;
         setUsers(prev => normalizeTeamUsers([...(prev || []), ...data.users]));
         if (Array.isArray(data.deletedProjectIds)) rememberDeletedProjects(data.deletedProjectIds);
         if (Array.isArray(data.projects)) {
-          const incomingProjects = filterDeletedProjects(sanitizeProjectsForCache(data.projects));
-          confirmPendingCreatedProjectsAgainstServer(incomingProjects);
-          setProjects(prev => {
-            const merged = filterDeletedProjects(protectRecentlyCreatedProjects(incomingProjects, prev));
-            try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(sanitizeProjectsForCache(merged))); localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(merged))); } catch(e) {}
-            return merged;
-          });
+          applyProjectSnapshot(data.projects, { source: 'backend-poll' });
         }
         if (Array.isArray(data.chatMessages)) {
           setChatMessages(prev => {
@@ -4064,7 +4071,7 @@ function AppShell() {
       window.removeEventListener('focus', refreshPresence);
       document.removeEventListener('visibilitychange', refreshPresence);
     };
-  }, [backendStateReady, financeSafeHeaders]);
+  }, [backendStateReady, financeSafeHeaders, applyProjectSnapshot]);
 
   useEffect(() => {
     if (!USE_BACKEND_STATE || !backendStateReady || !isDbReady) return;
@@ -4081,10 +4088,11 @@ function AppShell() {
         // created a feedback loop where stale client snapshots overwrote fresh
         // backend counters and made the page flicker.
       };
-      fetch(`${API_BASE}/api/state`, {
-        method: 'POST',
+      saveBackendStateApi({
+        apiBase: API_BASE,
         headers: jsonFinanceSafeHeaders,
-        body: JSON.stringify({ ...payload, currentUserRole: currentUser?.role || '' })
+        currentUserRole: currentUser?.role || '',
+        payload
       }).catch(err => console.warn('Backend/PostgreSQL state save failed:', err.message));
     }, 900);
     return () => clearTimeout(timer);
@@ -4105,21 +4113,16 @@ function AppShell() {
         if (cancelled || !project?.id) continue;
         try {
           markPendingCreatedAttempt(project.id);
-          const res = await fetch(`${API_BASE}/api/state/projects`, {
-            method: 'POST',
+          const data = await createTaskApi({
+            apiBase: API_BASE,
             headers: jsonFinanceSafeHeaders,
-            body: JSON.stringify({ currentUserRole: currentUser?.role || '', project: sanitizeProjectForCache(project) })
+            currentUserRole: currentUser?.role || '',
+            task: sanitizeProjectForCache(project)
           });
-          if (!res.ok) continue;
-          const data = await res.json().catch(() => ({}));
           const savedProject = data.project || data.case || project;
           forgetPendingCreatedProjects(project.id, project.caseId);
           rememberRecentCreatedProject(savedProject);
-          setProjects(prev => {
-            const merged = filterDeletedProjects(protectRecentlyCreatedProjects([savedProject], prev));
-            try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(sanitizeProjectsForCache(merged))); localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(merged))); } catch(e) {}
-            return merged;
-          });
+          applyProjectSnapshot([savedProject], { source: 'pending-create-confirmed' });
         } catch(e) {
           console.warn('Pending task save retry failed:', e.message);
         }
@@ -4130,7 +4133,7 @@ function AppShell() {
     window.addEventListener('online', flushPendingCreatedProjects);
     window.addEventListener('focus', flushPendingCreatedProjects);
     return () => { cancelled = true; clearInterval(timer); window.removeEventListener('online', flushPendingCreatedProjects); window.removeEventListener('focus', flushPendingCreatedProjects); };
-  }, [USE_BACKEND_STATE, backendStateReady, isDbReady, jsonFinanceSafeHeaders, currentUser?.role]);
+  }, [USE_BACKEND_STATE, backendStateReady, isDbReady, jsonFinanceSafeHeaders, currentUser?.role, applyProjectSnapshot]);
 
   // Keep assignment/status changes live across tabs without creating storage-event loops.
   // Important: never write back to localStorage while handling an incoming sync event;
@@ -4153,14 +4156,7 @@ function AppShell() {
       if (fingerprint && fingerprint === lastProjectSyncFingerprintRef.current) return;
       lastProjectSyncFingerprintRef.current = fingerprint;
 
-      setProjects(prev => {
-        const merged = filterDeletedProjects(protectRecentlyCreatedProjects(compactIncoming, prev));
-        const mergedFingerprint = makeFingerprint(merged);
-        const prevFingerprint = makeFingerprint(prev);
-        if (mergedFingerprint === prevFingerprint) return prev;
-        setSelectedProject(sel => sel ? (merged.find(p => String(p.id) === String(sel.id)) || sel) : sel);
-        return merged;
-      });
+      applyProjectSnapshot(compactIncoming, { persistCache: false, source: 'cross-tab' });
     };
 
     const handleBroadcast = (event) => {
@@ -4191,7 +4187,7 @@ function AppShell() {
       try { opsBroadcast?.removeEventListener('message', handleBroadcast); } catch (e) {}
       window.removeEventListener('storage', handleStorage);
     };
-  }, []);
+  }, [applyProjectSnapshot]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -4251,7 +4247,7 @@ function AppShell() {
       setUsers(normalizeTeamUsers(savedUsers ? JSON.parse(savedUsers) : INITIAL_USERS));
       const localProjects = savedProjects ? JSON.parse(savedProjects) : [];
       const backupProjects = savedProjectsBackup ? JSON.parse(savedProjectsBackup) : [];
-      setProjects(filterDeletedProjects(mergeProjectsByFreshness(sanitizeProjectsForCache(localProjects), sanitizeProjectsForCache(backupProjects))));
+      setProjects(filterDeletedProjects(protectRecentlyCreatedProjects(sanitizeProjectsForCache(localProjects), sanitizeProjectsForCache(backupProjects))));
       setChatMessages(savedChats ? sanitizeChatsForCache(JSON.parse(savedChats)) : []);
       setNotifications(savedNotifs ? JSON.parse(savedNotifs) : []);
       setAttendanceLogs(savedLogs ? JSON.parse(savedLogs) : []);
@@ -4277,7 +4273,8 @@ function AppShell() {
           const cloudProjects = filterDeletedProjects(sanitizeProjectsForCache(snap.docs.map(doc => doc.data())));
           if (cloudProjects.length > 0) {
             setProjects(prev => {
-              const merged = filterDeletedProjects(mergeProjectsByFreshness(prev, cloudProjects));
+              confirmPendingCreatedProjectsAgainstServer(cloudProjects);
+              const merged = filterDeletedProjects(protectRecentlyCreatedProjects(cloudProjects, prev));
               try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(merged)); localStorage.setItem('kalpa_projects', JSON.stringify(merged)); merged.forEach(recordAssignmentLedger); } catch(e) {}
               return merged;
             });
@@ -4339,7 +4336,8 @@ function AppShell() {
         const cloudProjects = filterDeletedProjects(sanitizeProjectsForCache(snap.docs.map(d => d.data())));
         if (cloudProjects.length) {
           setProjects(prev => {
-            const merged = filterDeletedProjects(mergeProjectsByFreshness(prev, cloudProjects));
+            confirmPendingCreatedProjectsAgainstServer(cloudProjects);
+            const merged = filterDeletedProjects(protectRecentlyCreatedProjects(cloudProjects, prev));
             try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(merged)); localStorage.setItem('kalpa_projects', JSON.stringify(merged)); merged.forEach(recordAssignmentLedger); } catch(e) {}
             setSelectedProject(sel => sel ? (merged.find(p => String(p.id) === String(sel.id)) || sel) : sel);
             return merged;
@@ -4573,7 +4571,7 @@ function AppShell() {
     }
 
     if (changedPrimaryTaskId && USE_BACKEND_STATE) {
-      try { await fetch(`${API_BASE}/api/state/projects/${encodeURIComponent(oldProject.id)}`, { method: 'DELETE' }); } catch(e) {}
+      try { await deleteTaskApi({ apiBase: API_BASE, taskId: oldProject.id, headers: jsonFinanceSafeHeaders }); } catch(e) {}
     }
 
     normalizedSpawned.forEach(spawned => {
@@ -4649,8 +4647,7 @@ function AppShell() {
      } catch(e) {}
      try {
        if (USE_BACKEND_STATE) {
-         const res = await fetch(`${API_BASE}/api/state/projects/${encodeURIComponent(id)}`, { method: 'DELETE' });
-         const data = await res.json().catch(() => ({}));
+         const data = await deleteTaskApi({ apiBase: API_BASE, taskId: id, headers: jsonFinanceSafeHeaders });
          if (Array.isArray(data.deletedProjectIds)) rememberDeletedProjects(data.deletedProjectIds);
        }
      } catch (e) { console.warn('Backend delete failed after local deletion:', e); }
@@ -5331,15 +5328,18 @@ function AppShell() {
 
       {!selectedProject && !showNewLead && <MobileBottomNavigation currentUser={currentUser} ROLES={ROLES} activeTab={activeTab} setActiveTab={setActiveTab} unreadNotifs={unreadNotifs} />}
 
-      {showNewLead && createPortal((
-        <div className="kalpa-lead-modal fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex justify-center items-start p-4" role="dialog" aria-modal="true" aria-label="Create task">
-          <div className="kalpa-lead-modal-card bg-white rounded-[2rem] w-full max-w-4xl max-h-[calc(100dvh-2rem)] overflow-y-auto p-8 shadow-2xl animate-in zoom-in-95 duration-200 custom-scrollbar">
-             <div className="flex justify-between items-center mb-8 border-b-2 border-slate-100 pb-6">
-                <h2 className="text-3xl font-black text-slate-800 tracking-tight">Log New Case</h2>
-                <button type="button" onClick={() => setShowNewLead(false)} className="p-2.5 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors"><X className="w-6 h-6 text-slate-600"/></button>
+      {showNewLead && (
+        <PortalLayer isOpen={showNewLead} className="kalpa-lead-modal" lockScrollClass="kalpa-create-task-open" role="dialog" ariaModal={true} ariaLabel="Create task">
+          <div className="kalpa-lead-modal-card bg-white shadow-2xl animate-in zoom-in-95 duration-200">
+             <div className="kalpa-lead-modal-header">
+                <div>
+                  <p className="text-xs font-black uppercase tracking-[0.22em] text-indigo-500 mb-1">Operations</p>
+                  <h2 className="text-3xl font-black text-slate-800 tracking-tight">Log New Case</h2>
+                </div>
+                <button type="button" onClick={() => setShowNewLead(false)} className="kalpa-modal-icon-button" aria-label="Close create task modal"><X className="w-6 h-6 text-slate-600"/></button>
              </div>
              
-             <form noValidate onSubmit={async (e) => {
+             <form noValidate className="kalpa-create-task-form" onSubmit={async (e) => {
                e.preventDefault();
                if (isSubmittingLead) return;
                setIsSubmittingLead(true);
@@ -5399,22 +5399,17 @@ function AppShell() {
                try { window.localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(filterDeletedProjects(nextProjects)))); } catch(e) {}
                if (USE_BACKEND_STATE && backendStateReady && isDbReady) {
                  try {
-                   const saveRes = await fetch(`${API_BASE}/api/state/projects`, {
-                     method: 'POST',
+                   const saveData = await createTaskApi({
+                     apiBase: API_BASE,
                      headers: jsonFinanceSafeHeaders,
-                     body: JSON.stringify({ currentUserRole: currentUser?.role || '', project: sanitizeProjectForCache(newP) })
+                     currentUserRole: currentUser?.role || '',
+                     task: sanitizeProjectForCache(newP)
                    });
-                   if (!saveRes.ok) throw new Error(`Backend project save failed: ${saveRes.status}`);
-                   const saveData = await saveRes.json().catch(() => ({}));
                    if (saveData?.project || saveData?.case) {
                      const savedProject = saveData.project || saveData.case;
                      forgetPendingCreatedProjects(newP.id, newP.caseId);
                      rememberRecentCreatedProject(savedProject);
-                     setProjects(prev => {
-                       const merged = filterDeletedProjects(protectRecentlyCreatedProjects([savedProject], prev));
-                       persistAndBroadcastProjects(merged);
-                       return merged;
-                     });
+                     applyProjectSnapshot([savedProject], { source: 'create-confirmed' });
                    }
                  } catch (saveErr) {
                    console.warn('Immediate task save failed; local task is kept and background sync will retry:', saveErr.message);
@@ -5437,7 +5432,7 @@ function AppShell() {
                } finally {
                  setIsSubmittingLead(false);
                }
-             }} className="space-y-6">
+             }} className="kalpa-create-task-form custom-scrollbar">
                
                <div className="grid grid-cols-1 sm:grid-cols-4 gap-5">
                  <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Bank Name</label><input required name="client" className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none transition-colors font-bold text-slate-800" placeholder="SBI Home Loans"/></div>
@@ -5466,7 +5461,7 @@ function AppShell() {
                          <span className={`text-[10px] font-black px-2 py-1 rounded-md ${u.active >= u.limit ? 'bg-orange-100 text-orange-700' : 'bg-emerald-100 text-emerald-700'}`}>{u.active}/{u.limit} active</span>
                        </div>
                      ))}
-                     <p className="text-[10px] font-bold text-indigo-500 mt-2">Daily task limit rises automatically: 5 â†’ 10 â†’ 15 as case volume increases.</p>
+                     <p className="text-[10px] font-bold text-indigo-500 mt-2">Daily task limit rises automatically: 5 → 10 → 15 as case volume increases.</p>
                    </div>
                  </div>
                </div>
@@ -5534,8 +5529,8 @@ function AppShell() {
                </button>
              </form>
           </div>
-        </div>
-      ), document.body)}
+        </PortalLayer>
+      )}
 
       <style dangerouslySetInnerHTML={{__html: `
         .custom-scrollbar::-webkit-scrollbar { width: 6px; }

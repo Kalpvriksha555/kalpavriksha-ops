@@ -40,8 +40,8 @@ if (srcAppFiles.length !== 1 || srcAppFiles[0] !== 'frontend/src/App.jsx') {
 
 if (exists('frontend/src/App.jsx')) {
   const app = read('frontend/src/App.jsx');
-  const createModalCount = (app.match(/showNewLead\s*&&\s*createPortal/g) || []).length;
-  if (createModalCount !== 1) errors.push(`Expected one Create Task portal, found ${createModalCount}.`);
+  const createModalCount = (app.match(/showNewLead\s*&&\s*\(\s*<PortalLayer/g) || []).length;
+  if (createModalCount !== 1) errors.push(`Expected one Create Task PortalLayer, found ${createModalCount}.`);
   const submitGuardCount = (app.match(/isSubmittingLead/g) || []).length;
   if (submitGuardCount < 3) warnings.push('Create Task submit guard appears weak.');
   const rawAlertCreate = /alert\(`Task could not be created/.test(app);
