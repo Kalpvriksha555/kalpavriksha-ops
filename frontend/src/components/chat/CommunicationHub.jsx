@@ -8,7 +8,7 @@ import { MiniEmptyState } from '../shared';
 import { getVisibleNotifications } from '../../services/notificationService';
 import { CHAT_API_BASE, absoluteChatUrl, makeMessageId, QUICK_EMOJIS, isUserActuallyOnline, getOperationalUsers, identityKey, samePerson, readEntryName, ROLES, normalizeChannelKey, chatEmojiGroups, reactionEmojis } from '../../utils/chatUtils';
 
-export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onDeleteMessage, onUpdateMessage, onMarkMessagesRead, appId, projects = [], onOpenTaskReference }) => {
+export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onDeleteMessage, onUpdateMessage, onMarkMessagesRead, appId, projects = [], onOpenTaskReference, onPreviewFile }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [presenceNow, setPresenceNow] = useState(Date.now());
   const [activeChannel, setActiveChannel] = useState('global');
@@ -456,8 +456,11 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     const fileName = fileMeta.name || fallback.name || 'Attachment';
     const fileType = fileMeta.mime || fileMeta.mimeType || fallback.type || '';
     const fileSize = fileMeta.size || fallback.size || 0;
-    const url = fileMeta.url ? absoluteChatUrl(fileMeta.url) : (fileMeta.downloadUrl ? absoluteChatUrl(fileMeta.downloadUrl) : fallback.url || '');
-    const downloadUrl = fileMeta.downloadUrl ? absoluteChatUrl(fileMeta.downloadUrl) : url;
+    const previewUrl = getInlineChatPreviewUrl(fileMeta.previewUrl || fileMeta.url || fallback.url || fileMeta.downloadUrl || '');
+    const downloadUrl = fileMeta.downloadUrl
+      ? absoluteChatUrl(fileMeta.downloadUrl)
+      : absoluteChatUrl(fileMeta.downloadUrl || fileMeta.url || fallback.url || previewUrl || '');
+    const url = previewUrl || downloadUrl;
     const fileRecord = {
       ...fileMeta,
       id: fileMeta.id || fallback.id,
@@ -466,8 +469,10 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       mime: fileType,
       mimeType: fileType,
       size: fileSize,
-      url: fileMeta.url || fallback.url || '',
-      downloadUrl: fileMeta.downloadUrl || fileMeta.url || fallback.url || ''
+      // url/previewUrl are always inline-safe; downloadUrl is the only attachment path.
+      url: previewUrl || fileMeta.previewUrl || fileMeta.url || fallback.url || '',
+      previewUrl: previewUrl || fileMeta.previewUrl || fileMeta.url || fallback.url || '',
+      downloadUrl: downloadUrl || fileMeta.downloadUrl || ''
     };
     return createBaseMessage({
       text: extra.text || `Shared attachment: ${fileName}`,
@@ -954,43 +959,124 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     return 'File';
   };
 
+
+  const getInlineChatPreviewUrl = (url = '') => {
+    const absolute = absoluteChatUrl(url || '');
+    if (!absolute) return '';
+    if (/^(blob:|data:)/i.test(absolute)) return absolute;
+    if (/\/api\/files\/[^/?#]+\/download(?:$|[?#])/i.test(absolute)) return absolute.replace(/\/download(?=($|[?#]))/i, '/preview');
+    if (/\/api\/files\/[^/?#]+(?:$|[?#])/i.test(absolute) && !/[?&]mode=preview/i.test(absolute)) {
+      const [base, hash = ''] = absolute.split('#');
+      const cleaned = base.replace(/([?&])mode=download(&|$)/i, '$1').replace(/[?&]$/, '');
+      return `${cleaned}${cleaned.includes('?') ? '&' : '?'}mode=preview${hash ? `#${hash}` : ''}`;
+    }
+    if (/\/api\/uploads\/[^/?#]+(?:$|[?#])/i.test(absolute) && !/[?&]mode=preview/i.test(absolute)) {
+      const [base, hash = ''] = absolute.split('#');
+      const cleaned = base.replace(/([?&])mode=download(&|$)/i, '$1').replace(/[?&]$/, '');
+      return `${cleaned}${cleaned.includes('?') ? '&' : '?'}mode=preview${hash ? `#${hash}` : ''}`;
+    }
+    return absolute;
+  };
+
+  const getAttachmentFileRecord = (m = {}) => {
+    const first = m.files?.[0] || {};
+    const fileName = m.fileName || first.name || 'Attachment';
+    const fileType = m.fileType || first.mime || first.mimeType || '';
+    const rawPreview = first.previewUrl || m.previewUrl || first.url || m.fileUrl || m.downloadUrl || first.downloadUrl || '';
+    const rawDownload = m.downloadUrl || first.downloadUrl || first.url || m.fileUrl || rawPreview;
+    const previewUrl = getInlineChatPreviewUrl(rawPreview);
+    const downloadUrl = absoluteChatUrl(rawDownload || '');
+    return {
+      ...first,
+      id: first.fileId || first.id || m.fileId || m.id,
+      fileId: first.fileId || first.id || m.fileId,
+      name: fileName,
+      fileName,
+      mime: fileType,
+      mimeType: fileType,
+      size: m.fileSize || first.size || 0,
+      url: previewUrl,
+      previewUrl,
+      downloadUrl,
+    };
+  };
+
   const renderAttachmentPreview = (m, isMine) => {
-    const fileUrl = absoluteChatUrl(m.downloadUrl || m.fileUrl || m.files?.[0]?.downloadUrl || m.files?.[0]?.url || '');
-    if (!fileUrl) return null;
-    const fileName = m.fileName || m.files?.[0]?.name || 'Attachment';
-    const fileType = m.fileType || m.files?.[0]?.mime || m.files?.[0]?.mimeType || '';
+    const fileRecord = getAttachmentFileRecord(m);
+    const previewUrl = fileRecord.previewUrl || fileRecord.url || '';
+    const downloadUrl = fileRecord.downloadUrl || previewUrl || '';
+    if (!previewUrl && !downloadUrl) return null;
+    const fileName = fileRecord.name || 'Attachment';
+    const fileType = fileRecord.mimeType || fileRecord.mime || '';
     const lower = String(fileName).toLowerCase();
     const isImage = String(fileType).startsWith('image/') || /\.(jpg|jpeg|png|gif|webp)$/i.test(lower);
     const isVideo = String(fileType).startsWith('video/') || /\.(mp4|mov|avi|mkv|webm)$/i.test(lower);
     const isAudio = String(fileType).startsWith('audio/') || /\.(webm|mp3|wav|m4a|ogg)$/i.test(lower);
     const isPdf = /\.pdf$/i.test(lower) || String(fileType).includes('pdf');
     const label = getAttachmentLabel(fileName, fileType);
+    const previewHandler = typeof onPreviewFile === 'function'
+      ? onPreviewFile
+      : (typeof window !== 'undefined' && typeof window.__kalpaOpenFilePreview === 'function' ? window.__kalpaOpenFilePreview : null);
+    const canInlinePreview = (isImage || isPdf) && typeof previewHandler === 'function' && Boolean(previewUrl || downloadUrl);
+    const handlePreviewClick = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (canInlinePreview) {
+        previewHandler({ ...fileRecord, previewUrl: previewUrl || fileRecord.previewUrl, url: previewUrl || fileRecord.url, downloadUrl });
+        return;
+      }
+      alert('Preview is not ready yet. Please try again after the file finishes syncing.');
+    };
+    const handleDownloadClick = (event) => {
+      event.stopPropagation();
+      if (!downloadUrl) return;
+      const anchor = document.createElement('a');
+      anchor.href = downloadUrl;
+      anchor.download = fileName;
+      anchor.rel = 'noopener noreferrer';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    };
     return (
       <div className={`kalpa-chat-attachment mt-3 rounded-2xl border overflow-hidden ${isMine ? 'border-indigo-300 bg-indigo-500/20' : 'border-slate-100 bg-slate-50'}`}>
-        {isImage && <a href={fileUrl} target="_blank" rel="noreferrer" className="block"><img src={fileUrl} alt={fileName} loading="lazy" className="kalpa-chat-attachment-image block max-h-64 w-full object-contain bg-black/5" /></a>}
-        {isVideo && <video src={fileUrl} controls preload="metadata" className="block max-h-64 w-full bg-black" />}
-        {isAudio && <div className="p-3"><div className={`text-[10px] font-black uppercase tracking-widest mb-2 ${isMine ? 'text-indigo-100' : 'text-indigo-600'}`}>{m.isVoiceNote ? 'Voice note' : 'Audio attachment'}</div><audio src={fileUrl} controls preload="metadata" className="w-full" /></div>}
+        {isImage && previewUrl && (
+          <button type="button" onClick={handlePreviewClick} className="block w-full bg-black/5 cursor-zoom-in" title="Preview image">
+            <img src={previewUrl} alt={fileName} loading="lazy" className="kalpa-chat-attachment-image block max-h-64 w-full object-contain" />
+          </button>
+        )}
+        {isVideo && <video src={previewUrl || downloadUrl} controls preload="metadata" className="block max-h-64 w-full bg-black" />}
+        {isAudio && <div className="p-3"><div className={`text-[10px] font-black uppercase tracking-widest mb-2 ${isMine ? 'text-indigo-100' : 'text-indigo-600'}`}>{m.isVoiceNote ? 'Voice note' : 'Audio attachment'}</div><audio src={previewUrl || downloadUrl} controls preload="metadata" className="w-full" /></div>}
         {!isImage && !isVideo && !isAudio && (
           <div className={`p-4 flex items-center gap-3 ${isMine ? 'bg-indigo-500/20' : 'bg-white'}`}>
             <div className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 ${isMine ? 'bg-white/15 text-white' : 'bg-indigo-50 text-indigo-600'}`}><FileIcon className="w-5 h-5" /></div>
             <div className="min-w-0 flex-1">
               <p className={`text-sm font-black truncate ${isMine ? 'text-white' : 'text-slate-800'}`}>{fileName}</p>
-              <p className={`text-[10px] font-bold uppercase tracking-wider ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>{label}{getReadableFileSize(m.fileSize || m.files?.[0]?.size) ? ` • ${getReadableFileSize(m.fileSize || m.files?.[0]?.size)}` : ''}</p>
+              <p className={`text-[10px] font-bold uppercase tracking-wider ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>{label}{getReadableFileSize(fileRecord.size) ? ` • ${getReadableFileSize(fileRecord.size)}` : ''}</p>
             </div>
           </div>
         )}
-        {isPdf && <div className={`px-3 pb-3 ${isMine ? 'bg-indigo-500/20' : 'bg-white'}`}><object data={fileUrl} type="application/pdf" className="w-full h-40 rounded-xl border border-slate-200 bg-white"><p className="text-xs text-slate-400 p-3">PDF preview unavailable. Open the file below.</p></object></div>}
+        {isPdf && (
+          <div className={`px-3 pb-3 ${isMine ? 'bg-indigo-500/20' : 'bg-white'}`}>
+            <button type="button" onClick={handlePreviewClick} className={`w-full h-32 rounded-xl border border-dashed flex flex-col items-center justify-center gap-2 transition-colors ${isMine ? 'border-indigo-200/60 bg-white/10 text-white hover:bg-white/15' : 'border-indigo-100 bg-indigo-50/60 text-indigo-700 hover:bg-indigo-50'}`}>
+              <FileIcon className="w-7 h-7" />
+              <span className="text-xs font-black">Preview PDF in Kalpavriksha Ops</span>
+              <span className="text-[10px] font-bold opacity-70">No automatic browser download</span>
+            </button>
+          </div>
+        )}
         <div className={`p-3 flex items-center justify-between gap-3 border-t ${isMine ? 'border-indigo-300/40' : 'border-slate-100'}`}>
           <div className="min-w-0 flex items-center gap-2">
             <FileIcon className={`w-4 h-4 shrink-0 ${isMine ? 'text-white' : 'text-indigo-500'}`} />
             <div className="min-w-0">
               <p className={`text-xs font-black truncate ${isMine ? 'text-white' : 'text-slate-700'}`}>{fileName}</p>
-              <p className={`text-[10px] font-bold ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>{label} {getReadableFileSize(m.fileSize || m.files?.[0]?.size) ? `• ${getReadableFileSize(m.fileSize || m.files?.[0]?.size)}` : ''}{m.localPreviewOnly ? ' • local preview' : ''}</p>
+              <p className={`text-[10px] font-bold ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>{label} {getReadableFileSize(fileRecord.size) ? `• ${getReadableFileSize(fileRecord.size)}` : ''}{m.localPreviewOnly ? ' • local preview' : ''}</p>
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            <a href={fileUrl} target="_blank" rel="noreferrer" className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white/90 text-slate-700' : 'bg-white text-indigo-700 border border-indigo-100'}`}>Open</a>
-            <a href={fileUrl} download={fileName} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white text-indigo-700' : 'bg-indigo-600 text-white'}`}>Download</a>
+            {(isImage || isPdf) && <button type="button" onClick={handlePreviewClick} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white/90 text-slate-700' : 'bg-white text-indigo-700 border border-indigo-100'}`}>Preview</button>}
+            {!(isImage || isPdf) && <button type="button" onClick={handleDownloadClick} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white/90 text-slate-700' : 'bg-white text-indigo-700 border border-indigo-100'}`}>Open</button>}
+            {downloadUrl && <button type="button" onClick={handleDownloadClick} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${isMine ? 'bg-white text-indigo-700' : 'bg-indigo-600 text-white'}`}>Download</button>}
           </div>
         </div>
       </div>

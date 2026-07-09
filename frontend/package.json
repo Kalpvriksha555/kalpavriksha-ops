@@ -15,7 +15,7 @@
     "react": "latest",
     "react-dom": "latest",
     "lucide-react": "latest",
-    "firebase": "latest"
+    "firebase": "^11.10.0"
   },
   "devDependencies": {
     "autoprefixer": "^10.4.21",

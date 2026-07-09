@@ -1,5 +1,6 @@
 import React from 'react';
 import { FileText, LayoutDashboard } from 'lucide-react';
+import { EmptyStatePanel, LoadingState } from './ui/designSystem.jsx';
 
 export const Badge = ({ children, colorClass }) => (
   <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium border transition-all duration-200 ${colorClass}`}>
@@ -7,7 +8,7 @@ export const Badge = ({ children, colorClass }) => (
   </span>
 );
 
-export const PageLoadingScreen = ({ title = 'Connecting to Secure Cloud...', subtitle = 'Preparing Kalpvriksha Designs Ops' }) => (
+export const PageLoadingScreen = ({ title = 'Connecting to Secure Cloud...', subtitle = 'Preparing Kalpvriksha Designs Ops' }) => (/* legacy compatible wrapper */
   <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-indigo-50 flex items-center justify-center p-6">
     <div className="bg-white/90 backdrop-blur rounded-[2rem] border-2 border-slate-100 shadow-2xl px-8 py-10 w-full max-w-md text-center animate-in fade-in zoom-in-95 duration-300">
       <div className="relative mx-auto mb-6 w-20 h-20">
@@ -41,3 +42,6 @@ export const MiniEmptyState = ({ children }) => (
     {children}
   </div>
 );
+
+
+export { LoadingState, EmptyStatePanel };

@@ -8,6 +8,7 @@ import { copyTextToClipboard } from './utils/clipboard';
 import { Badge, PageLoadingScreen, EmptyState, MiniEmptyState } from './components/shared';
 import { LocalModeBanner, DatabasePermissionBanner, TopNavigation, MobileSearchBar, MainTabNavigation, MobileBottomNavigation } from './components/layout';
 import { PortalLayer } from './components/ui/LayerPortal';
+import { Button, IconButton, InlineAlert } from './components/ui/designSystem.jsx';
 import { ActiveToasts } from './features/notifications';
 import { ProfileView } from './features/profile';
 import { CalculatorView } from './features/calculator';
@@ -19,7 +20,7 @@ import { ActiveOperationsView } from './features/operations';
 import { getStatusColor, getPriorityColor, fetchBackendState, createTaskApi, saveBackendStateApi, deleteTaskApi, mergeTaskLists, persistTasksToLocalCache } from './services/taskService';
 import { API_BASE, USE_BACKEND_STATE, ONLINE_STALE_MS, MAX_INLINE_DATA_URL_CHARS } from './config/appConfig';
 import { fileToBase64, cleanFileName } from './utils/fileUtils';
-import { absoluteApiUrl, getProjectFileDownloadUrl, getProjectFilePreviewUrl, isProjectFilePdf, isProjectFileImage, getProjectFileKind, canPreviewProjectFile, fetchProjectFilePreview, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile, getProjectFileCacheKey, listCachedProjectFiles, openCachedProjectFile, clearCachedProjectFile, pruneExpiredProjectFileCache } from './services/fileService';
+import { absoluteApiUrl, getProjectFileDownloadUrl, getProjectFilePreviewUrl, getProjectFileActionState, isProjectFilePdf, isProjectFileImage, getProjectFileKind, canPreviewProjectFile, fetchProjectFilePreview, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile, getProjectFileCacheKey, listCachedProjectFiles, openCachedProjectFile, clearCachedProjectFile, pruneExpiredProjectFileCache } from './services/fileService';
 import { sendRealOtp, verifyRealOtp } from './services/otpService';
 import { buildNotification, getVisibleNotifications, NOTIFICATION_CATEGORIES, getNotificationCategory, getNotificationPriority, buildActivityTimeline, isNotificationForUser } from './services/notificationService';
 import { 
@@ -27,14 +28,14 @@ import {
   MapPin, Plus, Search, User, Users, Wallet, ArrowRight, Upload, 
   List, MessageSquare, Bell, Paperclip, X, Image as ImageIcon, 
   File as FileIcon, Archive, Send, Flag, Shield, Hash, Video, Phone,
-  Calendar, Filter, Check, ArrowLeft, Download, ChevronRight, Lock, Eye, EyeOff, Map as MapIcon, AlertCircle, KanbanSquare, Link as LinkIcon, BarChart3, Building2, Smile, Star, Mic, Square, Trash2, Edit3, Save
+  Calendar, Filter, Check, ArrowLeft, Download, ChevronRight, ChevronLeft, Lock, Eye, EyeOff, Map as MapIcon, AlertCircle, KanbanSquare, Link as LinkIcon, BarChart3, Building2, Smile, Star, Mic, Square, Trash2, Edit3, Save, ZoomIn, ZoomOut, RotateCw, RotateCcw, Maximize2, RefreshCcw
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, doc, setDoc, onSnapshot, collection, deleteDoc, getDocs } from 'firebase/firestore';
 import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
 
-// ðŸ‘‡ SMART CONFIG: Safely connects to your real database ðŸ‘‡
+// SMART CONFIG: Safely connects to your real database
 const getFirebaseConfig = () => {
   try {
     if (typeof __firebase_config !== 'undefined' && __firebase_config) {
@@ -136,20 +137,59 @@ const forgetPendingCreatedProjects = (...ids) => {
 };
 const getProtectedCreatedProjectIds = () => new Set(getPendingCreatedProjects().flatMap(p => [p.id, p.caseId]).map(x => String(x || '')).filter(Boolean));
 
-const getDeletedProjectIds = () => {
-  try { return JSON.parse(localStorage.getItem('kalpa_deleted_project_ids') || '[]').map(x => String(x)).filter(Boolean); } catch(e) { return []; }
+const getPendingDeletedProjectIds = () => {
+  try {
+    const raw = JSON.parse(localStorage.getItem('kalpa_pending_deleted_project_ids') || '{}') || {};
+    return Object.keys(raw).map(x => String(x)).filter(Boolean);
+  } catch(e) { return []; }
 };
-const saveDeletedProjectIds = (ids = []) => {
+const rememberPendingDeletedProjects = (...ids) => {
+  const incoming = ids.flat().map(x => String(x || '')).filter(Boolean);
+  if (!incoming.length) return getPendingDeletedProjectIds();
+  try {
+    const raw = JSON.parse(localStorage.getItem('kalpa_pending_deleted_project_ids') || '{}') || {};
+    incoming.forEach(id => { raw[id] = { id, deletedAt: raw[id]?.deletedAt || Date.now(), lastAttemptAt: raw[id]?.lastAttemptAt || 0, attempts: Number(raw[id]?.attempts || 0) }; });
+    localStorage.setItem('kalpa_pending_deleted_project_ids', JSON.stringify(raw));
+  } catch(e) {}
+  return getPendingDeletedProjectIds();
+};
+const markPendingDeletedAttempt = (id) => {
+  try {
+    const raw = JSON.parse(localStorage.getItem('kalpa_pending_deleted_project_ids') || '{}') || {};
+    const key = String(id || '');
+    if (raw[key]) { raw[key].lastAttemptAt = Date.now(); raw[key].attempts = Number(raw[key].attempts || 0) + 1; localStorage.setItem('kalpa_pending_deleted_project_ids', JSON.stringify(raw)); }
+  } catch(e) {}
+};
+const forgetPendingDeletedProjects = (...ids) => {
+  const remove = new Set(ids.flat().map(x => String(x || '')).filter(Boolean));
+  if (!remove.size) return getPendingDeletedProjectIds();
+  try {
+    const raw = JSON.parse(localStorage.getItem('kalpa_pending_deleted_project_ids') || '{}') || {};
+    remove.forEach(id => { delete raw[id]; });
+    localStorage.setItem('kalpa_pending_deleted_project_ids', JSON.stringify(raw));
+  } catch(e) {}
+  return getPendingDeletedProjectIds();
+};
+const getDeletedProjectIds = () => {
+  try {
+    const confirmed = JSON.parse(localStorage.getItem('kalpa_deleted_project_ids') || '[]').map(x => String(x)).filter(Boolean);
+    return [...new Set([...confirmed, ...getPendingDeletedProjectIds()])];
+  } catch(e) { return getPendingDeletedProjectIds(); }
+};
+const saveDeletedProjectIds = (ids = [], options = {}) => {
   const protectedIds = getProtectedCreatedProjectIds();
-  const unique = [...new Set((ids || []).map(x => String(x)).filter(Boolean).filter(id => !protectedIds.has(id)))];
+  const force = !!options.force;
+  const unique = [...new Set((ids || []).map(x => String(x)).filter(Boolean).filter(id => force || !protectedIds.has(id)))];
   try { localStorage.setItem('kalpa_deleted_project_ids', JSON.stringify(unique)); } catch(e) {}
   return unique;
 };
 const rememberDeletedProjects = (...ids) => saveDeletedProjectIds([...getDeletedProjectIds(), ...ids.flat().map(x => String(x)).filter(Boolean)]);
+const rememberDeletedProjectsForce = (...ids) => saveDeletedProjectIds([...getDeletedProjectIds(), ...ids.flat().map(x => String(x)).filter(Boolean)], { force: true });
 const forgetDeletedProjects = (...ids) => {
   const remove = new Set(ids.flat().map(x => String(x)).filter(Boolean));
   if (!remove.size) return getDeletedProjectIds();
-  return saveDeletedProjectIds(getDeletedProjectIds().filter(id => !remove.has(String(id))));
+  forgetPendingDeletedProjects([...remove]);
+  return saveDeletedProjectIds(getDeletedProjectIds().filter(id => !remove.has(String(id))), { force: true });
 };
 const RECENT_CREATED_PROJECT_TTL_MS = 2 * 60 * 60 * 1000;
 const getRecentCreatedProjects = () => {
@@ -176,6 +216,19 @@ const rememberRecentCreatedProject = (project) => {
     localStorage.setItem('kalpa_recent_created_projects', JSON.stringify(raw));
   } catch(e) {}
 };
+const forgetRecentCreatedProjects = (...ids) => {
+  const remove = new Set(ids.flat().map(x => String(x || '')).filter(Boolean));
+  if (!remove.size) return;
+  try {
+    const raw = JSON.parse(localStorage.getItem('kalpa_recent_created_projects') || '{}') || {};
+    Object.entries(raw).forEach(([key, record]) => {
+      const project = record?.project || record || {};
+      const identities = [key, project.id, project.caseId, ...(project.previousTaskIds || [])].map(x => String(x || '')).filter(Boolean);
+      if (identities.some(id => remove.has(id))) delete raw[key];
+    });
+    localStorage.setItem('kalpa_recent_created_projects', JSON.stringify(raw));
+  } catch(e) {}
+};
 const projectIdentityMatches = (a = {}, b = {}) => {
   const aIds = [a.id, a.caseId, ...(a.previousTaskIds || [])].map(x => String(x || '')).filter(Boolean);
   const bIds = [b.id, b.caseId, ...(b.previousTaskIds || [])].map(x => String(x || '')).filter(Boolean);
@@ -195,6 +248,10 @@ const protectRecentlyCreatedProjects = (incoming = [], current = []) => {
 };
 const filterDeletedProjects = (projects = []) => {
   const deleted = new Set(getDeletedProjectIds());
+  const protectedIds = new Set([
+    ...getProtectedCreatedProjectIds(),
+    ...getRecentCreatedProjects().flatMap(p => [p?.id, p?.caseId]).map(x => String(x || '')).filter(Boolean)
+  ]);
   const list = Array.isArray(projects) ? projects : [];
   const supersededIds = new Set();
   list.forEach(p => {
@@ -205,6 +262,10 @@ const filterDeletedProjects = (projects = []) => {
     if (!p) return false;
     const id = String(p.id || '');
     const caseId = String(p.caseId || '');
+    // A freshly created task must never be hidden by old deleted-id memory.
+    // This restores the proven Phase 23C/24B behaviour: create first, protect
+    // until backend confirmation, then allow normal delete filtering later.
+    if (protectedIds.has(id) || protectedIds.has(caseId)) return true;
     return !deleted.has(id) && !deleted.has(caseId) && !supersededIds.has(id) && !supersededIds.has(caseId);
   });
 };
@@ -2197,7 +2258,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const [fileTransfer, setFileTransfer] = useState({ active: false, phase: '', label: '', fileName: '', progress: 0, message: '', loaded: 0, total: 0, speedBps: 0, etaSeconds: 0, startedAt: 0, transferType: '', fileId: '' });
   const [downloadedFileMap, setDownloadedFileMap] = useState(() => listCachedProjectFiles());
   const [filePreview, setFilePreview] = useState(null);
-  const [filePreviewUi, setFilePreviewUi] = useState({ zoom: 1, rotation: 0 });
+  const [filePreviewUi, setFilePreviewUi] = useState({ zoom: 1, rotation: 0, fitMode: 'width' });
 
   const closeFilePreview = useCallback(() => {
     setFilePreview((current) => {
@@ -2206,7 +2267,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
       }
       return null;
     });
-    setFilePreviewUi({ zoom: 1, rotation: 0 });
+    setFilePreviewUi({ zoom: 1, rotation: 0, fitMode: 'width' });
   }, []);
 
   useEffect(() => () => {
@@ -2558,7 +2619,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const renderInlineFileTransferBar = (extraClass = '') => renderWhatsAppTransferBar(`mt-3 ${extraClass}`);
 
 
-  const handlePreviewFile = async (doc = {}) => {
+  const openUnifiedFilePreview = useCallback(async (doc = {}) => {
     const kind = getProjectFileKind(doc);
     if (kind === 'file') {
       alert('Preview is available for PDF and image files. Please download this file to open it.');
@@ -2568,7 +2629,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     if (filePreview?.objectUrl) {
       try { URL.revokeObjectURL(filePreview.objectUrl); } catch {}
     }
-    setFilePreviewUi({ zoom: 1, rotation: 0 });
+    setFilePreviewUi({ zoom: 1, rotation: 0, fitMode: 'width' });
     setFilePreview({ doc, kind, name, loading: true, error: '', url: '', objectUrl: '' });
     try {
       const preview = await fetchProjectFilePreview(doc);
@@ -2585,19 +2646,32 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
         size: preview.size,
       });
     } catch (error) {
-      const fallbackUrl = getProjectFilePreviewUrl(doc);
       setFilePreview({
         doc,
         kind,
         name,
         loading: false,
         error: error?.message || 'Preview could not be loaded.',
-        url: fallbackUrl || '',
+        url: '',
         objectUrl: '',
-        sourceUrl: fallbackUrl || '',
+        sourceUrl: '',
       });
     }
-  };
+  }, [filePreview?.objectUrl]);
+
+  // Single active preview entry point. Older names are aliases only; do not create
+  // separate preview implementations. This prevents runtime errors during hot reload
+  // and keeps Chat/Operations/Archive on the same viewer path.
+  const handlePreviewFile = openUnifiedFilePreview;
+
+  useEffect(() => {
+    window.__kalpaOpenFilePreview = openUnifiedFilePreview;
+    return () => {
+      if (window.__kalpaOpenFilePreview === openUnifiedFilePreview) {
+        delete window.__kalpaOpenFilePreview;
+      }
+    };
+  }, [openUnifiedFilePreview]);
 
   const handleTrackedDownload = async (doc) => {
     const fileName = doc?.name || doc?.fileName || 'file';
@@ -2651,25 +2725,39 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   };
 
   const renderFileActionButtons = (doc, downloadClassName, deleteClassName = '') => {
-    const downloaded = isDocDownloaded(doc);
-    const canPreview = canPreviewProjectFile(doc);
+    const fileState = getProjectFileActionState(doc);
+    const safeDoc = fileState.doc || doc;
+    const downloaded = isDocDownloaded(safeDoc);
+    const canPreview = fileState.canPreview;
+    if (!fileState.hasLink) {
+      return (
+        <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
+          <span className="text-[11px] font-black text-amber-700 bg-amber-50 border border-amber-100 px-3 py-2 rounded-xl whitespace-nowrap" title="File record exists, but no usable server link was saved. Re-upload once to repair it.">
+            Link missing
+          </span>
+          {canDeleteProjectFile(safeDoc, user) && <button type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); handleFileDelete(safeDoc); }} title="Delete broken file record" className={deleteClassName || "text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"}><Trash2 className="w-3.5 h-3.5" /> Delete</button>}
+        </div>
+      );
+    }
     return (
       <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
         {canPreview && (
           <button
             type="button"
-            onClick={(event) => { event.preventDefault(); event.stopPropagation(); handlePreviewFile(doc); }}
+            onClick={(event) => { event.preventDefault(); event.stopPropagation(); openUnifiedFilePreview(safeDoc); }}
             className="text-xs font-black text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 px-4 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1.5"
             title="Preview inside Kalpavriksha Ops without downloading"
           >
             <Eye className="w-3.5 h-3.5" /> Preview
           </button>
         )}
-        <button type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); downloaded ? handleOpenDownloadedFile(doc) : handleTrackedDownload(doc); }} className={downloadClassName}>
-          {downloaded ? 'Open' : 'Download'}
-        </button>
+        {fileState.canDownload && (
+          <button type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); downloaded ? handleOpenDownloadedFile(safeDoc) : handleTrackedDownload(safeDoc); }} className={downloadClassName}>
+            {downloaded ? 'Open' : 'Download'}
+          </button>
+        )}
         {downloaded && <span className="text-[10px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 px-2 py-1 rounded-lg whitespace-nowrap">Downloaded • 7d cache</span>}
-        {canDeleteProjectFile(doc, user) && <button type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); handleFileDelete(doc); }} title="Delete file" className={deleteClassName || "text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"}><Trash2 className="w-3.5 h-3.5" /> Delete</button>}
+        {canDeleteProjectFile(safeDoc, user) && <button type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); handleFileDelete(safeDoc); }} title="Delete file" className={deleteClassName || "text-xs font-bold text-red-600 bg-white border border-red-100 hover:bg-red-50 px-3 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm flex items-center gap-1"}><Trash2 className="w-3.5 h-3.5" /> Delete</button>}
       </div>
     );
   };
@@ -3106,43 +3194,71 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
         ? (canManage ? 'Approve Final' : 'Awaiting Approval')
         : 'Advance Status';
 
+  const clampPreviewZoom = useCallback((value) => Math.min(4, Math.max(0.35, Number(value.toFixed ? value.toFixed(2) : value))), []);
+  const updatePreviewZoom = useCallback((delta) => setFilePreviewUi(v => ({ ...v, zoom: clampPreviewZoom(Number(v.zoom || 1) + delta), fitMode: 'custom' })), [clampPreviewZoom]);
+  const fitPreviewWidth = useCallback(() => setFilePreviewUi(v => ({ ...v, zoom: 1, fitMode: 'width' })), []);
+  const fitPreviewPage = useCallback(() => setFilePreviewUi(v => ({ ...v, zoom: 0.9, fitMode: 'page' })), []);
+  const resetPreviewView = useCallback(() => setFilePreviewUi({ zoom: 1, rotation: 0, fitMode: 'width' }), []);
+  const rotatePreview = useCallback((direction = 1) => setFilePreviewUi(v => ({ ...v, rotation: ((Number(v.rotation || 0) + (direction * 90)) % 360 + 360) % 360 })), []);
+  const previewZoomValue = clampPreviewZoom(Number(filePreviewUi.zoom || 1));
+  const previewFrameSrc = filePreview?.url && filePreview?.kind !== 'image'
+    ? `${String(filePreview.url).split('#')[0]}#toolbar=0&navpanes=0&view=${filePreviewUi.fitMode === 'page' ? 'Fit' : 'FitH'}&zoom=${Math.round(previewZoomValue * 100)}`
+    : filePreview?.url;
+  const previewPdfFrameStyle = undefined;
+
+  useEffect(() => {
+    if (!filePreview) return undefined;
+    const onKeyDown = (event) => {
+      const key = String(event.key || '').toLowerCase();
+      if (key === 'escape') { event.preventDefault(); closeFilePreview(); return; }
+      if (event.ctrlKey && (key === '+' || key === '=')) { event.preventDefault(); updatePreviewZoom(0.15); return; }
+      if (event.ctrlKey && key === '-') { event.preventDefault(); updatePreviewZoom(-0.15); return; }
+      if (event.ctrlKey && key === '0') { event.preventDefault(); resetPreviewView(); return; }
+      if (key === 'r') { event.preventDefault(); rotatePreview(event.shiftKey ? -1 : 1); }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [filePreview, closeFilePreview, updatePreviewZoom, resetPreviewView, rotatePreview]);
+
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       {filePreview && (
-        <PortalLayer isOpen={Boolean(filePreview)} className="kalpa-preview-layer fixed inset-0 bg-slate-950/75 backdrop-blur-sm p-2 sm:p-5 flex items-center justify-center" lockScrollClass="kalpa-preview-open" role="dialog" ariaModal={true} ariaLabel="File preview">
-          <div className="kalpa-preview-card bg-white w-full max-w-7xl h-[92vh] rounded-[1.75rem] shadow-2xl border border-slate-200 overflow-hidden flex flex-col">
-            <div className="px-4 sm:px-6 py-3 border-b border-slate-100 flex items-center justify-between gap-3 bg-slate-50/90">
-              <div className="min-w-0 flex items-center gap-3">
-                <div className={`${filePreview.kind === 'image' ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-red-50 text-red-600 border-red-100'} w-10 h-10 rounded-2xl flex items-center justify-center border shrink-0`}>
-                  {filePreview.kind === 'image' ? <ImageIcon className="w-5 h-5" /> : <FileText className="w-5 h-5" />}
+        <PortalLayer isOpen={Boolean(filePreview)} className="kalpa-preview-layer fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center" lockScrollClass="kalpa-preview-open" role="dialog" ariaModal={true} ariaLabel="File preview" onEscape={closeFilePreview} initialFocusSelector="button">
+          <div className="kalpa-preview-card bg-white shadow-2xl border border-slate-200 overflow-hidden flex flex-col">
+            <div className="kalpa-preview-header border-b border-slate-100 bg-white/95">
+              <div className="kalpa-preview-title min-w-0 flex items-center gap-3">
+                <div className={`${filePreview.kind === 'image' ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-red-50 text-red-600 border-red-100'} w-9 h-9 rounded-2xl flex items-center justify-center border shrink-0`}>
+                  {filePreview.kind === 'image' ? <ImageIcon className="w-4.5 h-4.5" /> : <FileText className="w-4.5 h-4.5" />}
                 </div>
                 <div className="min-w-0">
-                  <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">{filePreview.kind === 'image' ? 'Image Preview' : 'PDF Preview'}</p>
-                  <h3 className="text-sm sm:text-base font-black text-slate-900 truncate">{filePreview.name}</h3>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{filePreview.kind === 'image' ? 'Image Preview' : 'PDF Preview'}{isDocDownloaded(filePreview.doc) ? ' • Cached' : ''}</p>
+                  <h3 className="text-sm font-black text-slate-900 truncate">{filePreview.name}</h3>
                 </div>
               </div>
-              <div className="flex items-center gap-2 shrink-0">
-                {filePreview.kind === 'image' && !filePreview.loading && !filePreview.error && (
-                  <div className="hidden sm:flex items-center gap-1 bg-white border border-slate-200 rounded-xl p-1">
-                    <button type="button" onClick={() => setFilePreviewUi(v => ({ ...v, zoom: Math.max(0.5, Number((v.zoom - 0.25).toFixed(2))) }))} className="px-2 py-1 rounded-lg text-xs font-black hover:bg-slate-100">−</button>
-                    <span className="text-[11px] font-black text-slate-500 min-w-12 text-center">{Math.round(filePreviewUi.zoom * 100)}%</span>
-                    <button type="button" onClick={() => setFilePreviewUi(v => ({ ...v, zoom: Math.min(3, Number((v.zoom + 0.25).toFixed(2))) }))} className="px-2 py-1 rounded-lg text-xs font-black hover:bg-slate-100">+</button>
-                    <button type="button" onClick={() => setFilePreviewUi(v => ({ ...v, rotation: (Number(v.rotation || 0) + 90) % 360 }))} className="px-2 py-1 rounded-lg text-xs font-black hover:bg-slate-100">Rotate</button>
-                  </div>
-                )}
-                {filePreview.url && !filePreview.loading && !filePreview.error && <button type="button" onClick={() => window.open(filePreview.url, '_blank', 'noopener,noreferrer')} className="hidden sm:flex text-xs font-black text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 px-4 py-2 rounded-xl items-center gap-1.5">Open tab</button>}
-                <button type="button" onClick={() => handleTrackedDownload(filePreview.doc)} className="hidden sm:flex text-xs font-black text-indigo-700 bg-white hover:bg-indigo-50 border border-indigo-100 px-4 py-2 rounded-xl items-center gap-1.5"><Download className="w-3.5 h-3.5" /> Download</button>
-                <button type="button" onClick={closeFilePreview} className="p-2.5 rounded-xl bg-white hover:bg-slate-100 border border-slate-200"><X className="w-5 h-5" /></button>
+              <div className="kalpa-preview-toolbar flex items-center gap-1.5 shrink-0">
+                <button type="button" onClick={() => updatePreviewZoom(-0.15)} className="kalpa-preview-btn" title="Zoom out (Ctrl -)"><ZoomOut className="w-4 h-4" /></button>
+                <span className="kalpa-preview-zoom">{Math.round(previewZoomValue * 100)}%</span>
+                <button type="button" onClick={() => updatePreviewZoom(0.15)} className="kalpa-preview-btn" title="Zoom in (Ctrl +)"><ZoomIn className="w-4 h-4" /></button>
+                <span className="kalpa-preview-separator hidden sm:inline-flex" />
+                <button type="button" onClick={fitPreviewWidth} className="kalpa-preview-btn-text" title="Fit width">Fit Width</button>
+                <button type="button" onClick={fitPreviewPage} className="kalpa-preview-btn-text" title="Fit page">Fit Page</button>
+                <button type="button" onClick={() => rotatePreview(1)} className="kalpa-preview-btn-text" title="Rotate right (R)"><RotateCw className="w-3.5 h-3.5" /> Rotate</button>
+                <button type="button" onClick={resetPreviewView} className="kalpa-preview-btn" title="Reset view (Ctrl 0)"><RefreshCcw className="w-4 h-4" /></button>
+                <span className="kalpa-preview-separator hidden lg:inline-flex" />
+                <span className="kalpa-preview-page-pill hidden md:inline-flex">1 / 1</span>
+                {filePreview.url && !filePreview.loading && !filePreview.error && <button type="button" onClick={() => window.open(filePreview.url, '_blank', 'noopener,noreferrer')} className="kalpa-preview-btn-text hidden sm:inline-flex" title="Open in new tab"><Maximize2 className="w-3.5 h-3.5" /> Open</button>}
+                <button type="button" onClick={() => handleTrackedDownload(filePreview.doc)} className="kalpa-preview-btn-text text-indigo-700" title="Download"><Download className="w-3.5 h-3.5" /> Download</button>
+                <button type="button" onClick={closeFilePreview} className="kalpa-preview-close" title="Close (Esc)"><X className="w-5 h-5" /></button>
               </div>
             </div>
-            <div className="flex-1 bg-slate-100 min-h-0">
+            <div className="kalpa-preview-stage flex-1 bg-slate-950 min-h-0 overflow-hidden">
               {filePreview.loading ? (
-                <div className="w-full h-full flex flex-col items-center justify-center gap-4 text-slate-500">
-                  <div className="w-12 h-12 rounded-full border-4 border-slate-200 border-t-indigo-500 animate-spin" />
+                <div className="w-full h-full flex flex-col items-center justify-center gap-4 text-slate-300">
+                  <div className="w-12 h-12 rounded-full border-4 border-slate-700 border-t-indigo-400 animate-spin" />
                   <p className="text-sm font-black">Preparing preview...</p>
                 </div>
               ) : filePreview.error ? (
-                <div className="w-full h-full flex items-center justify-center p-6">
+                <div className="w-full h-full flex items-center justify-center p-6 bg-slate-100">
                   <div className="max-w-xl w-full bg-white rounded-3xl border border-rose-100 shadow-sm p-6 text-center">
                     <AlertCircle className="w-10 h-10 mx-auto text-rose-500 mb-3" />
                     <h4 className="font-black text-slate-900 text-lg">Preview could not open</h4>
@@ -3154,28 +3270,35 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                   </div>
                 </div>
               ) : filePreview.kind === 'image' ? (
-                <div className="w-full h-full flex items-center justify-center bg-slate-950 overflow-auto p-4">
+                <div className="kalpa-preview-image-stage">
                   <img
                     src={filePreview.url}
                     alt={filePreview.name || 'Image Preview'}
                     style={{ transform: `scale(${filePreviewUi.zoom}) rotate(${filePreviewUi.rotation}deg)`, transition: 'transform 160ms ease' }}
-                    className="max-w-full max-h-full object-contain rounded-xl shadow-2xl"
+                    className="kalpa-preview-image"
                   />
                 </div>
               ) : (
-                <iframe
-                  title={filePreview.name || 'PDF Preview'}
-                  src={filePreview.url}
-                  className="w-full h-full bg-white"
-                />
+                <div className="kalpa-preview-pdf-stage" style={{ transform: `rotate(${filePreviewUi.rotation}deg)`, transition: 'transform 160ms ease' }}>
+                  <div
+                    className="kalpa-preview-pdf-zoom-surface"
+                    style={{
+                      width: `${100 / previewZoomValue}%`,
+                      height: `${100 / previewZoomValue}%`,
+                      transform: `scale(${previewZoomValue})`,
+                      transformOrigin: 'top left',
+                    }}
+                  >
+                    <iframe
+                      key={`${filePreview.name || ''}-${filePreviewUi.fitMode}-${filePreviewUi.rotation}`}
+                      title={filePreview.name || 'PDF Preview'}
+                      src={previewFrameSrc}
+                      className="kalpa-preview-pdf-frame"
+                      style={previewPdfFrameStyle}
+                    />
+                  </div>
+                </div>
               )}
-            </div>
-            <div className="px-4 py-3 bg-white border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <p className="text-xs font-bold text-slate-500">Preview streams the file inline inside Kalpavriksha Ops. Download only when a local copy is needed.</p>
-              <div className="sm:hidden grid grid-cols-2 gap-2">
-                {filePreview.kind === 'image' && !filePreview.loading && !filePreview.error && <button type="button" onClick={() => setFilePreviewUi(v => ({ ...v, rotation: (Number(v.rotation || 0) + 90) % 360 }))} className="text-xs font-black text-slate-700 bg-slate-50 border border-slate-200 px-4 py-2 rounded-xl">Rotate</button>}
-                <button type="button" onClick={() => handleTrackedDownload(filePreview.doc)} className="text-xs font-black text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-4 py-2 rounded-xl flex items-center justify-center gap-1.5"><Download className="w-3.5 h-3.5" /> Download</button>
-              </div>
             </div>
           </div>
         </PortalLayer>
@@ -3444,11 +3567,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                      <div className="p-2 bg-white rounded-lg shadow-sm border border-slate-100">{getFileIcon(doc.name)}</div>
                      <span className="font-bold ml-4 truncate">{doc.name}</span>
                    </div>
-                   {doc.url ? (
-                     renderFileActionButtons(doc, "text-xs font-bold text-indigo-600 bg-white border border-slate-200 hover:bg-indigo-50 px-4 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm")
-                   ) : (
-                     <button type="button" className="text-xs font-bold text-slate-400 bg-slate-50 px-4 py-2 rounded-xl whitespace-nowrap cursor-not-allowed border border-slate-200">Unavailable</button>
-                   )}
+                   {renderFileActionButtons(doc, "text-xs font-bold text-indigo-600 bg-white border border-slate-200 hover:bg-indigo-50 px-4 py-2 rounded-xl whitespace-nowrap transition-colors shadow-sm")}
                    </div>
                    {isCurrentTransferForDoc(doc) && renderInlineFileTransferBar()}
                  </div>
@@ -3473,11 +3592,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                      <span className="font-bold ml-4 truncate">{doc.name}</span>
                      <span className="text-[11px] font-bold ml-3 text-blue-600 bg-blue-100 px-2 py-1 rounded-lg whitespace-nowrap hidden sm:inline-block border border-blue-200">by {doc.uploadedBy}</span>
                    </div>
-                   {doc.url ? (
-                     renderFileActionButtons(doc, "text-xs font-bold text-blue-700 bg-white hover:bg-blue-50 shadow-sm border border-blue-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors")
-                   ) : (
-                     <button type="button" className="text-xs font-bold text-slate-400 bg-slate-50 px-4 py-2 rounded-xl whitespace-nowrap cursor-not-allowed border border-slate-200">Unavailable</button>
-                   )}
+                   {renderFileActionButtons(doc, "text-xs font-bold text-blue-700 bg-white hover:bg-blue-50 shadow-sm border border-blue-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors")}
                    </div>
                    {isCurrentTransferForDoc(doc) && renderInlineFileTransferBar()}
                  </div>
@@ -3496,9 +3611,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
                      <span className="text-[10px] font-black ml-3 text-emerald-700 bg-white px-2 py-1 rounded-lg border border-emerald-100">V{idx + 1}</span>
                      <span className="text-[11px] font-bold ml-3 text-emerald-600 bg-emerald-100 px-2 py-1 rounded-lg whitespace-nowrap hidden sm:inline-block border border-emerald-200">by {doc.uploadedBy}</span>
                    </div>
-                   {doc.url && (
-                     renderFileActionButtons(doc, "text-xs font-bold text-emerald-700 bg-white hover:bg-emerald-50 shadow-sm border border-emerald-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors")
-                   )}
+                   {renderFileActionButtons(doc, "text-xs font-bold text-emerald-700 bg-white hover:bg-emerald-50 shadow-sm border border-emerald-200 px-4 py-2 rounded-xl whitespace-nowrap transition-colors")}
                    </div>
                    {isCurrentTransferForDoc(doc) && renderInlineFileTransferBar()}
                  </div>
@@ -3737,7 +3850,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
             {(project.reassignmentHistory || []).length > 0 && (
               <div className="mt-4 border-t border-slate-100 pt-4">
                 <p className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2">Reassignment History</p>
-                {(project.reassignmentHistory || []).map((r, idx) => <p key={idx} className="text-xs font-bold text-slate-600 bg-slate-50 rounded-lg px-3 py-2 mb-1">{r.from} â†’ {r.to} by {r.by} • {r.time}</p>)}
+                {(project.reassignmentHistory || []).map((r, idx) => <p key={idx} className="text-xs font-bold text-slate-600 bg-slate-50 rounded-lg px-3 py-2 mb-1">{r.from} → {r.to} by {r.by} • {r.time}</p>)}
               </div>
             )}
           </div>
@@ -3902,6 +4015,75 @@ function AppShell() {
     };
   }, [showNewLead]);
 
+  const [globalFilePreview, setGlobalFilePreview] = useState(null);
+  const [globalFilePreviewUi, setGlobalFilePreviewUi] = useState({ zoom: 1, rotation: 0, fitMode: 'width' });
+
+  const closeGlobalFilePreview = useCallback(() => {
+    setGlobalFilePreview((current) => {
+      if (current?.objectUrl) {
+        try { URL.revokeObjectURL(current.objectUrl); } catch {}
+      }
+      return null;
+    });
+    setGlobalFilePreviewUi({ zoom: 1, rotation: 0, fitMode: 'width' });
+  }, []);
+
+  const openUnifiedFilePreview = useCallback(async (doc = {}) => {
+    const kind = getProjectFileKind(doc);
+    const name = doc.name || doc.fileName || (kind === 'image' ? 'Image Preview' : 'PDF Preview');
+    if (kind === 'file' && !canPreviewProjectFile(doc)) {
+      alert('Preview is available for PDF and image files only. Use Download to save this file.');
+      return;
+    }
+    setGlobalFilePreview((current) => {
+      if (current?.objectUrl) {
+        try { URL.revokeObjectURL(current.objectUrl); } catch {}
+      }
+      return { doc, kind, name, loading: true, error: '', url: '', objectUrl: '' };
+    });
+    setGlobalFilePreviewUi({ zoom: 1, rotation: 0, fitMode: 'width' });
+    try {
+      const preview = await fetchProjectFilePreview(doc);
+      setGlobalFilePreview({
+        doc,
+        kind: preview.kind || kind,
+        name,
+        loading: false,
+        error: '',
+        url: preview.url,
+        objectUrl: preview.url,
+        sourceUrl: preview.sourceUrl,
+        mimeType: preview.mimeType,
+        size: preview.size,
+      });
+    } catch (error) {
+      setGlobalFilePreview({
+        doc,
+        kind,
+        name,
+        loading: false,
+        error: error?.message || 'Preview could not be loaded.',
+        url: '',
+        objectUrl: '',
+        sourceUrl: '',
+      });
+    }
+  }, []);
+
+  const updateGlobalPreviewZoom = useCallback((delta) => {
+    setGlobalFilePreviewUi((value) => ({ ...value, zoom: Math.max(0.25, Math.min(3, Number(value.zoom || 1) + delta)), fitMode: 'custom' }));
+  }, []);
+
+  const resetGlobalPreviewView = useCallback(() => setGlobalFilePreviewUi({ zoom: 1, rotation: 0, fitMode: 'width' }), []);
+  const rotateGlobalPreview = useCallback(() => setGlobalFilePreviewUi((value) => ({ ...value, rotation: ((Number(value.rotation || 0) + 90) % 360 + 360) % 360 })), []);
+
+  useEffect(() => {
+    window.__kalpaOpenFilePreview = openUnifiedFilePreview;
+    return () => {
+      if (window.__kalpaOpenFilePreview === openUnifiedFilePreview) delete window.__kalpaOpenFilePreview;
+    };
+  }, [openUnifiedFilePreview]);
+
   const [newTaskCategory, setNewTaskCategory] = useState(TASK_CATEGORIES[0]);
   
   const [leadFiles, setLeadFiles] = useState([]);
@@ -4021,7 +4203,28 @@ function AppShell() {
         setDbError(null);
       } catch (err) {
         console.warn('Backend/PostgreSQL state unavailable, using local cache fallback:', err.message);
+        try {
+          const savedUsers = localStorage.getItem('kalpa_users');
+          const savedProjects = localStorage.getItem('kalpa_projects');
+          const savedProjectsBackup = localStorage.getItem('kalpa_projects_backup');
+          const savedChats = localStorage.getItem('kalpa_chats');
+          const savedNotifs = localStorage.getItem('kalpa_notifs');
+          const savedLogs = localStorage.getItem('kalpa_attendance');
+          setUsers(normalizeTeamUsers(savedUsers ? JSON.parse(savedUsers) : INITIAL_USERS));
+          const localProjects = savedProjects ? JSON.parse(savedProjects) : [];
+          const backupProjects = savedProjectsBackup ? JSON.parse(savedProjectsBackup) : [];
+          applyProjectSnapshot(mergeProjectsByFreshness(sanitizeProjectsForCache(localProjects), sanitizeProjectsForCache(backupProjects)), { source: 'backend-fallback-cache' });
+          setChatMessages(savedChats ? sanitizeChatsForCache(JSON.parse(savedChats)) : []);
+          setNotifications(savedNotifs ? JSON.parse(savedNotifs) : []);
+          setAttendanceLogs(savedLogs ? JSON.parse(savedLogs) : []);
+          setShowLocalBanner(true);
+        } catch (cacheErr) {
+          console.warn('Local cache fallback failed:', cacheErr.message);
+          setUsers(normalizeTeamUsers(INITIAL_USERS));
+          setProjects(prev => prev || []);
+        }
         setBackendStateReady(true);
+        setIsDbReady(true);
       }
     };
     hydrate();
@@ -4135,6 +4338,37 @@ function AppShell() {
     return () => { cancelled = true; clearInterval(timer); window.removeEventListener('online', flushPendingCreatedProjects); window.removeEventListener('focus', flushPendingCreatedProjects); };
   }, [USE_BACKEND_STATE, backendStateReady, isDbReady, jsonFinanceSafeHeaders, currentUser?.role, applyProjectSnapshot]);
 
+
+  // Durable delete-task outbox: a deleted task remains hidden everywhere and the
+  // backend delete is retried until it confirms. This prevents stale backend,
+  // localStorage, or another tab from resurrecting a case after 3-5 seconds.
+  useEffect(() => {
+    if (!USE_BACKEND_STATE || !backendStateReady || !isDbReady) return;
+    let cancelled = false;
+    const flushPendingDeletedProjects = async () => {
+      const pendingIds = getPendingDeletedProjectIds();
+      if (!pendingIds.length) return;
+      setProjects(prev => filterDeletedProjects(prev || []));
+      for (const id of pendingIds) {
+        if (cancelled || !id) continue;
+        try {
+          markPendingDeletedAttempt(id);
+          const data = await deleteTaskApi({ apiBase: API_BASE, taskId: id, headers: jsonFinanceSafeHeaders });
+          if (Array.isArray(data.deletedProjectIds)) rememberDeletedProjectsForce(data.deletedProjectIds);
+          // Keep the confirmed deleted-id memory, but remove it from retry outbox.
+          forgetPendingDeletedProjects(id);
+        } catch (e) {
+          console.warn('Pending task delete retry failed:', e.message);
+        }
+      }
+    };
+    flushPendingDeletedProjects();
+    const timer = setInterval(flushPendingDeletedProjects, 30000);
+    window.addEventListener('online', flushPendingDeletedProjects);
+    window.addEventListener('focus', flushPendingDeletedProjects);
+    return () => { cancelled = true; clearInterval(timer); window.removeEventListener('online', flushPendingDeletedProjects); window.removeEventListener('focus', flushPendingDeletedProjects); };
+  }, [USE_BACKEND_STATE, backendStateReady, isDbReady, jsonFinanceSafeHeaders]);
+
   // Keep assignment/status changes live across tabs without creating storage-event loops.
   // Important: never write back to localStorage while handling an incoming sync event;
   // doing so rebroadcasts the same payload between tabs and can push CPU/memory very high.
@@ -4200,8 +4434,8 @@ function AppShell() {
   }, [users, currentUser?.id]);
 
   useEffect(() => {
-    if (isLocalMock) {
-      setFirebaseUser({ uid: 'local-dev-user' });
+    if (USE_BACKEND_STATE || isLocalMock) {
+      setFirebaseUser({ uid: USE_BACKEND_STATE ? 'backend-state-user' : 'local-dev-user' });
       setIsAuthReady(true);
       return;
     }
@@ -4633,10 +4867,19 @@ function AppShell() {
 
   const handleDeleteTask = async (taskId) => {
      const id = String(taskId);
+     const target = (projects || []).find(p => String(p.id) === id || String(p.caseId || '') === id) || selectedProject || {};
+     const deleteIds = [...new Set([id, target?.id, target?.caseId, ...(target?.previousTaskIds || [])].map(x => String(x || '')).filter(Boolean))];
      setSelectedProject(null);
-     rememberDeletedProjects(id);
+     // A user-initiated delete must win over recent-create protection. Otherwise
+     // a newly created case can disappear locally, then reappear from the protected
+     // recent-create cache/backend poll a few seconds later.
+     forgetPendingCreatedProjects(deleteIds);
+     forgetRecentCreatedProjects(deleteIds);
+     rememberDeletedProjectsForce(deleteIds);
+     rememberPendingDeletedProjects(deleteIds);
      setProjects(prev => {
-       const next = filterDeletedProjects((prev || []).filter(p => String(p.id) !== id && String(p.caseId || '') !== id));
+       const deleteSet = new Set(deleteIds);
+       const next = filterDeletedProjects((prev || []).filter(p => !deleteSet.has(String(p.id)) && !deleteSet.has(String(p.caseId || ''))));
        persistAndBroadcastProjects(next);
        return next;
      });
@@ -4648,7 +4891,8 @@ function AppShell() {
      try {
        if (USE_BACKEND_STATE) {
          const data = await deleteTaskApi({ apiBase: API_BASE, taskId: id, headers: jsonFinanceSafeHeaders });
-         if (Array.isArray(data.deletedProjectIds)) rememberDeletedProjects(data.deletedProjectIds);
+         if (Array.isArray(data.deletedProjectIds)) rememberDeletedProjectsForce(data.deletedProjectIds);
+         forgetPendingDeletedProjects(deleteIds);
        }
      } catch (e) { console.warn('Backend delete failed after local deletion:', e); }
      try {
@@ -5030,7 +5274,7 @@ function AppShell() {
     );
   }
 
-  if (!firebaseUser || !isDbReady) {
+  if ((USE_BACKEND_STATE ? !isDbReady : (!firebaseUser || !isDbReady))) {
     return <PageLoadingScreen />;
   }
 
@@ -5324,19 +5568,92 @@ function AppShell() {
         )}
       </main>
 
-      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} projects={projects} onOpenTaskReference={openTaskReferenceFromChat} />}
+      {globalFilePreview && (
+        <PortalLayer isOpen={Boolean(globalFilePreview)} className="kalpa-preview-layer fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center" lockScrollClass="kalpa-preview-open" role="dialog" ariaModal={true} ariaLabel="File preview" onEscape={closeGlobalFilePreview} initialFocusSelector="button">
+          <div className="kalpa-preview-card bg-white shadow-2xl border border-slate-200 overflow-hidden flex flex-col">
+            <div className="kalpa-preview-header border-b border-slate-100 bg-white/95">
+              <div className="kalpa-preview-title min-w-0 flex items-center gap-3">
+                <div className={`${globalFilePreview.kind === 'image' ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-red-50 text-red-600 border-red-100'} w-9 h-9 rounded-2xl flex items-center justify-center border shrink-0`}>
+                  {globalFilePreview.kind === 'image' ? <ImageIcon className="w-4.5 h-4.5" /> : <FileText className="w-4.5 h-4.5" />}
+                </div>
+                <div className="min-w-0">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{globalFilePreview.kind === 'image' ? 'Image Preview' : 'PDF Preview'}</p>
+                  <h3 className="text-sm font-black text-slate-900 truncate">{globalFilePreview.name}</h3>
+                </div>
+              </div>
+              <div className="kalpa-preview-toolbar flex items-center gap-1.5 shrink-0">
+                <button type="button" onClick={() => updateGlobalPreviewZoom(-0.15)} className="kalpa-preview-btn" title="Zoom out (Ctrl -)"><ZoomOut className="w-4 h-4" /></button>
+                <span className="kalpa-preview-zoom">{Math.round((globalFilePreviewUi.zoom || 1) * 100)}%</span>
+                <button type="button" onClick={() => updateGlobalPreviewZoom(0.15)} className="kalpa-preview-btn" title="Zoom in (Ctrl +)"><ZoomIn className="w-4 h-4" /></button>
+                <span className="kalpa-preview-separator hidden sm:inline-flex" />
+                <button type="button" onClick={() => setGlobalFilePreviewUi(v => ({ ...v, zoom: 1, fitMode: 'width' }))} className="kalpa-preview-btn-text" title="Fit width">Fit Width</button>
+                <button type="button" onClick={() => setGlobalFilePreviewUi(v => ({ ...v, zoom: 0.9, fitMode: 'page' }))} className="kalpa-preview-btn-text" title="Fit page">Fit Page</button>
+                <button type="button" onClick={rotateGlobalPreview} className="kalpa-preview-btn-text" title="Rotate right"><RotateCw className="w-3.5 h-3.5" /> Rotate</button>
+                <button type="button" onClick={resetGlobalPreviewView} className="kalpa-preview-btn" title="Reset view (Ctrl 0)"><RefreshCcw className="w-4 h-4" /></button>
+                <span className="kalpa-preview-separator hidden lg:inline-flex" />
+                <span className="kalpa-preview-page-pill hidden md:inline-flex">1 / 1</span>
+                {globalFilePreview.url && !globalFilePreview.loading && !globalFilePreview.error && <button type="button" onClick={() => window.open(globalFilePreview.url, '_blank', 'noopener,noreferrer')} className="kalpa-preview-btn-text hidden sm:inline-flex" title="Open in new tab"><Maximize2 className="w-3.5 h-3.5" /> Open</button>}
+                <button type="button" onClick={() => { const downloadUrl = getProjectFileDownloadUrl(globalFilePreview.doc); if (downloadUrl) window.open(downloadUrl, '_blank', 'noopener,noreferrer'); }} className="kalpa-preview-btn-text text-indigo-700" title="Download"><Download className="w-3.5 h-3.5" /> Download</button>
+                <button type="button" onClick={closeGlobalFilePreview} className="kalpa-preview-close" title="Close (Esc)"><X className="w-5 h-5" /></button>
+              </div>
+            </div>
+            <div className="kalpa-preview-stage flex-1 bg-slate-950 min-h-0 overflow-hidden">
+              {globalFilePreview.loading ? (
+                <div className="h-full min-h-[360px] flex items-center justify-center text-white font-black">Loading preview...</div>
+              ) : globalFilePreview.error ? (
+                <div className="h-full min-h-[360px] flex items-center justify-center">
+                  <div className="bg-white rounded-3xl p-6 max-w-md text-center shadow-xl">
+                    <AlertCircle className="w-10 h-10 text-red-500 mx-auto mb-3" />
+                    <p className="font-black text-slate-900">Preview unavailable</p>
+                    <p className="text-sm text-slate-500 mt-2 break-words">{globalFilePreview.error}</p>
+                  </div>
+                </div>
+              ) : globalFilePreview.kind === 'image' ? (
+                <div className="kalpa-preview-image-stage">
+                  <img
+                    src={globalFilePreview.url}
+                    alt={globalFilePreview.name || 'Image preview'}
+                    className="kalpa-preview-image"
+                    style={{ transform: `scale(${globalFilePreviewUi.zoom}) rotate(${globalFilePreviewUi.rotation}deg)`, transformOrigin: 'center center', transition: 'transform 160ms ease' }}
+                  />
+                </div>
+              ) : (
+                <div className="kalpa-preview-pdf-stage" style={{ transform: `rotate(${globalFilePreviewUi.rotation}deg)`, transformOrigin: 'center center' }}>
+                  <div
+                    className="kalpa-preview-pdf-zoom-surface"
+                    style={{
+                      width: `${100 / Math.max(0.35, Number(globalFilePreviewUi.zoom || 1))}%`,
+                      height: `${100 / Math.max(0.35, Number(globalFilePreviewUi.zoom || 1))}%`,
+                      transform: `scale(${Math.max(0.35, Number(globalFilePreviewUi.zoom || 1))})`,
+                      transformOrigin: 'top left',
+                    }}
+                  >
+                    <iframe
+                      title={globalFilePreview.name || 'PDF preview'}
+                      src={`${String(globalFilePreview.url || '').split('#')[0]}#toolbar=0&navpanes=0&view=${globalFilePreviewUi.fitMode === 'page' ? 'Fit' : 'FitH'}`}
+                      className="kalpa-preview-pdf-frame"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </PortalLayer>
+      )}
+
+      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} projects={projects} onOpenTaskReference={openTaskReferenceFromChat} onPreviewFile={openUnifiedFilePreview} />}
 
       {!selectedProject && !showNewLead && <MobileBottomNavigation currentUser={currentUser} ROLES={ROLES} activeTab={activeTab} setActiveTab={setActiveTab} unreadNotifs={unreadNotifs} />}
 
       {showNewLead && (
-        <PortalLayer isOpen={showNewLead} className="kalpa-lead-modal" lockScrollClass="kalpa-create-task-open" role="dialog" ariaModal={true} ariaLabel="Create task">
+        <PortalLayer isOpen={showNewLead} className="kalpa-lead-modal" lockScrollClass="kalpa-create-task-open" role="dialog" ariaModal={true} ariaLabel="Create task" onEscape={() => setShowNewLead(false)} initialFocusSelector="input[name=client]">
           <div className="kalpa-lead-modal-card bg-white shadow-2xl animate-in zoom-in-95 duration-200">
              <div className="kalpa-lead-modal-header">
                 <div>
                   <p className="text-xs font-black uppercase tracking-[0.22em] text-indigo-500 mb-1">Operations</p>
                   <h2 className="text-3xl font-black text-slate-800 tracking-tight">Log New Case</h2>
                 </div>
-                <button type="button" onClick={() => setShowNewLead(false)} className="kalpa-modal-icon-button" aria-label="Close create task modal"><X className="w-6 h-6 text-slate-600"/></button>
+                <IconButton label="Close create task modal" onClick={() => setShowNewLead(false)} className="kalpa-modal-icon-button"><X className="w-6 h-6 text-slate-600"/></IconButton>
              </div>
              
              <form noValidate className="kalpa-create-task-form" onSubmit={async (e) => {
@@ -5389,6 +5706,10 @@ function AppShell() {
                    newP.timeline.push({ id: Date.now()+1, text: `${docs.length} Source File(s) Attached`, time: new Date().toLocaleString() });
                }
 
+               // Fresh task IDs can be reused after local/dev resets. Clear any stale
+               // deleted-id memory before the first local merge, otherwise the task
+               // appears briefly and then vanishes on the next sync/filter pass.
+               forgetDeletedProjects(newP.id, newP.caseId);
                rememberRecentCreatedProject(newP);
                rememberPendingCreatedProject(newP);
                const nextProjects = filterDeletedProjects(mergeProjectsByFreshness((projects || []).filter(p => String(p.id) !== String(newP.id)), [newP, ...getRecentCreatedProjects(), ...getPendingCreatedProjects()]));
@@ -5519,14 +5840,12 @@ function AppShell() {
 
 
                {createTaskError && (
-                 <div className="rounded-2xl border-2 border-red-100 bg-red-50 px-4 py-3 text-sm font-bold text-red-700" role="alert">
-                   {createTaskError}
-                 </div>
+                 <InlineAlert tone="error">{createTaskError}</InlineAlert>
                )}
 
-               <button type="submit" disabled={isSubmittingLead} className={`kalpa-create-task-button w-full py-4 text-white rounded-2xl font-black text-lg shadow-xl transition-all mt-8 ${isSubmittingLead ? 'bg-indigo-400 cursor-not-allowed' : 'bg-slate-800 hover:bg-slate-700 shadow-slate-200 hover:-translate-y-1'}`}>
+               <Button type="submit" loading={isSubmittingLead} disabled={isSubmittingLead} size="xl" variant="primary" className="kalpa-create-task-button w-full mt-8">
                   {isSubmittingLead ? 'Uploading Files & Creating Task...' : 'Create Task'}
-               </button>
+               </Button>
              </form>
           </div>
         </PortalLayer>

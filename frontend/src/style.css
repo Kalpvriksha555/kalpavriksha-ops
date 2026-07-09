@@ -4804,3 +4804,584 @@ body.kalpa-overlay-open {
     grid-template-columns: minmax(0, 1fr) !important;
   }
 }
+
+/* Phase 24E.1: Unified preview toolbar and document workspace polish */
+.kalpa-preview-card {
+  display: flex !important;
+  flex-direction: column !important;
+}
+.kalpa-preview-header,
+.kalpa-preview-footer {
+  flex: 0 0 auto !important;
+}
+.kalpa-preview-stage {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+}
+.kalpa-preview-toolbar {
+  max-width: min(78vw, 920px);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.kalpa-preview-toolbar::-webkit-scrollbar { display: none; }
+.kalpa-preview-btn,
+.kalpa-preview-btn-text,
+.kalpa-preview-close,
+.kalpa-preview-mobile-btn {
+  min-height: 38px;
+  border: 1px solid rgb(226 232 240);
+  background: #fff;
+  color: rgb(30 41 59);
+  border-radius: 14px;
+  font-size: 12px;
+  font-weight: 900;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
+}
+.kalpa-preview-btn {
+  width: 38px;
+  padding: 0;
+}
+.kalpa-preview-btn-text {
+  padding: 0 12px;
+  white-space: nowrap;
+}
+.kalpa-preview-btn:hover,
+.kalpa-preview-btn-text:hover,
+.kalpa-preview-close:hover,
+.kalpa-preview-mobile-btn:hover {
+  background: rgb(248 250 252);
+  border-color: rgb(203 213 225);
+}
+.kalpa-preview-close {
+  width: 42px;
+  min-height: 42px;
+  border-radius: 16px;
+}
+.kalpa-preview-zoom,
+.kalpa-preview-page-pill {
+  height: 38px;
+  min-width: 58px;
+  padding: 0 10px;
+  border-radius: 14px;
+  background: rgb(248 250 252);
+  border: 1px solid rgb(226 232 240);
+  color: rgb(71 85 105);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+.kalpa-preview-separator {
+  width: 1px;
+  height: 26px;
+  background: rgb(226 232 240);
+  margin: 0 2px;
+}
+.kalpa-preview-image-stage {
+  width: 100%;
+  height: 100%;
+  background: radial-gradient(circle at center, rgb(30 41 59), rgb(2 6 23));
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+  overscroll-behavior: contain;
+}
+.kalpa-preview-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 14px;
+  box-shadow: 0 24px 70px rgba(0,0,0,.45);
+  transform-origin: center center;
+}
+.kalpa-preview-pdf-stage {
+  width: 100%;
+  height: 100%;
+  background: rgb(39 39 42);
+  overflow: hidden;
+  transform-origin: center center;
+}
+.kalpa-preview-pdf-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: white;
+  display: block;
+}
+.kalpa-preview-mobile-btn {
+  min-height: 40px;
+  padding: 0 10px;
+  background: rgb(248 250 252);
+}
+@media (max-width: 900px) {
+  .kalpa-preview-card {
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    border-radius: 0 !important;
+  }
+  .kalpa-preview-header {
+    padding-top: calc(10px + var(--kalpa-safe-top)) !important;
+  }
+  .kalpa-preview-footer {
+    padding-bottom: calc(10px + var(--kalpa-safe-bottom)) !important;
+  }
+  .kalpa-preview-image-stage {
+    padding: 12px;
+    align-items: center;
+  }
+}
+
+/* Phase 24E.2: shared UI foundation tokens and safeguards */
+:root {
+  --kalpa-radius-sm: 0.75rem;
+  --kalpa-radius-md: 1rem;
+  --kalpa-radius-lg: 1.5rem;
+  --kalpa-radius-xl: 2rem;
+  --kalpa-layer-modal: 2147483000;
+  --kalpa-layer-preview: 2147483100;
+  --kalpa-focus-ring: 0 0 0 4px rgba(99, 102, 241, 0.14);
+}
+
+.kalpa-ui-button:focus-visible,
+.kalpa-shared-modal-card input:focus,
+.kalpa-shared-modal-card select:focus,
+.kalpa-shared-modal-card textarea:focus {
+  box-shadow: var(--kalpa-focus-ring);
+}
+
+.kalpa-shared-modal-layer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.kalpa-shared-modal-card {
+  max-height: min(92vh, 980px);
+}
+
+.kalpa-shared-modal-body {
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+}
+
+body.kalpa-modal-open,
+body.kalpa-create-task-open,
+body.kalpa-preview-open {
+  overflow: hidden !important;
+  overscroll-behavior: none !important;
+}
+
+@media (max-width: 640px) {
+  .kalpa-shared-modal-layer {
+    padding: 0 !important;
+    align-items: stretch;
+  }
+  .kalpa-shared-modal-card {
+    width: 100vw !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    border-radius: 0 !important;
+  }
+  .kalpa-shared-modal-header,
+  .kalpa-shared-modal-footer {
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+  }
+  .kalpa-shared-modal-body {
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+  }
+}
+
+/* Phase 25A: Viewer QA - full workspace document-first layout */
+.kalpa-preview-layer {
+  padding: clamp(6px, 1vw, 14px) !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+.kalpa-preview-card {
+  width: min(96vw, 1680px) !important;
+  height: min(94dvh, 980px) !important;
+  max-width: calc(100vw - 16px) !important;
+  max-height: calc(100dvh - 16px) !important;
+  border-radius: 18px !important;
+}
+.kalpa-preview-header {
+  flex: 0 0 auto !important;
+  min-height: 58px !important;
+  padding: 8px 12px !important;
+  display: grid !important;
+  grid-template-columns: minmax(180px, 1fr) minmax(0, auto) !important;
+  align-items: center !important;
+  gap: 12px !important;
+}
+.kalpa-preview-title {
+  min-width: 0 !important;
+}
+.kalpa-preview-toolbar {
+  max-width: min(72vw, 1080px) !important;
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
+  padding-bottom: 1px !important;
+  scrollbar-width: thin !important;
+  justify-content: flex-end !important;
+}
+.kalpa-preview-toolbar::-webkit-scrollbar { height: 4px !important; display: block !important; }
+.kalpa-preview-toolbar::-webkit-scrollbar-thumb { background: rgb(203 213 225) !important; border-radius: 999px !important; }
+.kalpa-preview-btn,
+.kalpa-preview-btn-text,
+.kalpa-preview-close {
+  min-height: 36px !important;
+  height: 36px !important;
+  border-radius: 12px !important;
+  flex: 0 0 auto !important;
+}
+.kalpa-preview-btn { width: 36px !important; }
+.kalpa-preview-btn-text { padding: 0 11px !important; }
+.kalpa-preview-close { width: 40px !important; min-height: 40px !important; height: 40px !important; border-radius: 14px !important; }
+.kalpa-preview-zoom,
+.kalpa-preview-page-pill {
+  height: 36px !important;
+  min-width: 56px !important;
+  border-radius: 12px !important;
+  flex: 0 0 auto !important;
+}
+.kalpa-preview-stage {
+  height: auto !important;
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+}
+.kalpa-preview-footer { display: none !important; }
+.kalpa-preview-pdf-stage {
+  height: 100% !important;
+  overflow: hidden !important;
+  background: #1f2937 !important;
+}
+.kalpa-preview-pdf-frame {
+  width: 100% !important;
+  height: 100% !important;
+}
+.kalpa-preview-image-stage {
+  height: 100% !important;
+  padding: 16px !important;
+}
+@media (max-width: 900px) {
+  .kalpa-preview-layer { padding: 0 !important; }
+  .kalpa-preview-card {
+    width: 100vw !important;
+    height: 100dvh !important;
+    max-width: 100vw !important;
+    max-height: 100dvh !important;
+    border-radius: 0 !important;
+    border: 0 !important;
+  }
+  .kalpa-preview-header {
+    min-height: auto !important;
+    padding: calc(8px + var(--kalpa-safe-top)) 8px 8px !important;
+    grid-template-columns: 1fr !important;
+    gap: 8px !important;
+  }
+  .kalpa-preview-title .w-9 { width: 32px !important; height: 32px !important; }
+  .kalpa-preview-toolbar {
+    max-width: 100% !important;
+    justify-content: flex-start !important;
+    padding-bottom: 3px !important;
+  }
+  .kalpa-preview-btn-text {
+    padding: 0 9px !important;
+    font-size: 11px !important;
+  }
+  .kalpa-preview-zoom { min-width: 50px !important; }
+}
+@media (max-width: 480px) {
+  .kalpa-preview-btn,
+  .kalpa-preview-btn-text,
+  .kalpa-preview-close,
+  .kalpa-preview-zoom,
+  .kalpa-preview-page-pill {
+    height: 34px !important;
+    min-height: 34px !important;
+    border-radius: 11px !important;
+  }
+  .kalpa-preview-btn { width: 34px !important; }
+  .kalpa-preview-close { width: 38px !important; }
+  .kalpa-preview-btn-text { padding: 0 8px !important; }
+}
+
+
+/* Phase 25P: final preview containment and no-download preview safeguards */
+.kalpa-preview-layer {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100dvh !important;
+  overflow: hidden !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+.kalpa-preview-shell,
+.kalpa-preview-card {
+  width: min(96vw, 1720px) !important;
+  height: min(94dvh, 980px) !important;
+  max-width: calc(100vw - 20px) !important;
+  max-height: calc(100dvh - 20px) !important;
+  border-radius: 18px !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+.kalpa-preview-topbar,
+.kalpa-preview-header {
+  flex: 0 0 auto !important;
+  position: relative !important;
+  z-index: 3 !important;
+}
+.kalpa-preview-content,
+.kalpa-preview-stage {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  height: auto !important;
+  overflow: hidden !important;
+}
+.kalpa-preview-pdf-stage {
+  width: 100% !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  background: #1e293b !important;
+  display: flex !important;
+  align-items: stretch !important;
+  justify-content: stretch !important;
+}
+.kalpa-preview-pdf-frame {
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 100% !important;
+  min-height: 100% !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: #fff !important;
+  display: block !important;
+}
+.kalpa-preview-image-stage {
+  width: 100% !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  overflow: auto !important;
+  background: radial-gradient(circle at center, #334155 0%, #0f172a 70%) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  padding: 18px !important;
+}
+.kalpa-preview-image {
+  display: block !important;
+  max-width: min(100%, calc(100vw - 72px)) !important;
+  max-height: calc(100dvh - 150px) !important;
+  width: auto !important;
+  height: auto !important;
+  object-fit: contain !important;
+  background: #fff !important;
+  border-radius: 14px !important;
+  box-shadow: 0 24px 80px rgba(0,0,0,.45) !important;
+}
+@media (max-width: 640px) {
+  .kalpa-preview-shell,
+  .kalpa-preview-card {
+    width: 100vw !important;
+    height: 100dvh !important;
+    max-width: 100vw !important;
+    max-height: 100dvh !important;
+    border-radius: 0 !important;
+  }
+  .kalpa-preview-image {
+    max-width: calc(100vw - 24px) !important;
+    max-height: calc(100dvh - 156px) !important;
+  }
+}
+
+/* Phase 25Q: preview no-download and chat image toolbar visibility */
+.kalpa-preview-topbar {
+  display: grid !important;
+  grid-template-columns: minmax(160px, 1fr) minmax(0, auto) !important;
+  align-items: center !important;
+  gap: 10px !important;
+}
+.kalpa-preview-topbar .kalpa-preview-toolbar,
+.kalpa-preview-header .kalpa-preview-toolbar {
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
+  max-width: min(74vw, 1120px) !important;
+  scrollbar-width: thin !important;
+}
+.kalpa-preview-topbar [aria-label="Close preview"],
+.kalpa-preview-close {
+  flex: 0 0 auto !important;
+  position: sticky !important;
+  right: 0 !important;
+  z-index: 5 !important;
+  background: #fff !important;
+}
+@media (max-width: 700px) {
+  .kalpa-preview-topbar {
+    grid-template-columns: 1fr !important;
+  }
+  .kalpa-preview-topbar .kalpa-preview-toolbar,
+  .kalpa-preview-header .kalpa-preview-toolbar {
+    max-width: 100% !important;
+    justify-content: flex-start !important;
+  }
+}
+
+/* Phase 25R: keep preview controls visible in chat/global viewer */
+.kalpa-preview-header,
+.kalpa-preview-topbar {
+  display: grid !important;
+  grid-template-columns: minmax(120px, 0.55fr) minmax(0, 1.45fr) !important;
+  align-items: center !important;
+  gap: 8px !important;
+  padding: 10px 12px !important;
+}
+.kalpa-preview-title,
+.kalpa-preview-topbar > .flex:first-child {
+  min-width: 0 !important;
+  overflow: hidden !important;
+}
+.kalpa-preview-toolbar {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  flex-wrap: nowrap !important;
+  gap: 6px !important;
+  min-width: 0 !important;
+  max-width: none !important;
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
+  scrollbar-width: thin !important;
+  padding-bottom: 1px !important;
+}
+.kalpa-preview-toolbar > * {
+  flex: 0 0 auto !important;
+}
+.kalpa-preview-toolbar button,
+.kalpa-preview-btn,
+.kalpa-preview-btn-text,
+.kalpa-preview-close {
+  min-height: 40px !important;
+  white-space: nowrap !important;
+}
+.kalpa-preview-btn,
+.kalpa-preview-close {
+  width: 42px !important;
+  min-width: 42px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+.kalpa-preview-btn-text {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  padding-left: 12px !important;
+  padding-right: 12px !important;
+}
+.kalpa-preview-close,
+.kalpa-preview-topbar [aria-label="Close preview"] {
+  position: sticky !important;
+  right: 0 !important;
+  z-index: 20 !important;
+  background: #fff !important;
+  border: 1px solid rgb(226 232 240) !important;
+  box-shadow: -8px 0 14px rgba(255,255,255,.92) !important;
+}
+@media (max-width: 900px) {
+  .kalpa-preview-header,
+  .kalpa-preview-topbar {
+    grid-template-columns: 1fr !important;
+    padding: 8px !important;
+  }
+  .kalpa-preview-toolbar {
+    justify-content: flex-start !important;
+    max-width: 100% !important;
+  }
+  .kalpa-preview-title h3,
+  .kalpa-preview-topbar h3 {
+    max-width: calc(100vw - 60px) !important;
+  }
+}
+@media (max-width: 520px) {
+  .kalpa-preview-btn-text {
+    padding-left: 10px !important;
+    padding-right: 10px !important;
+    font-size: 11px !important;
+  }
+  .kalpa-preview-btn,
+  .kalpa-preview-close {
+    width: 38px !important;
+    min-width: 38px !important;
+  }
+}
+
+/* Phase 25U: one visible source-file preview toolbar for chat + working PDF zoom */
+.kalpa-preview-header,
+.kalpa-preview-topbar {
+  grid-template-columns: minmax(150px, 0.45fr) minmax(0, 1.55fr) !important;
+  overflow: visible !important;
+}
+.kalpa-preview-toolbar {
+  overflow: visible !important;
+  flex-wrap: wrap !important;
+  justify-content: flex-end !important;
+  row-gap: 6px !important;
+  max-width: none !important;
+  padding-bottom: 0 !important;
+}
+.kalpa-preview-toolbar::-webkit-scrollbar { display: none !important; }
+.kalpa-preview-toolbar .kalpa-preview-btn,
+.kalpa-preview-toolbar .kalpa-preview-close,
+.kalpa-preview-toolbar .kalpa-preview-btn-text,
+.kalpa-preview-toolbar .kalpa-preview-zoom,
+.kalpa-preview-toolbar .kalpa-preview-page-pill {
+  flex: 0 0 auto !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+.kalpa-preview-close,
+.kalpa-preview-topbar [aria-label="Close preview"] {
+  position: static !important;
+  right: auto !important;
+  box-shadow: none !important;
+}
+.kalpa-preview-pdf-stage {
+  overflow: auto !important;
+  align-items: flex-start !important;
+  justify-content: flex-start !important;
+}
+.kalpa-preview-pdf-zoom-surface {
+  min-width: 100% !important;
+  min-height: 100% !important;
+  transform-origin: top left !important;
+}
+.kalpa-preview-pdf-zoom-surface .kalpa-preview-pdf-frame {
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 100% !important;
+  min-height: 100% !important;
+}
+@media (max-width: 980px) {
+  .kalpa-preview-header,
+  .kalpa-preview-topbar {
+    grid-template-columns: 1fr !important;
+  }
+  .kalpa-preview-toolbar {
+    justify-content: flex-start !important;
+  }
+}

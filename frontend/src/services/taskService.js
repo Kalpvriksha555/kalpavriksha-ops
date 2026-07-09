@@ -28,6 +28,7 @@ export const TASK_SYNC_STORAGE_KEYS = Object.freeze({
   deleted: 'kalpa_deleted_project_ids',
   pendingCreates: 'kalpa_pending_created_projects',
   recentCreates: 'kalpa_recent_created_projects',
+  pendingDeletes: 'kalpa_pending_deleted_project_ids',
   syncPing: 'kalpa_projects_sync_ping'
 });
 

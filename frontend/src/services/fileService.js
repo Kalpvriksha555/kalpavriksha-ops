@@ -61,33 +61,84 @@ const normalizePreviewUrl = (url = '') => {
   return absolute;
 };
 
+
+
+const getPreviewDataUrl = (doc = {}) => {
+  const previewUrl = getProjectFilePreviewUrl(doc);
+  if (!previewUrl) return '';
+  if (/^(blob:|data:)/i.test(previewUrl)) return previewUrl;
+  if (/\/api\/files\/[^/?#]+\/preview(?:$|[?#])/i.test(previewUrl)) {
+    return previewUrl.replace(/\/preview(?=($|[?#]))/i, '/preview-data');
+  }
+  const match = previewUrl.match(/\/api\/files\/([^/?#]+)/i);
+  if (match && match[1]) return `${API_BASE}/api/files/${encodeURIComponent(decodeURIComponent(match[1]))}/preview-data`;
+  return previewUrl;
+};
+
+const dataUrlToBlob = (dataUrl = '', fallbackType = 'application/octet-stream') => {
+  const raw = String(dataUrl || '');
+  const match = raw.match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
+  if (!match) return null;
+  const mime = match[1] || fallbackType;
+  const isBase64 = Boolean(match[2]);
+  const body = match[3] || '';
+  if (isBase64) {
+    const binary = atob(body);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  }
+  return new Blob([decodeURIComponent(body)], { type: mime });
+};
+
 export const canPreviewProjectFile = (doc = {}) => getProjectFileKind(doc) !== 'file' && Boolean(getProjectFilePreviewUrl(doc));
 
 export const fetchProjectFilePreview = async (doc = {}) => {
   const kind = getProjectFileKind(doc);
   if (kind === 'file') throw new Error('Preview is available only for PDF and image files.');
-  const url = getProjectFilePreviewUrl(doc);
-  if (!url) throw new Error('Preview link is not available for this file.');
-  const res = await fetch(url, { method: 'GET', cache: 'no-store' });
-  const contentType = String(res.headers.get('Content-Type') || '').toLowerCase();
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(text || `Preview failed (${res.status})`);
+  const sourceUrl = getProjectFilePreviewUrl(doc);
+  if (!sourceUrl) throw new Error('Preview link is not available for this file.');
+
+  // Use JSON/base64 preview-data instead of embedding /preview directly. This
+  // prevents IDM/browser download managers from treating Preview as a download.
+  const dataUrl = getPreviewDataUrl(doc);
+  if (/^(blob:|data:)/i.test(dataUrl)) {
+    if (dataUrl.startsWith('blob:')) return { kind, url: dataUrl, sourceUrl: dataUrl, mimeType: getProjectFileMime(doc), size: Number(doc.size || 0) };
+    const blob = dataUrlToBlob(dataUrl, kind === 'pdf' ? 'application/pdf' : 'image/*');
+    if (!blob || blob.size <= 0) throw new Error('Preview file is empty. Please download or re-upload this file.');
+    return { kind, url: URL.createObjectURL(blob), sourceUrl: dataUrl, mimeType: blob.type, size: blob.size };
   }
-  if (contentType.includes('application/json') || contentType.includes('text/html')) {
-    const text = await res.text().catch(() => '');
-    throw new Error(text || 'Preview endpoint did not return a valid file stream.');
+
+  const fetchPreviewBlobFallback = async () => {
+    // Last-resort inline preview fetch. Never expose this URL directly to iframe/window.open,
+    // because download managers can intercept /preview. We fetch it as a blob and render a blob URL.
+    const fallbackRes = await fetch(sourceUrl, { method: 'GET', cache: 'no-store', headers: { Accept: kind === 'pdf' ? 'application/pdf,*/*' : 'image/*,*/*' } });
+    if (!fallbackRes.ok) {
+      const text = await fallbackRes.text().catch(() => '');
+      throw new Error(text || `Preview failed (${fallbackRes.status})`);
+    }
+    const blob = await fallbackRes.blob();
+    if (!blob || blob.size <= 0) throw new Error('Preview file is empty. Please download or re-upload this file.');
+    return { kind, url: URL.createObjectURL(blob), sourceUrl, mimeType: blob.type || getProjectFileMime(doc), size: blob.size };
+  };
+
+  let res;
+  try {
+    res = await fetch(dataUrl, { method: 'GET', cache: 'no-store', headers: { Accept: 'application/json' } });
+  } catch (error) {
+    return fetchPreviewBlobFallback();
   }
-  const blob = await res.blob();
+  if (!res.ok) return fetchPreviewBlobFallback();
+  const payload = await res.json().catch(() => null);
+  if (!payload?.ok || !payload?.dataUrl) return fetchPreviewBlobFallback();
+  const blob = dataUrlToBlob(payload.dataUrl, payload.mimeType || (kind === 'pdf' ? 'application/pdf' : 'image/*'));
   if (!blob || blob.size <= 0) throw new Error('Preview file is empty. Please download or re-upload this file.');
-  const expected = kind === 'pdf' ? 'application/pdf' : (contentType || blob.type || 'image/*');
-  const typedBlob = blob.type ? blob : new Blob([blob], { type: expected });
   return {
-    kind,
-    url: URL.createObjectURL(typedBlob),
-    sourceUrl: url,
-    mimeType: typedBlob.type || contentType,
-    size: typedBlob.size,
+    kind: payload.kind || kind,
+    url: URL.createObjectURL(blob),
+    sourceUrl,
+    mimeType: blob.type || payload.mimeType,
+    size: blob.size || payload.size,
   };
 };
 
@@ -100,10 +151,46 @@ export const getProjectFileDownloadUrl = (doc = {}) => {
   // /api/files/:id/download caused false "missing file" errors on mobile/desktop.
   if (doc.url) return absoluteApiUrl(doc.url);
 
-  const id = String(doc.id || '').trim();
+  const id = String(doc.fileId || doc.id || '').trim();
   const looksLikeServerFileId = /^[A-Za-z0-9_-]{6,40}$/.test(id) && !/^\d+(\.\d+)?$/.test(id);
   if (looksLikeServerFileId) return `${API_BASE}/api/files/${encodeURIComponent(id)}/download`;
   return '';
+};
+
+export const normalizeProjectFileRecord = (doc = {}) => {
+  const id = String(doc.fileId || doc.id || '').trim();
+  const name = String(doc.name || doc.fileName || doc.filename || doc.originalName || doc.storedName || 'file').trim();
+  const mimeType = String(doc.mimeType || doc.mime || doc.contentType || '').trim();
+  const normalized = {
+    ...doc,
+    id: doc.id || doc.fileId || id || undefined,
+    fileId: doc.fileId || doc.id || id || undefined,
+    name,
+    fileName: doc.fileName || name,
+    mimeType,
+    mime: doc.mime || mimeType,
+  };
+  const downloadUrl = getProjectFileDownloadUrl(normalized);
+  const previewUrl = getProjectFilePreviewUrl(normalized);
+  if (downloadUrl) normalized.downloadUrl = downloadUrl;
+  if (previewUrl) normalized.previewUrl = previewUrl;
+  return normalized;
+};
+
+export const hasProjectFileAccess = (doc = {}) => Boolean(getProjectFileDownloadUrl(doc) || getProjectFilePreviewUrl(doc));
+
+export const getProjectFileActionState = (doc = {}) => {
+  const normalized = normalizeProjectFileRecord(doc);
+  const downloadUrl = getProjectFileDownloadUrl(normalized);
+  const previewUrl = getProjectFilePreviewUrl(normalized);
+  return {
+    doc: normalized,
+    hasLink: Boolean(downloadUrl || previewUrl),
+    canPreview: canPreviewProjectFile(normalized),
+    canDownload: Boolean(downloadUrl),
+    downloadUrl,
+    previewUrl,
+  };
 };
 
 
@@ -194,6 +281,7 @@ export const uploadProjectFile = async (file, projectId, type, uploadedBy, onPro
       uploadedBy,
       date: new Date().toLocaleDateString(),
       url: payload.file?.url || payload.file?.downloadUrl || '',
+      previewUrl: payload.file?.previewUrl || (payload.file?.id ? `/api/files/${payload.file.id}/preview` : ''),
       downloadUrl: payload.file?.downloadUrl || (payload.file?.id ? `/api/files/${payload.file.id}/download` : '')
     };
   } catch (error) {

@@ -1267,7 +1267,7 @@ function classify(name='', mime=''){
 }
 function docPayload(file, uploadedBy, role, purpose='SOURCE', caseId=''){
   const id = nanoid(8);
-  return {id,caseId,name:file.originalname,storedName:file.filename,mime:file.mimetype,size:file.size,type:classify(file.originalname,file.mimetype),purpose,uploadedBy,uploadedByRole:role,uploadedAt:now(),url:`/api/uploads/${file.filename}`,downloadUrl:`/api/files/${id}/download`};
+  return {id,caseId,name:file.originalname,storedName:file.filename,mime:file.mimetype,mimeType:file.mimetype,size:file.size,type:classify(file.originalname,file.mimetype),purpose,uploadedBy,uploadedByRole:role,uploadedAt:now(),url:`/api/uploads/${file.filename}`,previewUrl:`/api/files/${id}/preview`,downloadUrl:`/api/files/${id}/download`};
 }
 
 function fileBaseName(value=''){
@@ -1296,11 +1296,14 @@ function addFileRegistryEntry(d, doc={}){
     uploadedBy: doc.uploadedBy || doc.by || 'Team',
     uploadedAt: doc.uploadedAt || now(),
     url: doc.url || (doc.storedName ? `/uploads/${doc.storedName}` : ''),
+    previewUrl: `/api/files/${doc.id}/preview`,
     downloadUrl: `/api/files/${doc.id}/download`
   };
   if (existing) Object.assign(existing, entry);
   else d.files.unshift(entry);
   doc.downloadUrl = entry.downloadUrl;
+  doc.previewUrl = entry.previewUrl;
+  if (!doc.mimeType && entry.mime) doc.mimeType = entry.mime;
   if (!doc.url && entry.url) doc.url = entry.url;
   if (!doc.storedName && entry.storedName) doc.storedName = entry.storedName;
   return doc;
@@ -1862,9 +1865,39 @@ app.get('/api/files/:id/status',(req,res)=>{
     available: !!resolved,
     id: req.params.id,
     name: doc?.name || doc?.fileName || doc?.storedName || '',
+    previewUrl: doc ? `/api/files/${doc.id || req.params.id}/preview` : '',
+    previewDataUrl: doc ? `/api/files/${doc.id || req.params.id}/preview-data` : '',
     downloadUrl: doc ? `/api/files/${doc.id || req.params.id}/download` : ''
   });
 });
+
+app.get('/api/files/:id/preview-data',(req,res)=>{
+  const d=db();
+  const { doc, resolved } = resolveFileById(d, req.params.id);
+  if(!doc) return res.status(404).json({ ok:false, error:'File record not found. Please refresh the page or re-upload the file.' });
+  if(!resolved) return res.status(410).json({ ok:false, error:'File unavailable on server. Please re-upload this file once.' });
+  const { stored, fp } = resolved;
+  if(!fp.startsWith(path.resolve(UPLOAD_DIR))) return res.status(400).json({ ok:false, error:'Invalid file path' });
+  const fileName = doc.name || doc.fileName || stored;
+  const mime = String(doc.mime || doc.mimeType || '').toLowerCase();
+  const lowerName = String(fileName || '').toLowerCase();
+  const isPdf = /\.pdf$/i.test(fileName) || mime.includes('pdf');
+  const imageMimeByExt = lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg') ? 'image/jpeg'
+    : lowerName.endsWith('.png') ? 'image/png'
+    : lowerName.endsWith('.gif') ? 'image/gif'
+    : lowerName.endsWith('.webp') ? 'image/webp'
+    : lowerName.endsWith('.bmp') ? 'image/bmp'
+    : lowerName.endsWith('.svg') ? 'image/svg+xml'
+    : '';
+  const isImage = mime.startsWith('image/') || Boolean(imageMimeByExt);
+  if(!isPdf && !isImage) return res.status(415).json({ ok:false, error:'Preview is available for PDF and image files only.' });
+  const stat = fs.statSync(fp);
+  const mimeType = isPdf ? 'application/pdf' : (mime.startsWith('image/') ? mime : imageMimeByExt || 'application/octet-stream');
+  const base64 = fs.readFileSync(fp).toString('base64');
+  res.setHeader('Cache-Control','private, max-age=0, must-revalidate');
+  return res.json({ ok:true, id: doc.id || req.params.id, name: fileName, kind: isPdf ? 'pdf' : 'image', mimeType, size: stat.size, dataUrl: `data:${mimeType};base64,${base64}` });
+});
+
 app.get('/api/files/:id/preview',(req,res)=>{
   const d=db();
   const { doc, resolved } = resolveFileById(d, req.params.id);
