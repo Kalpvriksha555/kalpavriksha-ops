@@ -104,15 +104,95 @@ const sanitizeProjectForCache = (project) => {
 
 const sanitizeProjectsForCache = (projects) => (Array.isArray(projects) ? projects.map(sanitizeProjectForCache) : []);
 
+const getPendingCreatedProjects = () => {
+  try {
+    const raw = JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
+    return Object.values(raw).map(record => record?.project || record).filter(project => project?.id);
+  } catch(e) { return []; }
+};
+const rememberPendingCreatedProject = (project) => {
+  if (!project?.id) return;
+  try {
+    const raw = JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
+    raw[String(project.id)] = { project: sanitizeProjectForCache(project), createdAt: Date.now(), lastAttemptAt: 0, attempts: Number(raw[String(project.id)]?.attempts || 0) };
+    localStorage.setItem('kalpa_pending_created_projects', JSON.stringify(raw));
+  } catch(e) {}
+};
+const markPendingCreatedAttempt = (projectId) => {
+  try {
+    const raw = JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
+    const key = String(projectId || '');
+    if (raw[key]) { raw[key].lastAttemptAt = Date.now(); raw[key].attempts = Number(raw[key].attempts || 0) + 1; localStorage.setItem('kalpa_pending_created_projects', JSON.stringify(raw)); }
+  } catch(e) {}
+};
+const forgetPendingCreatedProjects = (...ids) => {
+  const remove = new Set(ids.flat().map(x => String(x)).filter(Boolean));
+  if (!remove.size) return;
+  try {
+    const raw = JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
+    remove.forEach(id => { delete raw[id]; });
+    localStorage.setItem('kalpa_pending_created_projects', JSON.stringify(raw));
+  } catch(e) {}
+};
+const getProtectedCreatedProjectIds = () => new Set(getPendingCreatedProjects().flatMap(p => [p.id, p.caseId]).map(x => String(x || '')).filter(Boolean));
+
 const getDeletedProjectIds = () => {
   try { return JSON.parse(localStorage.getItem('kalpa_deleted_project_ids') || '[]').map(x => String(x)).filter(Boolean); } catch(e) { return []; }
 };
 const saveDeletedProjectIds = (ids = []) => {
-  const unique = [...new Set((ids || []).map(x => String(x)).filter(Boolean))];
+  const protectedIds = getProtectedCreatedProjectIds();
+  const unique = [...new Set((ids || []).map(x => String(x)).filter(Boolean).filter(id => !protectedIds.has(id)))];
   try { localStorage.setItem('kalpa_deleted_project_ids', JSON.stringify(unique)); } catch(e) {}
   return unique;
 };
 const rememberDeletedProjects = (...ids) => saveDeletedProjectIds([...getDeletedProjectIds(), ...ids.flat().map(x => String(x)).filter(Boolean)]);
+const forgetDeletedProjects = (...ids) => {
+  const remove = new Set(ids.flat().map(x => String(x)).filter(Boolean));
+  if (!remove.size) return getDeletedProjectIds();
+  return saveDeletedProjectIds(getDeletedProjectIds().filter(id => !remove.has(String(id))));
+};
+const RECENT_CREATED_PROJECT_TTL_MS = 2 * 60 * 60 * 1000;
+const getRecentCreatedProjects = () => {
+  try {
+    const raw = JSON.parse(localStorage.getItem('kalpa_recent_created_projects') || '{}') || {};
+    const now = Date.now();
+    const next = {};
+    Object.entries(raw).forEach(([id, record]) => {
+      const project = record?.project || record;
+      const createdAt = Number(record?.createdAt || project?.createdAt || project?.updatedAt || 0);
+      if (project?.id && createdAt && now - createdAt < RECENT_CREATED_PROJECT_TTL_MS) {
+        next[String(id)] = { project, createdAt };
+      }
+    });
+    if (JSON.stringify(next) !== JSON.stringify(raw)) localStorage.setItem('kalpa_recent_created_projects', JSON.stringify(next));
+    return Object.values(next).map(x => x.project).filter(Boolean);
+  } catch(e) { return []; }
+};
+const rememberRecentCreatedProject = (project) => {
+  if (!project?.id) return;
+  try {
+    const raw = JSON.parse(localStorage.getItem('kalpa_recent_created_projects') || '{}') || {};
+    raw[String(project.id)] = { project: sanitizeProjectForCache(project), createdAt: Date.now() };
+    localStorage.setItem('kalpa_recent_created_projects', JSON.stringify(raw));
+  } catch(e) {}
+};
+const projectIdentityMatches = (a = {}, b = {}) => {
+  const aIds = [a.id, a.caseId, ...(a.previousTaskIds || [])].map(x => String(x || '')).filter(Boolean);
+  const bIds = [b.id, b.caseId, ...(b.previousTaskIds || [])].map(x => String(x || '')).filter(Boolean);
+  return aIds.some(id => bIds.includes(id));
+};
+const confirmPendingCreatedProjectsAgainstServer = (serverProjects = []) => {
+  try {
+    const pending = getPendingCreatedProjects();
+    const confirmed = pending.filter(p => (serverProjects || []).some(s => projectIdentityMatches(p, s))).flatMap(p => [p.id, p.caseId]).filter(Boolean);
+    if (confirmed.length) forgetPendingCreatedProjects(confirmed);
+  } catch(e) {}
+};
+const protectRecentlyCreatedProjects = (incoming = [], current = []) => {
+  const recent = getRecentCreatedProjects();
+  const pending = getPendingCreatedProjects();
+  return mergeProjectsByFreshness(mergeProjectsByFreshness(mergeProjectsByFreshness(incoming, current), recent), pending);
+};
 const filterDeletedProjects = (projects = []) => {
   const deleted = new Set(getDeletedProjectIds());
   const list = Array.isArray(projects) ? projects : [];
@@ -3906,8 +3986,12 @@ function AppShell() {
         if (Array.isArray(data.deletedProjectIds)) rememberDeletedProjects(data.deletedProjectIds);
         if (Array.isArray(data.projects)) {
           const incoming = filterDeletedProjects(sanitizeProjectsForCache(data.projects));
-          setProjects(prev => filterDeletedProjects(mergeProjectsByFreshness(incoming, prev)));
-          try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(incoming)); localStorage.setItem('kalpa_projects', JSON.stringify(incoming)); } catch(e) {}
+          confirmPendingCreatedProjectsAgainstServer(incoming);
+          setProjects(prev => {
+            const merged = filterDeletedProjects(protectRecentlyCreatedProjects(incoming, prev));
+            try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(sanitizeProjectsForCache(merged))); localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(merged))); } catch(e) {}
+            return merged;
+          });
         }
         if (Array.isArray(data.chatMessages)) {
           const incomingChats = sanitizeChatsForCache(data.chatMessages);
@@ -3944,8 +4028,12 @@ function AppShell() {
         if (Array.isArray(data.deletedProjectIds)) rememberDeletedProjects(data.deletedProjectIds);
         if (Array.isArray(data.projects)) {
           const incomingProjects = filterDeletedProjects(sanitizeProjectsForCache(data.projects));
-          setProjects(prev => filterDeletedProjects(mergeProjectsByFreshness(incomingProjects, prev)));
-          try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(incomingProjects)); localStorage.setItem('kalpa_projects', JSON.stringify(incomingProjects)); } catch(e) {}
+          confirmPendingCreatedProjectsAgainstServer(incomingProjects);
+          setProjects(prev => {
+            const merged = filterDeletedProjects(protectRecentlyCreatedProjects(incomingProjects, prev));
+            try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(sanitizeProjectsForCache(merged))); localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(merged))); } catch(e) {}
+            return merged;
+          });
         }
         if (Array.isArray(data.chatMessages)) {
           setChatMessages(prev => {
@@ -3985,7 +4073,7 @@ function AppShell() {
         // Attendance Engine V3 presence is owned by /api/presence.
         // Never POST client users back through /api/state; that created a
         // second writer which fought the heartbeat stream and caused slow flicker.
-        projects: sanitizeProjectsForCache(filterDeletedProjects(projects || [])),
+        projects: sanitizeProjectsForCache(filterDeletedProjects(protectRecentlyCreatedProjects(projects || [], []))),
         deletedProjectIds: getDeletedProjectIds(),
         chatMessages: sanitizeChatsForCache(chatMessages || []),
         notifications: notifications || [],
@@ -4001,6 +4089,48 @@ function AppShell() {
     }, 900);
     return () => clearTimeout(timer);
   }, [backendStateReady, isDbReady, projects, chatMessages, notifications, currentUser?.role, jsonFinanceSafeHeaders]);
+
+
+  // Durable create-task outbox: a task that was created in the UI remains protected
+  // and is retried until the backend confirms it. This removes the old 30-60 minute
+  // failure mode where a delayed backend/localStorage refresh could erase a locally
+  // created task that had not yet been persisted.
+  useEffect(() => {
+    if (!USE_BACKEND_STATE || !backendStateReady || !isDbReady) return;
+    let cancelled = false;
+    const flushPendingCreatedProjects = async () => {
+      const pending = getPendingCreatedProjects();
+      if (!pending.length) return;
+      for (const project of pending) {
+        if (cancelled || !project?.id) continue;
+        try {
+          markPendingCreatedAttempt(project.id);
+          const res = await fetch(`${API_BASE}/api/state/projects`, {
+            method: 'POST',
+            headers: jsonFinanceSafeHeaders,
+            body: JSON.stringify({ currentUserRole: currentUser?.role || '', project: sanitizeProjectForCache(project) })
+          });
+          if (!res.ok) continue;
+          const data = await res.json().catch(() => ({}));
+          const savedProject = data.project || data.case || project;
+          forgetPendingCreatedProjects(project.id, project.caseId);
+          rememberRecentCreatedProject(savedProject);
+          setProjects(prev => {
+            const merged = filterDeletedProjects(protectRecentlyCreatedProjects([savedProject], prev));
+            try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(sanitizeProjectsForCache(merged))); localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(merged))); } catch(e) {}
+            return merged;
+          });
+        } catch(e) {
+          console.warn('Pending task save retry failed:', e.message);
+        }
+      }
+    };
+    flushPendingCreatedProjects();
+    const timer = setInterval(flushPendingCreatedProjects, 30000);
+    window.addEventListener('online', flushPendingCreatedProjects);
+    window.addEventListener('focus', flushPendingCreatedProjects);
+    return () => { cancelled = true; clearInterval(timer); window.removeEventListener('online', flushPendingCreatedProjects); window.removeEventListener('focus', flushPendingCreatedProjects); };
+  }, [USE_BACKEND_STATE, backendStateReady, isDbReady, jsonFinanceSafeHeaders, currentUser?.role]);
 
   // Keep assignment/status changes live across tabs without creating storage-event loops.
   // Important: never write back to localStorage while handling an incoming sync event;
@@ -4024,7 +4154,7 @@ function AppShell() {
       lastProjectSyncFingerprintRef.current = fingerprint;
 
       setProjects(prev => {
-        const merged = mergeProjectsByFreshness(prev, compactIncoming);
+        const merged = filterDeletedProjects(protectRecentlyCreatedProjects(compactIncoming, prev));
         const mergedFingerprint = makeFingerprint(merged);
         const prevFingerprint = makeFingerprint(prev);
         if (mergedFingerprint === prevFingerprint) return prev;
@@ -5223,6 +5353,7 @@ function AppShell() {
                const location = fd.get('location');
                const taskType = newTaskCategory === 'Other' ? fd.get('otherType') : newTaskCategory;
                const taskId = generateTraceableTaskId({ location, client, bankerName, customerName, projects });
+               forgetDeletedProjects(taskId);
                const docs = [];
                for (const file of leadFiles) {
                   try {
@@ -5234,6 +5365,7 @@ function AppShell() {
                }
 
                const assignedTo = fd.get('assignedTo');
+               const createdStamp = Date.now();
                const newP = {
                  id: taskId,
                  taskName: [taskType, customerName, location].filter(Boolean).join(' • '),
@@ -5243,13 +5375,13 @@ function AppShell() {
                  location,
                  type: taskType,
                  description: fd.get('description') || '',
-                 priority: fd.get('priority'), assignedTo, assignedBy: assignedTo !== 'Unassigned' ? currentUser.name : '', assignedAt: assignedTo !== 'Unassigned' ? Date.now() : null, assignmentVersion: assignedTo !== 'Unassigned' ? Date.now() : null,
+                 priority: fd.get('priority'), assignedTo, assignedBy: assignedTo !== 'Unassigned' ? currentUser.name : '', assignedAt: assignedTo !== 'Unassigned' ? createdStamp : null, assignmentVersion: assignedTo !== 'Unassigned' ? createdStamp : null,
                  dueDate: fd.get('dueDate') || null,
                  estimateDetails: fd.get('estimateDetails') || '', estimate: fd.get('estimate') || 0,
-                 status: 'Lead Received', createdAt: Date.now(), updatedAt: Date.now(), syncVersion: Date.now(), createdBy: currentUser.name,
+                 status: 'Lead Received', createdAt: createdStamp, updatedAt: createdStamp, syncVersion: createdStamp, createdBy: currentUser.name,
                  ownership: { createdBy: currentUser.name, assignedBy: assignedTo !== 'Unassigned' ? currentUser.name : '', assignedTo },
-                 reassignmentHistory: assignedTo !== 'Unassigned' ? [{ from: 'Unassigned', to: assignedTo, by: currentUser.name, time: new Date().toLocaleString() }] : [],
-                 documents: docs, timeline: [{id: Date.now(), text: 'Case Created', time: new Date().toLocaleString()}],
+                 reassignmentHistory: assignedTo !== 'Unassigned' ? [{ from: 'Unassigned', to: assignedTo, by: currentUser.name, time: new Date(createdStamp).toLocaleString() }] : [],
+                 documents: docs, timeline: [{id: createdStamp, text: 'Case Created', time: new Date(createdStamp).toLocaleString()}],
                  subTasks: [], notes: [], ledger: {}, reportSent: false
                };
                
@@ -5257,7 +5389,9 @@ function AppShell() {
                    newP.timeline.push({ id: Date.now()+1, text: `${docs.length} Source File(s) Attached`, time: new Date().toLocaleString() });
                }
 
-               const nextProjects = mergeProjectsByFreshness((projects || []).filter(p => String(p.id) !== String(newP.id)), [newP]);
+               rememberRecentCreatedProject(newP);
+               rememberPendingCreatedProject(newP);
+               const nextProjects = filterDeletedProjects(mergeProjectsByFreshness((projects || []).filter(p => String(p.id) !== String(newP.id)), [newP, ...getRecentCreatedProjects(), ...getPendingCreatedProjects()]));
                persistAndBroadcastProjects(nextProjects);
                setProjects(nextProjects);
                setSelectedBoardDate(formatDateKey(newP.createdAt));
@@ -5265,22 +5399,23 @@ function AppShell() {
                try { window.localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(filterDeletedProjects(nextProjects)))); } catch(e) {}
                if (USE_BACKEND_STATE && backendStateReady && isDbReady) {
                  try {
-                   const saveRes = await fetch(`${API_BASE}/api/state`, {
+                   const saveRes = await fetch(`${API_BASE}/api/state/projects`, {
                      method: 'POST',
                      headers: jsonFinanceSafeHeaders,
-                     body: JSON.stringify({
-                       currentUserRole: currentUser?.role || '',
-                       users: normalizeTeamUsers(users && users.length ? users : INITIAL_USERS),
-                       projects: sanitizeProjectsForCache(filterDeletedProjects(nextProjects)),
-                       deletedProjectIds: getDeletedProjectIds(),
-                       chatMessages: sanitizeChatsForCache(chatMessages || []),
-                       notifications: notifications || [],
-                       // Attendance is owned by /api/presence in backend mode. Posting it here
-        // created a feedback loop where stale client snapshots overwrote fresh
-        // backend counters and made the page flicker.
-                     })
+                     body: JSON.stringify({ currentUserRole: currentUser?.role || '', project: sanitizeProjectForCache(newP) })
                    });
-                   if (!saveRes.ok) throw new Error(`Backend save failed: ${saveRes.status}`);
+                   if (!saveRes.ok) throw new Error(`Backend project save failed: ${saveRes.status}`);
+                   const saveData = await saveRes.json().catch(() => ({}));
+                   if (saveData?.project || saveData?.case) {
+                     const savedProject = saveData.project || saveData.case;
+                     forgetPendingCreatedProjects(newP.id, newP.caseId);
+                     rememberRecentCreatedProject(savedProject);
+                     setProjects(prev => {
+                       const merged = filterDeletedProjects(protectRecentlyCreatedProjects([savedProject], prev));
+                       persistAndBroadcastProjects(merged);
+                       return merged;
+                     });
+                   }
                  } catch (saveErr) {
                    console.warn('Immediate task save failed; local task is kept and background sync will retry:', saveErr.message);
                  }

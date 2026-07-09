@@ -1645,6 +1645,26 @@ app.get('/api/system/status', async (_req, res) => {
 
 
 
+
+app.post('/api/state/projects', (req, res) => {
+  try {
+    const d = db();
+    const incoming = req.body?.project || req.body?.case || req.body;
+    if (!incoming || (!incoming.id && !incoming.caseId)) return res.status(400).json({ ok:false, error:'Project id is required.' });
+    const projectId = String(incoming.id || incoming.caseId || '').trim();
+    d.deletedProjectIds = (d.deletedProjectIds || []).filter(id => String(id) !== projectId && String(id) !== String(incoming.caseId || ''));
+    const isFinanceAdmin = isFinanceAdminRequest(req);
+    const safeIncoming = !isFinanceAdmin ? preserveFinanceForNonAdminCases(d.cases || [], [incoming])[0] || incoming : incoming;
+    d.cases = mergeCasesPreservingFreshest(d.cases || [], [safeIncoming], d.deletedProjectIds || []);
+    const saved = findCaseByAnyId(d.cases || [], projectId) || findCaseByAnyId(d.cases || [], incoming.caseId || projectId) || safeIncoming;
+    save(d);
+    const performanceRecords = mergePerformanceRecords(d.performanceRecords || [], buildPerformanceRecordsFromCases(d.cases || []));
+    res.json({ ok:true, project:saved, case:saved, deletedProjectIds:d.deletedProjectIds || [], counts:{ cases:(d.cases || []).length, performanceRecords:performanceRecords.length } });
+  } catch (e) {
+    res.status(500).json({ ok:false, error:e.message || 'Project save failed.' });
+  }
+});
+
 app.delete('/api/state/projects/:id', (req,res)=>{
   const d=db();
   const id=String(req.params.id || '');
