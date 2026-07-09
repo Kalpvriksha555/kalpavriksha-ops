@@ -16,11 +16,10 @@ import { CommunicationHub } from './features/chat';
 import { HistoryArchiveView } from './features/archive';
 import { CommandCentreView, ProductivityDashboard, DailyClosingReport, ReportsAnalyticsView, ProductionQAView, SystemSettingsView } from './features/command-centre';
 import { ActiveOperationsView } from './features/operations';
-import { UnifiedFileViewer } from './components/files/UnifiedFileViewer';
 import { getStatusColor, getPriorityColor } from './services/taskService';
 import { API_BASE, USE_BACKEND_STATE, ONLINE_STALE_MS, MAX_INLINE_DATA_URL_CHARS } from './config/appConfig';
 import { fileToBase64, cleanFileName } from './utils/fileUtils';
-import { absoluteApiUrl, getProjectFileDownloadUrl, getProjectFilePreviewUrl, isProjectFilePdf, isProjectFileImage, getProjectFileKind, canPreviewProjectFile, fetchProjectFilePreview, releaseProjectFilePreview, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile, getProjectFileCacheKey, listCachedProjectFiles, openCachedProjectFile, clearCachedProjectFile, pruneExpiredProjectFileCache } from './services/fileService';
+import { absoluteApiUrl, getProjectFileDownloadUrl, getProjectFilePreviewUrl, isProjectFilePdf, isProjectFileImage, getProjectFileKind, canPreviewProjectFile, fetchProjectFilePreview, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile, getProjectFileCacheKey, listCachedProjectFiles, openCachedProjectFile, clearCachedProjectFile, pruneExpiredProjectFileCache } from './services/fileService';
 import { sendRealOtp, verifyRealOtp } from './services/otpService';
 import { buildNotification, getVisibleNotifications, NOTIFICATION_CATEGORIES, getNotificationCategory, getNotificationPriority, buildActivityTimeline, isNotificationForUser } from './services/notificationService';
 import { 
@@ -2109,7 +2108,7 @@ const LedgerView = ({ projects, onSelectProject }) => {
   );
 };
 
-const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, projects = [], onDeleteTask, onPreviewFile }) => {
+const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, projects = [], onDeleteTask }) => {
   const [newSubTask, setNewSubTask] = useState('');
   const [newNote, setNewNote] = useState('');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -2119,27 +2118,22 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const [downloadedFileMap, setDownloadedFileMap] = useState(() => listCachedProjectFiles());
   const [filePreview, setFilePreview] = useState(null);
   const [filePreviewUi, setFilePreviewUi] = useState({ zoom: 1, rotation: 0 });
-  const filePreviewAbortRef = useRef(null);
 
   const closeFilePreview = useCallback(() => {
-    if (filePreviewAbortRef.current) {
-      try { filePreviewAbortRef.current.abort(); } catch {}
-      filePreviewAbortRef.current = null;
-    }
     setFilePreview((current) => {
-      releaseProjectFilePreview(current);
+      if (current?.objectUrl) {
+        try { URL.revokeObjectURL(current.objectUrl); } catch {}
+      }
       return null;
     });
     setFilePreviewUi({ zoom: 1, rotation: 0 });
   }, []);
 
   useEffect(() => () => {
-    if (filePreviewAbortRef.current) {
-      try { filePreviewAbortRef.current.abort(); } catch {}
-      filePreviewAbortRef.current = null;
+    if (filePreview?.objectUrl) {
+      try { URL.revokeObjectURL(filePreview.objectUrl); } catch {}
     }
-    releaseProjectFilePreview(filePreview);
-  }, [filePreview]);
+  }, [filePreview?.objectUrl]);
 
   const [subTaskAttachments, setSubTaskAttachments] = useState([]);
   const [noteAttachments, setNoteAttachments] = useState([]);
@@ -2484,15 +2478,44 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const renderInlineFileTransferBar = (extraClass = '') => renderWhatsAppTransferBar(`mt-3 ${extraClass}`);
 
 
-  const handlePreviewFile = (doc = {}) => {
-    if (typeof onPreviewFile === 'function') {
-      onPreviewFile(doc);
-      return;
-    }
+  const handlePreviewFile = async (doc = {}) => {
     const kind = getProjectFileKind(doc);
     if (kind === 'file') {
-      alert('Preview is not available for this file type yet. Please download this file to open it.');
+      alert('Preview is available for PDF and image files. Please download this file to open it.');
       return;
+    }
+    const name = doc.name || doc.fileName || (kind === 'image' ? 'Image Preview' : 'PDF Preview');
+    if (filePreview?.objectUrl) {
+      try { URL.revokeObjectURL(filePreview.objectUrl); } catch {}
+    }
+    setFilePreviewUi({ zoom: 1, rotation: 0 });
+    setFilePreview({ doc, kind, name, loading: true, error: '', url: '', objectUrl: '' });
+    try {
+      const preview = await fetchProjectFilePreview(doc);
+      setFilePreview({
+        doc,
+        kind: preview.kind || kind,
+        name,
+        loading: false,
+        error: '',
+        url: preview.url,
+        objectUrl: preview.url,
+        sourceUrl: preview.sourceUrl,
+        mimeType: preview.mimeType,
+        size: preview.size,
+      });
+    } catch (error) {
+      const fallbackUrl = getProjectFilePreviewUrl(doc);
+      setFilePreview({
+        doc,
+        kind,
+        name,
+        loading: false,
+        error: error?.message || 'Preview could not be loaded.',
+        url: fallbackUrl || '',
+        objectUrl: '',
+        sourceUrl: fallbackUrl || '',
+      });
     }
   };
 
@@ -3726,20 +3749,6 @@ class AppErrorBoundary extends React.Component {
 }
 
 function AppShell() {
-  const [globalPreviewFile, setGlobalPreviewFile] = useState(null);
-  const openUnifiedPreview = useCallback((file = {}) => {
-    if (!file) return;
-    setGlobalPreviewFile({ ...file, _previewKey: `${Date.now()}_${Math.random().toString(36).slice(2)}` });
-  }, []);
-  const closeUnifiedPreview = useCallback(() => setGlobalPreviewFile(null), []);
-  const downloadFromUnifiedPreview = useCallback(async (file = {}) => {
-    try {
-      await downloadProjectFile(file);
-      setTimeout(() => pruneExpiredProjectFileCache().catch(() => {}), 100);
-    } catch (error) {
-      alert(error?.message || 'Download failed. Please try again.');
-    }
-  }, []);
   const [currentUser, setCurrentUser] = useState(null);
   const currentUserRef = useRef(null);
   useEffect(() => { currentUserRef.current = currentUser; }, [currentUser]);
@@ -3790,10 +3799,34 @@ function AppShell() {
   const [showNotifs, setShowNotifs] = useState(false);
   const [showProfilePanel, setShowProfilePanel] = useState(false);
   const [showNewLead, setShowNewLead] = useState(false);
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    const body = document.body;
+    const html = document.documentElement;
+    const previousBodyOverflow = body.style.overflow;
+    const previousHtmlOverflow = html.style.overflow;
+    const previousBodyOverscroll = body.style.overscrollBehavior;
+    if (showNewLead) {
+      body.classList.add('kalpa-create-task-open');
+      body.style.overflow = 'hidden';
+      html.style.overflow = 'hidden';
+      body.style.overscrollBehavior = 'none';
+    } else {
+      body.classList.remove('kalpa-create-task-open');
+    }
+    return () => {
+      body.classList.remove('kalpa-create-task-open');
+      body.style.overflow = previousBodyOverflow;
+      html.style.overflow = previousHtmlOverflow;
+      body.style.overscrollBehavior = previousBodyOverscroll;
+    };
+  }, [showNewLead]);
+
   const [newTaskCategory, setNewTaskCategory] = useState(TASK_CATEGORIES[0]);
   
   const [leadFiles, setLeadFiles] = useState([]);
   const [isSubmittingLead, setIsSubmittingLead] = useState(false);
+  const [createTaskError, setCreateTaskError] = useState('');
   
   const [showLocalBanner, setShowLocalBanner] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
@@ -5111,7 +5144,7 @@ function AppShell() {
         )}
 
         {selectedProject ? (
-          <TaskDetailView project={selectedProject} user={currentUser} onBack={closeTaskDetail} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} onPreviewFile={openUnifiedPreview} />
+          <TaskDetailView project={selectedProject} user={currentUser} onBack={closeTaskDetail} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} />
         ) : activeTab === 'command' ? (
           <CommandCentreView projects={projects} users={activeUsers} attendanceLogs={attendanceLogs} currentUser={currentUser} onOpenPerformance={() => setActiveTab('productivity')} onSelectProject={(p) => openTaskDetail(p, 'command')} onNavigate={(target) => { if (target === 'newCase') { setShowNewLead(true); return; } if (target === 'notifications') { setShowNotifs(true); return; } setActiveTab(target); }} />
         ) : activeTab === 'productivity' ? (
@@ -5164,24 +5197,23 @@ function AppShell() {
         )}
       </main>
 
-      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} projects={projects} onOpenTaskReference={openTaskReferenceFromChat} onPreviewFile={openUnifiedPreview} />}
-
-      <UnifiedFileViewer file={globalPreviewFile} onClose={closeUnifiedPreview} onDownload={downloadFromUnifiedPreview} />
+      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} projects={projects} onOpenTaskReference={openTaskReferenceFromChat} />}
 
       {!selectedProject && !showNewLead && <MobileBottomNavigation currentUser={currentUser} ROLES={ROLES} activeTab={activeTab} setActiveTab={setActiveTab} unreadNotifs={unreadNotifs} />}
 
-      {showNewLead && (
-        <div className="kalpa-lead-modal fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[80] flex justify-center items-center p-4">
-          <div className="kalpa-lead-modal-card bg-white rounded-[2rem] w-full max-w-3xl max-h-[90vh] overflow-y-auto p-8 shadow-2xl animate-in zoom-in-95 duration-200 custom-scrollbar">
+      {showNewLead && createPortal((
+        <div className="kalpa-lead-modal fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex justify-center items-start p-4" role="dialog" aria-modal="true" aria-label="Create task">
+          <div className="kalpa-lead-modal-card bg-white rounded-[2rem] w-full max-w-4xl max-h-[calc(100dvh-2rem)] overflow-y-auto p-8 shadow-2xl animate-in zoom-in-95 duration-200 custom-scrollbar">
              <div className="flex justify-between items-center mb-8 border-b-2 border-slate-100 pb-6">
                 <h2 className="text-3xl font-black text-slate-800 tracking-tight">Log New Case</h2>
                 <button type="button" onClick={() => setShowNewLead(false)} className="p-2.5 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors"><X className="w-6 h-6 text-slate-600"/></button>
              </div>
              
-             <form onSubmit={async (e) => {
+             <form noValidate onSubmit={async (e) => {
                e.preventDefault();
                if (isSubmittingLead) return;
                setIsSubmittingLead(true);
+               setCreateTaskError('');
                try {
                const fd = new FormData(e.target);
                
@@ -5266,7 +5298,7 @@ function AppShell() {
                setNewTaskCategory(TASK_CATEGORIES[0]);
                } catch (err) {
                  console.error('Create task failed:', err);
-                 alert(`Task could not be created: ${err?.message || 'Please try again.'}`);
+                 setCreateTaskError(err?.message || 'Task could not be created. Please check required fields and try again.');
                } finally {
                  setIsSubmittingLead(false);
                }
@@ -5355,13 +5387,20 @@ function AppShell() {
                   </label>
                </div>
 
+
+               {createTaskError && (
+                 <div className="rounded-2xl border-2 border-red-100 bg-red-50 px-4 py-3 text-sm font-bold text-red-700" role="alert">
+                   {createTaskError}
+                 </div>
+               )}
+
                <button type="submit" disabled={isSubmittingLead} className={`kalpa-create-task-button w-full py-4 text-white rounded-2xl font-black text-lg shadow-xl transition-all mt-8 ${isSubmittingLead ? 'bg-indigo-400 cursor-not-allowed' : 'bg-slate-800 hover:bg-slate-700 shadow-slate-200 hover:-translate-y-1'}`}>
                   {isSubmittingLead ? 'Uploading Files & Creating Task...' : 'Create Task'}
                </button>
              </form>
           </div>
         </div>
-      )}
+      ), document.body)}
 
       <style dangerouslySetInnerHTML={{__html: `
         .custom-scrollbar::-webkit-scrollbar { width: 6px; }

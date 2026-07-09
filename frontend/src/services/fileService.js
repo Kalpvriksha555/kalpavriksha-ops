@@ -26,38 +26,9 @@ export const isProjectFileImage = (doc = {}) => {
   return mime.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|bmp|svg)$/i.test(name);
 };
 
-export const isProjectFileText = (doc = {}) => {
-  const name = getProjectFileName(doc);
-  const mime = getProjectFileMime(doc);
-  return mime.startsWith('text/')
-    || /\.(txt|json|xml|csv|log|md|rtf)$/i.test(name)
-    || ['application/json', 'application/xml', 'text/xml', 'application/csv'].some(type => mime.includes(type));
-};
-
-export const isProjectFileOffice = (doc = {}) => {
-  const name = getProjectFileName(doc);
-  const mime = getProjectFileMime(doc);
-  return /\.(doc|docx|xls|xlsx|ppt|pptx)$/i.test(name)
-    || mime.includes('wordprocessingml')
-    || mime.includes('spreadsheetml')
-    || mime.includes('presentationml')
-    || mime.includes('msword')
-    || mime.includes('ms-excel')
-    || mime.includes('ms-powerpoint');
-};
-
-export const isProjectFileCad = (doc = {}) => {
-  const name = getProjectFileName(doc);
-  const mime = getProjectFileMime(doc);
-  return name.endsWith('.dwg') || name.endsWith('.dxf') || mime.includes('acad') || mime.includes('dwg') || mime.includes('dxf');
-};
-
 export const getProjectFileKind = (doc = {}) => {
   if (isProjectFilePdf(doc)) return 'pdf';
   if (isProjectFileImage(doc)) return 'image';
-  if (isProjectFileText(doc)) return 'text';
-  if (isProjectFileOffice(doc)) return 'office';
-  if (isProjectFileCad(doc)) return 'cad';
   return 'file';
 };
 
@@ -90,8 +61,35 @@ const normalizePreviewUrl = (url = '') => {
   return absolute;
 };
 
-export const canPreviewProjectFile = (doc = {}) => Boolean(getProjectFilePreviewUrl(doc));
+export const canPreviewProjectFile = (doc = {}) => getProjectFileKind(doc) !== 'file' && Boolean(getProjectFilePreviewUrl(doc));
 
+export const fetchProjectFilePreview = async (doc = {}) => {
+  const kind = getProjectFileKind(doc);
+  if (kind === 'file') throw new Error('Preview is available only for PDF and image files.');
+  const url = getProjectFilePreviewUrl(doc);
+  if (!url) throw new Error('Preview link is not available for this file.');
+  const res = await fetch(url, { method: 'GET', cache: 'no-store' });
+  const contentType = String(res.headers.get('Content-Type') || '').toLowerCase();
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(text || `Preview failed (${res.status})`);
+  }
+  if (contentType.includes('application/json') || contentType.includes('text/html')) {
+    const text = await res.text().catch(() => '');
+    throw new Error(text || 'Preview endpoint did not return a valid file stream.');
+  }
+  const blob = await res.blob();
+  if (!blob || blob.size <= 0) throw new Error('Preview file is empty. Please download or re-upload this file.');
+  const expected = kind === 'pdf' ? 'application/pdf' : (contentType || blob.type || 'image/*');
+  const typedBlob = blob.type ? blob : new Blob([blob], { type: expected });
+  return {
+    kind,
+    url: URL.createObjectURL(typedBlob),
+    sourceUrl: url,
+    mimeType: typedBlob.type || contentType,
+    size: typedBlob.size,
+  };
+};
 
 export const getProjectFileDownloadUrl = (doc = {}) => {
   if (!doc) return '';
@@ -109,262 +107,22 @@ export const getProjectFileDownloadUrl = (doc = {}) => {
 };
 
 
-const isServerFileId = (id = '') => /^[A-Za-z0-9_-]{6,40}$/.test(String(id || '').trim()) && !/^\d+(\.\d+)?$/.test(String(id || '').trim());
-
-const hasInlineLocalUrl = (doc = {}) => /^(blob:|data:)/i.test(String(doc.previewUrl || doc.url || doc.fileUrl || '').trim());
-
-const hasExplicitFileUrl = (doc = {}) => Boolean(String(doc.previewUrl || doc.url || doc.fileUrl || doc.downloadUrl || '').trim());
-
 export const getProjectFilePreviewUrl = (doc = {}) => {
-  if (!doc) return '';
+  if (!doc || getProjectFileKind(doc) === 'file') return '';
 
-  // Chat attachments often carry a message id plus a direct file/data URL. Prefer
-  // the real file URL first, otherwise the message id can be mistaken for a file id
-  // and the app may navigate to a raw image/PDF route instead of the viewer.
   if (doc.previewUrl) return normalizePreviewUrl(doc.previewUrl);
-  if (doc.url) return normalizePreviewUrl(doc.url);
-  if (doc.fileUrl) return normalizePreviewUrl(doc.fileUrl);
-  if (doc.downloadUrl) return normalizePreviewUrl(doc.downloadUrl);
 
   const id = String(doc.fileId || doc.id || '').trim();
-  if (isServerFileId(id)) return `${API_BASE}/api/files/${encodeURIComponent(id)}/preview`;
+  const looksLikeServerFileId = /^[A-Za-z0-9_-]{6,40}$/.test(id) && !/^\d+(\.\d+)?$/.test(id);
+  if (looksLikeServerFileId) return `${API_BASE}/api/files/${encodeURIComponent(id)}?mode=preview`;
+
+  const downloadUrl = getProjectFileDownloadUrl(doc);
+  if (downloadUrl) return normalizePreviewUrl(downloadUrl);
+
+  const url = String(doc.url || '').trim();
+  if (url) return normalizePreviewUrl(url);
 
   return '';
-};
-
-export const getProjectFilePreviewDataUrl = (doc = {}) => {
-  if (!doc || hasInlineLocalUrl(doc)) return '';
-
-  const explicit = String(doc.previewUrl || doc.url || doc.fileUrl || doc.downloadUrl || '').trim();
-  if (explicit && !/\/api\/files\/[^/?#]+/i.test(explicit)) return '';
-
-  const fileId = String(doc.fileId || '').trim();
-  if (isServerFileId(fileId)) return `${API_BASE}/api/files/${encodeURIComponent(fileId)}/preview-data`;
-
-  const id = String(doc.id || '').trim();
-  if (!hasExplicitFileUrl(doc) && isServerFileId(id)) return `${API_BASE}/api/files/${encodeURIComponent(id)}/preview-data`;
-
-  return '';
-};
-
-const base64ToBlob = (base64 = '', mimeType = 'application/octet-stream') => {
-  const binary = atob(String(base64 || ''));
-  const chunks = [];
-  const chunkSize = 8192;
-  for (let offset = 0; offset < binary.length; offset += chunkSize) {
-    const slice = binary.slice(offset, offset + chunkSize);
-    const bytes = new Uint8Array(slice.length);
-    for (let i = 0; i < slice.length; i += 1) bytes[i] = slice.charCodeAt(i);
-    chunks.push(bytes);
-  }
-  return new Blob(chunks, { type: mimeType || 'application/octet-stream' });
-};
-
-const getScopedProjectFileCacheKey = (doc = {}, scope = FILE_CACHE_SCOPE_DOWNLOAD) => {
-  const base = getProjectFileCacheKey(doc);
-  return base ? `${scope}::${base}` : '';
-};
-
-const isScopedCacheEntryFresh = (entry = {}, ttlMs = FILE_CACHE_TTL_MS) => {
-  const savedAt = Number(entry.savedAt || 0);
-  return savedAt > 0 && (nowMs() - savedAt) <= ttlMs;
-};
-
-export const releaseProjectFilePreview = (preview = {}) => {
-  const url = String(preview?.objectUrl || preview?.url || '');
-  if (url && url.startsWith('blob:')) {
-    try { URL.revokeObjectURL(url); } catch {}
-  }
-};
-
-const putPreviewBlob = async (doc = {}, blob) => {
-  if (!blob || !fileCacheAvailable()) return null;
-  const key = getScopedProjectFileCacheKey(doc, FILE_CACHE_SCOPE_PREVIEW);
-  if (!key) return null;
-  const db = await openFileCacheDb();
-  await new Promise((resolve, reject) => {
-    const tx = db.transaction(FILE_CACHE_STORE, 'readwrite');
-    tx.objectStore(FILE_CACHE_STORE).put({
-      key,
-      blob,
-      scope: FILE_CACHE_SCOPE_PREVIEW,
-      name: doc.name || doc.fileName || 'preview',
-      size: blob.size || doc.size || 0,
-      mimeType: blob.type || doc.mimeType || 'application/octet-stream',
-      savedAt: nowMs(),
-      expiresAt: nowMs() + FILE_PREVIEW_CACHE_TTL_MS,
-    });
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error || new Error('Could not save preview cache.'));
-  });
-  db.close?.();
-  return true;
-};
-
-const getCachedPreviewBlob = async (doc = {}) => {
-  const key = getScopedProjectFileCacheKey(doc, FILE_CACHE_SCOPE_PREVIEW);
-  if (!key || !fileCacheAvailable()) return null;
-  const db = await openFileCacheDb();
-  const item = await new Promise((resolve, reject) => {
-    const tx = db.transaction(FILE_CACHE_STORE, 'readonly');
-    const req = tx.objectStore(FILE_CACHE_STORE).get(key);
-    req.onsuccess = () => resolve(req.result || null);
-    req.onerror = () => reject(req.error || new Error('Could not read preview cache.'));
-  });
-  db.close?.();
-  if (!item?.blob) return null;
-  if (!isScopedCacheEntryFresh(item, FILE_PREVIEW_CACHE_TTL_MS)) {
-    if (fileCacheAvailable()) {
-      const cleanupDb = await openFileCacheDb().catch(() => null);
-      if (cleanupDb) {
-        await new Promise((resolve) => {
-          const tx = cleanupDb.transaction(FILE_CACHE_STORE, 'readwrite');
-          tx.objectStore(FILE_CACHE_STORE).delete(key);
-          tx.oncomplete = resolve;
-          tx.onerror = resolve;
-        });
-        cleanupDb.close?.();
-      }
-    }
-    return null;
-  }
-  return item;
-};
-
-const fetchProjectFilePreviewFresh = async (doc = {}, options = {}) => {
-  const kind = getProjectFileKind(doc);
-  const sourceUrl = getProjectFilePreviewUrl(doc);
-  const name = doc.name || doc.fileName || doc.filename || 'File';
-  const size = Number(doc.size || doc.fileSize || 0);
-  const originalMime = getProjectFileMime(doc) || 'application/octet-stream';
-
-  if (!sourceUrl) throw new Error('Preview link is not available for this file.');
-
-  // CAD and unsupported binary formats should never force a browser download from Preview.
-  // They open as metadata cards with an explicit Download button.
-  if (kind === 'cad' || kind === 'file') {
-    return {
-      kind,
-      url: '',
-      objectUrl: '',
-      sourceUrl,
-      mimeType: originalMime,
-      size,
-      metadataOnly: true,
-      fromCache: false,
-      name,
-    };
-  }
-
-  // Office files are browser-dependent. We keep Preview inline by showing a safe
-  // office preview card/iframe fallback instead of navigating to a download URL.
-  if (kind === 'office') {
-    return {
-      kind,
-      url: sourceUrl,
-      objectUrl: '',
-      sourceUrl,
-      mimeType: originalMime,
-      size,
-      metadataOnly: false,
-      fromCache: false,
-      name,
-    };
-  }
-
-  const cached = await getCachedPreviewBlob(doc).catch(() => null);
-  if (cached?.blob) {
-    const cachedUrl = URL.createObjectURL(cached.blob);
-    const mimeType = cached.mimeType || cached.blob.type || originalMime;
-    const text = kind === 'text' ? await cached.blob.text().catch(() => '') : undefined;
-    return {
-      kind,
-      url: cachedUrl,
-      objectUrl: cachedUrl,
-      sourceUrl,
-      mimeType,
-      size: cached.size || cached.blob.size,
-      text,
-      fromCache: true,
-      release: () => releaseProjectFilePreview({ objectUrl: cachedUrl }),
-    };
-  }
-
-  const dataUrl = getProjectFilePreviewDataUrl(doc);
-  let blob;
-  let contentType = '';
-  if (dataUrl) {
-    const dataRes = await fetch(dataUrl, { method: 'GET', cache: 'no-store', signal: options.signal, headers: { Accept: 'application/json' } });
-    const payload = await dataRes.json().catch(() => null);
-    if (!dataRes.ok || !payload?.ok) throw new Error(payload?.error || `Preview failed (${dataRes.status})`);
-    if (payload.previewType === 'metadata') {
-      return { kind, url: '', objectUrl: '', sourceUrl, mimeType: payload.mime || originalMime, size: payload.size || size, metadataOnly: true, fromCache: false, name: payload.name || name };
-    }
-    contentType = String(payload.mime || originalMime || '').toLowerCase();
-    blob = base64ToBlob(payload.base64 || '', contentType || originalMime || 'application/octet-stream');
-  } else {
-    const res = await fetch(sourceUrl, { method: 'GET', cache: 'no-store', signal: options.signal, headers: { Accept: 'application/octet-stream,*/*;q=0.8' } });
-    contentType = String(res.headers.get('Content-Type') || '').toLowerCase();
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(text || `Preview failed (${res.status})`);
-    }
-    if (contentType.includes('text/html') && kind !== 'text') {
-      const text = await res.text().catch(() => '');
-      throw new Error(text || 'Preview endpoint did not return a valid file stream.');
-    }
-    blob = await res.blob();
-  }
-
-  if (!blob || blob.size <= 0) throw new Error('Preview file is empty. Please download or re-upload this file.');
-
-  const expected = kind === 'pdf'
-    ? 'application/pdf'
-    : kind === 'image'
-      ? (contentType && contentType !== 'application/octet-stream' ? contentType : (originalMime.startsWith('image/') ? originalMime : 'image/*'))
-      : (contentType && contentType !== 'application/octet-stream' ? contentType : (originalMime || 'text/plain'));
-  const typedBlob = new Blob([blob], { type: expected });
-  await putPreviewBlob(doc, typedBlob).catch((error) => console.warn('Preview cache save failed:', error));
-  const objectUrl = URL.createObjectURL(typedBlob);
-  const text = kind === 'text' ? await typedBlob.text().catch(() => '') : undefined;
-
-  return {
-    kind,
-    url: objectUrl,
-    objectUrl,
-    sourceUrl,
-    mimeType: typedBlob.type || contentType,
-    size: typedBlob.size,
-    text,
-    fromCache: false,
-    release: () => releaseProjectFilePreview({ objectUrl }),
-  };
-};
-
-export const fetchProjectFilePreview = async (doc = {}, options = {}) => {
-  const dedupeKey = getScopedProjectFileCacheKey(doc, FILE_CACHE_SCOPE_PREVIEW) || getProjectFilePreviewUrl(doc);
-  const signal = options.signal;
-
-  if (!dedupeKey) return fetchProjectFilePreviewFresh(doc, options);
-
-  // Reuse an active network/cache read for the same file so double-clicks,
-  // React re-renders, and quick viewer transitions do not fire duplicate preview requests.
-  const active = PREVIEW_INFLIGHT_REQUESTS.get(dedupeKey);
-  if (active?.promise) {
-    if (signal?.aborted) throw new DOMException('Preview request cancelled.', 'AbortError');
-    return active.promise.then((result) => {
-      if (signal?.aborted) throw new DOMException('Preview request cancelled.', 'AbortError');
-      // Blob URLs cannot be shared safely between two consumers because one close
-      // may revoke the other viewer. Clone the blob-backed preview from cache for
-      // the second consumer by re-reading after the first request completes.
-      return fetchProjectFilePreviewFresh(doc, { signal });
-    });
-  }
-
-  const promise = fetchProjectFilePreviewFresh(doc, options)
-    .finally(() => PREVIEW_INFLIGHT_REQUESTS.delete(dedupeKey));
-  PREVIEW_INFLIGHT_REQUESTS.set(dedupeKey, { promise, startedAt: nowMs() });
-  return promise;
 };
 
 
@@ -450,10 +208,6 @@ const FILE_CACHE_DB_NAME = 'kalpavriksha-file-cache-v1';
 const FILE_CACHE_STORE = 'files';
 const FILE_CACHE_INDEX_KEY = 'kalpavriksha_downloaded_file_index_v1';
 const FILE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const FILE_PREVIEW_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const FILE_CACHE_SCOPE_DOWNLOAD = 'download';
-const FILE_CACHE_SCOPE_PREVIEW = 'preview';
-const PREVIEW_INFLIGHT_REQUESTS = new Map();
 const nowMs = () => Date.now();
 
 const isDesktopBridgeAvailable = () => typeof window !== 'undefined' && Boolean(window.kalpavrikshaDesktop?.isDesktop);

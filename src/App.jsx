@@ -16,10 +16,11 @@ import { CommunicationHub } from './features/chat';
 import { HistoryArchiveView } from './features/archive';
 import { CommandCentreView, ProductivityDashboard, DailyClosingReport, ReportsAnalyticsView, ProductionQAView, SystemSettingsView } from './features/command-centre';
 import { ActiveOperationsView } from './features/operations';
+import { UnifiedFileViewer } from './components/files/UnifiedFileViewer';
 import { getStatusColor, getPriorityColor } from './services/taskService';
 import { API_BASE, USE_BACKEND_STATE, ONLINE_STALE_MS, MAX_INLINE_DATA_URL_CHARS } from './config/appConfig';
 import { fileToBase64, cleanFileName } from './utils/fileUtils';
-import { absoluteApiUrl, getProjectFileDownloadUrl, getProjectFilePreviewUrl, isProjectFilePdf, isProjectFileImage, getProjectFileKind, canPreviewProjectFile, fetchProjectFilePreview, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile, getProjectFileCacheKey, listCachedProjectFiles, openCachedProjectFile, clearCachedProjectFile, pruneExpiredProjectFileCache } from './services/fileService';
+import { absoluteApiUrl, getProjectFileDownloadUrl, getProjectFilePreviewUrl, isProjectFilePdf, isProjectFileImage, getProjectFileKind, canPreviewProjectFile, fetchProjectFilePreview, releaseProjectFilePreview, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile, getProjectFileCacheKey, listCachedProjectFiles, openCachedProjectFile, clearCachedProjectFile, pruneExpiredProjectFileCache } from './services/fileService';
 import { sendRealOtp, verifyRealOtp } from './services/otpService';
 import { buildNotification, getVisibleNotifications, NOTIFICATION_CATEGORIES, getNotificationCategory, getNotificationPriority, buildActivityTimeline, isNotificationForUser } from './services/notificationService';
 import { 
@@ -327,6 +328,37 @@ const detectEmployeeLifecycleEventType = (existing = {}, next = {}) => {
 
 
 const stripLargeLocalFilesForCloud = (project) => sanitizeProjectForCache(project);
+
+
+const TASK_CREATE_FILE_LIMIT_BYTES = 80 * 1024 * 1024;
+const TASK_CREATE_MAX_FILES = 20;
+const TASK_CREATE_ALLOWED_EXTENSIONS = new Set(['jpg','jpeg','png','webp','gif','svg','pdf','dwg','dxf','xls','xlsx','doc','docx','txt','csv','json','xml','log']);
+
+const cleanTaskField = (value = '') => String(value || '').replace(/\s+/g, ' ').trim();
+const formatTaskFileSize = (bytes = 0) => {
+  const size = Number(bytes || 0);
+  if (!Number.isFinite(size) || size <= 0) return '0 KB';
+  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(size >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+  return `${Math.max(1, Math.round(size / 1024))} KB`;
+};
+const getTaskCreateFileExtension = (name = '') => String(name || '').split('.').pop()?.toLowerCase() || '';
+const makeLeadFileKey = (file = {}) => `${String(file.name || '').toLowerCase()}_${file.size || 0}_${file.lastModified || 0}`;
+const validateTaskCreateForm = ({ client, customerName, location, taskType, dueDate, estimate, files = [], isAdmin = false } = {}) => {
+  const errors = [];
+  if (!cleanTaskField(client)) errors.push('Bank name is required.');
+  if (!cleanTaskField(customerName)) errors.push('Customer name is required.');
+  if (!cleanTaskField(location)) errors.push('Location is required.');
+  if (!cleanTaskField(taskType)) errors.push('Task category is required.');
+  if (dueDate) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const selected = new Date(`${dueDate}T00:00:00`);
+    if (!Number.isNaN(selected.getTime()) && selected < today) errors.push('Due date cannot be before today.');
+  }
+  if (isAdmin && estimate !== '' && estimate !== null && estimate !== undefined && Number(estimate) < 0) errors.push('Pricing estimate cannot be negative.');
+  if ((files || []).length > TASK_CREATE_MAX_FILES) errors.push(`Attach up to ${TASK_CREATE_MAX_FILES} files only.`);
+  return errors;
+};
 
 const TASK_CATEGORIES = [
   'Key Route Map', 'Key Route + Map Estimate', 'Key Route + Floor Map',
@@ -2108,7 +2140,7 @@ const LedgerView = ({ projects, onSelectProject }) => {
   );
 };
 
-const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, projects = [], onDeleteTask }) => {
+const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, projects = [], onDeleteTask, onPreviewFile }) => {
   const [newSubTask, setNewSubTask] = useState('');
   const [newNote, setNewNote] = useState('');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -2118,22 +2150,27 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const [downloadedFileMap, setDownloadedFileMap] = useState(() => listCachedProjectFiles());
   const [filePreview, setFilePreview] = useState(null);
   const [filePreviewUi, setFilePreviewUi] = useState({ zoom: 1, rotation: 0 });
+  const filePreviewAbortRef = useRef(null);
 
   const closeFilePreview = useCallback(() => {
+    if (filePreviewAbortRef.current) {
+      try { filePreviewAbortRef.current.abort(); } catch {}
+      filePreviewAbortRef.current = null;
+    }
     setFilePreview((current) => {
-      if (current?.objectUrl) {
-        try { URL.revokeObjectURL(current.objectUrl); } catch {}
-      }
+      releaseProjectFilePreview(current);
       return null;
     });
     setFilePreviewUi({ zoom: 1, rotation: 0 });
   }, []);
 
   useEffect(() => () => {
-    if (filePreview?.objectUrl) {
-      try { URL.revokeObjectURL(filePreview.objectUrl); } catch {}
+    if (filePreviewAbortRef.current) {
+      try { filePreviewAbortRef.current.abort(); } catch {}
+      filePreviewAbortRef.current = null;
     }
-  }, [filePreview?.objectUrl]);
+    releaseProjectFilePreview(filePreview);
+  }, [filePreview]);
 
   const [subTaskAttachments, setSubTaskAttachments] = useState([]);
   const [noteAttachments, setNoteAttachments] = useState([]);
@@ -2478,44 +2515,15 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const renderInlineFileTransferBar = (extraClass = '') => renderWhatsAppTransferBar(`mt-3 ${extraClass}`);
 
 
-  const handlePreviewFile = async (doc = {}) => {
-    const kind = getProjectFileKind(doc);
-    if (kind === 'file') {
-      alert('Preview is available for PDF and image files. Please download this file to open it.');
+  const handlePreviewFile = (doc = {}) => {
+    if (typeof onPreviewFile === 'function') {
+      onPreviewFile(doc);
       return;
     }
-    const name = doc.name || doc.fileName || (kind === 'image' ? 'Image Preview' : 'PDF Preview');
-    if (filePreview?.objectUrl) {
-      try { URL.revokeObjectURL(filePreview.objectUrl); } catch {}
-    }
-    setFilePreviewUi({ zoom: 1, rotation: 0 });
-    setFilePreview({ doc, kind, name, loading: true, error: '', url: '', objectUrl: '' });
-    try {
-      const preview = await fetchProjectFilePreview(doc);
-      setFilePreview({
-        doc,
-        kind: preview.kind || kind,
-        name,
-        loading: false,
-        error: '',
-        url: preview.url,
-        objectUrl: preview.url,
-        sourceUrl: preview.sourceUrl,
-        mimeType: preview.mimeType,
-        size: preview.size,
-      });
-    } catch (error) {
-      const fallbackUrl = getProjectFilePreviewUrl(doc);
-      setFilePreview({
-        doc,
-        kind,
-        name,
-        loading: false,
-        error: error?.message || 'Preview could not be loaded.',
-        url: fallbackUrl || '',
-        objectUrl: '',
-        sourceUrl: fallbackUrl || '',
-      });
+    const kind = getProjectFileKind(doc);
+    if (kind === 'file') {
+      alert('Preview is not available for this file type yet. Please download this file to open it.');
+      return;
     }
   };
 
@@ -3749,6 +3757,20 @@ class AppErrorBoundary extends React.Component {
 }
 
 function AppShell() {
+  const [globalPreviewFile, setGlobalPreviewFile] = useState(null);
+  const openUnifiedPreview = useCallback((file = {}) => {
+    if (!file) return;
+    setGlobalPreviewFile({ ...file, _previewKey: `${Date.now()}_${Math.random().toString(36).slice(2)}` });
+  }, []);
+  const closeUnifiedPreview = useCallback(() => setGlobalPreviewFile(null), []);
+  const downloadFromUnifiedPreview = useCallback(async (file = {}) => {
+    try {
+      await downloadProjectFile(file);
+      setTimeout(() => pruneExpiredProjectFileCache().catch(() => {}), 100);
+    } catch (error) {
+      alert(error?.message || 'Download failed. Please try again.');
+    }
+  }, []);
   const [currentUser, setCurrentUser] = useState(null);
   const currentUserRef = useRef(null);
   useEffect(() => { currentUserRef.current = currentUser; }, [currentUser]);
@@ -3803,6 +3825,30 @@ function AppShell() {
   
   const [leadFiles, setLeadFiles] = useState([]);
   const [isSubmittingLead, setIsSubmittingLead] = useState(false);
+  const [taskCreateStatus, setTaskCreateStatus] = useState('');
+  const [taskCreateError, setTaskCreateError] = useState('');
+
+  useEffect(() => {
+    if (!showNewLead) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    const previousHtmlOverflow = document.documentElement.style.overflow;
+    const previousPaddingRight = document.body.style.paddingRight;
+    const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+    if (scrollbarWidth > 0) document.body.style.paddingRight = `${scrollbarWidth}px`;
+    document.documentElement.classList.add('kalpa-task-create-open');
+    requestAnimationFrame(() => {
+      const card = document.querySelector('.kalpa-lead-modal-card');
+      if (card) card.scrollTop = 0;
+    });
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.documentElement.style.overflow = previousHtmlOverflow;
+      document.body.style.paddingRight = previousPaddingRight;
+      document.documentElement.classList.remove('kalpa-task-create-open');
+    };
+  }, [showNewLead]);
   
   const [showLocalBanner, setShowLocalBanner] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
@@ -3882,8 +3928,11 @@ function AppShell() {
         if (Array.isArray(data.deletedProjectIds)) rememberDeletedProjects(data.deletedProjectIds);
         if (Array.isArray(data.projects)) {
           const incoming = filterDeletedProjects(sanitizeProjectsForCache(data.projects));
-          setProjects(prev => filterDeletedProjects(mergeProjectsByFreshness(incoming, prev)));
-          try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(incoming)); localStorage.setItem('kalpa_projects', JSON.stringify(incoming)); } catch(e) {}
+          setProjects(prev => {
+            const merged = filterDeletedProjects(mergeProjectsByFreshness(incoming, prev));
+            try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(sanitizeProjectsForCache(merged))); localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(merged))); } catch(e) {}
+            return merged;
+          });
         }
         if (Array.isArray(data.chatMessages)) {
           const incomingChats = sanitizeChatsForCache(data.chatMessages);
@@ -3920,8 +3969,11 @@ function AppShell() {
         if (Array.isArray(data.deletedProjectIds)) rememberDeletedProjects(data.deletedProjectIds);
         if (Array.isArray(data.projects)) {
           const incomingProjects = filterDeletedProjects(sanitizeProjectsForCache(data.projects));
-          setProjects(prev => filterDeletedProjects(mergeProjectsByFreshness(incomingProjects, prev)));
-          try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(incomingProjects)); localStorage.setItem('kalpa_projects', JSON.stringify(incomingProjects)); } catch(e) {}
+          setProjects(prev => {
+            const merged = filterDeletedProjects(mergeProjectsByFreshness(incomingProjects, prev));
+            try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(sanitizeProjectsForCache(merged))); localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(merged))); } catch(e) {}
+            return merged;
+          });
         }
         if (Array.isArray(data.chatMessages)) {
           setChatMessages(prev => {
@@ -4844,14 +4896,46 @@ function AppShell() {
     postPresenceUpdate(onBreak ? 'resume' : 'break', updated);
   };
 
+  const resetTaskCreateState = () => {
+      if (isSubmittingLead) return;
+      setShowNewLead(false);
+      setTaskCreateError('');
+      setTaskCreateStatus('');
+  };
+
   const handleLeadFileChange = (e) => {
-      if (e.target.files) {
-          setLeadFiles([...leadFiles, ...Array.from(e.target.files)]);
-      }
+      const incoming = Array.from(e.target.files || []);
+      if (!incoming.length) return;
+      const existingKeys = new Set(leadFiles.map(makeLeadFileKey));
+      const accepted = [];
+      const skipped = [];
+      incoming.forEach(file => {
+        const extension = getTaskCreateFileExtension(file.name);
+        const key = makeLeadFileKey(file);
+        if (!TASK_CREATE_ALLOWED_EXTENSIONS.has(extension)) {
+          skipped.push(`${file.name}: unsupported file type`);
+          return;
+        }
+        if ((file.size || 0) > TASK_CREATE_FILE_LIMIT_BYTES) {
+          skipped.push(`${file.name}: file is larger than ${formatTaskFileSize(TASK_CREATE_FILE_LIMIT_BYTES)}`);
+          return;
+        }
+        if (existingKeys.has(key)) {
+          skipped.push(`${file.name}: already attached`);
+          return;
+        }
+        existingKeys.add(key);
+        accepted.push(file);
+      });
+      const nextFiles = [...leadFiles, ...accepted].slice(0, TASK_CREATE_MAX_FILES);
+      setLeadFiles(nextFiles);
+      setTaskCreateError(skipped.length ? skipped.slice(0, 3).join(' • ') : '');
+      if (e.target) e.target.value = '';
   };
 
   const removeLeadFile = (idxToRemove) => {
       setLeadFiles(leadFiles.filter((_, idx) => idx !== idxToRemove));
+      setTaskCreateError('');
   };
 
   if (authError) {
@@ -5120,7 +5204,7 @@ function AppShell() {
         )}
 
         {selectedProject ? (
-          <TaskDetailView project={selectedProject} user={currentUser} onBack={closeTaskDetail} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} />
+          <TaskDetailView project={selectedProject} user={currentUser} onBack={closeTaskDetail} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} onPreviewFile={openUnifiedPreview} />
         ) : activeTab === 'command' ? (
           <CommandCentreView projects={projects} users={activeUsers} attendanceLogs={attendanceLogs} currentUser={currentUser} onOpenPerformance={() => setActiveTab('productivity')} onSelectProject={(p) => openTaskDetail(p, 'command')} onNavigate={(target) => { if (target === 'newCase') { setShowNewLead(true); return; } if (target === 'notifications') { setShowNotifs(true); return; } setActiveTab(target); }} />
         ) : activeTab === 'productivity' ? (
@@ -5173,31 +5257,45 @@ function AppShell() {
         )}
       </main>
 
-      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} projects={projects} onOpenTaskReference={openTaskReferenceFromChat} />}
+      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} projects={projects} onOpenTaskReference={openTaskReferenceFromChat} onPreviewFile={openUnifiedPreview} />}
+
+      <UnifiedFileViewer file={globalPreviewFile} onClose={closeUnifiedPreview} onDownload={downloadFromUnifiedPreview} />
 
       {!selectedProject && !showNewLead && <MobileBottomNavigation currentUser={currentUser} ROLES={ROLES} activeTab={activeTab} setActiveTab={setActiveTab} unreadNotifs={unreadNotifs} />}
 
-      {showNewLead && (
-        <div className="kalpa-lead-modal fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[80] flex justify-center items-center p-4">
-          <div className="kalpa-lead-modal-card bg-white rounded-[2rem] w-full max-w-3xl max-h-[90vh] overflow-y-auto p-8 shadow-2xl animate-in zoom-in-95 duration-200 custom-scrollbar">
-             <div className="flex justify-between items-center mb-8 border-b-2 border-slate-100 pb-6">
-                <h2 className="text-3xl font-black text-slate-800 tracking-tight">Log New Case</h2>
-                <button type="button" onClick={() => setShowNewLead(false)} className="p-2.5 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors"><X className="w-6 h-6 text-slate-600"/></button>
+      {showNewLead && createPortal((
+        <div className="kalpa-lead-modal fixed inset-0 bg-slate-900/70 backdrop-blur-md flex justify-center items-start p-0 sm:p-4 overflow-hidden" style={{ zIndex: 2147483600 }} role="dialog" aria-modal="true" aria-label="Create task">
+          <div className="kalpa-lead-modal-card relative bg-white rounded-none sm:rounded-[2rem] w-full max-w-4xl h-[100dvh] sm:h-[calc(100dvh-2rem)] overflow-y-auto p-4 sm:p-8 shadow-2xl animate-in zoom-in-95 duration-200 custom-scrollbar overscroll-contain" style={{ zIndex: 2147483601 }}>
+             <div className="sticky top-0 z-30 -mx-4 sm:-mx-8 px-4 sm:px-8 py-4 sm:py-5 mb-5 sm:mb-7 bg-white/98 backdrop-blur border-b-2 border-slate-100 flex justify-between items-start gap-4">
+                <div><h2 className="text-2xl sm:text-3xl font-black text-slate-800 tracking-tight">Create Task</h2><p className="text-xs sm:text-sm font-bold text-slate-400 mt-1">Fill the essentials first. Optional details can be added later.</p></div>
+                <button type="button" onClick={resetTaskCreateState} disabled={isSubmittingLead} className="p-2.5 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"><X className="w-6 h-6 text-slate-600"/></button>
              </div>
              
              <form onSubmit={async (e) => {
                e.preventDefault();
                if (isSubmittingLead) return;
+               setTaskCreateError('');
+               setTaskCreateStatus('Checking task details...');
                setIsSubmittingLead(true);
                try {
                const fd = new FormData(e.target);
                
-               const client = fd.get('client');
+               const client = cleanTaskField(fd.get('client'));
                const bankerName = ''; // banker/loan officer removed from simplified operational form
-               const customerName = fd.get('customerName');
-               const location = fd.get('location');
-               const taskType = newTaskCategory === 'Other' ? fd.get('otherType') : newTaskCategory;
+               const customerName = cleanTaskField(fd.get('customerName'));
+               const location = cleanTaskField(fd.get('location'));
+               const rawTaskType = newTaskCategory === 'Other' ? fd.get('otherType') : newTaskCategory;
+               const taskType = cleanTaskField(rawTaskType);
+               const dueDate = fd.get('dueDate') || null;
+               const estimateValue = fd.get('estimate') || '';
+               const validationErrors = validateTaskCreateForm({ client, customerName, location, taskType, dueDate, estimate: estimateValue, files: leadFiles, isAdmin: currentUser.role === ROLES.ADMIN });
+               if (validationErrors.length) {
+                 setTaskCreateError(validationErrors.join(' '));
+                 setTaskCreateStatus('');
+                 return;
+               }
                const taskId = generateTraceableTaskId({ location, client, bankerName, customerName, projects });
+               setTaskCreateStatus(leadFiles.length ? `Uploading ${leadFiles.length} file${leadFiles.length === 1 ? '' : 's'}...` : 'Creating task...');
                const docs = [];
                for (const file of leadFiles) {
                   try {
@@ -5208,8 +5306,11 @@ function AppShell() {
                   }
                }
 
-               const assignedTo = fd.get('assignedTo');
-               const newP = {
+               const now = Date.now();
+               const assignedToRaw = fd.get('assignedTo');
+               const assignedTo = normalizePersonName(assignedToRaw || 'Unassigned') || 'Unassigned';
+               const isAssigned = assignedTo !== 'Unassigned';
+               const newP = normalizeProjectRecord({
                  id: taskId,
                  taskName: [taskType, customerName, location].filter(Boolean).join(' • '),
                  client, 
@@ -5217,36 +5318,45 @@ function AppShell() {
                  customerName,
                  location,
                  type: taskType,
-                 description: fd.get('description') || '',
-                 priority: fd.get('priority'), assignedTo, assignedBy: assignedTo !== 'Unassigned' ? currentUser.name : '', assignedAt: assignedTo !== 'Unassigned' ? Date.now() : null, assignmentVersion: assignedTo !== 'Unassigned' ? Date.now() : null,
-                 dueDate: fd.get('dueDate') || null,
-                 estimateDetails: fd.get('estimateDetails') || '', estimate: fd.get('estimate') || 0,
-                 status: 'Lead Received', createdAt: Date.now(), updatedAt: Date.now(), syncVersion: Date.now(), createdBy: currentUser.name,
-                 ownership: { createdBy: currentUser.name, assignedBy: assignedTo !== 'Unassigned' ? currentUser.name : '', assignedTo },
-                 reassignmentHistory: assignedTo !== 'Unassigned' ? [{ from: 'Unassigned', to: assignedTo, by: currentUser.name, time: new Date().toLocaleString() }] : [],
-                 documents: docs, timeline: [{id: Date.now(), text: 'Case Created', time: new Date().toLocaleString()}],
+                 description: cleanTaskField(fd.get('description')),
+                 priority: fd.get('priority') || 'Normal',
+                 assignedTo,
+                 assignedBy: isAssigned ? currentUser.name : '',
+                 assignedAt: isAssigned ? now : null,
+                 assignmentVersion: isAssigned ? now : null,
+                 dueDate,
+                 estimateDetails: cleanTaskField(fd.get('estimateDetails')), estimate: estimateValue || 0,
+                 status: 'Lead Received', createdAt: now, updatedAt: now, syncVersion: now, createdBy: currentUser.name,
+                 showInOperations: true,
+                 showInMyTasks: isAssigned,
+                 ownership: { createdBy: currentUser.name, assignedBy: isAssigned ? currentUser.name : '', assignedTo },
+                 reassignmentHistory: isAssigned ? [{ from: 'Unassigned', to: assignedTo, by: currentUser.name, time: new Date(now).toLocaleString() }] : [],
+                 documents: docs, timeline: [{id: now, text: 'Case Created', time: new Date(now).toLocaleString()}],
                  subTasks: [], notes: [], ledger: {}, reportSent: false
-               };
+               });
                
                if (docs.length > 0) {
                    newP.timeline.push({ id: Date.now()+1, text: `${docs.length} Source File(s) Attached`, time: new Date().toLocaleString() });
                }
 
-               const nextProjects = mergeProjectsByFreshness((projects || []).filter(p => String(p.id) !== String(newP.id)), [newP]);
-               persistAndBroadcastProjects(nextProjects);
-               setProjects(nextProjects);
+               setTaskCreateStatus('Saving task...');
+               if (isAssignedValue(newP.assignedTo)) recordAssignmentLedger(newP);
+               const immediateNextProjects = mergeProjectsByFreshness((projects || []).filter(p => String(p.id) !== String(newP.id)), [newP]);
+               persistAndBroadcastProjects(immediateNextProjects);
+               setProjects(prev => mergeProjectsByFreshness((prev || []).filter(p => String(p.id) !== String(newP.id)), [newP]));
                setSelectedBoardDate(formatDateKey(newP.createdAt));
                setActiveTab('board');
-               try { window.localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(filterDeletedProjects(nextProjects)))); } catch(e) {}
+               try { window.localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(filterDeletedProjects(immediateNextProjects)))); } catch(e) {}
                if (USE_BACKEND_STATE && backendStateReady && isDbReady) {
                  try {
+                   const latestProjectsForSave = sanitizeProjectsForCache(filterDeletedProjects(immediateNextProjects));
                    const saveRes = await fetch(`${API_BASE}/api/state`, {
                      method: 'POST',
                      headers: jsonFinanceSafeHeaders,
                      body: JSON.stringify({
                        currentUserRole: currentUser?.role || '',
                        users: normalizeTeamUsers(users && users.length ? users : INITIAL_USERS),
-                       projects: sanitizeProjectsForCache(filterDeletedProjects(nextProjects)),
+                       projects: latestProjectsForSave,
                        deletedProjectIds: getDeletedProjectIds(),
                        chatMessages: sanitizeChatsForCache(chatMessages || []),
                        notifications: notifications || [],
@@ -5268,27 +5378,50 @@ function AppShell() {
                    const targetRole = activeUsers.find(u => u.name === newP.assignedTo)?.role || ROLES.DESIGNER;
                    addNotification(targetRole, newP.assignedTo, `New Task Assigned: ${newP.id}`, 'info');
                }
+               setTaskCreateStatus('Task created successfully.');
+               try {
+                 sessionStorage.setItem('kalpa_last_created_task_id', String(newP.id));
+                 sessionStorage.setItem('kalpa_last_created_task_time', String(Date.now()));
+               } catch(e) {}
+               setTimeout(() => {
+                 setProjects(prev => mergeProjectsByFreshness(prev || [], [newP]));
+               }, 250);
                setShowNewLead(false);
                setLeadFiles([]);
                setNewTaskCategory(TASK_CATEGORIES[0]);
+               setTaskCreateError('');
                } catch (err) {
                  console.error('Create task failed:', err);
-                 alert(`Task could not be created: ${err?.message || 'Please try again.'}`);
+                 setTaskCreateError(`Task could not be created: ${err?.message || 'Please check the details and try again.'}`);
                } finally {
                  setIsSubmittingLead(false);
+                 setTimeout(() => setTaskCreateStatus(''), 1200);
                }
-             }} className="space-y-6">
+             }} noValidate className="space-y-5 sm:space-y-6">
+               {(taskCreateError || taskCreateStatus) && (
+                 <div role="alert" className={`rounded-2xl border px-4 py-3 text-sm font-bold ${taskCreateError ? 'bg-red-50 border-red-100 text-red-700' : 'bg-indigo-50 border-indigo-100 text-indigo-700'}`}>
+                   {taskCreateError || taskCreateStatus}
+                 </div>
+               )}
+               <div className="bg-slate-50 border border-slate-100 rounded-2xl p-3 sm:p-4">
+                 <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Quick guide</p>
+                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs font-bold text-slate-500">
+                   <span>1. Add bank, customer and location.</span>
+                   <span>2. Pick task type and assignee.</span>
+                   <span>3. Attach files only if available.</span>
+                 </div>
+               </div>
                
-               <div className="grid grid-cols-1 sm:grid-cols-4 gap-5">
-                 <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Bank Name</label><input required name="client" className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none transition-colors font-bold text-slate-800" placeholder="SBI Home Loans"/></div>
-                 <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Customer Name</label><input required name="customerName" className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none transition-colors font-bold text-slate-800" placeholder="Rajesh Kumar"/></div>
-                 <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Location</label><input required name="location" className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none transition-colors font-bold text-slate-800" placeholder="Varanasi"/></div>
+               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-5">
+                 <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Bank Name</label><input required name="client" autoComplete="organization" onInput={() => setTaskCreateError('')} className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none transition-colors font-bold text-slate-800" placeholder="SBI Home Loans"/></div>
+                 <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Customer Name</label><input required name="customerName" autoComplete="name" onInput={() => setTaskCreateError('')} className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none transition-colors font-bold text-slate-800" placeholder="Rajesh Kumar"/></div>
+                 <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Location</label><input required name="location" autoComplete="address-level2" onInput={() => setTaskCreateError('')} className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none transition-colors font-bold text-slate-800" placeholder="Varanasi"/></div>
                </div>
 
                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                  <div>
                    <label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Task Category</label>
-                   <select required name="type" value={newTaskCategory} onChange={(e) => setNewTaskCategory(e.target.value)} className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none transition-colors font-bold text-slate-800 cursor-pointer">
+                   <select required name="type" value={newTaskCategory} onChange={(e) => { setNewTaskCategory(e.target.value); setTaskCreateError(''); }} className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none transition-colors font-bold text-slate-800 cursor-pointer">
                      {TASK_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
                    </select>
                  </div>
@@ -5306,13 +5439,13 @@ function AppShell() {
                          <span className={`text-[10px] font-black px-2 py-1 rounded-md ${u.active >= u.limit ? 'bg-orange-100 text-orange-700' : 'bg-emerald-100 text-emerald-700'}`}>{u.active}/{u.limit} active</span>
                        </div>
                      ))}
-                     <p className="text-[10px] font-bold text-indigo-500 mt-2">Daily task limit rises automatically: 5 â†’ 10 â†’ 15 as case volume increases.</p>
+                     <p className="text-[10px] font-bold text-indigo-500 mt-2">Daily task limit rises automatically: 5 → 10 → 15 as case volume increases.</p>
                    </div>
                  </div>
                </div>
 
                {newTaskCategory === 'Other' && (
-                  <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Describe Custom Task</label><input name="otherType" className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none font-bold text-slate-800"/></div>
+                  <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Describe Custom Task</label><input name="otherType" required placeholder="Type the custom work clearly" onInput={() => setTaskCreateError('')} className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none font-bold text-slate-800"/></div>
                )}
                
                {newTaskCategory.toLowerCase().includes('estimate') && (
@@ -5346,8 +5479,8 @@ function AppShell() {
                   {leadFiles.length > 0 && (
                      <div className="mb-4 space-y-2">
                         {leadFiles.map((file, idx) => (
-                           <div key={idx} className="flex justify-between items-center bg-indigo-50 p-3 rounded-xl border border-indigo-100">
-                              <span className="text-xs font-bold text-slate-700 flex items-center"><FileText className="w-4 h-4 mr-2 text-indigo-500"/> {file.name}</span>
+                           <div key={idx} className="flex justify-between items-center gap-3 bg-indigo-50 p-3 rounded-xl border border-indigo-100">
+                              <span className="text-xs font-bold text-slate-700 flex items-center min-w-0"><FileText className="w-4 h-4 mr-2 text-indigo-500 shrink-0"/> <span className="truncate">{file.name}</span><span className="ml-2 shrink-0 text-[10px] text-slate-400">{formatTaskFileSize(file.size)}</span></span>
                               <button type="button" onClick={() => removeLeadFile(idx)} className="text-slate-400 hover:text-red-500 bg-white p-1 rounded-md shadow-sm"><X className="w-4 h-4" /></button>
                            </div>
                         ))}
@@ -5362,18 +5495,30 @@ function AppShell() {
                   </label>
                </div>
 
-               <button type="submit" disabled={isSubmittingLead} className={`kalpa-create-task-button w-full py-4 text-white rounded-2xl font-black text-lg shadow-xl transition-all mt-8 ${isSubmittingLead ? 'bg-indigo-400 cursor-not-allowed' : 'bg-slate-800 hover:bg-slate-700 shadow-slate-200 hover:-translate-y-1'}`}>
-                  {isSubmittingLead ? 'Uploading Files & Creating Task...' : 'Create Task'}
-               </button>
+               <div className="sticky bottom-0 z-20 -mx-4 sm:-mx-8 px-4 sm:px-8 py-3 bg-white/95 backdrop-blur border-t border-slate-100">
+                 <button type="submit" disabled={isSubmittingLead} className={`kalpa-create-task-button w-full py-4 text-white rounded-2xl font-black text-base sm:text-lg shadow-xl transition-all ${isSubmittingLead ? 'bg-indigo-400 cursor-not-allowed' : 'bg-slate-800 hover:bg-slate-700 shadow-slate-200 hover:-translate-y-1'}`}>
+                    {isSubmittingLead ? (taskCreateStatus || 'Creating Task...') : 'Create Task'}
+                 </button>
+                 <p className="text-[10px] font-bold text-slate-400 text-center mt-2">Task ID will be generated automatically after validation.</p>
+               </div>
              </form>
           </div>
         </div>
-      )}
+      ), document.body)}
 
       <style dangerouslySetInnerHTML={{__html: `
         .custom-scrollbar::-webkit-scrollbar { width: 6px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 20px; }
+        html.kalpa-task-create-open, html.kalpa-task-create-open body { overflow: hidden !important; overscroll-behavior: none !important; }
+        .kalpa-lead-modal { isolation: isolate; position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100dvh !important; }
+        .kalpa-lead-modal-card { scrollbar-gutter: stable; max-height: 100dvh; }
+        .kalpa-lead-modal-card input, .kalpa-lead-modal-card select, .kalpa-lead-modal-card textarea { font-size: 16px; }
+        @media (max-width: 640px) {
+          .kalpa-lead-modal { padding: 0 !important; align-items: stretch !important; }
+          .kalpa-lead-modal-card { border-radius: 0 !important; width: 100vw !important; height: 100dvh !important; max-height: 100dvh !important; padding-bottom: max(1rem, env(safe-area-inset-bottom)) !important; }
+          .kalpa-create-task-button { min-height: 56px; }
+        }
         .kalpa-empty-state { border-style: dashed; }
         .kalpa-soft-enter { animation: kalpaSoftEnter .22s ease-out both; }
         @keyframes kalpaSoftEnter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }

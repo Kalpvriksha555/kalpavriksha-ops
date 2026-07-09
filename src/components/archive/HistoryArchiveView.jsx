@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Archive, Calendar, Check, Filter } from 'lucide-react';
 import { formatDateTime } from '../../utils/date';
 import { getEstimateDetails, getLatestCompletedFileName, getTaskDescription } from '../../utils/taskDisplayUtils';
@@ -149,18 +149,20 @@ const ArchiveTableRow = ({ project, onSelectProject, currentUser, onPaymentStatu
 );
 
 export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, archiveViewState, setArchiveViewState, onPaymentStatusChange }) => {
-  const filterMonth = archiveViewState?.filterMonth || 'All';
-  const filterDate = archiveViewState?.filterDate || '';
+  const [localArchiveViewState, setLocalArchiveViewState] = useState({ filterMonth: 'All', filterDate: '' });
+  const effectiveArchiveViewState = archiveViewState || localArchiveViewState;
+  const filterMonth = effectiveArchiveViewState?.filterMonth || 'All';
+  const filterDate = effectiveArchiveViewState?.filterDate || '';
   const updateArchiveViewState = (patch) => {
-    if (typeof setArchiveViewState === 'function') {
-      setArchiveViewState((prev = {}) => ({ filterMonth: 'All', filterDate: '', searchText: '', sortOrder: 'newest', scrollTop: 0, ...prev, ...patch }));
-    }
+    const updater = (prev = {}) => ({ filterMonth: 'All', filterDate: '', searchText: '', sortOrder: 'newest', scrollTop: 0, ...prev, ...patch });
+    if (typeof setArchiveViewState === 'function') setArchiveViewState(updater);
+    else setLocalArchiveViewState(updater);
   };
   const archiveTableRef = useRef(null);
   useEffect(() => {
     const node = archiveTableRef.current;
     if (!node) return;
-    const savedScrollTop = Number(archiveViewState?.scrollTop || 0);
+    const savedScrollTop = Number(effectiveArchiveViewState?.scrollTop || 0);
     if (savedScrollTop > 0) requestAnimationFrame(() => { node.scrollTop = savedScrollTop; });
   }, [filterMonth, filterDate]);
   const rememberArchiveScroll = () => {

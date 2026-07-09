@@ -1,0 +1,7 @@
+Fix included:
+- Resolved frontend crash: "nowTick is not defined".
+- The issue was caused by LoginScreen using nowTick before AppShell creates it.
+- LoginScreen now uses Date.now() for presence normalization, while AppShell still uses the live nowTick timer.
+- Previous email/status/attendance/team availability fixes are preserved.
+
+Replace the included files in the same locations, then restart the frontend.

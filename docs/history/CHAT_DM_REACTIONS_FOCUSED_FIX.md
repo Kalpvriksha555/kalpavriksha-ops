@@ -1,0 +1,1 @@
+Focused chat update only: restored direct-message sidebar visibility with inline containment, kept emoji picker open for multiple emoji selection before sending, and added local message reactions without touching other modules.

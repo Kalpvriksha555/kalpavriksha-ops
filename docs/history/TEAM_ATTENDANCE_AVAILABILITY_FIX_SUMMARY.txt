@@ -1,0 +1,14 @@
+Fixes included:
+
+1. Team Attendance now lists every approved non-admin user, even if they have no login record for the selected date.
+2. Admin users are excluded from Team Attendance.
+3. Logged-in users show Online using the live presence check.
+4. Offline users show Last seen from their saved lastSeenAt/lastSeen/lastActivityAt time.
+5. Attendance export now exports all non-admin users for the selected date, not only users with logs.
+6. Monthly attendance continues to show all non-admin users.
+7. Team Availability now excludes admins from Available/Busy/Break/Offline counts and lists.
+
+Files updated:
+- src/App.jsx
+- frontend/src/App.jsx
+- kalpavriksha-ops/src/App.jsx

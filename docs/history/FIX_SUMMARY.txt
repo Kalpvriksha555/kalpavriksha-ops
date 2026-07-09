@@ -1,0 +1,15 @@
+Kalpavriksha Ops revised files
+
+Fixed:
+1. /api/system/status no longer calls missing getDbStatus(). It now returns PostgreSQL/json status directly.
+2. Email OTP configuration now accepts EMAIL_PROVIDER case-insensitively and supports both old/new env names:
+   - OTP_FROM_EMAIL, MAIL_FROM, EMAIL_FROM, SMTP_FROM
+   - SMTP_USER or EMAIL_USER
+   - SMTP_PASS or EMAIL_PASS
+   - EMAIL_PROVIDER=smtp, SMTP, gmail, GMAIL are all handled.
+3. Added /api/email/status alias in addition to /api/email/health.
+4. Attendance and Team Availability now use lastSeenAt heartbeat with stale-user detection instead of trusting isOnline forever.
+5. Login, logout, break toggle, and active sessions update lastSeenAt/lastActivityAt.
+6. Offline users now show last seen time where available.
+
+Files included in this ZIP should be copied over the matching paths in your project.

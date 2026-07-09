@@ -1252,8 +1252,8 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
   const teamTrend = effectivePerformanceSummary?.trend || { pct: 0, label: 'Stable' };
   const avgSla = memberRows.length ? Math.round(memberRows.reduce((sum, row) => sum + row.slaPct, 0) / memberRows.length) : 100;
   const exportPerformance = () => exportToCSV(
-    ['Member', 'Role', 'Status', 'Break Today', 'Assigned', 'Completed', 'Active', 'Revisions', 'Completed Today', 'Average Finish Time', 'Revision Rate', 'On-time %', 'Performance Score', 'Quality'],
-    memberRows.map(row => [row.user.name, row.user.role, row.live.label, formatMinutes(row.breakMinutes), row.assigned.length, row.completed.length, row.active.length, row.revisions.length, row.completedToday, displayMinutes(row.avgMins, '0m'), row.revisionRate, `${row.slaPct}%`, row.productivityScore, getQualityLabel(row.productivityScore)]),
+    ['Member', 'Role', 'Status', 'Break Today', 'Assigned', 'Completed', 'Active', 'Revisions', 'Completed Today', 'Avg Completion', 'Avg Review', 'Revision Rate', 'SLA %', 'Productivity Score', 'Quality'],
+    memberRows.map(row => [row.user.name, row.user.role, row.live.label, formatMinutes(row.breakMinutes), row.assigned.length, row.completed.length, row.active.length, row.revisions.length, row.completedToday, displayMinutes(row.avgMins, '0m'), displayMinutes(row.avgReviewMins, '0m'), row.revisionRate, `${row.slaPct}%`, row.productivityScore, getQualityLabel(row.productivityScore)]),
     `Performance_Analytics_${range}.csv`
   );
   const StatCard = ({ label, value, hint }) => (
@@ -1328,7 +1328,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
       .sort((a, b) => Number(a.avg || 0) - Number(b.avg || 0))[0];
     const candidates = [
       { label: fastestCaseType ? `Fastest in ${fastestCaseType.caseType}` : 'Good completion rhythm', value: Number(score.speedScore || 0), min: 70 },
-      { label: Number(row.slaPct || 0) >= 95 ? 'Reliable on-time delivery' : 'Improving on-time rhythm', value: Number(score.slaScore || row.slaPct || 0), min: 75 },
+      { label: Number(row.slaPct || 0) >= 95 ? 'Reliable on-time delivery' : 'Improving SLA discipline', value: Number(score.slaScore || row.slaPct || 0), min: 75 },
       { label: revisionRate <= 0.15 ? 'Clean work with fewer revisions' : 'Revision control improving', value: Number(score.revisionScore || 0), min: 70 },
       { label: 'Quality consistency', value: Number(score.qualityScore || 0), min: 70 },
       { label: completedCount > 0 ? 'Consistent completion history' : 'Ready to build history', value: Math.min(100, completedCount * 5), min: 40 }
@@ -1349,9 +1349,10 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
       .sort((a, b) => Number(b.avg || 0) - Number(a.avg || 0))[0];
     const options = [
       { key: 'speed', score: Number(score.speedScore || 0), text: slowCaseType ? `Reduce ${slowCaseType.caseType} average from ${displayMinutes(slowCaseType.avg)}.` : `Bring average finish time below ${displayMinutes(Math.max(90, avg - 30))}.` },
+      { key: 'review', score: review ? Math.max(0, 100 - Math.round(review / 4)) : 80, text: review ? `Cut review/checking time from ${displayMinutes(review)} with a pre-upload checklist.` : 'Keep review handoff clean and documented.' },
       { key: 'quality', score: Number(score.qualityScore || 0), text: 'Improve first-submit quality with a 2-minute final check.' },
       { key: 'revision', score: Number(score.revisionScore || 0), text: revisionRate > 0 ? `Reduce revisions from ${revisionRate}/task with clearer self-review.` : 'Keep revision rate low while improving speed.' },
-      { key: 'on-time', score: Number(score.slaScore || row.slaPct || 0), text: activeCount > 0 ? `Finish or pause ${activeCount} active case${activeCount === 1 ? '' : 's'} clearly so open work stays under control.` : 'Accept the next task quickly to keep workload moving.' }
+      { key: 'sla', score: Number(score.slaScore || row.slaPct || 0), text: activeCount > 0 ? `Finish or pause ${activeCount} active case${activeCount === 1 ? '' : 's'} clearly to protect SLA.` : 'Accept the next task quickly to keep workload moving.' }
     ];
     const weakest = options.sort((a, b) => a.score - b.score)[0];
     return weakest?.text || 'Keep performance stable and avoid late task buildup.';
@@ -1360,9 +1361,9 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
         <div>
-          <p className="text-xs font-black uppercase tracking-widest text-indigo-500 mb-2">Simple team insights</p>
+          <p className="text-xs font-black uppercase tracking-widest text-indigo-500 mb-2">Single source of truth</p>
           <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Performance Analytics</h1>
-          <p className="text-slate-500 font-medium mt-2 max-w-4xl">Simple cards that show who is finishing work, who needs support, and what each person should improve next.</p>
+          <p className="text-slate-500 font-medium mt-2 max-w-4xl">Productivity, average completion, review speed, case-type timing, revisions, and SLA quality.</p>
         </div>
         <div className="flex flex-wrap gap-3">
           <select value={range} onChange={e => setRange(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none">
@@ -1379,23 +1380,23 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
         <StatCard label="Completed" value={totals.completed} hint="productivity" />
         <StatCard label="Active" value={totals.active} hint="currently open" />
         <StatCard label="Revisions" value={totals.revisions} hint="quality trend" />
-        <StatCard label="Overall Avg" value={displayMinutes(teamAvgMins)} hint="finish time" />
+        <StatCard label="Lifetime Avg" value={displayMinutes(teamAvgMins)} hint="all history" />
         <StatCard label="Last 30 Avg" value={displayMinutes(teamRolling30)} hint="rolling" />
         <StatCard label="Last 10 Avg" value={displayMinutes(teamRolling10)} hint={teamTrend?.label || 'trend'} />
-        <StatCard label="On-time" value={`${avgSla}%`} hint="finished on schedule" />
+        <StatCard label="SLA" value={`${avgSla}%`} hint="average compliance" />
       </div>
       <div className="rounded-3xl border border-indigo-100 bg-gradient-to-r from-indigo-50 to-white px-4 py-3 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 shadow-sm">
         <div>
           <p className="text-xs font-black uppercase tracking-widest text-indigo-700">Performance data is ready</p>
-          <p className="text-xs font-bold text-indigo-600 mt-1">Using {effectivePerformanceSummary?.recordCount ? `${effectivePerformanceSummary.recordCount} saved completion records` : `${performanceRecords.length} task records`} for average time, trend, quality, and revisions.</p>
+          <p className="text-xs font-bold text-indigo-600 mt-1">Using {effectivePerformanceSummary?.recordCount ? `${effectivePerformanceSummary.recordCount} saved completion records` : `${performanceRecords.length} task records`} for average time, trend, SLA, quality, and revisions.</p>
         </div>
         <button type="button" onClick={rebuildPerformanceEngine} disabled={engineBusy} className="px-4 py-2.5 rounded-xl bg-indigo-600 text-white font-black text-sm disabled:opacity-60 disabled:cursor-not-allowed shadow-sm">{engineBusy ? 'Refreshing...' : 'Refresh averages'}</button>
       </div>
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
         <div className="xl:col-span-2 bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
           <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <h2 className="font-black text-slate-800 text-lg flex items-center"><Users className="w-5 h-5 mr-2 text-indigo-500" /> Team Performance</h2>
-            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">simple score • speed • quality</span>
+            <h2 className="font-black text-slate-800 text-lg flex items-center"><Users className="w-5 h-5 mr-2 text-indigo-500" /> Team Performance Cards</h2>
+            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Completion • case type • quality</span>
           </div>
           <div className="p-4 grid grid-cols-1 lg:grid-cols-2 gap-4 max-h-[520px] overflow-y-auto custom-scrollbar">
             {memberRows.map(row => {
@@ -1456,7 +1457,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
                     <SimpleMetric label="Assigned" value={row.assigned.length} helper="total given" />
                     <SimpleMetric label="Completed" value={row.completed.length} tone="text-emerald-600" helper="finished" />
                     <SimpleMetric label="Active" value={row.active.length} tone="text-orange-600" helper="pending now" />
-                    <SimpleMetric label="On time" value={`${row.slaPct}%`} tone="text-indigo-600" helper="on schedule" />
+                    <SimpleMetric label="On time" value={`${row.slaPct}%`} tone="text-indigo-600" helper="SLA" />
                   </div>
 
                   <div className="mt-3 rounded-2xl bg-slate-50/80 border border-slate-100 p-3">
@@ -1466,7 +1467,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
                     </div>
                     <div className="grid grid-cols-2 gap-2">
                       <SimpleMetric label="Avg finish time" value={avgTime} helper="overall average" />
-                      <SimpleMetric label="Today done" value={row.completedToday} tone="text-emerald-600" helper="finished today" />
+                      <SimpleMetric label="Review delay" value={avgReview} tone="text-blue-600" helper="not in designer score" />
                       <SimpleMetric label="Last 30 avg" value={rolling30} tone="text-indigo-600" helper="recent work" />
                       <SimpleMetric label="Last 10 avg" value={rolling10} tone="text-indigo-600" helper="latest speed" />
                     </div>
@@ -1482,8 +1483,8 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
                     <div className="mt-3 rounded-2xl bg-white border border-slate-100 p-3">
                       <div className="flex items-center justify-between gap-3 mb-3">
                         <div>
-                          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Score made simple</p>
-                          <p className="text-[11px] font-bold text-slate-400 mt-0.5">Score uses speed, clean work, on-time delivery and revision control.</p>
+                          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Designer score breakdown</p>
+                          <p className="text-[11px] font-bold text-slate-400 mt-0.5">Score uses only designer-controlled metrics. Review delay is shown separately.</p>
                         </div>
                         <Badge colorClass={getQualityBadgeClass(row.productivityScore)}>{quality}</Badge>
                       </div>
@@ -1495,7 +1496,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
                       <div className="space-y-3">
                         <WeightedScoreRow label="Completion speed" score={row.scoreBreakdown?.speedScore} weight={35} detail={`${avgTime} avg finish${teamAvgMins ? ` • Team ${displayMinutes(teamAvgMins)}` : ''}`} helper="Faster completion improves this part." />
                         <WeightedScoreRow label="Work quality" score={row.scoreBreakdown?.qualityScore} weight={30} detail={`${row.revisionRate}/task revision rate`} helper="Fewer corrections improve this part." />
-                        <WeightedScoreRow label="On-time delivery" score={row.scoreBreakdown?.slaScore} weight={20} detail={`${row.slaPct}% finished on schedule`} helper="Finish open work before it becomes late." />
+                        <WeightedScoreRow label="On-time SLA" score={row.scoreBreakdown?.slaScore} weight={20} detail={`${row.slaPct}% completed within expected time`} helper="Keep delivery within SLA." />
                         <WeightedScoreRow label="Revision control" score={row.scoreBreakdown?.revisionScore} weight={15} detail={`${row.revisions.length} revision case${row.revisions.length === 1 ? '' : 's'}`} helper="Self-check before upload protects this score." />
                       </div>
                     </div>
@@ -1543,10 +1544,10 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
         </div>
       </div>
       <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
-        <div className="p-5 border-b-2 border-slate-100"><h2 className="font-black text-slate-800 text-lg">Simple Team Leaderboard</h2></div>
-        <div className="overflow-x-auto"><table className="w-full text-left text-sm whitespace-nowrap"><thead className="bg-slate-50 text-slate-500"><tr>{['Member','Role','Status','Assigned','Completed','Active','Today','Avg Finish','Revision Rate','On-time','Score','Quality'].map(c => <th key={c} className="px-4 py-3 text-[10px] font-black uppercase tracking-widest">{c}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">
-          {memberRows.map(row => <tr key={row.user.id} className="hover:bg-slate-50"><td className="px-5 py-4 font-black text-slate-800">{row.user.name}</td><td className="px-5 py-4 font-bold text-slate-500">{row.user.role}</td><td className="px-5 py-4"><Badge colorClass={row.live.badgeClass}>{row.live.label}</Badge></td><td className="px-5 py-4 font-black text-slate-700">{row.assigned.length}</td><td className="px-5 py-4 font-black text-emerald-600">{row.completed.length}</td><td className="px-5 py-4 font-black text-orange-600">{row.active.length}</td><td className="px-5 py-4 font-black text-indigo-600">{row.completedToday}</td><td className="px-5 py-4 font-bold text-slate-600">{displayMinutes(row.avgMins)}</td><td className="px-5 py-4 font-bold text-purple-600">{row.revisionRate}/task</td><td className="px-4 py-3 font-bold text-indigo-600">{row.slaPct}%</td><td className="px-5 py-4 font-black text-indigo-600">{row.productivityScore}</td><td className="px-5 py-4"><Badge colorClass={getQualityBadgeClass(row.productivityScore)}>{getQualityLabel(row.productivityScore)}</Badge></td></tr>)}
-          {memberRows.length === 0 && <tr><td colSpan="12" className="px-4 py-8 text-center text-slate-400 font-bold">No performance data for this filter.</td></tr>}
+        <div className="p-5 border-b-2 border-slate-100"><h2 className="font-black text-slate-800 text-lg">Team Leaderboard & Individual Analytics</h2></div>
+        <div className="overflow-x-auto"><table className="w-full text-left text-sm whitespace-nowrap"><thead className="bg-slate-50 text-slate-500"><tr>{['Member','Role','Status','Assigned','Completed','Active','Today','Avg Completion','Avg Review','Revision Rate','SLA','Productivity','Quality'].map(c => <th key={c} className="px-4 py-3 text-[10px] font-black uppercase tracking-widest">{c}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">
+          {memberRows.map(row => <tr key={row.user.id} className="hover:bg-slate-50"><td className="px-5 py-4 font-black text-slate-800">{row.user.name}</td><td className="px-5 py-4 font-bold text-slate-500">{row.user.role}</td><td className="px-5 py-4"><Badge colorClass={row.live.badgeClass}>{row.live.label}</Badge></td><td className="px-5 py-4 font-black text-slate-700">{row.assigned.length}</td><td className="px-5 py-4 font-black text-emerald-600">{row.completed.length}</td><td className="px-5 py-4 font-black text-orange-600">{row.active.length}</td><td className="px-5 py-4 font-black text-indigo-600">{row.completedToday}</td><td className="px-5 py-4 font-bold text-slate-600">{displayMinutes(row.avgMins)}</td><td className="px-5 py-4 font-bold text-blue-600">{displayMinutes(row.avgReviewMins)}</td><td className="px-5 py-4 font-bold text-purple-600">{row.revisionRate}/task</td><td className="px-4 py-3 font-bold text-slate-700">{row.slaPct}%</td><td className="px-5 py-4 font-black text-indigo-600">{row.productivityScore}</td><td className="px-5 py-4"><Badge colorClass={getQualityBadgeClass(row.productivityScore)}>{getQualityLabel(row.productivityScore)}</Badge></td></tr>)}
+          {memberRows.length === 0 && <tr><td colSpan="13" className="px-4 py-8 text-center text-slate-400 font-bold">No performance data for this filter.</td></tr>}
         </tbody></table></div>
       </div>
     </div>
