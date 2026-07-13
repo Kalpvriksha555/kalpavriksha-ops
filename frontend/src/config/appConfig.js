@@ -1,4 +1,6 @@
-export const API_BASE = import.meta.env.VITE_API_BASE || import.meta.env.VITE_API_URL || 'http://localhost:8080';
+const runtimeApiBase = 'https://api.kalpvriksha.co.in';
+
+export const API_BASE = String(import.meta.env.VITE_API_BASE || import.meta.env.VITE_API_URL || runtimeApiBase).replace(/\/+$/, '');
 
 // Production mode uses the central backend/PostgreSQL state first.
 // Firebase/localStorage are kept only as UI fallback/cache.

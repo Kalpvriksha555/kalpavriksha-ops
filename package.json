@@ -3,14 +3,17 @@
   "version": "1.0.0-production-candidate",
   "type": "module",
   "scripts": {
-    "dev": "npm --prefix frontend run dev",
-    "build": "npm --prefix frontend run build",
-    "preview": "npm --prefix frontend run preview",
+    "dev": "node scripts/start-all.mjs",
+    "dev:frontend": "node node_modules/vite/bin/vite.js frontend --host 0.0.0.0",
+    "postinstall": "npm install --prefix backend --no-audit --no-fund",
+    "build": "node node_modules/vite/bin/vite.js build frontend",
+    "preview": "node node_modules/vite/bin/vite.js preview frontend",
     "smoke": "node scripts/smoke-check.mjs",
+    "data:check": "node scripts/smoke-check.mjs",
     "dev:backend": "cd backend && npm run dev",
     "dev:all": "node scripts/start-all.mjs",
-    "start": "npm --prefix frontend run dev",
-    "serve": "npm --prefix frontend run preview",
+    "start": "node scripts/start-all.mjs",
+    "serve": "node scripts/start-all.mjs --production",
     "prod": "npm run build && npm run serve",
     "preflight": "node scripts/preflight.mjs",
     "db:health": "node backend/scripts/db-health.mjs",
@@ -20,7 +23,7 @@
     "desktop:pack": "npm run build && electron-builder",
     "doctor": "node scripts/doctor.mjs",
     "clean:cache": "node -e \"console.log('Use scripts/clean-local-cache.ps1 on Windows or scripts/clean-local-cache.sh on Linux/macOS.')\"",
-    "verify": "npm run doctor && npm run guard && npm run audit:production && cd frontend && npm run build",
+    "verify": "npm run doctor && npm run guard && npm run audit:production && npm run build",
     "guard": "node scripts/regression-guard.mjs",
     "audit:production": "node scripts/production-regression-audit.mjs"
   },
@@ -52,7 +55,7 @@
       "output": "release"
     },
     "files": [
-      "dist/**/*",
+      "frontend/dist/**/*",
       "desktop/**/*",
       "package.json"
     ],

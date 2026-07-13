@@ -5,7 +5,7 @@ import { isNotificationReadByUser } from '../services/notificationService';
 
 export const LocalModeBanner = ({ onClose }) => (
   <div className="bg-amber-100 border-b border-amber-200 text-amber-800 p-2.5 text-center text-xs font-bold flex flex-wrap justify-center items-center gap-2 shadow-sm z-50 relative">
-    <span>⚠️ Local Mode: Data is saved locally. Cloud features disconnected.</span>
+    <span>Live database unavailable - using the bundled offline snapshot. Changes may not sync until reconnection.</span>
     <button type="button" onClick={onClose} className="sm:ml-2 p-1 hover:bg-amber-200 rounded-md transition-colors"><X className="w-4 h-4" /></button>
   </div>
 );

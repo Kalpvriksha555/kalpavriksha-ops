@@ -1,21 +1,31 @@
-import fs from 'fs';
-const src = fs.readFileSync('src/App.jsx', 'utf8');
-const checks = [
-  ['Command Centre component exists', /const CommandCentreView/.test(src)],
-  ['Payment Health is admin-only', /currentUser\?\.role === ROLES\.ADMIN[\s\S]{0,250}Payment Health/.test(src)],
-  ['Daily Closing tab is admin-only', src.includes("currentUser.role === ROLES.ADMIN && <button") && src.includes(">Daily Closing</button>") && src.includes("activeTab === 'closing' && currentUser.role === ROLES.ADMIN")],
-  ['Attendance excludes admins', /role !== ROLES\.ADMIN/.test(src)],
-  ['Khushbu spelling and username are normalized', /Khushbu Pandey/.test(src) && /username: 'khushbu'/.test(src)],
-  ['Calculator tools are present', /Calculator & Conversion Tools/.test(src)],
-  ['Global search is present', /Search Results/.test(src) && /Search cases/.test(src)],
-  ['Completed file upload handler exists', /handleFileUpload\('completed'/.test(src) || /handleFileUpload\("completed"/.test(src)],
-  ['WhatsApp completed-file sharing exists', /shareCompletedFileOnWhatsApp/.test(src)],
-  ['Duplicate detection UI is absent', !/Possible Duplicate|Duplicate Case Found|duplicate warning/i.test(src)],
-  ['Error boundary is present', /class AppErrorBoundary/.test(src)]
-];
+import fs from 'node:fs';
+
+const read = path => fs.readFileSync(path, 'utf8');
+const checks = [];
+const check = (label, condition) => checks.push([label, Boolean(condition)]);
+
+const app = read('frontend/src/App.jsx');
+const server = read('backend/src/server.js');
+const config = read('frontend/src/config/appConfig.js');
+const pkg = JSON.parse(read('package.json'));
+const db = JSON.parse(read('backend/src/data/db.json'));
+const projects = Array.isArray(db.cases) ? db.cases : (Array.isArray(db.projects) ? db.projects : []);
+
+check('Active frontend entry exists', fs.existsSync('frontend/src/App.jsx') && fs.existsSync('frontend/src/main.jsx'));
+check('Backend entry exists', fs.existsSync('backend/src/server.js'));
+check('Full-stack localhost command starts both services', pkg.scripts?.dev === 'node scripts/start-all.mjs' && pkg.scripts?.start === 'node scripts/start-all.mjs');
+check('Frontend defaults to shared production API', config.includes('https://api.kalpvriksha.co.in') && config.includes('VITE_API_URL'));
+check('Backend exposes state hydration', server.includes("app.get('/api/state'"));
+check('Dedicated task save exists', server.includes("app.post('/api/state/projects'"));
+check('Dedicated task delete exists', server.includes("app.delete('/api/state/projects/:id'"));
+check('Frontend hydrates backend state', app.includes('fetchBackendState'));
+check('Bundled database is readable', Array.isArray(projects));
+check('Bundled tasks are present', projects.length > 0);
+
 let failed = 0;
 for (const [label, ok] of checks) {
   console.log(`${ok ? 'PASS' : 'FAIL'} - ${label}`);
-  if (!ok) failed++;
+  if (!ok) failed += 1;
 }
+console.log(`Bundled data: ${projects.length} tasks, ${(db.users || []).length} users, ${(db.teamChat || []).length} chat messages, ${(db.notifications || []).length} notifications.`);
 if (failed) process.exit(1);

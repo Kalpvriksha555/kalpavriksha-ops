@@ -124,7 +124,7 @@ function createWindow() {
   if (devUrl) {
     mainWindow.loadURL(devUrl);
   } else {
-    const indexPath = path.join(__dirname, '..', 'dist', 'index.html');
+    const indexPath = path.join(__dirname, '..', 'frontend', 'dist', 'index.html');
     mainWindow.loadFile(indexPath);
   }
 }

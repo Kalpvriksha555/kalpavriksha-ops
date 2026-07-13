@@ -13,18 +13,20 @@ import { addCaseTimelineEvent, mergeTimelineEvents, normalizeCaseTimeline, norma
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DATA_DIR = path.join(__dirname, 'data');
-const UPLOAD_DIR = path.join(__dirname, 'uploads');
-const DB_FILE = path.join(DATA_DIR, 'db.json');
+const DATA_DIR = process.env.KALPA_DATA_DIR ? path.resolve(process.env.KALPA_DATA_DIR) : path.join(__dirname, 'data');
+const UPLOAD_DIR = process.env.KALPA_UPLOAD_DIR ? path.resolve(process.env.KALPA_UPLOAD_DIR) : path.join(__dirname, 'uploads');
+const DB_FILE = process.env.KALPA_DB_FILE ? path.resolve(process.env.KALPA_DB_FILE) : path.join(DATA_DIR, 'db.json');
 fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const { Pool } = pg;
 const DATABASE_URL = process.env.DATABASE_URL || '';
-const USE_POSTGRES = /^postgres(ql)?:\/\//i.test(DATABASE_URL);
+let USE_POSTGRES = /^postgres(ql)?:\/\//i.test(DATABASE_URL);
 const pool = USE_POSTGRES ? new Pool({
   connectionString: DATABASE_URL,
-  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+  connectionTimeoutMillis: Number(process.env.DB_CONNECT_TIMEOUT_MS || 10000)
 }) : null;
 let memoryState = null;
 let postgresReady = false;
@@ -460,14 +462,68 @@ function filterDeletedCases(cases = [], deletedProjectIds = []){
 
 function caseFreshness(c = {}) {
   const candidates = [c.syncVersion, c.updatedAt, c.assignmentVersion, c.assignedAt, c.completedAt, c.createdAt];
-  for (const value of candidates) {
-    if (!value) continue;
+  return Math.max(0, ...candidates.map(value => {
+    if (!value) return 0;
     const numeric = Number(value);
     if (Number.isFinite(numeric) && numeric > 0) return numeric;
     const parsed = new Date(value).getTime();
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  }));
+}
+
+function assignmentFreshness(c = {}) {
+  return Math.max(0, ...[c.assignmentVersion, c.assignedAt].map(value => {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+    const parsed = new Date(value || 0).getTime();
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  }));
+}
+
+function normalizeCaseAssignee(c = {}) {
+  const assignedTo = String(c.assignedTo || c.ownership?.assignedTo || c.assigneeName || c.assignedToName || c.assignedUserName || '').trim() || 'Unassigned';
+  return {
+    ...c,
+    assignedTo,
+    assigneeName: assignedTo === 'Unassigned' ? '' : assignedTo,
+    ownership: { ...(c.ownership || {}), assignedTo }
+  };
+}
+
+function mergeCaseCollection(a = [], b = []) {
+  const result = [];
+  const seen = new Set();
+  for (const item of [...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])]) {
+    if (item === null || item === undefined) continue;
+    const key = typeof item === 'object'
+      ? String(item.id || item.fileId || item.workItemId || [item.name, item.type, item.at || item.time || item.date, item.text || item.title || item.action].filter(Boolean).join('|'))
+      : String(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
   }
-  return 0;
+  return result;
+}
+
+function mergeCaseRecords(existing = {}, incoming = {}) {
+  const a = normalizeCaseAssignee(existing || {});
+  const b = normalizeCaseAssignee(incoming || {});
+  const base = caseFreshness(b) >= caseFreshness(a) ? { ...a, ...b } : { ...b, ...a };
+  const assignmentSource = assignmentFreshness(b) >= assignmentFreshness(a) ? b : a;
+  const assignedTo = String(assignmentSource.assignedTo || '').trim() || 'Unassigned';
+  base.assignedTo = assignedTo;
+  base.assigneeName = assignedTo === 'Unassigned' ? '' : assignedTo;
+  base.assigneeId = assignmentSource.assigneeId ?? base.assigneeId;
+  base.assigneeRole = assignmentSource.assigneeRole ?? base.assigneeRole;
+  base.assignedBy = assignmentSource.assignedBy ?? base.assignedBy;
+  base.assignedAt = assignmentSource.assignedAt ?? base.assignedAt;
+  base.assignmentVersion = assignmentSource.assignmentVersion ?? assignmentSource.assignedAt ?? base.assignmentVersion;
+  base.ownership = { ...(base.ownership || {}), ...(assignmentSource.ownership || {}), assignedTo, assignedBy: base.assignedBy };
+  for (const field of ['documents','completedFiles','history','comments','revisions','subTasks','notes','revisionHistory','reassignmentHistory']) {
+    base[field] = mergeCaseCollection(a[field], b[field]);
+  }
+  base.timeline = mergeTimelineEvents(a.timeline, b.timeline, a.history, b.history);
+  return normalizeCaseAssignee(base);
 }
 
 function getCaseIdentitySet(c = {}) {
@@ -501,27 +557,14 @@ function mergeCasesPreservingFreshest(existingCases = [], incomingCases = [], de
   // id, caseId and previousTaskIds. This prevents an edited/renamed task from
   // reverting back to an older version for managers/designers after another client
   // saves its stale local copy.
-  const timelineById = new Map();
-  for (const c of [...(Array.isArray(existingCases) ? existingCases : []), ...(Array.isArray(incomingCases) ? incomingCases : [])].filter(Boolean)) {
-    for (const id of getCaseIdentitySet(c)) {
-      const current = timelineById.get(id) || [];
-      timelineById.set(id, mergeTimelineEvents(current, c.timeline, c.history));
-    }
+  const merged = [];
+  for (const raw of [...(Array.isArray(existingCases) ? existingCases : []), ...(Array.isArray(incomingCases) ? incomingCases : [])].filter(Boolean)) {
+    const c = normalizeCaseAssignee(raw);
+    const ids = new Set(getCaseIdentitySet(c));
+    const index = merged.findIndex(candidate => getCaseIdentitySet(candidate).some(id => ids.has(id)));
+    if (index >= 0) merged[index] = mergeCaseRecords(merged[index], c);
+    else merged.push(c);
   }
-  const merged = [
-    ...(Array.isArray(existingCases) ? existingCases : []),
-    ...(Array.isArray(incomingCases) ? incomingCases : [])
-  ].filter(Boolean).map(c => {
-    const nowStamp = Date.now();
-    const ids = getCaseIdentitySet(c);
-    const timeline = ids.map(id => timelineById.get(id)).find(Boolean) || c.timeline || [];
-    return {
-      ...c,
-      timeline: mergeTimelineEvents(timeline, c.timeline, c.history),
-      updatedAt: c.updatedAt || c.syncVersion || c.assignmentVersion || c.assignedAt || c.completedAt || c.createdAt || nowStamp,
-      syncVersion: c.syncVersion || c.updatedAt || nowStamp
-    };
-  });
   return dedupeRenamedCases(filterDeletedCases(merged, deletedProjectIds || []), deletedProjectIds || []);
 }
 
@@ -1640,7 +1683,8 @@ app.get('/api/app-state', async (req, res) => {
 app.get('/api/system/status', async (_req, res) => {
   try {
     const db = await getDbStatus();
-    res.json({ ok: true, cloudConnected: db.connected, database: db.database, connected: db.connected, localMode: !db.connected });
+    const cloudConnected = db.database === 'postgresql' && db.connected === true;
+    res.json({ ok: true, cloudConnected, database: db.database, connected: db.connected, localMode: !cloudConnected });
   } catch (e) {
     res.status(500).json({ ok: false, cloudConnected: false, localMode: true, error: e.message });
   }
@@ -1655,7 +1699,11 @@ app.post('/api/state/projects', (req, res) => {
     const incoming = req.body?.project || req.body?.case || req.body;
     if (!incoming || (!incoming.id && !incoming.caseId)) return res.status(400).json({ ok:false, error:'Project id is required.' });
     const projectId = String(incoming.id || incoming.caseId || '').trim();
-    d.deletedProjectIds = (d.deletedProjectIds || []).filter(id => String(id) !== projectId && String(id) !== String(incoming.caseId || ''));
+    const incomingIds = getCaseIdentitySet(incoming);
+    const tombstones = new Set((d.deletedProjectIds || []).map(String));
+    if (incomingIds.some(id => tombstones.has(id))) {
+      return res.status(409).json({ ok:false, code:'PROJECT_DELETED', error:'This task was permanently deleted and cannot be restored by a stale client.', deletedProjectIds:d.deletedProjectIds || [] });
+    }
     const isFinanceAdmin = isFinanceAdminRequest(req);
     const safeIncoming = !isFinanceAdmin ? preserveFinanceForNonAdminCases(d.cases || [], [incoming])[0] || incoming : incoming;
     d.cases = mergeCasesPreservingFreshest(d.cases || [], [safeIncoming], d.deletedProjectIds || []);
@@ -2088,5 +2136,11 @@ app.get('/api/db/health', async (_req,res)=>{
 const PORT=process.env.PORT||8080;
 initStore()
   .then(()=>app.listen(PORT,()=>console.log(`Kalpvriksha API running on http://localhost:${PORT} using ${USE_POSTGRES ? 'PostgreSQL' : 'JSON fallback'}`)))
-  .catch(err=>{ console.error('Failed to initialize data store:', err); process.exit(1); });
+  .catch(err=>{
+    console.error('PostgreSQL unavailable; starting with the bundled JSON snapshot:', err.message);
+    USE_POSTGRES = false;
+    postgresReady = false;
+    memoryState = norm(readJsonFallback());
+    app.listen(PORT,()=>console.log('Kalpvriksha API running on http://localhost:' + PORT + ' using JSON fallback'));
+  });
 

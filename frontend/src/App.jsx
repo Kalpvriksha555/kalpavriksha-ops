@@ -185,6 +185,11 @@ const saveDeletedProjectIds = (ids = [], options = {}) => {
 };
 const rememberDeletedProjects = (...ids) => saveDeletedProjectIds([...getDeletedProjectIds(), ...ids.flat().map(x => String(x)).filter(Boolean)]);
 const rememberDeletedProjectsForce = (...ids) => saveDeletedProjectIds([...getDeletedProjectIds(), ...ids.flat().map(x => String(x)).filter(Boolean)], { force: true });
+const replaceConfirmedDeletedProjects = (ids = []) => {
+  const confirmed = [...new Set((Array.isArray(ids) ? ids : []).map(x => String(x || '')).filter(Boolean))];
+  try { localStorage.setItem('kalpa_deleted_project_ids', JSON.stringify(confirmed)); } catch(e) {}
+  return getDeletedProjectIds();
+};
 const forgetDeletedProjects = (...ids) => {
   const remove = new Set(ids.flat().map(x => String(x)).filter(Boolean));
   if (!remove.size) return getDeletedProjectIds();
@@ -741,12 +746,14 @@ const normalizeTimeline = (timeline = [], history = []) => {
 };
 
 const normalizeProjectRecord = (project = {}) => {
-  const assignedTo = normalizePersonName(project.assignedTo || '');
-  const createdBy = normalizePersonName(project.createdBy || '');
+  const assignedTo = normalizePersonName(project.assignedTo || project.ownership?.assignedTo || project.assigneeName || project.assignedToName || project.assignedUserName || '');
+  const createdBy = normalizePersonName(project.createdBy || project.creatorName || '');
   const manager = normalizePersonName(project.manager || '');
   return {
     ...project,
-    assignedTo: assignedTo || project.assignedTo,
+    id: String(project.id || project.caseId || '').trim(),
+    caseId: project.caseId || project.id,
+    assignedTo: assignedTo || 'Unassigned',
     createdBy: createdBy || project.createdBy,
     manager: manager || project.manager,
     taskName: project.taskName || makeTaskDisplayName(project),
@@ -756,7 +763,12 @@ const normalizeProjectRecord = (project = {}) => {
 
 const normalizeProjectRecords = (list = []) => (Array.isArray(list) ? list : []).map(normalizeProjectRecord);
 
-const projectFreshness = (p = {}) => Number(p.updatedAt || p.syncVersion || p.assignmentVersion || p.assignedAt || p.completedAt || p.submittedAt || p.createdAt || 0);
+const projectFreshness = (p = {}) => Math.max(0, ...[p.updatedAt, p.syncVersion, p.assignmentVersion, p.assignedAt, p.completedAt, p.submittedAt, p.createdAt].map(value => {
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  const parsed = new Date(value || 0).getTime();
+  return Number.isNaN(parsed) ? 0 : parsed;
+}));
 const isAssignedValue = (value) => Boolean(value && String(value).trim() && String(value).trim() !== 'Unassigned');
 const assignmentFreshness = (p = {}) => Number(p.assignmentVersion || p.assignedAt || 0);
 const mergeProjectRecordSafely = (existing = {}, incoming = {}) => {
@@ -894,7 +906,7 @@ const LOCATION_DISPLAY_ALIASES = {
   GZB: 'GHAZIABAD', GHAZIABAD: 'GHAZIABAD'
 };
 
-const toTitleCase = (value = '') => String(value || '').toLowerCase().replace(/\w/g, char => char.toUpperCase());
+const toTitleCase = (value = '') => String(value || '').toLowerCase().replace(/\b\w/g, char => char.toUpperCase());
 const canonicalDisplayValue = (value = '', aliases = {}) => {
   const key = normalizeCodeInput(value);
   if (!key) return '';
@@ -930,6 +942,7 @@ const generateTraceableTaskId = ({ location = '', client = '', bankerName = '', 
   const existing = new Set((projects || [])
     .filter(p => String(p.id || '') !== String(excludeId || ''))
     .map(p => String(p.id || '')));
+  getDeletedProjectIds().forEach(id => existing.add(String(id)));
   let serial = 1;
   let nextId = `${prefix}-${String(serial).padStart(4, '0')}`;
   while (existing.has(nextId)) {
@@ -4185,7 +4198,7 @@ function AppShell() {
         const data = await fetchBackendState({ apiBase: API_BASE, headers: financeSafeHeaders });
         if (cancelled) return;
         if (Array.isArray(data.users) && data.users.length) setUsers(normalizeTeamUsers(data.users));
-        if (Array.isArray(data.deletedProjectIds)) rememberDeletedProjects(data.deletedProjectIds);
+        if (Array.isArray(data.deletedProjectIds)) replaceConfirmedDeletedProjects(data.deletedProjectIds);
         if (Array.isArray(data.projects)) {
           applyProjectSnapshot(data.projects, { source: 'backend-hydrate' });
         }
@@ -4201,6 +4214,7 @@ function AppShell() {
         setBackendStateReady(true);
         setIsDbReady(true);
         setDbError(null);
+        setShowLocalBanner(data.database === 'json-file');
       } catch (err) {
         console.warn('Backend/PostgreSQL state unavailable, using local cache fallback:', err.message);
         try {
@@ -4241,7 +4255,7 @@ function AppShell() {
         const data = await fetchBackendState({ apiBase: API_BASE, headers: financeSafeHeaders });
         if (cancelled || !Array.isArray(data.users)) return;
         setUsers(prev => normalizeTeamUsers([...(prev || []), ...data.users]));
-        if (Array.isArray(data.deletedProjectIds)) rememberDeletedProjects(data.deletedProjectIds);
+        if (Array.isArray(data.deletedProjectIds)) replaceConfirmedDeletedProjects(data.deletedProjectIds);
         if (Array.isArray(data.projects)) {
           applyProjectSnapshot(data.projects, { source: 'backend-poll' });
         }
@@ -4262,10 +4276,12 @@ function AppShell() {
         if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, data.attendanceLogs));
         if (Array.isArray(data.performanceRecords)) setPerformanceRecords(data.performanceRecords);
         if (data.performanceSummary && typeof data.performanceSummary === 'object') setPerformanceSummary(data.performanceSummary);
+        setShowLocalBanner(data.database === 'json-file');
+        setDbError(null);
       } catch (e) {}
     };
     refreshPresence();
-    const timer = setInterval(refreshPresence, 30000);
+    const timer = setInterval(refreshPresence, 10000);
     window.addEventListener('focus', refreshPresence);
     document.addEventListener('visibilitychange', refreshPresence);
     return () => {
@@ -4283,8 +4299,8 @@ function AppShell() {
         // Attendance Engine V3 presence is owned by /api/presence.
         // Never POST client users back through /api/state; that created a
         // second writer which fought the heartbeat stream and caused slow flicker.
-        projects: sanitizeProjectsForCache(filterDeletedProjects(protectRecentlyCreatedProjects(projects || [], []))),
-        deletedProjectIds: getDeletedProjectIds(),
+        // Project deletion is owned by the dedicated DELETE endpoint/outbox.
+        // Never upload browser tombstone cache through whole-state sync.
         chatMessages: sanitizeChatsForCache(chatMessages || []),
         notifications: notifications || [],
         // Attendance is owned by /api/presence in backend mode. Posting it here
@@ -4299,7 +4315,7 @@ function AppShell() {
       }).catch(err => console.warn('Backend/PostgreSQL state save failed:', err.message));
     }, 900);
     return () => clearTimeout(timer);
-  }, [backendStateReady, isDbReady, projects, chatMessages, notifications, currentUser?.role, jsonFinanceSafeHeaders]);
+  }, [backendStateReady, isDbReady, chatMessages, notifications, currentUser?.role, jsonFinanceSafeHeaders]);
 
 
   // Durable create-task outbox: a task that was created in the UI remains protected
@@ -4327,6 +4343,12 @@ function AppShell() {
           rememberRecentCreatedProject(savedProject);
           applyProjectSnapshot([savedProject], { source: 'pending-create-confirmed' });
         } catch(e) {
+          if (e?.status === 409 || e?.code === 'PROJECT_DELETED') {
+            forgetPendingCreatedProjects(project.id, project.caseId);
+            rememberDeletedProjectsForce(e?.payload?.deletedProjectIds || [project.id, project.caseId]);
+            setProjects(prev => filterDeletedProjects(prev || []));
+            continue;
+          }
           console.warn('Pending task save retry failed:', e.message);
         }
       }
@@ -4802,6 +4824,29 @@ function AppShell() {
         if (changedPrimaryTaskId) {
           try { await deleteDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', oldProject.id.toString())); } catch(e) {}
         }
+    }
+
+    if (USE_BACKEND_STATE && backendStateReady && isDbReady) {
+      for (const projectToSave of projectsToSave) {
+        try {
+          const data = await createTaskApi({
+            apiBase: API_BASE,
+            headers: jsonFinanceSafeHeaders,
+            currentUserRole: currentUser?.role || '',
+            task: sanitizeProjectForCache(projectToSave)
+          });
+          forgetPendingCreatedProjects(projectToSave.id, projectToSave.caseId);
+          if (data?.project || data?.case) applyProjectSnapshot([data.project || data.case], { source: 'task-update-confirmed' });
+        } catch (e) {
+          if (e?.status === 409 || e?.code === 'PROJECT_DELETED') {
+            rememberDeletedProjectsForce(e?.payload?.deletedProjectIds || [projectToSave.id, projectToSave.caseId]);
+            setProjects(prev => filterDeletedProjects(prev || []));
+          } else {
+            rememberPendingCreatedProject(projectToSave);
+            console.warn('Task update queued for retry:', e.message);
+          }
+        }
+      }
     }
 
     if (changedPrimaryTaskId && USE_BACKEND_STATE) {

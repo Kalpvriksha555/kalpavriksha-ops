@@ -34,13 +34,12 @@ export const TASK_SYNC_STORAGE_KEYS = Object.freeze({
 
 export const getTaskRecordTime = (task = {}) => {
   const candidates = [task.updatedAt, task.syncVersion, task.assignmentVersion, task.assignedAt, task.completedAt, task.submittedAt, task.createdAt];
-  for (const value of candidates) {
+  return Math.max(0, ...candidates.map(value => {
     const numeric = Number(value);
     if (Number.isFinite(numeric) && numeric > 0) return numeric;
     const parsed = new Date(value || 0).getTime();
-    if (!Number.isNaN(parsed) && parsed > 0) return parsed;
-  }
-  return 0;
+    return !Number.isNaN(parsed) && parsed > 0 ? parsed : 0;
+  }));
 };
 
 export const normalizeTaskAssignee = (value) => {
@@ -50,7 +49,7 @@ export const normalizeTaskAssignee = (value) => {
 
 export const normalizeTaskRecord = (task = {}) => {
   if (!task || typeof task !== 'object') return task;
-  const assignedTo = normalizeTaskAssignee(task.assignedTo || task.ownership?.assignedTo);
+  const assignedTo = normalizeTaskAssignee(task.assignedTo || task.ownership?.assignedTo || task.assigneeName || task.assignedToName || task.assignedUserName);
   return {
     ...task,
     id: String(task.id || task.caseId || '').trim() || task.id,
@@ -104,6 +103,15 @@ export const mergeTaskLists = (current = [], incoming = []) => {
 
 const parseJsonSafe = async (response) => response.json().catch(() => ({}));
 
+const throwApiError = async (response, fallback) => {
+  const payload = await parseJsonSafe(response);
+  const error = new Error(payload.error || `${fallback}: ${response.status}`);
+  error.status = response.status;
+  error.code = payload.code || '';
+  error.payload = payload;
+  throw error;
+};
+
 export const fetchBackendState = async ({ apiBase, headers = {} }) => {
   const res = await fetch(`${apiBase}/api/state`, { cache: 'no-store', headers });
   if (!res.ok) throw new Error(`Backend state failed: ${res.status}`);
@@ -116,7 +124,7 @@ export const createTaskApi = async ({ apiBase, headers = {}, currentUserRole = '
     headers,
     body: JSON.stringify({ currentUserRole, project: normalizeTaskRecord(task) })
   });
-  if (!res.ok) throw new Error(`Backend project save failed: ${res.status}`);
+  if (!res.ok) return throwApiError(res, 'Backend project save failed');
   return parseJsonSafe(res);
 };
 
@@ -145,10 +153,12 @@ export const persistTasksToLocalCache = (tasks = [], { sanitize = (x) => x, filt
 };
 
 export const saveBackendStateApi = async ({ apiBase, headers = {}, payload = {}, currentUserRole = '' }) => {
+  const normalizedPayload = { ...payload, currentUserRole };
+  if (Object.prototype.hasOwnProperty.call(payload, 'projects')) normalizedPayload.projects = normalizeTaskList(payload.projects || []);
   const res = await fetch(`${apiBase}/api/state`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ ...payload, currentUserRole, projects: normalizeTaskList(payload.projects || []) })
+    body: JSON.stringify(normalizedPayload)
   });
   if (!res.ok) throw new Error(`Backend state save failed: ${res.status}`);
   return parseJsonSafe(res);

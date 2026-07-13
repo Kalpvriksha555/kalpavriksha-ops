@@ -5385,3 +5385,34 @@ body.kalpa-preview-open {
     justify-content: flex-start !important;
   }
 }
+
+/* Final scroll contract: the page owns normal vertical scrolling; a portal owns
+   scrolling only while its overlay is open. Touch remains enabled inside
+   dialogs on phones and tablets. */
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+  min-width: 0;
+}
+html,
+body {
+  overflow-y: auto;
+  overscroll-behavior-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+body.kalpa-overlay-open,
+body.kalpa-modal-open,
+body.kalpa-create-task-open,
+body.kalpa-preview-open {
+  overflow: hidden !important;
+  overscroll-behavior: none !important;
+  touch-action: auto !important;
+}
+.kalpa-create-task-form,
+.kalpa-shared-modal-body,
+.kalpa-preview-image-stage,
+.kalpa-chat-messages {
+  touch-action: pan-y pinch-zoom;
+}

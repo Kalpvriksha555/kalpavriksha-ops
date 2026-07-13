@@ -1,4 +1,6 @@
-const CHAT_API_BASE = import.meta.env.VITE_API_BASE || import.meta.env.VITE_API_URL || 'http://localhost:8080';
+import { API_BASE } from '../config/appConfig';
+
+const CHAT_API_BASE = API_BASE;
 
 export { CHAT_API_BASE };
 
