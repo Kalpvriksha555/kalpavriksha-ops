@@ -1296,7 +1296,7 @@ function notify(d, to, text, category='normal', target=''){
 }
 function notifyRole(d, role, text, category='normal', target=''){ notify(d,role,text,category,target); }
 function notifyUser(d, userIdOrName, text, category='normal', target=''){ notify(d,userIdOrName,text,category,target); }
-function nextCaseNo(d, city='Lucknow'){ const code=String(city||'LKO').slice(0,3).toUpperCase(); return `KD-${code}-2026-${String(d.cases.length+1).padStart(4,'0')}`; }
+function nextCaseNo(d, city='Lucknow'){ const code=String(city||'LKO').slice(0,3).toUpperCase(); return `KD-${code}-2026-${String(d.cases.length+1).padStart(2,'0')}`; }
 function leastBusy(d){ return sanitizePresenceUsers(d.users).filter(u=>normalizeRole(u.role)==='Designer').map(u=>({ ...u, active:d.cases.filter(c=>c.assigneeId===u.id && !['COMPLETED','CLOSED'].includes(c.status)).length })).sort((a,b)=>a.active-b.active)[0] || sanitizePresenceUsers(d.users).find(u=>normalizeRole(u.role)==='Manager'); }
 function publicUrl(){ return process.env.PUBLIC_APP_URL || 'http://localhost:5173'; }
 function classify(name='', mime=''){

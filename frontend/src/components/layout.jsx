@@ -203,10 +203,11 @@ export const MainTabNavigation = ({ currentUser, ROLES, activeTab, setActiveTab 
       event.stopPropagation?.();
     }
     setActiveTab(tab);
+    window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'auto' }));
   };
   const tabButtonProps = (tab) => ({
     type: 'button',
-    onClick: () => setActiveTab(tab),
+    onClick: (event) => selectTab(tab, event),
     onTouchEnd: (event) => selectTab(tab, event),
   });
 
@@ -264,7 +265,7 @@ export const MobileBottomNavigation = ({ currentUser, ROLES, activeTab, setActiv
   const go = (key) => {
     setActiveTab(key);
     setShowMore(false);
-    window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
+    window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'auto' }));
   };
 
   const TabButton = ({ item }) => {

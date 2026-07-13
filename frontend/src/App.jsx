@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { formatLastSeenDateTime, formatCallDuration, formatDateKey, formatDateTime, formatDuration, formatMinutes } from './utils/date';
-import { allProjectDocs, getCompletedDocuments, getLatestCompletedFileName, getTaskDescription, getEstimateDetails, getCompletedFileBadge } from './utils/taskDisplayUtils';
+import { formatTaskId, allProjectDocs, getCompletedDocuments, getLatestCompletedFileName, getTaskDescription, getEstimateDetails, getCompletedFileBadge } from './utils/taskDisplayUtils';
 import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass, buildPaymentTrackingUpdate, getPaymentEstimateAmount, getPaymentReceivedAmount, derivePaymentTrackingStatusFromData } from './features/finance';
 import { getBreakMinutesFromLog, getTaskBusySince, getUserActiveTasks, getUserLastCompletedAt, getUserFreeSince, getUserBusySince, getDraftingElapsedMs, getTotalLoggedInMinutesFromLog, getActiveMinutesFromLog, getAttendanceActiveTaskMinutes, buildAttendanceAccrual, deriveAttendanceSession, getAttendanceFirstLoginLabel, buildAttendanceEngineV3 } from './features/attendance';
 import { createSafeMeetingRoomName, buildJitsiUrl } from './utils/meeting';
 import { copyTextToClipboard } from './utils/clipboard';
-import { Badge, PageLoadingScreen, EmptyState, MiniEmptyState } from './components/shared';
+import { Badge, PageLoadingScreen, EmptyState, MiniEmptyState, MultiSelectCheckbox } from './components/shared';
 import { LocalModeBanner, DatabasePermissionBanner, TopNavigation, MobileSearchBar, MainTabNavigation, MobileBottomNavigation } from './components/layout';
 import { PortalLayer } from './components/ui/LayerPortal';
 import { Button, IconButton, InlineAlert } from './components/ui/designSystem.jsx';
@@ -933,7 +933,7 @@ const makeLocationCode = (location = '') => {
 };
 
 const generateTraceableTaskId = ({ location = '', client = '', bankerName = '', customerName = '', projects = [], excludeId = '' } = {}) => {
-  // Format: STATION-BANK-CUSTOMER-NUMBER (example: LKO-PNB-SHUB-0001)
+  // Format: STATION-BANK-CUSTOMER-NUMBER (example: LKO-PNB-SHUB-01)
   // Station codes use the fixed office code map requested by the team.
   const loc = makeLocationCode(location);
   const bank = makeCodePart(client, 'BANK', 4);
@@ -941,13 +941,13 @@ const generateTraceableTaskId = ({ location = '', client = '', bankerName = '', 
   const prefix = `${loc}-${bank}-${person}`;
   const existing = new Set((projects || [])
     .filter(p => String(p.id || '') !== String(excludeId || ''))
-    .map(p => String(p.id || '')));
-  getDeletedProjectIds().forEach(id => existing.add(String(id)));
+    .map(p => formatTaskId(p.id || '')));
+  getDeletedProjectIds().forEach(id => existing.add(formatTaskId(id)));
   let serial = 1;
-  let nextId = `${prefix}-${String(serial).padStart(4, '0')}`;
+  let nextId = `${prefix}-${String(serial).padStart(2, '0')}`;
   while (existing.has(nextId)) {
     serial += 1;
-    nextId = `${prefix}-${String(serial).padStart(4, '0')}`;
+    nextId = `${prefix}-${String(serial).padStart(2, '0')}`;
   }
   return nextId;
 };
@@ -974,7 +974,7 @@ const getAssignmentRecommendations = (users = [], projects = []) => {
     .sort((a,b) => a.score - b.score || b.doneToday - a.doneToday || a.name.localeCompare(b.name));
 };
 
-const getDisplayTaskId = (project = {}) => project.displayId || project.originalTaskId || project.id;
+const getDisplayTaskId = (project = {}) => formatTaskId(project.displayId || project.originalTaskId || project.id);
 const isRevisionWorkItem = (project = {}) => project.isRevisionWorkItem === true || String(project.id || '').includes('__REV__');
 const getNextRevisionNumber = (project = {}) => {
   const existing = [
@@ -1659,7 +1659,7 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
   };
 
   return (
-    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in duration-200">
       <div className="flex flex-col xl:flex-row justify-between xl:items-end gap-4">
         <div>
            <h2 className="text-3xl font-extrabold text-slate-800 tracking-tight flex items-center"><Users className="w-8 h-8 mr-3 text-indigo-500"/> Team Attendance</h2>
@@ -1780,11 +1780,11 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
 
 const LedgerView = ({ projects, onSelectProject }) => {
   const [activeTab, setActiveTab] = useState('transactions');
-  const [selectedLocation, setSelectedLocation] = useState('All');
-  const [selectedClient, setSelectedClient] = useState('All');
-  const [selectedPaymentStatus, setSelectedPaymentStatus] = useState('All');
+  const [selectedLocations, setSelectedLocations] = useState([]);
+  const [selectedClients, setSelectedClients] = useState([]);
+  const [selectedPaymentStatuses, setSelectedPaymentStatuses] = useState([]);
   
-  const financePaymentStatuses = ['All', 'Not Updated', 'Pending', 'Partially Paid', 'Paid', 'Overpaid'];
+  const financePaymentStatuses = ['Not Updated', 'Pending', 'Partially Paid', 'Paid', 'Overpaid'];
   const deriveLedgerPaymentStatus = (project = {}) => {
     const estimate = getPaymentEstimateAmount(project);
     const received = getPaymentReceivedAmount(project);
@@ -1808,22 +1808,19 @@ const LedgerView = ({ projects, onSelectProject }) => {
       case 'Overpaid': return 'bg-violet-50 text-violet-700 border-violet-100';
       case 'Partially Paid': return 'bg-blue-50 text-blue-700 border-blue-100';
       case 'Pending': return 'bg-amber-50 text-amber-700 border-amber-100';
-      default: return 'bg-rose-50 text-rose-700 border-rose-100';
+      default: return 'bg-slate-100 text-slate-600 border-slate-200';
     }
   };
   
-  const baseLedgerProjects = projects.filter(p => !isRevisionWorkItem(p) && !p.excludeFromLedger && !p.isFinanceExcluded && ((Number(p.estimate) > 0) || (Number(p.ledger?.amountIn) > 0) || p.ledger?.updatedAt || p.paymentTrackingUpdatedAt));
-  const allLocations = [...new Set(baseLedgerProjects.map(p => getCanonicalLocationName(p.location)).filter(Boolean))].sort();
-  const availableClients = [...new Set(baseLedgerProjects.filter(p => selectedLocation === 'All' || getCanonicalLocationName(p.location) === selectedLocation).map(p => getCanonicalBankName(p.client || p.bankName || p.bank)).filter(Boolean))].sort();
-
-  useEffect(() => {
-    if (selectedClient !== 'All' && !availableClients.includes(selectedClient)) setSelectedClient('All');
-  }, [selectedLocation, availableClients, selectedClient]);
+  // Finance must account for every real task. Missing finance fields are explicitly "Not Updated".
+  const baseLedgerProjects = projects.filter(p => !isRevisionWorkItem(p) && !p.excludeFromLedger && !p.isFinanceExcluded && (p.id || p.caseId));
+  const allLocations = [...new Set(baseLedgerProjects.map(p => getCanonicalLocationName(p.location || p.city)).filter(Boolean))].sort();
+  const availableClients = [...new Set(baseLedgerProjects.map(p => getCanonicalBankName(p.client || p.bankName || p.bank)).filter(Boolean))].sort();
 
   const ledgerProjects = baseLedgerProjects.filter(p => {
-      if (selectedLocation !== 'All' && getCanonicalLocationName(p.location) !== selectedLocation) return false;
-      if (selectedClient !== 'All' && getCanonicalBankName(p.client || p.bankName || p.bank) !== selectedClient) return false;
-      if (selectedPaymentStatus !== 'All' && deriveLedgerPaymentStatus(p) !== selectedPaymentStatus) return false;
+      if (selectedLocations.length > 0 && !selectedLocations.includes(getCanonicalLocationName(p.location || p.city))) return false;
+      if (selectedClients.length > 0 && !selectedClients.includes(getCanonicalBankName(p.client || p.bankName || p.bank))) return false;
+      if (selectedPaymentStatuses.length > 0 && !selectedPaymentStatuses.includes(deriveLedgerPaymentStatus(p))) return false;
       return true;
   }).sort((a,b) => ((b.ledger?.updatedAt || b.completedAt || b.createdAt) || 0) - ((a.ledger?.updatedAt || a.completedAt || a.createdAt) || 0));
 
@@ -1914,40 +1911,14 @@ const LedgerView = ({ projects, onSelectProject }) => {
   };
 
   return (
-    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in duration-200">
       <div className="flex flex-col xl:flex-row justify-between xl:items-end gap-4">
         <div>
            <h2 className="text-3xl font-extrabold text-slate-800 tracking-tight">Financial Ledger</h2>
            <div className="flex flex-wrap gap-3 mt-4">
-              <div className="flex flex-col">
-                  <label className="text-[10px] font-black uppercase text-slate-400 mb-1 tracking-widest">Filter by Area/City</label>
-                  <div className="relative">
-                      <MapPin className="w-4 h-4 text-indigo-500 absolute left-3 top-1/2 -translate-y-1/2" />
-                      <select value={selectedLocation} onChange={e => setSelectedLocation(e.target.value)} className="pl-9 pr-8 py-2.5 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-700 outline-none focus:border-indigo-500 appearance-none shadow-sm cursor-pointer min-w-[160px]">
-                          <option value="All">All Areas</option>
-                          {allLocations.map(l => <option key={l} value={l}>{l}</option>)}
-                      </select>
-                  </div>
-              </div>
-              <div className="flex flex-col">
-                  <label className="text-[10px] font-black uppercase text-slate-400 mb-1 tracking-widest">Filter by Bank</label>
-                  <div className="relative">
-                      <Briefcase className="w-4 h-4 text-indigo-500 absolute left-3 top-1/2 -translate-y-1/2" />
-                      <select value={selectedClient} onChange={e => setSelectedClient(e.target.value)} className="pl-9 pr-8 py-2.5 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-700 outline-none focus:border-indigo-500 appearance-none shadow-sm cursor-pointer min-w-[160px]">
-                          <option value="All">All Banks in Area</option>
-                          {availableClients.map(c => <option key={c} value={c}>{c}</option>)}
-                      </select>
-                  </div>
-              </div>
-              <div className="flex flex-col">
-                  <label className="text-[10px] font-black uppercase text-slate-400 mb-1 tracking-widest">Payment Status</label>
-                  <div className="relative">
-                      <Filter className="w-4 h-4 text-indigo-500 absolute left-3 top-1/2 -translate-y-1/2" />
-                      <select value={selectedPaymentStatus} onChange={e => setSelectedPaymentStatus(e.target.value)} className="pl-9 pr-8 py-2.5 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-700 outline-none focus:border-indigo-500 appearance-none shadow-sm cursor-pointer min-w-[190px]">
-                          {financePaymentStatuses.map(status => <option key={status} value={status}>{status} ({statusCounts[status] || 0})</option>)}
-                      </select>
-                  </div>
-              </div>
+              <MultiSelectCheckbox label="Filter by Area/City" options={allLocations} selectedValues={selectedLocations} onChange={setSelectedLocations} allLabel="All Areas" />
+              <MultiSelectCheckbox label="Filter by Bank" options={availableClients} selectedValues={selectedClients} onChange={setSelectedClients} allLabel="All Banks" />
+              <MultiSelectCheckbox label="Payment Status" options={financePaymentStatuses} selectedValues={selectedPaymentStatuses} onChange={setSelectedPaymentStatuses} allLabel={'All Statuses (' + statusCounts.All + ')'} />
            </div>
         </div>
         <div className="flex flex-wrap gap-3 mt-4 xl:mt-0">
@@ -2012,7 +1983,7 @@ const LedgerView = ({ projects, onSelectProject }) => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {ledgerProjects.filter(p => activeTab === 'pending' ? ((Number(p.estimate) || 0) > (Number(p.ledger?.amountIn) || 0)) : true).map(p => {
+                {ledgerProjects.filter(p => activeTab === 'pending' ? ['Pending', 'Partially Paid'].includes(deriveLedgerPaymentStatus(p)) : true).map(p => {
                   const est = getPaymentEstimateAmount(p);
                   const rec = getPaymentReceivedAmount(p);
                   const exp = Number(p.ledger?.expenses) || 0;
@@ -2052,7 +2023,7 @@ const LedgerView = ({ projects, onSelectProject }) => {
                     </tr>
                   )
                 })}
-                {ledgerProjects.filter(p => activeTab === 'pending' ? ((Number(p.estimate) || 0) > (Number(p.ledger?.amountIn) || 0)) : true).length === 0 && (
+                {ledgerProjects.filter(p => activeTab === 'pending' ? ['Pending', 'Partially Paid'].includes(deriveLedgerPaymentStatus(p)) : true).length === 0 && (
                    <tr><td colSpan="8" className="text-center py-10 text-slate-500 font-medium">No records found for this view.</td></tr>
                 )}
               </tbody>
@@ -3234,7 +3205,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   }, [filePreview, closeFilePreview, updatePreviewZoom, resetPreviewView, rotatePreview]);
 
   return (
-    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in duration-200">
       {filePreview && (
         <PortalLayer isOpen={Boolean(filePreview)} className="kalpa-preview-layer fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center" lockScrollClass="kalpa-preview-open" role="dialog" ariaModal={true} ariaLabel="File preview" onEscape={closeFilePreview} initialFocusSelector="button">
           <div className="kalpa-preview-card bg-white shadow-2xl border border-slate-200 overflow-hidden flex flex-col">
@@ -3978,18 +3949,32 @@ function AppShell() {
   const [performanceSummary, setPerformanceSummary] = useState(null);
   const [backendStateReady, setBackendStateReady] = useState(false);
   
+  const [activeTab, setActiveTab] = useState('command');
   const [selectedProject, setSelectedProject] = useState(null);
-  const [archiveViewState, setArchiveViewState] = useState({ filterMonth: 'All', filterDate: '', searchText: '', sortOrder: 'newest', scrollTop: 0 });
+  const [archiveViewState, setArchiveViewState] = useState({ filterMonth: 'All', filterDate: '', selectedBanks: [], selectedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0 });
   const [taskDetailReturnTab, setTaskDetailReturnTab] = useState('board');
+  const taskDetailReturnPositionRef = useRef({ windowY: 0, tab: 'board' });
+  const previousTabRef = useRef('command');
   const openTaskDetail = (project, returnTab = activeTab || 'board') => {
+    const windowY = typeof window !== 'undefined' ? window.scrollY : 0;
+    taskDetailReturnPositionRef.current = { windowY, tab: returnTab };
     setTaskDetailReturnTab(returnTab);
     setSelectedProject(project);
+    requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'auto' }));
   };
   const closeTaskDetail = () => {
+    const targetTab = taskDetailReturnPositionRef.current?.tab || taskDetailReturnTab || 'board';
+    const targetY = Number(taskDetailReturnPositionRef.current?.windowY || 0);
     setSelectedProject(null);
-    if (taskDetailReturnTab) setActiveTab(taskDetailReturnTab);
+    if (targetTab) setActiveTab(targetTab);
+    requestAnimationFrame(() => requestAnimationFrame(() => window.scrollTo({ top: targetY, behavior: 'auto' })));
   };
-  const [activeTab, setActiveTab] = useState('command');
+  useEffect(() => {
+    if (previousTabRef.current !== activeTab && !selectedProject) {
+      requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'auto' }));
+    }
+    previousTabRef.current = activeTab;
+  }, [activeTab, selectedProject]);
   const [boardViewMode, setBoardViewMode] = useState('list'); // 'list' or 'kanban'
   const [selectedBoardDate, setSelectedBoardDate] = useState(formatDateKey());
   const [nowTick, setNowTick] = useState(Date.now());
@@ -5345,7 +5330,7 @@ function AppShell() {
   const activityTimeline = buildActivityTimeline(projects, chatMessages, notifications);
   const normalizedGlobalSearch = globalSearch.trim().toLowerCase();
   const globalCaseResults = !normalizedGlobalSearch ? [] : (projects || [])
-    .filter(p => [p.id, p.client, p.bankName, p.branchName, p.customerName, p.location, p.assignedTo, p.type, p.status, p.description, p.paymentStatus, p.paymentTrackingStatus]
+    .filter(p => [p.id, formatTaskId(p.id), p.client, p.bankName, p.branchName, p.customerName, p.location, p.assignedTo, p.type, p.status, p.description, p.paymentStatus, p.paymentTrackingStatus, getLatestCompletedFileName(p), p.createdAt ? formatDateTime(p.createdAt) : '', p.completedAt ? formatDateTime(p.completedAt) : '']
       .filter(Boolean).join(' ').toLowerCase().includes(normalizedGlobalSearch))
     .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
   const globalPeopleResults = !normalizedGlobalSearch ? [] : (activeUsers || [])
@@ -5517,9 +5502,9 @@ function AppShell() {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   {globalCaseResults.slice(0, 10).map(p => (
                     <button key={p.id} type="button" onClick={() => openTaskDetail(p, activeTab || 'board')} className="kalpa-task-row text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 hover:border-indigo-100 rounded-2xl p-4 transition-all">
-                      <p className="font-black text-slate-800">{p.id}</p>
+                      <div className="flex items-start justify-between gap-2"><p className="font-black text-slate-800">{formatTaskId(p.id)}</p><span className="text-[10px] font-black text-slate-400 whitespace-nowrap">{p.completedAt ? 'Completed ' + formatDateTime(p.completedAt) : (p.createdAt ? 'Created ' + formatDateTime(p.createdAt) : 'Date unavailable')}</span></div>
                       <p className="text-xs font-bold text-slate-500 mt-1">{getCustomerDisplayName(p)} • {p.location}</p>
-                      <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase">{p.type} • {p.assignedTo || 'Unassigned'} • {p.status}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mt-2 line-clamp-2"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1 line-clamp-2"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}
+                      <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase">{p.type} • {p.assignedTo || 'Unassigned'} • {p.status}</p>{getTaskDescription(p) && <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1 mt-2 line-clamp-2"><span className="font-black">Description:</span> {getTaskDescription(p)}</p>}{getEstimateDetails(p) && <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1 line-clamp-2"><span className="font-black">Estimate:</span> {getEstimateDetails(p)}</p>}{getLatestCompletedFileName(p) && <p className="text-xs font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mt-1 truncate"><span className="font-black">Completed file:</span> {getLatestCompletedFileName(p)}</p>}
                     </button>
                   ))}
                   {globalCaseResults.length === 0 && <div className="md:col-span-2"><EmptyState icon={Search} title="No matching cases found" description="Try customer, bank, branch, location, task ID, status, payment status, or designer name." compact /></div>}

@@ -6,6 +6,7 @@ import { createSafeMeetingRoomName, buildJitsiUrl } from '../../utils/meeting';
 import { copyTextToClipboard } from '../../utils/clipboard';
 import { MiniEmptyState } from '../shared';
 import { getVisibleNotifications } from '../../services/notificationService';
+import { formatTaskId } from '../../utils/taskDisplayUtils';
 import { CHAT_API_BASE, absoluteChatUrl, makeMessageId, QUICK_EMOJIS, isUserActuallyOnline, getOperationalUsers, identityKey, samePerson, readEntryName, ROLES, normalizeChannelKey, chatEmojiGroups, reactionEmojis } from '../../utils/chatUtils';
 
 export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onDeleteMessage, onUpdateMessage, onMarkMessagesRead, appId, projects = [], onOpenTaskReference, onPreviewFile }) => {
@@ -78,7 +79,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const activeCallUrl = activePeer ? buildJitsiUrl(activeCallRoom, currentUser.name, { audioOnly: callAudioOnly, shareScreen: callShareScreen }) : '';
 
   const normalizeTaskToken = (value = '') => String(value || '').replace(/^#/, '').trim().toUpperCase();
-  const getTaskDisplayId = (project = {}) => String(project.id || project.caseId || '').trim();
+  const getTaskDisplayId = (project = {}) => formatTaskId(project.id || project.caseId || '');
   const taskLookup = React.useMemo(() => {
     const map = new Map();
     (projects || []).forEach(project => {

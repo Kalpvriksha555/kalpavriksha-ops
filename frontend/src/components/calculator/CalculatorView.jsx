@@ -151,7 +151,7 @@ export const CalculatorView = () => {
   };
 
   return (
-    <div className="calculator-page space-y-4 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300 pb-24 md:pb-6">
+    <div className="calculator-page space-y-4 sm:space-y-6 animate-in fade-in duration-200 pb-24 md:pb-6">
       <div className="hidden sm:block">
         <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Calculator & Conversion Tools</h1>
         <p className="text-slate-500 font-medium mt-2">Area calculator, land measurement converter, Hindi digit guide, and quick estimate tools for everyone.</p>

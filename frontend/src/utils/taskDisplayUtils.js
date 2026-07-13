@@ -2,6 +2,13 @@
 // These helpers are intentionally data-only so UI components can reuse the
 // same labels/metadata without duplicating fallback logic.
 
+export const formatTaskId = (value = '') => {
+  const raw = String(value || '').trim();
+  return raw.replace(/-(\d+)$/, (_match, digits) => {
+    const numeric = Number(digits);
+    return '-' + (Number.isFinite(numeric) ? String(numeric).padStart(2, '0') : digits);
+  });
+};
 export const allProjectDocs = (project = {}) => {
   const singleCompletedFields = [
     project?.completedFile,

@@ -5,7 +5,7 @@ import { ONLINE_STALE_MS } from '../../config/appConfig';
 import { absoluteApiUrl } from '../../services/fileService';
 import { getStatusColor } from '../../services/taskService';
 import { formatDateKey, formatDuration, formatLastSeenDateTime, formatMinutes } from '../../utils/date';
-import { getEstimateDetails, getLatestCompletedFileName, getTaskDescription } from '../../utils/taskDisplayUtils';
+import { formatTaskId, getEstimateDetails, getLatestCompletedFileName, getTaskDescription } from '../../utils/taskDisplayUtils';
 import { getTaskBusySince, getUserActiveTasks, getUserBusySince, getUserFreeSince, getUserLastCompletedAt, getUserDraftingTask, getDraftingElapsedMs } from '../../utils/presenceAttendanceUtils';
 
 const toMs = (value) => {
@@ -382,7 +382,7 @@ const getPerformanceOwnerName = (project = {}) => {
   return candidates[0] || '';
 };
 
-const getPerformanceTaskId = (project = {}) => String(project.originalTaskId || project.rootTaskId || project.parentTaskId || project.caseId || project.id || '').trim();
+const getPerformanceTaskId = (project = {}) => formatTaskId(project.originalTaskId || project.rootTaskId || project.parentTaskId || project.caseId || project.id || '');
 
 const isRevisionOnlyWorkItem = (project = {}) => {
   const idText = String(project.id || project.caseId || project.taskId || '').toUpperCase();
@@ -1031,7 +1031,7 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
     ['Activity', liveActivityFeed.length, 'activity', 'bg-indigo-50 text-indigo-700 border-indigo-100', 'Latest operational activity']
   ];
   return (
-    <div className="kalpa-production-polish space-y-4 sm:space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
+    <div className="kalpa-production-polish space-y-4 sm:space-y-5 animate-in fade-in duration-200">
       <div className="flex flex-col sm:flex-row justify-between sm:items-end gap-4">
         <div>
           <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Command Centre</h1>
@@ -1075,7 +1075,7 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
                 <button key={p.id || p.caseId} type="button" onClick={() => onSelectProject(p)} className="w-full text-left px-4 py-3 hover:bg-slate-50 transition flex items-center justify-between gap-4">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <p className="font-black text-slate-800 truncate">{p.id || p.caseId}</p>
+                      <p className="font-black text-slate-800 truncate">{formatTaskId(p.id || p.caseId)}</p>
                       <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{p.type || 'Case'}</span>
                       {isCarriedForwardProject(p, dateKey) && <span className="text-[9px] bg-orange-50 text-orange-700 border border-orange-100 px-2 py-0.5 rounded-lg font-black uppercase">Carry forward</span>}
                     </div>
@@ -1103,7 +1103,7 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
               {liveActivityFeed.slice(0, 9).map(item => (
                 <button key={item.id} type="button" onClick={() => onSelectProject(item.project)} className="w-full text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 rounded-xl px-3 py-2.5 transition-all flex gap-3">
                   <div className="w-12 shrink-0 text-center"><p className="text-[11px] font-black text-slate-500">{formatActivityClock(item.at)}</p><p className="text-base mt-0.5">{getActivityIcon(item.type)}</p></div>
-                  <div className="min-w-0 flex-1"><p className="font-black text-slate-800 text-sm truncate">{item.project?.id || item.project?.caseId} • {item.title}</p><p className="text-[11px] font-bold text-slate-500 mt-0.5 truncate">{getCustomerDisplayName(item.project)}{item.by ? ` • ${item.by}` : ''}</p></div>
+                  <div className="min-w-0 flex-1"><p className="font-black text-slate-800 text-sm truncate">{formatTaskId(item.project?.id || item.project?.caseId)} • {item.title}</p><p className="text-[11px] font-bold text-slate-500 mt-0.5 truncate">{getCustomerDisplayName(item.project)}{item.by ? ` • ${item.by}` : ''}</p></div>
                 </button>
               ))}
               {liveActivityFeed.length === 0 && <p className="text-sm text-slate-400 font-bold text-center py-6">No timeline activity yet.</p>}
@@ -1358,7 +1358,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
     return weakest?.text || 'Keep performance stable and avoid late task buildup.';
   };
   return (
-    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in duration-200">
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
         <div>
           <p className="text-xs font-black uppercase tracking-widest text-indigo-500 mb-2">Single source of truth</p>
@@ -1447,7 +1447,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Current work</p>
-                        <p className="text-sm font-black text-slate-800 truncate">{currentTask ? (currentTask.id || currentTask.caseId || makeTaskDisplayName(currentTask)) : live.detail}</p>
+                        <p className="text-sm font-black text-slate-800 truncate">{currentTask ? (formatTaskId(currentTask.id || currentTask.caseId) || makeTaskDisplayName(currentTask)) : live.detail}</p>
                       </div>
                       <Badge colorClass={live.badgeClass}>{live.label}</Badge>
                     </div>
@@ -1590,7 +1590,7 @@ export const ReportsAnalyticsView = ({ projects = [], users = [], currentUser = 
   const StatCard = ({ label, value, hint }) => (<div className="bg-white rounded-3xl border-2 border-slate-100 p-5 shadow-sm"><p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</p><p className="text-3xl font-black text-slate-800 mt-2">{value}</p>{hint && <p className="text-xs font-bold text-slate-400 mt-1">{hint}</p>}</div>);
   const SimpleTable = ({ title, columns, rows, empty = 'No data yet.' }) => (<div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden"><div className="p-4 border-b border-slate-100"><h2 className="font-black text-slate-800 text-lg">{title}</h2></div><div className="overflow-x-auto"><table className="w-full text-left text-sm whitespace-nowrap"><thead className="bg-slate-50 text-slate-500"><tr>{columns.map(c => <th key={c} className="px-4 py-3 text-[10px] font-black uppercase tracking-widest">{c}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row, idx) => <tr key={idx} className="hover:bg-slate-50">{row.map((cell, i) => <td key={i} className="px-4 py-3 font-bold text-slate-700">{cell}</td>)}</tr>)}{rows.length === 0 && <tr><td colSpan={columns.length} className="px-4 py-8 text-center text-slate-400 font-bold">{empty}</td></tr>}</tbody></table></div></div>);
   return (
-    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in duration-200">
       <div className="flex flex-col lg:flex-row justify-between lg:items-end gap-4">
         <div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Reports</h1><p className="text-slate-500 font-medium mt-2 max-w-4xl">Bank, branch, case type, payment aging, finance and SLA summaries.</p></div>
         <div className="flex flex-wrap gap-3"><select value={range} onChange={e => setRange(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none"><option value="week">Last 7 days</option><option value="month">Last 30 days</option><option value="quarter">Last 90 days</option></select><button type="button" onClick={exportSummary} className="bg-emerald-100 text-emerald-700 font-bold px-4 py-2.5 rounded-xl"><Download className="w-4 h-4 inline mr-2"/>Export Summary</button><button type="button" onClick={exportWorkload} className="bg-indigo-100 text-indigo-700 font-bold px-4 py-2.5 rounded-xl"><Download className="w-4 h-4 inline mr-2"/>Export Reports</button></div>
@@ -1663,7 +1663,7 @@ export const ProductionQAView = ({ projects = [], users = [], currentUser = null
   };
   const signoffPct = Math.round((signedItems.length / Math.max(1, workflowItems.length)) * 100);
   return (
-    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in duration-200">
       <div className="flex flex-col lg:flex-row justify-between lg:items-end gap-4">
         <div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Production QA</h1><p className="text-slate-500 font-medium mt-2">Maintenance-only release-readiness checks for core workflows, audit trail, SLA, reports and team state. Use this after updates, deployments, server maintenance or bug reports.</p></div>
         <button type="button" onClick={exportQA} className="bg-indigo-100 text-indigo-700 font-bold px-4 py-2.5 rounded-xl w-fit"><Download className="w-4 h-4 inline mr-2"/>Export QA CSV</button>
@@ -1725,7 +1725,7 @@ export const SystemSettingsView = ({ projects = [], users = [], currentUser = nu
     { key: 'audit', label: 'Audit Logs', title: 'Traceability', text: 'Case timelines and activity feed preserve the operational audit trail.' }
   ];
   return (
-    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in duration-200">
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
         <div>
           <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Settings & System Health</h1>
@@ -1773,11 +1773,11 @@ export const DailyClosingReport = ({ projects = [], currentUser = null }) => {
   ];
   const handleExport = () => exportToCSV(['Metric','Value'], rows, `Daily_Closing_${dateKey}.csv`);
   return (
-    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+    <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in duration-200">
       <div className="flex flex-col sm:flex-row justify-between sm:items-end gap-4"><div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Daily Closing Report</h1><p className="text-slate-500 font-medium mt-2">Official end-of-day snapshot for one selected date, including pending work carried forward.</p></div><div className="flex gap-3"><input type="date" value={dateKey} onChange={e => setDateKey(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none" /><button onClick={handleExport} className="bg-emerald-100 text-emerald-700 font-bold px-4 py-2.5 rounded-xl"><Download className="w-4 h-4 inline mr-2"/>Export</button></div></div>
       <div className="bg-slate-900 text-white rounded-3xl p-5 shadow-sm"><p className="text-xs font-black uppercase tracking-widest text-slate-300">Daily Closing vs Reports</p><p className="text-sm font-bold text-slate-100 mt-2">Daily Closing is the official one-day operational summary for end-of-day review. Reports are flexible analytics for trends, banks, branches, team productivity and longer periods.</p></div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">{rows.map(([label,value]) => <div key={label} className="kalpa-panel bg-white rounded-3xl border-2 border-slate-100 p-6 shadow-sm"><p className="text-xs text-slate-400 font-black uppercase tracking-widest">{label}</p><p className="text-3xl font-black text-slate-800 mt-2">{value}</p></div>)}</div>
-      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden"><div className="p-4 border-b border-slate-100"><h2 className="font-black text-slate-800 text-xl">Pending Carry Forward List</h2></div><div className="divide-y divide-slate-100">{metrics.carried.map(p => <div key={p.id} className="p-5 flex justify-between items-center"><div><p className="font-black text-slate-800">{p.id}</p><p className="text-xs font-bold text-slate-400">{getCustomerDisplayName(p)} • {p.location} • {p.assignedTo}</p></div><Badge colorClass={getStatusColor(p.status)}>{p.status}</Badge></div>)}{metrics.carried.length === 0 && <div className="p-10 text-center text-slate-400 font-bold">No previous pending tasks to carry forward.</div>}</div></div>
+      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden"><div className="p-4 border-b border-slate-100"><h2 className="font-black text-slate-800 text-xl">Pending Carry Forward List</h2></div><div className="divide-y divide-slate-100">{metrics.carried.map(p => <div key={p.id} className="p-5 flex justify-between items-center"><div><p className="font-black text-slate-800">{formatTaskId(p.id)}</p><p className="text-xs font-bold text-slate-400">{getCustomerDisplayName(p)} • {p.location} • {p.assignedTo}</p></div><Badge colorClass={getStatusColor(p.status)}>{p.status}</Badge></div>)}{metrics.carried.length === 0 && <div className="p-10 text-center text-slate-400 font-bold">No previous pending tasks to carry forward.</div>}</div></div>
     </div>
   );
 };

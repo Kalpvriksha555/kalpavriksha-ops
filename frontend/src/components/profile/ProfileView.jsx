@@ -197,7 +197,7 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
   ];
 
   return (
-    <div className="space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+    <div className="space-y-5 sm:space-y-6 animate-in fade-in duration-200">
       <div>
         <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">My Profile</h1>
         <p className="text-slate-500 font-medium mt-2">Manage your photo, internal details, and password.</p>

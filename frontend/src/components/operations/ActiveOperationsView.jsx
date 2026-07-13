@@ -2,13 +2,13 @@ import React from 'react';
 import { Calendar, List, KanbanSquare, Plus, Flag, Users, Clock, MessageSquare } from 'lucide-react';
 import { Badge } from '../shared';
 import { formatDateTime, formatLastSeenDateTime, formatDuration, formatMinutes } from '../../utils/date';
-import { getTaskDescription, getEstimateDetails, getLatestCompletedFileName } from '../../utils/taskDisplayUtils';
+import { formatTaskId, getTaskDescription, getEstimateDetails, getLatestCompletedFileName } from '../../utils/taskDisplayUtils';
 import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass } from '../../utils/paymentStatusUtils';
 import { getTaskBusySince, getUserActiveTasks, getDraftingElapsedMs, getUserFreeSince } from '../../utils/presenceAttendanceUtils';
 import { getStatusColor } from '../../services/taskService';
 
 const isAdminUser = (user = {}) => String(user?.role || '').trim().toUpperCase() === 'ADMIN';
-const getDisplayTaskId = (project = {}) => project.displayId || project.originalTaskId || project.id;
+const getDisplayTaskId = (project = {}) => formatTaskId(project.displayId || project.originalTaskId || project.id);
 const isRevisionWorkItem = (project = {}) => project.isRevisionWorkItem === true || String(project.id || '').includes('__REV__');
 const isRevisionLikeProject = (project = {}) => {
   const status = String(project.status || project.reviewStatus || '').toLowerCase();
@@ -304,7 +304,7 @@ export const ActiveOperationsView = ({
     else if (typeof setSelectedProject === 'function') setSelectedProject(project);
   };
   return (
-  <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+  <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in duration-200">
     <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-6">
       <div>
         <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">{activeTab === 'my_tasks' ? 'My Tasks' : (canManage ? 'Active Operations' : 'My Workspace')}</h1>

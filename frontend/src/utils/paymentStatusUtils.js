@@ -65,7 +65,7 @@ export const getPaymentStatusDotClass = (status = 'Not Updated') => {
   switch (getPaymentTrackingStatus({ paymentTrackingStatus: status })) {
     case 'Paid': return 'bg-emerald-500';
     case 'Pending': return 'bg-amber-500';
-    default: return 'bg-rose-500';
+    default: return 'bg-slate-500';
   }
 };
 

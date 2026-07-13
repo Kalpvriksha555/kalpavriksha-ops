@@ -50,7 +50,7 @@ export const TeamMeetingRoom = ({ currentUser, safeAppId }) => {
     try { localStorage.setItem('kalpa_team_meeting_notes', value); } catch(err) {}
   };
   return (
-    <div className="space-y-5 sm:space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+    <div className="space-y-5 sm:space-y-6 animate-in fade-in duration-200">
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div>
           <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight flex items-center"><Video className="w-8 h-8 mr-3 text-indigo-500"/> Team Virtual Office</h1>
