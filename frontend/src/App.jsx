@@ -1778,11 +1778,22 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
   );
 };
 
-const LedgerView = ({ projects, onSelectProject }) => {
-  const [activeTab, setActiveTab] = useState('transactions');
-  const [selectedLocations, setSelectedLocations] = useState([]);
-  const [selectedClients, setSelectedClients] = useState([]);
-  const [selectedPaymentStatuses, setSelectedPaymentStatuses] = useState([]);
+const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceViewState }) => {
+  const [localFinanceViewState, setLocalFinanceViewState] = useState({ activeTab: 'transactions', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
+  const effectiveFinanceViewState = financeViewState || localFinanceViewState;
+  const updateFinanceViewState = (patch) => {
+    const update = (previous = {}) => ({ activeTab: 'transactions', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [], ...previous, ...patch });
+    if (typeof setFinanceViewState === 'function') setFinanceViewState(update);
+    else setLocalFinanceViewState(update);
+  };
+  const activeTab = effectiveFinanceViewState.activeTab || 'transactions';
+  const selectedLocations = Array.isArray(effectiveFinanceViewState.selectedLocations) ? effectiveFinanceViewState.selectedLocations : [];
+  const selectedClients = Array.isArray(effectiveFinanceViewState.selectedClients) ? effectiveFinanceViewState.selectedClients : [];
+  const selectedPaymentStatuses = Array.isArray(effectiveFinanceViewState.selectedPaymentStatuses) ? effectiveFinanceViewState.selectedPaymentStatuses : [];
+  const setActiveTab = (value) => updateFinanceViewState({ activeTab: value });
+  const setSelectedLocations = (value) => updateFinanceViewState({ selectedLocations: value });
+  const setSelectedClients = (value) => updateFinanceViewState({ selectedClients: value });
+  const setSelectedPaymentStatuses = (value) => updateFinanceViewState({ selectedPaymentStatuses: value });
   
   const financePaymentStatuses = ['Not Updated', 'Pending', 'Partially Paid', 'Paid', 'Overpaid'];
   const deriveLedgerPaymentStatus = (project = {}) => {
@@ -3952,6 +3963,7 @@ function AppShell() {
   const [activeTab, setActiveTab] = useState('command');
   const [selectedProject, setSelectedProject] = useState(null);
   const [archiveViewState, setArchiveViewState] = useState({ filterMonth: 'All', filterDate: '', selectedBanks: [], selectedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0 });
+  const [financeViewState, setFinanceViewState] = useState({ activeTab: 'transactions', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
   const [taskDetailReturnTab, setTaskDetailReturnTab] = useState('board');
   const taskDetailReturnPositionRef = useRef({ windowY: 0, tab: 'board' });
   const previousTabRef = useRef('command');
@@ -5567,7 +5579,7 @@ function AppShell() {
         ) : (activeTab === 'settings' || activeTab === 'qa') && currentUser.role === ROLES.ADMIN ? (
           <SystemSettingsView projects={projects} users={activeUsers} currentUser={currentUser} />
         ) : activeTab === 'ledger' && currentUser.role === ROLES.ADMIN ? (
-          <LedgerView projects={projects} onSelectProject={(p) => openTaskDetail(p, 'ledger')} />
+          <LedgerView projects={projects} financeViewState={financeViewState} setFinanceViewState={setFinanceViewState} onSelectProject={(p) => openTaskDetail(p, 'ledger')} />
         ) : activeTab === 'archive' ? (
           <HistoryArchiveView projects={projects} currentUser={currentUser} archiveViewState={archiveViewState} setArchiveViewState={setArchiveViewState} onSelectProject={(p) => openTaskDetail(p, 'archive')} onPaymentStatusChange={handlePaymentStatusChange} />
         ) : activeTab === 'team' ? (
