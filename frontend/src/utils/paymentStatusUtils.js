@@ -50,8 +50,14 @@ export const getPaymentTrackingStatus = (project = {}) => {
   return normalizedExplicit || dataStatus;
 };
 
+const normalizePaymentStatusLabel = (status = 'Not Updated') =>
+  PAYMENT_TRACKING_OPTIONS.find(option => normalizePaymentValue(option) === normalizePaymentValue(status)) || 'Not Updated';
+
+// Styling receives an already-derived label. Do not run it through record-level
+// finance validation, because a label alone has no amount fields and would turn
+// a valid "Paid" presentation back into "Not Updated".
 export const getPaymentStatusBadgeClass = (status = 'Not Updated') => {
-  switch (getPaymentTrackingStatus({ paymentTrackingStatus: status })) {
+  switch (normalizePaymentStatusLabel(status)) {
     case 'Paid':
       return 'bg-emerald-50 text-emerald-700 border-emerald-100';
     case 'Pending':
@@ -62,7 +68,7 @@ export const getPaymentStatusBadgeClass = (status = 'Not Updated') => {
 };
 
 export const getPaymentStatusDotClass = (status = 'Not Updated') => {
-  switch (getPaymentTrackingStatus({ paymentTrackingStatus: status })) {
+  switch (normalizePaymentStatusLabel(status)) {
     case 'Paid': return 'bg-emerald-500';
     case 'Pending': return 'bg-amber-500';
     default: return 'bg-slate-500';

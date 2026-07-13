@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { FileText, LayoutDashboard } from 'lucide-react';
+import { Check, ChevronDown, FileText, LayoutDashboard, Search, X } from 'lucide-react';
 import { EmptyStatePanel, LoadingState } from './ui/designSystem.jsx';
 
 export const Badge = ({ children, colorClass }) => (
@@ -10,12 +10,20 @@ export const Badge = ({ children, colorClass }) => (
 
 export const MultiSelectCheckbox = ({ label, options = [], selectedValues = [], onChange, allLabel = 'All' }) => {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
   const rootRef = useRef(null);
   const selected = Array.isArray(selectedValues) ? selectedValues : [];
+  const uniqueOptions = Array.from(new Map(
+    (options || []).filter(Boolean).map(option => [String(option).trim().toLocaleUpperCase(), String(option).trim()])
+  ).values());
+  const filteredOptions = uniqueOptions.filter(option => option.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
 
   useEffect(() => {
     const close = (event) => {
-      if (rootRef.current && !rootRef.current.contains(event.target)) setOpen(false);
+      if (rootRef.current && !rootRef.current.contains(event.target)) {
+        setOpen(false);
+        setQuery('');
+      }
     };
     document.addEventListener('mousedown', close);
     return () => document.removeEventListener('mousedown', close);
@@ -27,27 +35,36 @@ export const MultiSelectCheckbox = ({ label, options = [], selectedValues = [], 
       : [...selected, value];
     onChange(next);
   };
-  const summary = selected.length === 0 ? allLabel : (selected.length === 1 ? selected[0] : selected.length + ' selected');
+  const summary = selected.length === 0 ? allLabel : (selected.length === 1 ? selected[0] : `${selected.length} selected`);
 
   return (
-    <div ref={rootRef} className="relative min-w-[180px]">
+    <div ref={rootRef} className="relative min-w-[180px] max-w-full">
       {label && <label className="block text-[10px] font-black uppercase text-slate-400 mb-1 tracking-widest">{label}</label>}
-      <button type="button" onClick={() => setOpen((value) => !value)} className="w-full min-h-11 px-3 py-2.5 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-700 text-left shadow-sm hover:border-indigo-300 focus:border-indigo-500 outline-none flex items-center justify-between gap-2" aria-expanded={open}>
+      <button type="button" onClick={() => setOpen((value) => !value)} className={`w-full min-h-11 px-3 py-2.5 bg-white border-2 rounded-xl font-bold text-slate-700 text-left shadow-sm hover:border-indigo-300 focus:border-indigo-500 outline-none flex items-center justify-between gap-2 ${open ? 'border-indigo-500 ring-2 ring-indigo-50' : 'border-slate-200'}`} aria-expanded={open} title={summary}>
         <span className="truncate">{summary}</span>
-        <span className="text-slate-400 text-xs">▼</span>
+        <ChevronDown className={`w-4 h-4 flex-shrink-0 text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && (
-        <div className="absolute left-0 top-full mt-2 z-[180] w-full min-w-[230px] max-h-72 overflow-y-auto bg-white border-2 border-slate-100 rounded-2xl shadow-2xl p-2">
-          <button type="button" onClick={() => onChange([])} className="w-full text-left px-3 py-2 rounded-xl text-xs font-black text-indigo-700 hover:bg-indigo-50">
-            {allLabel}
-          </button>
-          {options.map((option) => (
-            <label key={option} className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-slate-50 cursor-pointer text-sm font-bold text-slate-700">
-              <input type="checkbox" checked={selected.includes(option)} onChange={() => toggle(option)} className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
-              <span className="truncate">{option}</span>
-            </label>
-          ))}
-          {options.length === 0 && <p className="px-3 py-2 text-xs font-bold text-slate-400">No options available</p>}
+        <div className="absolute left-0 top-full mt-2 z-[180] max-h-[22rem] overflow-hidden bg-white border-2 border-slate-100 rounded-2xl shadow-2xl" style={{ width: 'min(360px, calc(100vw - 2rem))' }}>
+          <div className="sticky top-0 bg-white p-2 border-b border-slate-100 z-10">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search ${String(label || allLabel).toLowerCase()}...`} className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pl-9 pr-9 text-sm font-bold text-slate-700 outline-none focus:border-indigo-400 focus:bg-white" autoFocus />
+              {query && <button type="button" onClick={() => setQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700" aria-label="Clear filter search"><X className="w-4 h-4" /></button>}
+            </div>
+            <button type="button" onClick={() => onChange([])} className="mt-1 w-full text-left px-3 py-2 rounded-xl text-xs font-black text-indigo-700 hover:bg-indigo-50 flex items-center justify-between gap-3">
+              <span>{allLabel}</span>{selected.length === 0 && <Check className="w-4 h-4" />}
+            </button>
+          </div>
+          <div className="max-h-[16rem] overflow-y-auto p-2 custom-scrollbar">
+            {filteredOptions.map((option) => (
+              <label key={option} className="flex items-start gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-50 cursor-pointer text-sm font-bold text-slate-700" title={option}>
+                <input type="checkbox" checked={selected.includes(option)} onChange={() => toggle(option)} className="w-4 h-4 mt-0.5 flex-shrink-0 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
+                <span className="whitespace-normal break-words leading-5">{option}</span>
+              </label>
+            ))}
+            {filteredOptions.length === 0 && <p className="px-3 py-5 text-xs font-bold text-slate-400 text-center">No matching options</p>}
+          </div>
         </div>
       )}
     </div>

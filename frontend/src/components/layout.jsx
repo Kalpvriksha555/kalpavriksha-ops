@@ -196,6 +196,20 @@ export const MobileSearchBar = ({ globalSearch, setGlobalSearch }) => (
   </div>
 );
 
+const scrollPageToTop = () => {
+  if (typeof window === 'undefined') return;
+  const reset = () => {
+    window.scrollTo(0, 0);
+    if (document.scrollingElement) document.scrollingElement.scrollTop = 0;
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  };
+  reset();
+  window.requestAnimationFrame(() => {
+    reset();
+    window.requestAnimationFrame(reset);
+  });
+};
 export const MainTabNavigation = ({ currentUser, ROLES, activeTab, setActiveTab }) => {
   const selectTab = (tab, event) => {
     if (event) {
@@ -203,7 +217,7 @@ export const MainTabNavigation = ({ currentUser, ROLES, activeTab, setActiveTab 
       event.stopPropagation?.();
     }
     setActiveTab(tab);
-    window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'auto' }));
+    scrollPageToTop();
   };
   const tabButtonProps = (tab) => ({
     type: 'button',
@@ -265,7 +279,7 @@ export const MobileBottomNavigation = ({ currentUser, ROLES, activeTab, setActiv
   const go = (key) => {
     setActiveTab(key);
     setShowMore(false);
-    window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'auto' }));
+    scrollPageToTop();
   };
 
   const TabButton = ({ item }) => {

@@ -3971,7 +3971,17 @@ function AppShell() {
   };
   useEffect(() => {
     if (previousTabRef.current !== activeTab && !selectedProject) {
-      requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'auto' }));
+      const resetPagePosition = () => {
+        window.scrollTo(0, 0);
+        if (document.scrollingElement) document.scrollingElement.scrollTop = 0;
+        document.documentElement.scrollTop = 0;
+        document.body.scrollTop = 0;
+      };
+      resetPagePosition();
+      requestAnimationFrame(() => {
+        resetPagePosition();
+        requestAnimationFrame(resetPagePosition);
+      });
     }
     previousTabRef.current = activeTab;
   }, [activeTab, selectedProject]);

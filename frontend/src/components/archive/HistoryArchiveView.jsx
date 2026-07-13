@@ -8,8 +8,25 @@ import { MultiSelectCheckbox } from '../shared';
 const getCustomerDisplayName = (project = {}) => project.customerName || 'Customer not added';
 const isAdminUser = (user = {}) => String(user?.role || '').trim().toUpperCase() === 'ADMIN';
 const isRevisionWorkItem = (project = {}) => project.isRevisionWorkItem === true || String(project.id || '').includes('__REV__');
-const getArchiveBank = (project = {}) => String(project.client || project.bankName || project.bank || 'Bank not added').trim();
-const getArchiveLocation = (project = {}) => String(project.location || project.city || 'Location not added').trim();
+const normalizeFilterValue = (value = '') => String(value || '')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/[^a-zA-Z0-9&()'., -]/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .toUpperCase();
+const ARCHIVE_LOCATION_ALIASES = {
+  LKO: 'LUCKNOW', LKN: 'LUCKNOW', LUCKNOW: 'LUCKNOW',
+  VNS: 'VARANASI', BANARAS: 'VARANASI', KASHI: 'VARANASI', VARANASI: 'VARANASI',
+  KNP: 'KANPUR', KANPUR: 'KANPUR', AGR: 'AGRA', AGRA: 'AGRA',
+  AYD: 'AYODHYA', FAIZABAD: 'AYODHYA', AYODHYA: 'AYODHYA',
+  ALD: 'PRAYAGRAJ', ALLAHABAD: 'PRAYAGRAJ', PRJ: 'PRAYAGRAJ', PRAYAGRAJ: 'PRAYAGRAJ',
+};
+const getArchiveBank = (project = {}) => normalizeFilterValue(project.client || project.bankName || project.bank || 'Bank not added');
+const getArchiveLocation = (project = {}) => {
+  const value = normalizeFilterValue(project.location || project.city || 'Location not added');
+  return ARCHIVE_LOCATION_ALIASES[value] || value;
+};
 
 const getArchiveRevisionSummary = (project = {}) => {
   const history = Array.isArray(project.revisionHistory) ? project.revisionHistory : [];
@@ -230,7 +247,7 @@ export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, arc
 
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in duration-200">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-5">
+      <div className="space-y-4">
         <div>
           <h2 className="text-3xl font-extrabold text-slate-800 flex items-center tracking-tight">
             <Archive className="w-8 h-8 mr-3 text-indigo-500" /> Task History Catalog
@@ -255,7 +272,7 @@ export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, arc
 
       <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
         <div ref={archiveTableRef} onScroll={rememberArchiveScroll} className="kalpa-archive-table-wrap">
-          <table className="w-full text-left text-sm whitespace-nowrap">
+          <table className="kalpa-archive-table w-full text-left text-sm whitespace-nowrap">
             <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
               <tr>
                 <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Date Completed</th>

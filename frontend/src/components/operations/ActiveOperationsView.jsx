@@ -81,17 +81,23 @@ const OperationKanbanCard = ({ project, onSelectProject, getCustomerDisplayName,
 );
 
 const OperationsKanban = ({ projects, onSelectProject, getCustomerDisplayName, onDiscussTask, currentUser, onPaymentStatusChange }) => (
-  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-6">
-    {['Lead Received', 'Revision Pending', 'Revision In Progress', 'Drafting', 'Drafting Paused', 'Internal Review', 'Completed'].map(statusCol => (
-      <div key={statusCol} className="bg-slate-100/50 rounded-3xl p-3 sm:p-4 border-2 border-slate-100/50 min-h-[420px] sm:min-h-[500px] transition-colors duration-200">
-        <h3 className="font-black text-slate-500 uppercase tracking-widest text-xs mb-4 px-2">{statusCol} <span className="ml-2 bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full">{projects.filter(p => p.status === statusCol).length}</span></h3>
-        <div className="space-y-4">
-          {projects.filter(p => p.status === statusCol).map(project => (
-            <OperationKanbanCard key={project.id} project={project} onSelectProject={onSelectProject} getCustomerDisplayName={getCustomerDisplayName} onDiscussTask={onDiscussTask} currentUser={currentUser} onPaymentStatusChange={onPaymentStatusChange} />
-          ))}
+  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-6 items-start">
+    {['Lead Received', 'Revision Pending', 'Revision In Progress', 'Drafting', 'Drafting Paused', 'Internal Review', 'Completed'].map(statusCol => {
+      const statusProjects = projects.filter(project => project.status === statusCol);
+      const isEmpty = statusProjects.length === 0;
+      return (
+        <div key={statusCol} className={`bg-slate-100/50 rounded-3xl p-3 sm:p-4 border-2 border-slate-100/50 transition-colors duration-200 self-start ${isEmpty ? 'min-h-[96px]' : 'min-h-[180px]'}`}>
+          <h3 className={`font-black text-slate-500 uppercase tracking-widest text-xs px-2 ${isEmpty ? 'mb-0' : 'mb-4'}`}>{statusCol} <span className="ml-2 bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full">{statusProjects.length}</span></h3>
+          {!isEmpty && (
+            <div className="space-y-4">
+              {statusProjects.map(project => (
+                <OperationKanbanCard key={project.id} project={project} onSelectProject={onSelectProject} getCustomerDisplayName={getCustomerDisplayName} onDiscussTask={onDiscussTask} currentUser={currentUser} onPaymentStatusChange={onPaymentStatusChange} />
+              ))}
+            </div>
+          )}
         </div>
-      </div>
-    ))}
+      );
+    })}
   </div>
 );
 
