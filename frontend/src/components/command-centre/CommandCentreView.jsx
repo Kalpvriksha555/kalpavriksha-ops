@@ -741,6 +741,15 @@ const formatActivityClock = (value) => {
   if (!ms) return '--:--';
   return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 };
+const formatActivityAge = (value, nowMs = Date.now()) => {
+  const ms = toMs(value);
+  if (!ms) return '';
+  const minutes = Math.max(0, Math.floor((nowMs - ms) / 60000));
+  if (minutes < 1) return 'Just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h ago` : new Date(ms).toLocaleDateString();
+};
 const getActivityIcon = (type = '') => {
   const key = normalizeWorkStatus(type);
   if (key.includes('REVISION')) return '🟣';
@@ -751,27 +760,81 @@ const getActivityIcon = (type = '') => {
   if (key.includes('SLA')) return '🔴';
   return '•';
 };
-const buildLiveActivityFeed = (projects = []) => projects.flatMap(project => {
-  const timeline = Array.isArray(project.timeline) ? project.timeline : [];
-  if (timeline.length) {
-    return timeline.map((event, index) => ({
-      id: `${project.id || project.caseId}-tl-${event.id || event.at || event.time || index}`,
-      project,
-      at: toMs(event.at || event.time || event.createdAt || project.updatedAt || project.createdAt),
-      type: event.type || event.action || 'activity',
-      title: event.title || event.text || event.action || 'Case activity',
-      by: event.by || event.user || event.createdBy || '',
-      remarks: event.remarks || event.note || event.text || ''
-    }));
-  }
-  return [{
-    id: `${project.id || project.caseId}-fallback`, project,
-    at: toMs(project.updatedAt || project.completedAt || project.submittedAt || project.createdAt),
-    type: project.status || 'activity',
-    title: `${project.id || project.caseId} • ${project.status || 'Updated'}`,
-    by: project.assignedTo || project.creatorName || '', remarks: getCustomerDisplayName(project)
-  }];
-}).filter(item => item.at).sort((a,b) => b.at - a.at);
+const isFinancialActivityEvent = (event = {}) => {
+  const searchable = [
+    event.type,
+    event.title,
+    event.text,
+    event.action,
+    event.message,
+    event.remarks,
+    event.note,
+    event.status
+  ].filter(Boolean).join(' ').toLowerCase();
+  return /\b(payment|paid|finance|financial|ledger|refund|transaction|collection|amount\s+received|amount\s+paid|receipt)\b/i.test(searchable);
+};
+const buildLiveActivityFeed = (projects = [], nowMs = Date.now()) => {
+  const startOfToday = new Date(nowMs);
+  startOfToday.setHours(0, 0, 0, 0);
+  const todayStartMs = startOfToday.getTime();
+  const seen = new Set();
+
+  return projects.flatMap(project => {
+    const projectKey = project.id || project.caseId || 'case';
+    const rawSources = [
+      ...(Array.isArray(project.timeline) ? project.timeline : []),
+      ...(Array.isArray(project.history) ? project.history : []),
+      ...(Array.isArray(project.activityLog) ? project.activityLog : []),
+      ...(Array.isArray(project.events) ? project.events : []),
+      ...(Array.isArray(project.deliveryLog) ? project.deliveryLog.map(event => ({ ...event, type: 'delivery', title: event.title || `Final file sent${event.file ? `: ${event.file}` : ''}`, remarks: event.via || event.remarks })) : []),
+      ...(Array.isArray(project.revisionHistory) ? project.revisionHistory.map(event => ({ ...event, type: 'revision', title: event.title || event.action || 'Revision updated', at: event.at || event.completedAt || event.createdAt })) : []),
+      ...(Array.isArray(project.revisions) ? project.revisions.map(event => ({ ...event, type: 'revision', title: event.title || event.action || 'Revision created', remarks: event.note })) : [])
+    ];
+    const sources = rawSources.filter(event => !isFinancialActivityEvent(event));
+
+    const events = sources.map((event, index) => {
+      // Never give an undated old event the case's latest updatedAt. Doing that
+      // made stale timeline rows look current after any unrelated case edit.
+      const at = toMs(event.at || event.time || event.timestamp || event.createdAt || event.updatedAt || event.completedAt);
+      const title = event.title || event.text || event.action || event.message || 'Case activity';
+      const by = event.by || event.user || event.createdBy || event.updatedBy || event.completedBy || '';
+      return {
+        id: `${projectKey}-event-${event.id || at || index}`,
+        project,
+        at,
+        type: event.type || event.action || event.status || 'activity',
+        title,
+        by,
+        remarks: event.remarks || event.note || event.message || event.text || ''
+      };
+    }).filter(item => item.at);
+
+    const updatedAt = toMs(project.updatedAt || project.syncVersion);
+    const hasMatchingUpdate = updatedAt && events.some(item => Math.abs(item.at - updatedAt) < 2000);
+    const updateWasFinancial = updatedAt && rawSources.some(event => {
+      if (!isFinancialActivityEvent(event)) return false;
+      const eventAt = toMs(event.at || event.time || event.timestamp || event.createdAt || event.updatedAt || event.completedAt);
+      return eventAt && Math.abs(eventAt - updatedAt) < 2000;
+    });
+    if (updatedAt && !hasMatchingUpdate && !updateWasFinancial) {
+      events.push({
+        id: `${projectKey}-updated-${updatedAt}`,
+        project,
+        at: updatedAt,
+        type: project.status || 'updated',
+        title: `Case updated • ${project.status || 'Status unchanged'}`,
+        by: project.updatedBy || project.assignedTo || project.creatorName || '',
+        remarks: getCustomerDisplayName(project)
+      });
+    }
+    return events;
+  }).filter(item => item.at >= todayStartMs && item.at <= nowMs + 300000).filter(item => {
+    const key = [item.project?.id || item.project?.caseId, item.at, normalizeWorkStatus(item.type), item.title, item.by].join('|');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort((a, b) => b.at - a.at);
+};
 
 const getTodayMetrics = (projects = [], dateKey = formatDateKey()) => {
   const todays = projects.filter(p => getProjectDateKey(p) === dateKey);
@@ -818,7 +881,7 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
   useEffect(() => { const timer = setInterval(() => setAvailabilityNow(Date.now()), 30000); return () => clearInterval(timer); }, []);
   const metrics = getTodayMetrics(projects, dateKey);
   const isAdmin = currentUser?.role === ROLES.ADMIN;
-  const liveActivityFeed = buildLiveActivityFeed(projects).slice(0, 14);
+  const liveActivityFeed = buildLiveActivityFeed(projects, availabilityNow);
   const rawActiveBoard = metrics.activeToday.slice().sort((a,b) => (toMs(b.completedAt || b.updatedAt || b.createdAt) || 0) - (toMs(a.completedAt || a.updatedAt || a.createdAt) || 0));
   const people = getOperationalUsers(users || [], { includeAdmins: true });
   const workingTeam = people.filter(u => u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER);
@@ -1096,17 +1159,17 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
         <div className="xl:col-span-5 space-y-4">
           <div ref={activityFeedRef} className="kalpa-panel bg-white rounded-2xl border border-slate-100 p-4 shadow-sm scroll-mt-24">
             <div className="flex items-center justify-between gap-3 mb-3">
-              <h3 className="font-black text-slate-800 flex items-center"><Bell className="w-5 h-5 mr-2 text-indigo-500" /> Live Activity</h3>
-              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{liveActivityFeed.length}</span>
+              <h3 className="font-black text-slate-800 flex items-center"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500 mr-2 animate-pulse" /><Bell className="w-5 h-5 mr-2 text-indigo-500" /> Live Activity</h3>
+              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Today • {liveActivityFeed.length}</span>
             </div>
             <div className="space-y-2 max-h-72 overflow-y-auto custom-scrollbar pr-1">
-              {liveActivityFeed.slice(0, 9).map(item => (
+              {liveActivityFeed.map(item => (
                 <button key={item.id} type="button" onClick={() => onSelectProject(item.project)} className="w-full text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 rounded-xl px-3 py-2.5 transition-all flex gap-3">
-                  <div className="w-12 shrink-0 text-center"><p className="text-[11px] font-black text-slate-500">{formatActivityClock(item.at)}</p><p className="text-base mt-0.5">{getActivityIcon(item.type)}</p></div>
+                  <div className="w-14 shrink-0 text-center"><p className="text-[11px] font-black text-slate-500">{formatActivityClock(item.at)}</p><p className="text-[10px] font-bold text-emerald-600 mt-0.5">{formatActivityAge(item.at, availabilityNow)}</p><p className="text-base mt-0.5">{getActivityIcon(item.type)}</p></div>
                   <div className="min-w-0 flex-1"><p className="font-black text-slate-800 text-sm truncate">{formatTaskId(item.project?.id || item.project?.caseId)} • {item.title}</p><p className="text-[11px] font-bold text-slate-500 mt-0.5 truncate">{getCustomerDisplayName(item.project)}{item.by ? ` • ${item.by}` : ''}</p></div>
                 </button>
               ))}
-              {liveActivityFeed.length === 0 && <p className="text-sm text-slate-400 font-bold text-center py-6">No timeline activity yet.</p>}
+              {liveActivityFeed.length === 0 && <p className="text-sm text-slate-400 font-bold text-center py-6">No activity recorded today. New actions will appear automatically.</p>}
             </div>
           </div>
 

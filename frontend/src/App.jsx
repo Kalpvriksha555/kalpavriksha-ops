@@ -733,9 +733,14 @@ const normalizeTimelineEvent = (event = {}) => {
 };
 
 const normalizeTimeline = (timeline = [], history = []) => {
-  const raw = Array.isArray(timeline) && timeline.length
-    ? timeline
-    : (Array.isArray(history) ? history.map(h => ({ title: h.action, text: h.action, by: h.by, at: h.at, time: h.at })) : []);
+  // Timeline and history are both active event sources. Older code treated
+  // history only as a fallback, so newer backend history entries disappeared
+  // whenever a case already had even one old timeline item.
+  const timelineItems = Array.isArray(timeline) ? timeline : [];
+  const historyItems = Array.isArray(history)
+    ? history.map(h => ({ ...h, title: h.title || h.action, text: h.text || h.action, by: h.by, at: h.at, time: h.time || h.at }))
+    : [];
+  const raw = [...timelineItems, ...historyItems];
   const seen = new Set();
   return raw.map(normalizeTimelineEvent).filter(event => {
     const key = [event.type || '', event.title || event.text || '', event.by || '', event.at || event.time || '', event.remarks || ''].join('|');
@@ -3101,6 +3106,35 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const completedRevisionItems = revisionTimelineItems.filter(isRevisionTimelineItemCompleted).length;
   const activeRevisionItems = revisionTimelineItems.length - completedRevisionItems;
 
+  const recordCompletedFileSent = async (fileName, via) => {
+    const sentAt = Date.now();
+    await onUpdateProject({
+      ...project,
+      reportSent: true,
+      reportSentAt: sentAt,
+      reportSentBy: user.name,
+      deliveryLog: [
+        ...(project.deliveryLog || []),
+        { id: sentAt, via, file: fileName, by: user.name, at: sentAt, time: new Date(sentAt).toLocaleString() }
+      ],
+      timeline: [
+        ...(project.timeline || []),
+        { id: sentAt, type: 'delivery', title: `Final file sent: ${fileName}`, text: `Final file sent: ${fileName}`, by: user.name, at: sentAt, time: sentAt, remarks: via }
+      ]
+    }, project);
+  };
+
+  const markCompletedFileAsSent = async () => {
+    const completedDocs = getCompletedDocuments(project);
+    if (completedDocs.length === 0) {
+      alert('No completed file found. Please upload the completed file first.');
+      return;
+    }
+    const latestDoc = completedDocs[completedDocs.length - 1];
+    const fileName = latestDoc.name || latestDoc.fileName || `${project.id || project.caseId || 'completed'}-file`;
+    await recordCompletedFileSent(fileName, 'Manually confirmed as sent');
+  };
+
   const shareCompletedFileOnWhatsApp = async () => {
     const completedDocs = getCompletedDocuments(project);
     if (completedDocs.length === 0) {
@@ -3116,13 +3150,6 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
       alert('This completed file does not have a valid server download link. Please re-upload the final PDF once.');
       return;
     }
-
-    const markPrepared = (via) => onUpdateProject({
-      ...project,
-      reportSent: true,
-      deliveryLog: [...(project.deliveryLog || []), { via, file: fileName, by: user.name, time: new Date().toLocaleString() }],
-      timeline: [...(project.timeline || []), { id: Date.now(), text: `Completed file prepared for WhatsApp delivery: ${fileName}`, time: new Date().toLocaleString() }]
-    }, project);
 
     try {
       const response = await fetch(downloadUrl, { cache: 'no-store' });
@@ -3148,7 +3175,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
 
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         await navigator.share({ files: [file], title: fileName, text: `Kalpvriksha Designs completed file: ${project.id || project.caseId || ''}`.trim() });
-        markPrepared('WhatsApp / native file share');
+        await recordCompletedFileSent(fileName, 'WhatsApp / native file share');
         return;
       }
 
@@ -3160,7 +3187,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
       link.click();
       document.body.removeChild(link);
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
-      markPrepared('Downloaded verified file for WhatsApp Web');
+      await recordCompletedFileSent(fileName, 'WhatsApp Web');
       window.open('https://web.whatsapp.com/', '_blank', 'noopener,noreferrer');
     } catch (e) {
       console.error('WhatsApp PDF share failed:', e);
@@ -3327,6 +3354,10 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
           
           <button type="button" onClick={shareCompletedFileOnWhatsApp} disabled={!isFinalApproved || completedDocsCount === 0} className={`px-4 py-2.5 rounded-xl transition-all flex items-center font-bold text-sm whitespace-nowrap ${isFinalApproved && completedDocsCount > 0 ? 'bg-green-500 text-white hover:bg-green-600 shadow-md shadow-green-100' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`} title={!isFinalApproved ? 'Final file can be shared only after internal review approval' : 'Share approved final file'}>
              <Send className="w-4 h-4 mr-1.5" /> Share PDF on WhatsApp
+          </button>
+
+          <button type="button" onClick={markCompletedFileAsSent} disabled={!isFinalApproved || completedDocsCount === 0 || project.reportSent} className={`px-4 py-2.5 rounded-xl transition-all flex items-center font-bold text-sm whitespace-nowrap border ${project.reportSent ? 'bg-emerald-50 text-emerald-700 border-emerald-200 cursor-default' : isFinalApproved && completedDocsCount > 0 ? 'bg-white text-emerald-700 border-emerald-300 hover:bg-emerald-50' : 'bg-slate-50 text-slate-400 border-slate-200 cursor-not-allowed'}`} title={project.reportSent ? `Sent${project.reportSentBy ? ` by ${project.reportSentBy}` : ''}` : !isFinalApproved ? 'Final file can be marked sent only after approval' : 'Confirm that the approved final file has been sent'}>
+             <CheckCircle className="w-4 h-4 mr-1.5" /> {project.reportSent ? 'Sent' : 'Mark as Sent'}
           </button>
 
           {canApproveFinal && (
@@ -6341,4 +6372,3 @@ function AppShell() {
 export default function App() {
   return <AppErrorBoundary><AppShell /></AppErrorBoundary>;
 }
-

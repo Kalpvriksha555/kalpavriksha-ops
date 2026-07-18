@@ -1,5 +1,5 @@
 import React from 'react';
-import { Calendar, List, KanbanSquare, Plus, Flag, Users, Clock, MessageSquare } from 'lucide-react';
+import { Calendar, List, KanbanSquare, Plus, Flag, Users, Clock, MessageSquare, CheckCircle, Send } from 'lucide-react';
 import { Badge } from '../shared';
 import { formatDateTime, formatLastSeenDateTime, formatDuration, formatMinutes } from '../../utils/date';
 import { formatTaskId, getTaskDescription, getEstimateDetails, getLatestCompletedFileName } from '../../utils/taskDisplayUtils';
@@ -19,6 +19,32 @@ const getRevisionLabel = (project = {}) => {
   const baseId = getDisplayTaskId(project);
   const code = project.revisionCode || (project.revisionNumber ? `R${project.revisionNumber}` : 'REV');
   return `${code} • Original ${baseId}`;
+};
+
+const isCompletedFileSent = (project = {}) => (
+  project.reportSent === true
+  || String(project.reportSent || '').trim().toLowerCase() === 'true'
+  || Boolean(project.reportSentAt)
+  || (Array.isArray(project.deliveryLog) && project.deliveryLog.length > 0)
+);
+
+const CompletedFileSentBadge = ({ project }) => {
+  if (isCompletedFileSent(project)) {
+    const sentDetails = [
+      project.reportSentBy ? `by ${project.reportSentBy}` : '',
+      project.reportSentAt ? `on ${formatDateTime(project.reportSentAt)}` : ''
+    ].filter(Boolean).join(' ');
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-md border border-emerald-300 bg-emerald-100 px-2 py-0.5 text-[10px] font-black uppercase tracking-wide text-emerald-800" title={`Completed file sent${sentDetails ? ` ${sentDetails}` : ''}`}>
+        <CheckCircle className="h-3 w-3" /> Sent
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1 rounded-md border border-amber-300 bg-amber-100 px-2 py-0.5 text-[10px] font-black uppercase tracking-wide text-amber-800" title="Completed file has not been sent yet">
+      <Send className="h-3 w-3" /> Not Sent
+    </span>
+  );
 };
 
 const CompactTextPill = ({ label, value, tone = 'indigo' }) => {
@@ -68,7 +94,10 @@ const OperationKanbanCard = ({ project, onSelectProject, getCustomerDisplayName,
     <CompactTextPill label="Estimate" value={getEstimateDetails(project)} tone="amber" />
     <PaymentStatusControl project={project} currentUser={currentUser} onPaymentStatusChange={onPaymentStatusChange} compact />
     {getLatestCompletedFileName(project) && (
-      <p className="text-[10px] font-black text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1 mb-3 truncate">Completed: {getLatestCompletedFileName(project)}</p>
+      <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-2 py-1.5">
+        <p className="min-w-0 flex-1 truncate text-[10px] font-black text-emerald-800" title={getLatestCompletedFileName(project)}>Completed: {getLatestCompletedFileName(project)}</p>
+        <CompletedFileSentBadge project={project} />
+      </div>
     )}
     <div className="flex justify-between items-center gap-2 pt-3 border-t border-slate-100">
       <Badge colorClass={project.assignedTo === 'Unassigned' ? 'bg-red-50 text-red-600 border-red-200' : 'bg-slate-50 text-slate-700 border-slate-200'}>{project.assignedTo}</Badge>
@@ -114,7 +143,12 @@ const OperationGridRow = ({ project, onSelectProject, getCustomerDisplayName, ge
         </div>
         <p className="text-slate-500 font-semibold text-xs mt-1 truncate">{getCustomerDisplayName(project)}</p>
         <p className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded mt-1.5 w-fit font-bold">Created: {project.createdAt ? formatDateTime(project.createdAt) : '-'}</p>
-        {getLatestCompletedFileName(project) && <p className="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-100 px-1.5 py-0.5 rounded mt-1.5 max-w-full truncate font-black" title={getLatestCompletedFileName(project)}>Completed: {getLatestCompletedFileName(project)}</p>}
+        {getLatestCompletedFileName(project) && (
+          <div className="mt-1.5 flex max-w-full flex-wrap items-center gap-2 rounded border border-emerald-200 bg-emerald-50 px-1.5 py-1">
+            <p className="min-w-0 flex-1 truncate text-[10px] font-black text-emerald-800" title={getLatestCompletedFileName(project)}>Completed: {getLatestCompletedFileName(project)}</p>
+            <CompletedFileSentBadge project={project} />
+          </div>
+        )}
       </div>
 
       <div className="kalpa-ops-cell kalpa-ops-type-cell">
