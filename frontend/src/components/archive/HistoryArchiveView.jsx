@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Archive, Calendar, Check, Filter } from 'lucide-react';
+import { Archive, Calendar, Check, ChevronDown, ChevronRight, Filter, MapPin } from 'lucide-react';
 import { formatDateTime } from '../../utils/date';
 import { formatTaskId, getEstimateDetails, getLatestCompletedFileName, getTaskDescription } from '../../utils/taskDisplayUtils';
 import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass } from '../../utils/paymentStatusUtils';
@@ -179,10 +179,12 @@ export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, arc
   const filterDate = effectiveArchiveViewState?.filterDate || '';
   const selectedBanks = Array.isArray(effectiveArchiveViewState?.selectedBanks) ? effectiveArchiveViewState.selectedBanks : [];
   const selectedLocations = Array.isArray(effectiveArchiveViewState?.selectedLocations) ? effectiveArchiveViewState.selectedLocations : [];
+  const expandedLocations = Array.isArray(effectiveArchiveViewState?.expandedLocations) ? effectiveArchiveViewState.expandedLocations : [];
   const bankFilterKey = selectedBanks.join('|');
   const locationFilterKey = selectedLocations.join('|');
+  const expandedLocationKey = expandedLocations.join('|');
   const updateArchiveViewState = (patch) => {
-    const updater = (prev = {}) => ({ filterMonth: 'All', filterDate: '', selectedBanks: [], selectedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0, ...prev, ...patch });
+    const updater = (prev = {}) => ({ filterMonth: 'All', filterDate: '', selectedBanks: [], selectedLocations: [], expandedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0, ...prev, ...patch });
     if (typeof setArchiveViewState === 'function') setArchiveViewState(updater);
     else setLocalArchiveViewState(updater);
   };
@@ -192,7 +194,7 @@ export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, arc
     if (!node) return;
     const savedScrollTop = Number(effectiveArchiveViewState?.scrollTop || 0);
     if (savedScrollTop > 0) requestAnimationFrame(() => { node.scrollTop = savedScrollTop; });
-  }, [filterMonth, filterDate, bankFilterKey, locationFilterKey]);
+  }, [filterMonth, filterDate, bankFilterKey, locationFilterKey, expandedLocationKey]);
   const rememberArchiveScroll = () => {
     const node = archiveTableRef.current;
     if (node) updateArchiveViewState({ scrollTop: node.scrollTop });
@@ -245,6 +247,30 @@ export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, arc
     }
   }), [archived, filterDate, filterMonth, bankFilterKey, locationFilterKey]);
 
+  const archiveLocationGroups = useMemo(() => {
+    const grouped = new Map();
+    filteredArchived.forEach((project) => {
+      const location = getArchiveLocation(project) || 'LOCATION NOT ADDED';
+      if (!grouped.has(location)) grouped.set(location, []);
+      grouped.get(location).push(project);
+    });
+    return Array.from(grouped.entries())
+      .map(([location, locationProjects]) => ({
+        location,
+        projects: locationProjects,
+        sentCount: locationProjects.filter((project) => project.reportSent).length,
+        latestCompletedAt: Math.max(0, ...locationProjects.map((project) => Number(project.completedAt || 0)))
+      }))
+      .sort((a, b) => a.location.localeCompare(b.location));
+  }, [filteredArchived]);
+
+  const allLocationNames = archiveLocationGroups.map((group) => group.location);
+  const toggleLocationGroup = (location) => updateArchiveViewState({
+    expandedLocations: expandedLocations.includes(location)
+      ? expandedLocations.filter((item) => item !== location)
+      : [...expandedLocations, location]
+  });
+
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in duration-200">
       <div className="space-y-4">
@@ -270,29 +296,67 @@ export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, arc
         />
       </div>
 
-      <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
-        <div ref={archiveTableRef} onScroll={rememberArchiveScroll} className="kalpa-archive-table-wrap">
-          <table className="kalpa-archive-table w-full text-left text-sm whitespace-nowrap">
-            <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
-              <tr>
-                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Date Completed</th>
-                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Task Details</th>
-                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Location</th>
-                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Designer</th>
-                {isAdminUser(currentUser) && <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Payment</th>}
-                <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Action</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {filteredArchived.map((project) => (
-                <ArchiveTableRow key={project.id} project={project} onSelectProject={(p) => { rememberArchiveScroll(); onSelectProject(p); }} currentUser={currentUser} onPaymentStatusChange={handleArchivePaymentStatusChange} />
-              ))}
-              {filteredArchived.length === 0 && (
-                <tr><td colSpan={isAdminUser(currentUser) ? 6 : 5} className="px-6 py-16 text-center text-slate-400 font-medium">No completed tasks found for this period.</td></tr>
+      <div ref={archiveTableRef} onScroll={rememberArchiveScroll} className="space-y-3">
+        {archiveLocationGroups.length > 0 && (
+          <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-xs font-black uppercase tracking-widest text-slate-500">Locations</p>
+              <p className="mt-1 text-[11px] font-bold text-slate-400">{archiveLocationGroups.length} groups • open only the location you need</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={() => updateArchiveViewState({ expandedLocations: allLocationNames })} className="inline-flex min-h-9 items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-black text-indigo-700 hover:bg-indigo-100"><ChevronDown className="h-4 w-4" /> Expand all</button>
+              <button type="button" onClick={() => updateArchiveViewState({ expandedLocations: [] })} className="inline-flex min-h-9 items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-black text-slate-600 hover:bg-slate-100"><ChevronRight className="h-4 w-4" /> Collapse all</button>
+            </div>
+          </div>
+        )}
+
+        {archiveLocationGroups.map((group) => {
+          const isExpanded = expandedLocations.includes(group.location);
+          return (
+            <section key={group.location} className="overflow-hidden rounded-2xl border-2 border-slate-100 bg-white shadow-sm">
+              <button type="button" onClick={() => toggleLocationGroup(group.location)} aria-expanded={isExpanded} className={`flex w-full items-center justify-between gap-4 px-4 py-4 text-left transition-colors sm:px-5 ${isExpanded ? 'bg-indigo-50 border-b border-indigo-100' : 'bg-white hover:bg-slate-50'}`}>
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border ${isExpanded ? 'border-indigo-200 bg-white text-indigo-600' : 'border-slate-200 bg-slate-50 text-slate-500'}`}><MapPin className="h-5 w-5" /></span>
+                  <div className="min-w-0">
+                    <h3 className="truncate text-sm font-black text-slate-800 sm:text-base">{group.location}</h3>
+                    <p className="mt-0.5 text-[11px] font-bold text-slate-400">{group.projects.length} completed task{group.projects.length === 1 ? '' : 's'}{group.latestCompletedAt ? ` • Latest ${formatDateTime(group.latestCompletedAt)}` : ''}</p>
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <span className="hidden rounded-lg border border-emerald-100 bg-emerald-50 px-2 py-1 text-[10px] font-black text-emerald-700 sm:inline-flex">{group.sentCount} Sent</span>
+                  <span className="rounded-full bg-slate-900 px-2.5 py-1 text-[10px] font-black text-white">{group.projects.length}</span>
+                  {isExpanded ? <ChevronDown className="h-5 w-5 text-indigo-600" /> : <ChevronRight className="h-5 w-5 text-slate-400" />}
+                </div>
+              </button>
+
+              {isExpanded && (
+                <div className="kalpa-archive-table-wrap">
+                  <table className="kalpa-archive-table w-full text-left text-sm whitespace-nowrap">
+                    <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
+                      <tr>
+                        <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs">Date Completed</th>
+                        <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs">Task Details</th>
+                        <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs">Location</th>
+                        <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs">Designer</th>
+                        {isAdminUser(currentUser) && <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs">Payment</th>}
+                        <th className="px-6 py-4 font-bold uppercase tracking-wider text-xs text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {group.projects.map((project) => (
+                        <ArchiveTableRow key={project.id} project={project} onSelectProject={(p) => { rememberArchiveScroll(); onSelectProject(p); }} currentUser={currentUser} onPaymentStatusChange={handleArchivePaymentStatusChange} />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
-            </tbody>
-          </table>
-        </div>
+            </section>
+          );
+        })}
+
+        {archiveLocationGroups.length === 0 && (
+          <div className="rounded-3xl border-2 border-slate-100 bg-white px-6 py-16 text-center text-slate-400 shadow-sm font-medium">No completed tasks found for this period.</div>
+        )}
       </div>
     </div>
   );
