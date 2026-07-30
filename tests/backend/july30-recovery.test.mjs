@@ -7,6 +7,7 @@ import {
   recoveryTimestamp,
   validateRecoveryExport
 } from '../../backend/scripts/july30-recovery-lib.mjs';
+import { loadStateForJuly30Recovery } from '../../backend/scripts/july30-recovery-state.mjs';
 
 const makeCases = () => Array.from({ length: 404 }, (_, index) => ({
   id: `TASK-${String(index + 1).padStart(3, '0')}`,
@@ -69,5 +70,87 @@ test('recovery merges missing operations while preserving live finance and atten
   assert.equal(
     caseFreshness(result.state.cases[0], { maxTimestamp: result.evidence.maxTimestamp }),
     Date.parse('2026-07-30T08:49:27.328Z')
+  );
+});
+
+test('recovery planning reads legacy app_state without migrating or writing it', async () => {
+  const liveState = {
+    cases: [{ id: 'LEGACY-1' }],
+    attendanceLogs: [{ id: 'attendance-1' }]
+  };
+  const queries = [];
+  const pool = {
+    async query(sql) {
+      queries.push(sql);
+      if (sql.includes('to_regclass')) {
+        return { rows: [{ metadata: 'app_state_metadata', legacy: 'app_state' }] };
+      }
+      if (sql.includes('FROM app_state_metadata')) return { rows: [] };
+      if (sql.includes('FROM app_state ')) {
+        return { rows: [{ value: liveState, state_version: 27 }] };
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    }
+  };
+  let migrated = false;
+  let reloaded = false;
+  const loaded = await loadStateForJuly30Recovery(pool, {
+    mode: 'plan',
+    loadRelationalStateFn: async () => {
+      migrated = true;
+      throw new Error('plan must not migrate');
+    },
+    reloadRelationalStateFn: async () => {
+      reloaded = true;
+      throw new Error('metadata row is absent');
+    }
+  });
+
+  assert.equal(loaded.source, 'legacy-app-state-read-only');
+  assert.equal(loaded.stateVersion, 27);
+  assert.deepEqual(loaded.state, liveState);
+  assert.equal(migrated, false);
+  assert.equal(reloaded, false);
+  assert.equal(queries.length, 3);
+});
+
+test('recovery apply imports an existing legacy state before persisting the merge', async () => {
+  const liveState = { cases: [{ id: 'LEGACY-1' }], attendanceLogs: [] };
+  const pool = {
+    async query(sql) {
+      if (sql.includes('to_regclass')) {
+        return { rows: [{ metadata: 'app_state_metadata', legacy: 'app_state' }] };
+      }
+      if (sql.includes('FROM app_state_metadata')) return { rows: [] };
+      if (sql.includes('FROM app_state ')) {
+        return { rows: [{ value: liveState, state_version: 27 }] };
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    }
+  };
+  let imports = 0;
+  const loaded = await loadStateForJuly30Recovery(pool, {
+    mode: 'apply',
+    loadRelationalStateFn: async () => {
+      imports += 1;
+      return { state: liveState, stateVersion: 27, source: 'legacy_app_state_import' };
+    }
+  });
+
+  assert.equal(imports, 1);
+  assert.equal(loaded.source, 'legacy_app_state_import');
+  assert.deepEqual(loaded.state, liveState);
+});
+
+test('recovery fails closed when neither relational metadata nor legacy state exists', async () => {
+  const pool = {
+    async query(sql) {
+      if (sql.includes('to_regclass')) return { rows: [{ metadata: null, legacy: null }] };
+      throw new Error(`Unexpected query: ${sql}`);
+    }
+  };
+  await assert.rejects(
+    loadStateForJuly30Recovery(pool, { mode: 'plan' }),
+    /No authoritative live state/
   );
 });

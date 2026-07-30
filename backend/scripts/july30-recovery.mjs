@@ -12,9 +12,9 @@ import {
 import {
   persistRelationalState,
   reloadRelationalState,
-  runRelationalMigrations,
   stateSnapshotHash
 } from '../src/repositories/postgresStateRepository.js';
+import { loadStateForJuly30Recovery } from './july30-recovery-state.mjs';
 
 const args = Object.fromEntries(process.argv.slice(2).map(value => {
   const [key, ...rest] = value.replace(/^--/, '').split('=');
@@ -44,8 +44,10 @@ const writeReport = report => {
 let original = null;
 let committedVersion = 0;
 try {
-  await runRelationalMigrations(pool);
-  const loaded = await reloadRelationalState(pool, { normalizeState: value => value });
+  const loaded = await loadStateForJuly30Recovery(pool, {
+    mode,
+    normalizeState: value => value
+  });
   original = loaded.state;
   const originalVersion = Number(loaded.stateVersion || 0);
   const originalAttendanceHash = attendanceHash(original);
@@ -160,4 +162,3 @@ try {
 } finally {
   await pool.end().catch(() => {});
 }
-
