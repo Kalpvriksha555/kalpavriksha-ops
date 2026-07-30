@@ -750,21 +750,22 @@ async function readRows(client, table, orderBy = 'sort_order,id') {
 }
 
 async function readRelationalParts(client) {
-  const [users, cases, payments, performanceRecords, notifications, teamChat, whatsappInbox, audit, attendanceLogs, files, deletedRows, chatReads, miscRows] = await Promise.all([
-    readRows(client, 'ops_users'),
-    readRows(client, 'ops_cases'),
-    readRows(client, 'ops_payments'),
-    readRows(client, 'ops_performance_records'),
-    readRows(client, 'ops_notifications'),
-    readRows(client, 'ops_chat_messages'),
-    readRows(client, 'ops_whatsapp_inbox'),
-    readRows(client, 'ops_audit_events'),
-    readRows(client, 'ops_attendance_logs'),
-    readRows(client, 'ops_files'),
-    client.query('SELECT project_id FROM ops_deleted_projects ORDER BY sort_order,project_id'),
-    readRows(client, 'ops_chat_reads', 'reader_key'),
-    client.query('SELECT key,payload FROM ops_misc_state ORDER BY key')
-  ]);
+  // A pg Client executes one query at a time. Keep this snapshot read on one
+  // connection and sequence the reads so pg@9 does not reject overlapping
+  // client.query() calls.
+  const users = await readRows(client, 'ops_users');
+  const cases = await readRows(client, 'ops_cases');
+  const payments = await readRows(client, 'ops_payments');
+  const performanceRecords = await readRows(client, 'ops_performance_records');
+  const notifications = await readRows(client, 'ops_notifications');
+  const teamChat = await readRows(client, 'ops_chat_messages');
+  const whatsappInbox = await readRows(client, 'ops_whatsapp_inbox');
+  const audit = await readRows(client, 'ops_audit_events');
+  const attendanceLogs = await readRows(client, 'ops_attendance_logs');
+  const files = await readRows(client, 'ops_files');
+  const deletedRows = await client.query('SELECT project_id FROM ops_deleted_projects ORDER BY sort_order,project_id');
+  const chatReads = await readRows(client, 'ops_chat_reads', 'reader_key');
+  const miscRows = await client.query('SELECT key,payload FROM ops_misc_state ORDER BY key');
   return {
     users, cases, payments, performanceRecords, notifications, teamChat, whatsappInbox, audit, attendanceLogs, files,
     deletedProjectIds: deletedRows.rows.map(row => row.project_id),
@@ -939,20 +940,18 @@ export async function persistRelationalState(pool, {
 export async function getRelationalHealth(pool) {
   const client = await pool.connect();
   try {
-    const [clock, metadata, migrations, revisions, tableCounts] = await Promise.all([
-      client.query('SELECT now() AS now'),
-      client.query('SELECT * FROM app_state_metadata WHERE key=$1', ['main']),
-      client.query('SELECT version,name,checksum,applied_at FROM schema_migrations ORDER BY version'),
-      client.query('SELECT count(*)::int AS count,max(state_version)::bigint AS latest_version,max(created_at) AS latest_at FROM state_revisions'),
-      client.query(`SELECT
+    const clock = await client.query('SELECT now() AS now');
+    const metadata = await client.query('SELECT * FROM app_state_metadata WHERE key=$1', ['main']);
+    const migrations = await client.query('SELECT version,name,checksum,applied_at FROM schema_migrations ORDER BY version');
+    const revisions = await client.query('SELECT count(*)::int AS count,max(state_version)::bigint AS latest_version,max(created_at) AS latest_at FROM state_revisions');
+    const tableCounts = await client.query(`SELECT
         (SELECT count(*)::int FROM ops_users) AS users,
         (SELECT count(*)::int FROM ops_cases) AS cases,
         (SELECT count(*)::int FROM ops_payments) AS payments,
         (SELECT count(*)::int FROM ops_notifications) AS notifications,
         (SELECT count(*)::int FROM ops_chat_messages) AS team_chat,
         (SELECT count(*)::int FROM ops_attendance_logs) AS attendance_logs,
-        (SELECT count(*)::int FROM ops_files) AS files`)
-    ]);
+        (SELECT count(*)::int FROM ops_files) AS files`);
     const meta = metadata.rows[0] || null;
     const actual = tableCounts.rows[0] || {};
     const expected = meta?.entity_counts || {};
