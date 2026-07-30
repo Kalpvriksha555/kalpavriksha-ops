@@ -12,7 +12,7 @@ $Remote = 'root@187.127.189.38'
 $RemoteWork = '/root/kalpavriksha-july30-safe'
 $ReleaseBranch = 'july30-safe-release'
 $GitUrl = 'https://github.com/Kalpvriksha555/kalpavriksha-ops.git'
-$GitAudit = 'D:\kalpavriksha-july30-release'
+$GitAudit = 'D:\kalpavriksha-july30-deploy-audit'
 $BackupBase = 'D:\Kalpavriksha-Recovery-Backups'
 $ExpectedFileSha256 = '51DB407B8F1BF7BAEECDDD37CAEDF5C503EA2F7716B8BFF270F0BF669AB455DA'
 
