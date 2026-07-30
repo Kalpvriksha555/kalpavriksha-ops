@@ -656,14 +656,32 @@ const TABLE_CONFIG = {
   }
 };
 
+export function rowsRequiringRelationalWrite(rows = [], existingRows = []) {
+  const existingById = new Map(existingRows.map(row => [String(row.id), row]));
+  return rows.filter(row => {
+    const existing = existingById.get(String(row.id));
+    if (!existing) return true;
+    return Number(existing.sortOrder || 0) !== Number(row.sortOrder || 0)
+      || stableStringify(existing.payload) !== stableStringify(row.payload);
+  });
+}
+
 async function upsertRows(client, config, rows = []) {
   const columns = config.columns;
   const updateColumns = columns.filter(column => column !== config.idColumn);
   const chunkSize = 150;
   for (let start = 0; start < rows.length; start += chunkSize) {
     const chunk = rows.slice(start, start + chunkSize);
+    const existing = await client.query(
+      `SELECT ${config.idColumn} AS id,sort_order AS "sortOrder",payload
+         FROM ${config.table}
+        WHERE ${config.idColumn} = ANY($1::text[])`,
+      [chunk.map(row => row.id)]
+    );
+    const pending = rowsRequiringRelationalWrite(chunk, existing.rows);
+    if (!pending.length) continue;
     const values = [];
-    const tuples = chunk.map((row, rowIndex) => {
+    const tuples = pending.map((row, rowIndex) => {
       const rowValues = config.values(row);
       values.push(...rowValues);
       const offset = rowIndex * columns.length;

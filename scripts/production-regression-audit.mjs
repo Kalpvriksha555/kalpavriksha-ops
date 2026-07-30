@@ -144,6 +144,10 @@ requireFile('scripts/deploy-july30-safe-vps.sh');
 requireFile('scripts/Run-July30-Safe-Deploy.ps1');
 requireInFile('backend/scripts/july30-recovery-lib.mjs', /expectedFreshCount\s*=\s*DEFAULT_EXPECTED_FRESH_COUNT/, 'July 30 recovery freshness gate is missing.');
 requireInFile('backend/scripts/july30-recovery.mjs', /attendancePreserved/, 'July 30 recovery attendance preservation check is missing.');
+requireInFile('backend/src/repositories/postgresStateRepository.js', /rowsRequiringRelationalWrite/, 'Relational persistence must skip unchanged legacy orphan rows.');
+requireInFile('scripts/deploy-july30-safe-vps.sh', /read-only recovery preflight/, 'Deployment must preflight live recovery before downtime.');
+requireInFile('scripts/deploy-july30-safe-vps.sh', /recovery-applied-commit/, 'Deployment must checkpoint an already verified recovery transaction.');
+requireInFile('scripts/deploy-july30-safe-vps.sh', /frontend\/dist\.next/, 'Deployment must atomically publish the verified frontend build.');
 requireInFile('backend/scripts/finance-recovery-apply.mjs', /targetStateVersion/, 'Finance recovery must bind to the exact live state version.');
 requireInFile('backend/src/services/releaseCertificationService.js', /APPLY FINANCE RECOVERY/, 'Finance recovery must require exact confirmation.');
 

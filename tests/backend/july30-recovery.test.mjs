@@ -8,6 +8,7 @@ import {
   validateRecoveryExport
 } from '../../backend/scripts/july30-recovery-lib.mjs';
 import { loadStateForJuly30Recovery } from '../../backend/scripts/july30-recovery-state.mjs';
+import { rowsRequiringRelationalWrite } from '../../backend/src/repositories/postgresStateRepository.js';
 
 const makeCases = () => Array.from({ length: 404 }, (_, index) => ({
   id: `TASK-${String(index + 1).padStart(3, '0')}`,
@@ -153,4 +154,22 @@ test('recovery fails closed when neither relational metadata nor legacy state ex
     loadStateForJuly30Recovery(pool, { mode: 'plan' }),
     /No authoritative live state/
   );
+});
+
+test('relational persistence skips unchanged legacy orphans but writes changed and new rows', () => {
+  const existing = [{
+    id: 'legacy-payment-1',
+    sortOrder: 4,
+    payload: { caseId: 'KNP-MUTH-SHUB-01', amount: 100, nested: { a: 1, b: 2 } }
+  }];
+  const unchangedWithDifferentKeyOrder = {
+    id: 'legacy-payment-1',
+    sortOrder: 4,
+    payload: { nested: { b: 2, a: 1 }, amount: 100, caseId: 'KNP-MUTH-SHUB-01' }
+  };
+  const changed = { ...unchangedWithDifferentKeyOrder, sortOrder: 5 };
+  const added = { id: 'new-payment', sortOrder: 6, payload: { caseId: 'KNOWN-CASE', amount: 50 } };
+
+  assert.deepEqual(rowsRequiringRelationalWrite([unchangedWithDifferentKeyOrder], existing), []);
+  assert.deepEqual(rowsRequiringRelationalWrite([changed, added], existing), [changed, added]);
 });

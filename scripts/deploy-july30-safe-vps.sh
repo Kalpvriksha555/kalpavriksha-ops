@@ -55,6 +55,20 @@ validate_source() {
 prepare_stage() {
   log "Fetching the July 30 safe release"
   git -C "$LIVE" fetch origin "$RELEASE_BRANCH"
+  local desired_commit stage_commit verified_commit
+  desired_commit="$(git -C "$LIVE" rev-parse "origin/$RELEASE_BRANCH")"
+  test "$desired_commit" = "${EXPECTED_COMMIT:-}" || fail "Fetched release does not match EXPECTED_COMMIT"
+  stage_commit="$(git -C "$STAGE" rev-parse HEAD 2>/dev/null || true)"
+  verified_commit="$(cat "$WORK/verified-stage-commit" 2>/dev/null || true)"
+  if [ "$stage_commit" = "$desired_commit" ] &&
+     [ "$verified_commit" = "$desired_commit" ] &&
+     [ -d "$STAGE/node_modules" ] &&
+     [ -d "$STAGE/backend/node_modules" ]; then
+    log "Reusing the already verified staging release $desired_commit"
+    validate_source "$STAGE"
+    return
+  fi
+
   git -C "$LIVE" worktree remove "$STAGE" --force 2>/dev/null || true
   test "$STAGE" != "/" && test "$STAGE" != "$LIVE" || fail "Unsafe staging path"
   rm -rf "$STAGE"
@@ -72,6 +86,7 @@ prepare_stage() {
   npm run verify
   rm -rf frontend/dist .release release-certification.json
   npm run release:clean-install
+  printf '%s' "$desired_commit" >"$WORK/verified-stage-commit"
 }
 
 create_backup_bundle() {
@@ -112,6 +127,24 @@ recover_and_deploy() {
   install -d -m 700 "$WORK"
   prepare_stage
 
+  local completed_commit current_script
+  completed_commit="$(cat "$WORK/recovery-deploy-complete" 2>/dev/null || true)"
+  current_script="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s).find(x=>x.name===process.argv[1]);process.stdout.write(p?.pm2_env?.pm_exec_path||'')})" "$PM2_NAME")"
+  if [ "$completed_commit" = "${EXPECTED_COMMIT:-}" ] &&
+     [ "$current_script" = "$STAGE/backend/src/server.js" ] &&
+     wait_for_health "/api/health/live" "$WORK/live-health.json" &&
+     wait_for_health "/api/health/ready" "$WORK/ready-health.json"; then
+    echo "JULY 30 RECOVERY AND DEPLOYMENT WERE ALREADY VERIFIED FOR $completed_commit"
+    return
+  fi
+
+  cd "$STAGE"
+  log "Running a read-only recovery preflight while the current service remains online"
+  node backend/scripts/july30-recovery.mjs \
+    --mode=plan \
+    --source="$RECOVERY_EXPORT" \
+    --report="$WORK/july30-recovery-preflight.json"
+
   log "Creating a verified pre-recovery database and private-file backup"
   create_backup_bundle "pre-recovery" "$STAGE"
 
@@ -141,18 +174,27 @@ recover_and_deploy() {
   service_stopped=1
 
   cd "$STAGE"
-  log "Planning recovery against the stopped live database"
-  node backend/scripts/july30-recovery.mjs \
-    --mode=plan \
-    --source="$RECOVERY_EXPORT" \
-    --report="$WORK/july30-recovery-plan.json"
+  local applied_commit
+  applied_commit="$(cat "$WORK/recovery-applied-commit" 2>/dev/null || true)"
+  if [ "$applied_commit" = "${EXPECTED_COMMIT:-}" ] &&
+     node -e "const fs=require('fs');const r=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));if(!r.ok||r.mode!=='apply'||!r.verification?.ok)process.exit(1)" "$WORK/july30-recovery-report.json"; then
+    log "Reusing the already verified recovery transaction for $applied_commit"
+    recovery_applied=1
+  else
+    log "Planning recovery against the stopped live database"
+    node backend/scripts/july30-recovery.mjs \
+      --mode=plan \
+      --source="$RECOVERY_EXPORT" \
+      --report="$WORK/july30-recovery-plan.json"
 
-  log "Applying the timestamp-aware project and operations merge"
-  node backend/scripts/july30-recovery.mjs \
-    --mode=apply \
-    --source="$RECOVERY_EXPORT" \
-    --report="$WORK/july30-recovery-report.json"
-  recovery_applied=1
+    log "Applying the timestamp-aware project and operations merge"
+    node backend/scripts/july30-recovery.mjs \
+      --mode=apply \
+      --source="$RECOVERY_EXPORT" \
+      --report="$WORK/july30-recovery-report.json"
+    recovery_applied=1
+    printf '%s' "$EXPECTED_COMMIT" >"$WORK/recovery-applied-commit"
+  fi
 
   log "Certifying the exact release against recovered production data"
   rm -f /var/lib/kalpavriksha/release-certification.json
@@ -170,6 +212,7 @@ recover_and_deploy() {
   log "Creating a verified post-recovery backup"
   create_backup_bundle "post-recovery" "$STAGE"
 
+  printf '%s' "$EXPECTED_COMMIT" >"$WORK/recovery-deploy-complete"
   trap - ERR INT TERM
   echo "JULY 30 DATA RECOVERY AND HARDENED DEPLOYMENT COMPLETED SUCCESSFULLY"
 }
@@ -185,6 +228,11 @@ align_main() {
   cd "$LIVE"
   rm -rf backend/node_modules
   npm ci --prefix backend --omit=dev --no-audit --no-fund
+  test -s "$STAGE/frontend/dist/index.html" || fail "Verified frontend build is missing from staging"
+  rm -rf "$LIVE/frontend/dist.next" "$LIVE/frontend/dist.previous"
+  cp -a "$STAGE/frontend/dist" "$LIVE/frontend/dist.next"
+  if [ -d "$LIVE/frontend/dist" ]; then mv "$LIVE/frontend/dist" "$LIVE/frontend/dist.previous"; fi
+  mv "$LIVE/frontend/dist.next" "$LIVE/frontend/dist"
 
   pm2 stop "$PM2_NAME"
   pm2 delete "$PM2_NAME" 2>/dev/null || true
@@ -192,10 +240,14 @@ align_main() {
   if ! wait_for_health "/api/health/live" "$WORK/main-live-health.json" || ! wait_for_health "/api/health/ready" "$WORK/main-ready-health.json"; then
     pm2 delete "$PM2_NAME" 2>/dev/null || true
     pm2 start "$STAGE/backend/src/server.js" --name "$PM2_NAME" --cwd "$STAGE/backend" --time --update-env
+    rm -rf "$LIVE/frontend/dist"
+    if [ -d "$LIVE/frontend/dist.previous" ]; then mv "$LIVE/frontend/dist.previous" "$LIVE/frontend/dist"; fi
     pm2 save
     fail "Main-path backend failed; the verified staging backend was restored"
   fi
+  rm -rf "$LIVE/frontend/dist.previous"
   pm2 save
+  printf '%s' "$EXPECTED_COMMIT" >"$WORK/main-align-complete"
   echo "VERIFIED GITHUB MAIN AND VPS ARE ALIGNED"
 }
 
@@ -204,4 +256,3 @@ case "$MODE" in
   align-main) align_main ;;
   *) fail "Unknown mode: $MODE" ;;
 esac
-

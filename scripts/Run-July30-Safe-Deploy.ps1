@@ -125,6 +125,7 @@ Write-Host 'Downloading verified pre/post recovery backups and reports...' -Fore
 Invoke-Native -FilePath scp -ArgumentList @(
     "${Remote}:$RemoteWork/pre-recovery-backup.tar",
     "${Remote}:$RemoteWork/post-recovery-backup.tar",
+    "${Remote}:$RemoteWork/july30-recovery-preflight.json",
     "${Remote}:$RemoteWork/july30-recovery-plan.json",
     "${Remote}:$RemoteWork/july30-recovery-report.json",
     "${Remote}:$RemoteWork/live-health.json",
