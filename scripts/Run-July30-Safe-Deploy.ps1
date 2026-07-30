@@ -118,7 +118,7 @@ Invoke-Native -FilePath scp -ArgumentList @(
 )
 Invoke-Native -FilePath ssh -ArgumentList @(
     $Remote,
-    "mv '$RemoteWork/$(Split-Path -Leaf $RecoveryExport)' '$RemoteWork/july30-project-operations-export.json' && chmod 700 '$RemoteWork/deploy-july30-safe-vps.sh' && EXPECTED_COMMIT='$releaseCommit' bash '$RemoteWork/deploy-july30-safe-vps.sh' recover-deploy"
+    "uploaded='$RemoteWork/$(Split-Path -Leaf $RecoveryExport)'; target='$RemoteWork/july30-project-operations-export.json'; if [ `"`$uploaded`" != `"`$target`" ]; then mv `"`$uploaded`" `"`$target`"; fi; chmod 700 '$RemoteWork/deploy-july30-safe-vps.sh' && EXPECTED_COMMIT='$releaseCommit' bash '$RemoteWork/deploy-july30-safe-vps.sh' recover-deploy"
 )
 
 Write-Host 'Downloading verified pre/post recovery backups and reports...' -ForegroundColor Cyan
