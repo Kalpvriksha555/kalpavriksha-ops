@@ -144,7 +144,7 @@ let runtimeOutput = '';
 const startRuntime = async () => {
   runtimeChild = spawn(process.execPath, ['backend/src/server.js'], {
     cwd:root,
-    env:{...process.env,NODE_ENV:'development',ALLOW_JSON_FALLBACK:'true',BACKUP_REQUIRED:'true',RELEASE_CERTIFICATE_REQUIRED:'true',DISK_WARNING_PERCENT:'98',DISK_CRITICAL_PERCENT:'100',PORT:String(runtimePort),KALPA_DATA_DIR:runtimeData,KALPA_DB_FILE:path.join(runtimeData,'db.json'),KALPA_AUTH_FILE:path.join(runtimeData,'auth.json'),KALPA_FILE_STORAGE_ROOT:fileRoot,KALPA_BACKUP_ROOT:backupRoot,RELEASE_CERTIFICATE_PATH:runtimeCertificatePath,BOOTSTRAP_ADMIN_USERNAME:'phase8admin',BOOTSTRAP_ADMIN_PASSWORD:'StrongAdmin123',BOOTSTRAP_ADMIN_NAME:'Phase 8 Admin',API_WRITE_RATE_LIMIT:'1000'},
+    env:{...process.env,NODE_ENV:'development',DATABASE_URL:'',DB_SSL:'false',ALLOW_JSON_FALLBACK:'true',BACKUP_REQUIRED:'true',RELEASE_CERTIFICATE_REQUIRED:'true',DISK_WARNING_PERCENT:'98',DISK_CRITICAL_PERCENT:'100',PORT:String(runtimePort),KALPA_DATA_DIR:runtimeData,KALPA_DB_FILE:path.join(runtimeData,'db.json'),KALPA_AUTH_FILE:path.join(runtimeData,'auth.json'),KALPA_FILE_STORAGE_ROOT:fileRoot,KALPA_BACKUP_ROOT:backupRoot,RELEASE_CERTIFICATE_PATH:runtimeCertificatePath,BOOTSTRAP_ADMIN_USERNAME:'phase8admin',BOOTSTRAP_ADMIN_PASSWORD:'StrongAdmin123',BOOTSTRAP_ADMIN_NAME:'Phase 8 Admin',API_WRITE_RATE_LIMIT:'1000'},
     stdio:['ignore','pipe','pipe']
   });
   runtimeChild.stdout.on('data', (chunk) => { runtimeOutput += chunk.toString(); });

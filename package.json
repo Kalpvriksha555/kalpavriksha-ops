@@ -1,6 +1,6 @@
 {
   "name": "kalpavriksha-designs-ops",
-  "version": "1.9.2-local-runtime-stability",
+  "version": "1.9.4-verifier-isolation",
   "type": "module",
   "scripts": {
     "dev": "node scripts/start-all.mjs",

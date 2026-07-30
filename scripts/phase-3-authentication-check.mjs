@@ -41,6 +41,8 @@ const start = async (bootstrap = false) => {
     env: {
       ...process.env,
       NODE_ENV: 'development',
+      DATABASE_URL: '',
+      DB_SSL: 'false',
       ALLOW_JSON_FALLBACK: 'true',
       PORT: String(port),
       KALPA_DB_FILE: dbFile,

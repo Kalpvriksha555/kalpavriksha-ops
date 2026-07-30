@@ -22,7 +22,7 @@ export default defineConfig(({ command, mode }) => {
     server: {
       host: '0.0.0.0',
       port: 5173,
-      strictPort: true,
+      strictPort: false,
       proxy: {
         '/api': {
           target: localApiTarget,

@@ -1,0 +1,26 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+
+const verifierFiles = [
+  'scripts/phase-2-finance-durability-check.mjs',
+  'scripts/phase-3-authentication-check.mjs',
+  'scripts/phase-4-authorization-check.mjs',
+  'scripts/phase-6-file-storage-check.mjs',
+  'scripts/phase-7-reliability-check.mjs',
+  'scripts/phase-8-release-certification-check.mjs'
+];
+
+test('runtime verification servers cannot inherit the production DATABASE_URL', () => {
+  for (const file of verifierFiles) {
+    const source = fs.readFileSync(file, 'utf8');
+    assert.match(source, /DATABASE_URL\s*:\s*['"]['"]/u, `${file} must explicitly blank DATABASE_URL`);
+  }
+});
+
+test('finance durability verifier uses isolated runtime storage', () => {
+  const source = fs.readFileSync('scripts/phase-2-finance-durability-check.mjs', 'utf8');
+  assert.match(source, /KALPA_DATA_DIR:\s*tempDir/u);
+  assert.match(source, /KALPA_FILE_STORAGE_ROOT:\s*path\.join\(tempDir, ['"]private-files['"]\)/u);
+  assert.match(source, /KALPA_BACKUP_ROOT:\s*path\.join\(tempDir, ['"]backups['"]\)/u);
+});

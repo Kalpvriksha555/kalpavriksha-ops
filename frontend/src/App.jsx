@@ -4150,6 +4150,28 @@ function AppShell() {
   const [createTaskError, setCreateTaskError] = useState('');
   
   const [showLocalBanner, setShowLocalBanner] = useState(false);
+
+  const clearAuthenticatedWorkspace = useCallback(({ clearCache = true } = {}) => {
+    setCurrentUser(null);
+    currentUserRef.current = null;
+    setSelectedProject(null);
+    setBackendStateReady(false);
+    setIsDbReady(false);
+    setUsers([]);
+    setProjects(() => []);
+    setChatMessages([]);
+    setNotifications([]);
+    setAttendanceLogs([]);
+    setPerformanceRecords([]);
+    setPerformanceSummary(null);
+    setShowLocalBanner(false);
+    setDbError(null);
+    if (clearCache) {
+      ['kalpa_users', 'kalpa_projects', 'kalpa_projects_backup', 'kalpa_chats', 'kalpa_notifs', 'kalpa_attendance', AUTHORIZATION_CACHE_SCOPE_KEY].forEach(key => {
+        try { localStorage.removeItem(key); } catch(e) {}
+      });
+    }
+  }, []);
   const [globalSearch, setGlobalSearch] = useState('');
   const [savedGlobalFilters, setSavedGlobalFilters] = useState(() => {
     try {
@@ -4470,10 +4492,18 @@ function AppShell() {
       setFirebaseUser({ uid: 'backend-state-user' });
       getSessionApi()
         .then((session) => {
-          if (!cancelled && session?.authenticated && session?.user) { clearRoleScopedOperationalCaches(session.user); setCurrentUser(session.user); }
-          else if (!cancelled) { setCurrentUser(null); currentUserRef.current = null; setBackendStateReady(false); setIsDbReady(false); }
+          if (cancelled) return;
+          if (session?.authenticated && session?.user) {
+            clearRoleScopedOperationalCaches(session.user);
+            setCurrentUser(session.user);
+            currentUserRef.current = session.user;
+          } else {
+            clearAuthenticatedWorkspace({ clearCache: true });
+          }
         })
-        .catch(() => {})
+        .catch(() => {
+          if (!cancelled) clearAuthenticatedWorkspace({ clearCache: true });
+        })
         .finally(() => { if (!cancelled) setIsAuthReady(true); });
       return () => { cancelled = true; };
     }
@@ -4509,7 +4539,7 @@ function AppShell() {
         setFirebaseUser(user);
     });
     return () => unsubscribe();
-  }, []);
+  }, [clearAuthenticatedWorkspace]);
 
   useEffect(() => {
     if (!firebaseUser || !isAuthReady || USE_BACKEND_STATE) return;
@@ -5298,26 +5328,6 @@ function AppShell() {
     }
   };
 
-  const clearAuthenticatedWorkspace = ({ clearCache = true } = {}) => {
-    setCurrentUser(null);
-    currentUserRef.current = null;
-    setSelectedProject(null);
-    setBackendStateReady(false);
-    setIsDbReady(false);
-    setUsers([]);
-    setProjects(() => []);
-    setChatMessages([]);
-    setNotifications([]);
-    setAttendanceLogs([]);
-    setPerformanceRecords([]);
-    setPerformanceSummary(null);
-    if (clearCache) {
-      ['kalpa_users', 'kalpa_projects', 'kalpa_projects_backup', 'kalpa_chats', 'kalpa_notifs', 'kalpa_attendance', AUTHORIZATION_CACHE_SCOPE_KEY].forEach(key => {
-        try { localStorage.removeItem(key); } catch(e) {}
-      });
-    }
-  };
-
   const establishAuthenticatedWorkspace = (user) => {
     if (!user) return;
     clearRoleScopedOperationalCaches(user);
@@ -5373,7 +5383,7 @@ function AppShell() {
     const expire = () => clearAuthenticatedWorkspace({ clearCache: true });
     window.addEventListener('kalpa-auth-expired', expire);
     return () => window.removeEventListener('kalpa-auth-expired', expire);
-  }, []);
+  }, [clearAuthenticatedWorkspace]);
 
   const toggleBreak = () => {
     if (!currentUser) return;

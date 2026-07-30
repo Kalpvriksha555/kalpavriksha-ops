@@ -78,7 +78,7 @@ const port=24000+(process.pid%1000);
 const base=`http://127.0.0.1:${port}`;
 let child; let output='';
 const start=async()=>{
-  child=spawn(process.execPath,['backend/src/server.js'],{cwd:root,env:{...process.env,NODE_ENV:'development',ALLOW_JSON_FALLBACK:'true',PORT:String(port),KALPA_DB_FILE:dbFile,KALPA_AUTH_FILE:authFile,KALPA_LEGACY_UPLOAD_DIR:legacyUpload,KALPA_FILE_STORAGE_ROOT:liveStorage,BOOTSTRAP_ADMIN_USERNAME:'phase6admin',BOOTSTRAP_ADMIN_PASSWORD:'StrongAdmin123',BOOTSTRAP_ADMIN_NAME:'Phase 6 Admin',API_WRITE_RATE_LIMIT:'1000'},stdio:['ignore','pipe','pipe']});
+  child=spawn(process.execPath,['backend/src/server.js'],{cwd:root,env:{...process.env,NODE_ENV:'development',DATABASE_URL:'',DB_SSL:'false',ALLOW_JSON_FALLBACK:'true',PORT:String(port),KALPA_DB_FILE:dbFile,KALPA_AUTH_FILE:authFile,KALPA_LEGACY_UPLOAD_DIR:legacyUpload,KALPA_FILE_STORAGE_ROOT:liveStorage,BOOTSTRAP_ADMIN_USERNAME:'phase6admin',BOOTSTRAP_ADMIN_PASSWORD:'StrongAdmin123',BOOTSTRAP_ADMIN_NAME:'Phase 6 Admin',API_WRITE_RATE_LIMIT:'1000'},stdio:['ignore','pipe','pipe']});
   child.stdout.on('data',chunk=>{output+=chunk.toString();}); child.stderr.on('data',chunk=>{output+=chunk.toString();});
   for(let i=0;i<120;i++){if(child.exitCode!==null)throw new Error(`Server exited early.\n${output}`);try{if((await fetch(`${base}/api/health/live`)).ok)return;}catch{}await delay(100);}throw new Error(`Server did not start.\n${output}`);
 };
