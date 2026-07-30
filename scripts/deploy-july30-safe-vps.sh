@@ -121,6 +121,43 @@ wait_for_health() {
   return 1
 }
 
+preflight_backend_runtime() {
+  local source="$1"
+  local probe_port="${KALPA_PREFLIGHT_PORT:-18080}"
+  local probe_log="$WORK/backend-runtime-preflight.log"
+  local probe_health="$WORK/backend-runtime-preflight-health.json"
+  local probe_pid=""
+
+  if curl -fsS "http://127.0.0.1:${probe_port}/api/health/live" >/dev/null 2>&1; then
+    fail "Private backend preflight port ${probe_port} is already in use"
+  fi
+
+  log "Starting the candidate backend privately while the stable service remains online"
+  cd "$source"
+  PORT="$probe_port" \
+    BIND_HOST="127.0.0.1" \
+    RELEASE_CERTIFICATE_REQUIRED="false" \
+    node backend/src/server.js >"$probe_log" 2>&1 &
+  probe_pid=$!
+
+  for _ in $(seq 1 45); do
+    if curl -fsS "http://127.0.0.1:${probe_port}/api/health/live" >"$probe_health" 2>/dev/null; then
+      kill -TERM "$probe_pid" 2>/dev/null || true
+      wait "$probe_pid" 2>/dev/null || true
+      echo "Candidate backend private startup preflight passed."
+      return 0
+    fi
+    if ! kill -0 "$probe_pid" 2>/dev/null; then break; fi
+    sleep 1
+  done
+
+  kill -TERM "$probe_pid" 2>/dev/null || true
+  wait "$probe_pid" 2>/dev/null || true
+  echo "Candidate backend private startup preflight failed. Startup log follows:" >&2
+  cat "$probe_log" >&2 || true
+  fail "Candidate backend cannot start; stable production was not stopped"
+}
+
 install_backup_timers() {
   local units="$LIVE/docs/deployment/systemd"
   for unit in \
@@ -286,6 +323,7 @@ final_merge_and_deploy() {
   load_env
   install -d -m 700 "$WORK"
   prepare_stage
+  preflight_backend_runtime "$STAGE"
 
   cd "$STAGE"
   log "Preflighting the final active-plus-recovered merge while the stable service remains online"
@@ -306,6 +344,8 @@ final_merge_and_deploy() {
     trap - ERR INT TERM
     echo "Final merge/deployment stopped with exit $rc."
     if [ "$service_stopped" = "1" ]; then
+      pm2 logs "$PM2_NAME" --lines 200 --nostream >"$WORK/final-deploy-failure.log" 2>&1 || true
+      cat "$WORK/final-deploy-failure.log" >&2 || true
       pm2 delete "$PM2_NAME" 2>/dev/null || true
       pm2 start "$old_script" --name "$PM2_NAME" --cwd "$old_cwd" --time --update-env || true
       pm2 save || true

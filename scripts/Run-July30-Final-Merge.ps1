@@ -30,7 +30,20 @@ foreach ($command in @('git', 'ssh', 'scp')) {
     }
 }
 if (-not (Test-Path -LiteralPath (Join-Path $GitAudit '.git'))) {
-    throw "Verified deployment checkout is missing: $GitAudit"
+    Write-Host "Recreating the verified deployment checkout at $GitAudit..." -ForegroundColor Cyan
+    if (Test-Path -LiteralPath $GitAudit) {
+        $existingItems = @(Get-ChildItem -LiteralPath $GitAudit -Force -ErrorAction SilentlyContinue)
+        if ($existingItems.Count -gt 0) {
+            throw "Deployment checkout path exists but is not a Git checkout: $GitAudit"
+        }
+    }
+    Invoke-Native -FilePath git -ArgumentList @(
+        'clone',
+        '--branch', $ReleaseBranch,
+        '--single-branch',
+        'https://github.com/Kalpvriksha555/kalpavriksha-ops.git',
+        $GitAudit
+    )
 }
 New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
 
