@@ -323,6 +323,8 @@ final_merge_and_deploy() {
   load_env
   install -d -m 700 "$WORK"
   prepare_stage
+  log "Creating a verified backup before credential migration and candidate startup"
+  create_backup_bundle "pre-candidate-runtime" "$STAGE"
   preflight_backend_runtime "$STAGE"
 
   cd "$STAGE"
