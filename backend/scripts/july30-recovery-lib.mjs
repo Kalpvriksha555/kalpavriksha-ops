@@ -323,6 +323,15 @@ function mergeActiveCollection(collection, recovered = [], active = []) {
   return result;
 }
 
+function stripUserCredentialFields(user = {}) {
+  const safe = structuredClone(user || {});
+  for (const field of [
+    'password', 'passwordHash', 'password_hash', 'credential', 'credentials',
+    'sessionToken', 'refreshToken', 'resetToken', 'otp', 'secret'
+  ]) delete safe[field];
+  return safe;
+}
+
 function mergeChatReads(recovered = {}, active = {}) {
   const readers = new Set([...Object.keys(recovered || {}), ...Object.keys(active || {})]);
   return Object.fromEntries([...readers].map(reader => [
@@ -403,6 +412,7 @@ export function mergeActiveLegacyIntoRecoveredState(recoveredState = {}, activeS
       activeState?.[collection]
     );
   }
+  state.users = state.users.map(stripUserCredentialFields);
   state.chatReads = mergeChatReads(recoveredState?.chatReads, activeState?.chatReads);
   summary.finalCases = finalCases.length;
   summary.finalAttendance = state.attendanceLogs.length;

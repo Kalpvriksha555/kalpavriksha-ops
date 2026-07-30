@@ -814,7 +814,7 @@ export async function loadRelationalState(pool, { normalizeState, seedState }) {
           await client.query('COMMIT');
           const currentParts = await readRelationalParts(client);
           const currentState = normalizeState(recomposeState(currentParts));
-          return { state:currentState, stateVersion:Number(concurrentMetadata.rows[0].state_version || 0), source:'relational', legacyState:null };
+          return { state:currentState, stateVersion:Number(concurrentMetadata.rows[0].state_version || 0), source:'relational', legacyState:rawState };
         }
         await syncRelationalParts(client, parts);
         await client.query(
@@ -838,7 +838,17 @@ export async function loadRelationalState(pool, { normalizeState, seedState }) {
     const parts = await readRelationalParts(client);
     const { persistedState } = verifyPersistedRelationalSnapshot(parts, metadata.rows[0]);
     const state = normalizeState(persistedState);
-    return { state, stateVersion: Number(metadata.rows[0].state_version || 0), source: 'relational', legacyState: null };
+    // The legacy app_state remains read-only during cutover, but it is still
+    // the authoritative source for one-time password migration. Returning it
+    // lets the API hash those legacy passwords into auth_credentials while the
+    // relational operational state stays authoritative.
+    const legacy = await client.query('SELECT value FROM app_state WHERE key=$1', ['main']);
+    return {
+      state,
+      stateVersion: Number(metadata.rows[0].state_version || 0),
+      source: 'relational',
+      legacyState: legacy.rows[0]?.value || null
+    };
   } finally {
     client.release();
   }

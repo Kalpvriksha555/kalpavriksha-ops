@@ -177,6 +177,7 @@ test('relational persistence skips unchanged legacy orphans but writes changed a
 
 test('final merge preserves recovered cases while active legacy finance and newer work win', () => {
   const recovered = {
+    users: [{ id: 'user-admin', username: 'admin', role: 'Admin' }],
     cases: [
       { id: 'CASE-1', status: 'Recovered Review', updatedAt: '2026-07-30T08:40:00.000Z', paymentAmountIn: 100 },
       { id: 'CASE-JULY30', status: 'Recovered July 30', updatedAt: '2026-07-30T08:49:00.000Z', paymentAmountIn: 0 }
@@ -188,6 +189,7 @@ test('final merge preserves recovered cases while active legacy finance and newe
     customSettings: { source: 'recovered' }
   };
   const active = {
+    users: [{ id: 'user-admin', username: 'admin', role: 'Admin', password: 'legacy-secret' }],
     projects: [
       { id: 'CASE-1', status: 'Paid Today', updatedAt: '2026-07-30T20:00:00.000Z', paymentAmountIn: 999, paymentTrackingStatus: 'Paid' },
       { id: 'CASE-NEW', status: 'New Today', updatedAt: '2026-07-30T20:05:00.000Z', paymentAmountIn: 50 }
@@ -213,6 +215,8 @@ test('final merge preserves recovered cases while active legacy finance and newe
   assert.deepEqual(final.attendanceLogs.map(item => item.id), ['att-old', 'att-new']);
   assert.deepEqual(final.notifications.map(item => item.id), ['notice-new', 'notice-old']);
   assert.deepEqual(final.files.map(item => item.id), ['file-new', 'file-old']);
+  assert.equal(final.users[0].username, 'admin');
+  assert.equal(Object.hasOwn(final.users[0], 'password'), false);
   assert.equal(final.customSettings.source, 'active');
 });
 
