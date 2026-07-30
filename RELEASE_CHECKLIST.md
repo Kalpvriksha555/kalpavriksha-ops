@@ -2,6 +2,10 @@
 
 ## Before every deploy
 
+- [ ] When recovering the July 30 incident, validate the exact 404-record export, 34 post-cutoff tasks, and latest activity on 30 July at approximately 2:19 PM IST.
+- [ ] Reject source timestamps later than the source export time; never use record totals alone as a freshness gate.
+- [ ] Hash attendance and all non-project state before and after a project/operations recovery.
+
 ```powershell
 npm ci
 npm run security:package-audit

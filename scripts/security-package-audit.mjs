@@ -60,6 +60,11 @@ const resolveLockedDependency = (packages, fromKey, dependencyName) => {
   }
   return candidates.find(candidate => packages[candidate]);
 };
+const sameDependencyMap = (left = {}, right = {}) => {
+  const leftEntries = Object.entries(left).sort(([a], [b]) => a.localeCompare(b));
+  const rightEntries = Object.entries(right).sort(([a], [b]) => a.localeCompare(b));
+  return JSON.stringify(leftEntries) === JSON.stringify(rightEntries);
+};
 for (const [lockFile, manifestFile] of lockPairs) {
   const text = fs.readFileSync(path.join(root, lockFile), 'utf8');
   const lock = JSON.parse(text);
@@ -69,7 +74,7 @@ for (const [lockFile, manifestFile] of lockPairs) {
   for (const section of ['dependencies', 'devDependencies']) {
     const expected = manifest[section] || {};
     const locked = lock.packages?.['']?.[section] || {};
-    if (JSON.stringify(expected) !== JSON.stringify(locked)) errors.push(`${lockFile} root ${section} does not match ${manifestFile}.`);
+    if (!sameDependencyMap(expected, locked)) errors.push(`${lockFile} root ${section} does not match ${manifestFile}.`);
   }
   for (const [packageKey, packageInfo] of Object.entries(lock.packages || {})) {
     for (const section of ['dependencies', 'optionalDependencies']) {

@@ -1,6 +1,6 @@
 {
   "name": "kalpavriksha-designs-ops",
-  "version": "1.9.6-build-tooling-isolation",
+  "version": "1.9.8-july30-safe-recovery",
   "type": "module",
   "scripts": {
     "dev": "node scripts/start-all.mjs",
@@ -45,6 +45,8 @@
     "release:gate": "node scripts/release-gate.mjs",
     "finance-recovery:plan": "npm run finance-recovery:plan --prefix backend",
     "finance-recovery:apply": "npm run finance-recovery:apply --prefix backend",
+    "july30-recovery:plan": "npm run july30-recovery:plan --prefix backend --",
+    "july30-recovery:apply": "npm run july30-recovery:apply --prefix backend --",
     "verify:frontend-ux": "node scripts/phase-9-frontend-ux-check.mjs",
     "test:backend": "node --test tests/backend/*.test.mjs"
   },

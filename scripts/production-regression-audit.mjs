@@ -138,6 +138,12 @@ requireInFile(serverPath, /\/api\/system\/release-certification/, 'Runtime relea
 requireInFile(serverPath, /RELEASE_CERTIFICATE_REQUIRED/, 'Readiness must enforce the production release certificate.');
 requireInFile('backend/src/repositories/postgresStateRepository.js', /migration\('008\.001'/, 'Phase 8 migration is missing.');
 requireInFile('backend/src/repositories/postgresStateRepository.js', /finance_recovery_runs/, 'Finance recovery audit history is missing.');
+requireFile('backend/scripts/july30-recovery-lib.mjs');
+requireFile('backend/scripts/july30-recovery.mjs');
+requireFile('scripts/deploy-july30-safe-vps.sh');
+requireFile('scripts/Run-July30-Safe-Deploy.ps1');
+requireInFile('backend/scripts/july30-recovery-lib.mjs', /expectedFreshCount\s*=\s*DEFAULT_EXPECTED_FRESH_COUNT/, 'July 30 recovery freshness gate is missing.');
+requireInFile('backend/scripts/july30-recovery.mjs', /attendancePreserved/, 'July 30 recovery attendance preservation check is missing.');
 requireInFile('backend/scripts/finance-recovery-apply.mjs', /targetStateVersion/, 'Finance recovery must bind to the exact live state version.');
 requireInFile('backend/src/services/releaseCertificationService.js', /APPLY FINANCE RECOVERY/, 'Finance recovery must require exact confirmation.');
 

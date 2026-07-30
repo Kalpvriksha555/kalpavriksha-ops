@@ -27,10 +27,35 @@ function safeText(value) {
   return String(value ?? '').trim();
 }
 
-function timestampValue(value) {
-  if (!value) return null;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+const MIN_OPERATIONAL_TIMESTAMP_MS = Date.UTC(2000, 0, 1);
+const MAX_OPERATIONAL_TIMESTAMP_MS = Date.UTC(2101, 0, 1) - 1;
+
+export function normalizeEpochMilliseconds(value) {
+  if (value === null || value === undefined || value === '') return null;
+  let numeric = null;
+  if (typeof value === 'number') numeric = value;
+  else if (typeof value === 'string' && /^[+-]?\d{10,19}(?:\.\d+)?$/.test(value.trim())) numeric = Number(value.trim());
+  if (!Number.isFinite(numeric)) return null;
+  const magnitude = Math.abs(numeric);
+  if (magnitude >= 1e17) numeric /= 1e6;      // nanoseconds -> milliseconds
+  else if (magnitude >= 1e14) numeric /= 1e3; // microseconds -> milliseconds
+  else if (magnitude > 0 && magnitude < 1e11) numeric *= 1e3; // seconds -> milliseconds
+  const milliseconds = Math.trunc(numeric);
+  if (milliseconds < MIN_OPERATIONAL_TIMESTAMP_MS || milliseconds > MAX_OPERATIONAL_TIMESTAMP_MS) return null;
+  return milliseconds;
+}
+
+export function timestampValue(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const normalizedEpoch = normalizeEpochMilliseconds(value);
+  const date = normalizedEpoch === null ? new Date(value) : new Date(normalizedEpoch);
+  const milliseconds = date.getTime();
+  if (!Number.isFinite(milliseconds) || milliseconds < MIN_OPERATIONAL_TIMESTAMP_MS || milliseconds > MAX_OPERATIONAL_TIMESTAMP_MS) return null;
+  try {
+    return date.toISOString();
+  } catch {
+    return null;
+  }
 }
 
 function numericValue(value) {

@@ -15,7 +15,7 @@ import { FINANCE_FIELDS, applyFreshestFinance, buildFinanceSnapshot, financeFres
 import { hashPassword, verifyPassword, passwordPolicyErrors, isWeakLegacyPassword, randomOpaqueToken, tokenHash, randomOtp, normalizeUsername, normalizeAuthRole, normalizeAuthStatus, stripCredentialFields, publicSessionUser } from './services/authService.js';
 import { ROLE_CAPABILITIES, authorizationActor, canAccessCase, canMutateCase, canAccessFileDocument, canDeleteFileDocument, filterCasesForUser, hasCapability, isCaseAssignedToUser, normalizePermissionRole, notificationBelongsToUser } from './services/authorizationService.js';
 import { attachRequestId, createRateLimiter, rejectDangerousJson, requireJsonForBody, secureResponseHeaders } from './middleware/security.js';
-import { getRelationalHealth, loadRelationalState, persistRelationalState, reloadRelationalState, restoreRelationalRevision, runRelationalMigrations } from './repositories/postgresStateRepository.js';
+import { getRelationalHealth, loadRelationalState, normalizeEpochMilliseconds, persistRelationalState, reloadRelationalState, restoreRelationalRevision, runRelationalMigrations } from './repositories/postgresStateRepository.js';
 import { buildFileReconciliationReport, createFileStorage, FileValidationError } from './services/fileStorageService.js';
 import { createOperationalJobStore, filesystemUsage, inspectBackupManifests, recordOperationalEvent, requestLogMiddleware, structuredLog } from './services/operationalReliabilityService.js';
 import { readAndVerifyReleaseCertificate } from './services/releaseCertificationService.js';
@@ -911,10 +911,10 @@ function parseDateMs(value){
     const sec = Number(value.seconds ?? value._seconds ?? value.sec);
     if(Number.isFinite(sec) && sec > 0) return Math.round(sec * 1000 + (Number(value.nanoseconds ?? value._nanoseconds ?? 0) || 0) / 1000000);
   }
-  if(typeof value === 'number') return value > 0 && value < 10000000000 ? value * 1000 : value;
+  if(typeof value === 'number') return normalizeEpochMilliseconds(value) || 0;
   const raw=String(value).trim();
-  const num=Number(raw);
-  if(Number.isFinite(num) && num > 0) return num < 10000000000 ? num * 1000 : num;
+  const normalizedEpoch = normalizeEpochMilliseconds(raw);
+  if(normalizedEpoch) return normalizedEpoch;
   const direct=new Date(raw).getTime();
   if(!Number.isNaN(direct)) return direct;
   const dmy=raw.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})(?:[,\s]+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?/i);
@@ -1175,8 +1175,8 @@ function caseFreshness(c = {}) {
   const candidates = [c.syncVersion, c.updatedAt, c.assignmentVersion, c.assignedAt, c.completedAt, c.createdAt];
   return Math.max(0, ...candidates.map(value => {
     if (!value) return 0;
-    const numeric = Number(value);
-    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+    const normalizedEpoch = normalizeEpochMilliseconds(value);
+    if (normalizedEpoch) return normalizedEpoch;
     const parsed = new Date(value).getTime();
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
   }));
