@@ -777,6 +777,21 @@ function compareCounts(expected = {}, actual = {}) {
   return Object.keys(expected).filter(key => Number(expected[key] || 0) !== Number(actual[key] || 0));
 }
 
+export function verifyPersistedRelationalSnapshot(parts = {}, metadata = {}) {
+  const persistedState = recomposeState(parts);
+  const counts = entityCounts(decomposeState(persistedState));
+  const expectedCounts = metadata.entity_counts || {};
+  const countMismatches = compareCounts(expectedCounts, counts);
+  const hash = stateSnapshotHash(persistedState);
+  const expectedHash = String(metadata.snapshot_hash || '');
+  if (countMismatches.length || (expectedHash && expectedHash !== hash)) {
+    const error = new Error(`Relational state integrity check failed${countMismatches.length ? ` for: ${countMismatches.join(', ')}` : ''}. Restore the last verified revision before starting the API.`);
+    error.code = 'RELATIONAL_STATE_INTEGRITY_FAILURE';
+    throw error;
+  }
+  return { persistedState, counts, hash };
+}
+
 export async function loadRelationalState(pool, { normalizeState, seedState }) {
   await runRelationalMigrations(pool);
   const client = await pool.connect();
@@ -820,16 +835,8 @@ export async function loadRelationalState(pool, { normalizeState, seedState }) {
     }
 
     const parts = await readRelationalParts(client);
-    const state = normalizeState(recomposeState(parts));
-    const counts = entityCounts(decomposeState(state));
-    const expectedCounts = metadata.rows[0].entity_counts || {};
-    const countMismatches = compareCounts(expectedCounts, counts);
-    const hash = stateSnapshotHash(state);
-    if (countMismatches.length || (metadata.rows[0].snapshot_hash && metadata.rows[0].snapshot_hash !== hash)) {
-      const error = new Error(`Relational state integrity check failed${countMismatches.length ? ` for: ${countMismatches.join(', ')}` : ''}. Restore the last verified revision before starting the API.`);
-      error.code = 'RELATIONAL_STATE_INTEGRITY_FAILURE';
-      throw error;
-    }
+    const { persistedState } = verifyPersistedRelationalSnapshot(parts, metadata.rows[0]);
+    const state = normalizeState(persistedState);
     return { state, stateVersion: Number(metadata.rows[0].state_version || 0), source: 'relational', legacyState: null };
   } finally {
     client.release();
