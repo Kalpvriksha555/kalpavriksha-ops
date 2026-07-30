@@ -68,9 +68,9 @@ let status = 'FAIL';
 let errorMessage = '';
 try {
   fs.cpSync(root, copyRoot, { recursive: true, filter: ignore });
-  runNpm('root_npm_ci', ['ci', '--ignore-scripts', '--no-audit', '--no-fund']);
+  runNpm('root_npm_ci', ['ci', '--include=dev', '--ignore-scripts', '--no-audit', '--no-fund']);
   runNpm('backend_npm_ci', ['ci', '--prefix', 'backend', '--no-audit', '--no-fund']);
-  runNpm('frontend_npm_ci', ['ci', '--prefix', 'frontend', '--no-audit', '--no-fund']);
+  runNpm('frontend_npm_ci', ['ci', '--prefix', 'frontend', '--include=dev', '--no-audit', '--no-fund']);
   runNpm('frontend_build', ['run', 'build']);
   run('backend_syntax', process.execPath, ['--check', 'backend/src/server.js']);
   status = 'PASS';

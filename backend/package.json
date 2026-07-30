@@ -1,6 +1,6 @@
 {
   "name": "kalpvriksha-designs-backend",
-  "version": "2.9.5-readiness-isolation",
+  "version": "2.9.6-build-tooling-isolation",
   "type": "module",
   "scripts": {
     "dev": "node scripts/start-json-dev.mjs",

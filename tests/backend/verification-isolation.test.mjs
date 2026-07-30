@@ -32,3 +32,19 @@ test('reliability verifier disables inherited production release-certificate gat
   assert.match(source, /RELEASE_REQUIRE_BACKUP:\s*['"]false['"]/u);
   assert.match(source, /RELEASE_CERTIFICATE_PATH:\s*path\.join\(temp,\s*['"]release-certification\.json['"]\)/u);
 });
+
+test('clean-install verification includes build-time dev dependencies under production NODE_ENV', () => {
+  for (const file of ['scripts/clean-install-verify.mjs', 'clean-install-verify.mjs']) {
+    const source = fs.readFileSync(file, 'utf8');
+    assert.match(
+      source,
+      /runNpm\('root_npm_ci',\s*\['ci',\s*'--include=dev'/u,
+      `${file} must install root build tooling even when NODE_ENV=production`
+    );
+    assert.match(
+      source,
+      /runNpm\('frontend_npm_ci',\s*\['ci',\s*'--prefix',\s*'frontend',\s*'--include=dev'/u,
+      `${file} must install frontend PostCSS/Tailwind build tooling even when NODE_ENV=production`
+    );
+  }
+});
