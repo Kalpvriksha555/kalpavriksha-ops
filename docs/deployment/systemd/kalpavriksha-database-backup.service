@@ -1,5 +1,5 @@
 [Unit]
-Description=Kalpavriksha verified PostgreSQL and private-file backup
+Description=Kalpavriksha verified PostgreSQL database backup
 After=network-online.target postgresql.service
 Wants=network-online.target
 
@@ -9,7 +9,7 @@ User=root
 WorkingDirectory=/var/www/kalpavriksha-ops
 EnvironmentFile=/etc/kalpavriksha/backend.env
 Environment=BACKUP_RETENTION_COUNT=120
-ExecStart=/usr/bin/npm run backup:create
+ExecStart=/usr/bin/node /var/www/kalpavriksha-ops/backend/scripts/backup-create.mjs --database-only
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7

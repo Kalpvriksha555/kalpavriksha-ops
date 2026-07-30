@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   attendanceHash,
   caseFreshness,
+  mergeActiveLegacyIntoRecoveredState,
   mergeRecoveryIntoState,
   recoveryTimestamp,
   validateRecoveryExport
@@ -172,4 +173,62 @@ test('relational persistence skips unchanged legacy orphans but writes changed a
 
   assert.deepEqual(rowsRequiringRelationalWrite([unchangedWithDifferentKeyOrder], existing), []);
   assert.deepEqual(rowsRequiringRelationalWrite([changed, added], existing), [changed, added]);
+});
+
+test('final merge preserves recovered cases while active legacy finance and newer work win', () => {
+  const recovered = {
+    cases: [
+      { id: 'CASE-1', status: 'Recovered Review', updatedAt: '2026-07-30T08:40:00.000Z', paymentAmountIn: 100 },
+      { id: 'CASE-JULY30', status: 'Recovered July 30', updatedAt: '2026-07-30T08:49:00.000Z', paymentAmountIn: 0 }
+    ],
+    attendanceLogs: [{ id: 'att-old', userId: 'u1', date: '2026-07-30' }],
+    notifications: [{ id: 'notice-old' }],
+    files: [{ id: 'file-old', caseId: 'CASE-JULY30' }],
+    deletedProjectIds: [],
+    customSettings: { source: 'recovered' }
+  };
+  const active = {
+    projects: [
+      { id: 'CASE-1', status: 'Paid Today', updatedAt: '2026-07-30T20:00:00.000Z', paymentAmountIn: 999, paymentTrackingStatus: 'Paid' },
+      { id: 'CASE-NEW', status: 'New Today', updatedAt: '2026-07-30T20:05:00.000Z', paymentAmountIn: 50 }
+    ],
+    attendanceLogs: [
+      { id: 'att-old', userId: 'u1', date: '2026-07-30', status: 'PRESENT' },
+      { id: 'att-new', userId: 'u1', date: '2026-07-31', status: 'PRESENT' }
+    ],
+    notifications: [{ id: 'notice-new' }],
+    files: [{ id: 'file-new', caseId: 'CASE-NEW' }],
+    deletedProjectIds: [],
+    customSettings: { source: 'active' }
+  };
+  const final = mergeActiveLegacyIntoRecoveredState(recovered, active).state;
+  const byId = new Map(final.cases.map(item => [item.id, item]));
+
+  assert.equal(final.cases.length, 3);
+  assert.equal(byId.get('CASE-1').status, 'Paid Today');
+  assert.equal(byId.get('CASE-1').paymentAmountIn, 999);
+  assert.equal(byId.get('CASE-1').paymentTrackingStatus, 'Paid');
+  assert.equal(byId.get('CASE-JULY30').status, 'Recovered July 30');
+  assert.equal(byId.get('CASE-NEW').status, 'New Today');
+  assert.deepEqual(final.attendanceLogs.map(item => item.id), ['att-old', 'att-new']);
+  assert.deepEqual(final.notifications.map(item => item.id), ['notice-new', 'notice-old']);
+  assert.deepEqual(final.files.map(item => item.id), ['file-new', 'file-old']);
+  assert.equal(final.customSettings.source, 'active');
+});
+
+test('final merge keeps separate attendance dates when legacy rows have no explicit ids', () => {
+  const recovered = {
+    cases: [],
+    attendanceLogs: [{ userId: 'u1', date: '2026-07-30', status: 'PRESENT' }]
+  };
+  const active = {
+    cases: [],
+    attendanceLogs: [
+      { userId: 'u1', date: '2026-07-30', status: 'PRESENT' },
+      { userId: 'u1', date: '2026-07-31', status: 'PRESENT' }
+    ]
+  };
+  const final = mergeActiveLegacyIntoRecoveredState(recovered, active).state;
+  assert.equal(final.attendanceLogs.length, 2);
+  assert.deepEqual(final.attendanceLogs.map(item => item.date), ['2026-07-30', '2026-07-31']);
 });

@@ -47,6 +47,8 @@
     "finance-recovery:apply": "npm run finance-recovery:apply --prefix backend",
     "july30-recovery:plan": "npm run july30-recovery:plan --prefix backend --",
     "july30-recovery:apply": "npm run july30-recovery:apply --prefix backend --",
+    "july30-final:plan": "npm run july30-final:plan --prefix backend --",
+    "july30-final:apply": "npm run july30-final:apply --prefix backend --",
     "verify:frontend-ux": "node scripts/phase-9-frontend-ux-check.mjs",
     "test:backend": "node --test tests/backend/*.test.mjs"
   },

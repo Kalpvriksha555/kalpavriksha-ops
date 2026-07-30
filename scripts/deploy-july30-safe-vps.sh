@@ -34,6 +34,7 @@ load_env() {
   : "${DATABASE_URL:?DATABASE_URL is missing from $ENV_FILE}"
   : "${KALPA_BACKUP_ROOT:?KALPA_BACKUP_ROOT is missing from $ENV_FILE}"
   export PORT="${PORT:-8080}"
+  export BIND_HOST="0.0.0.0"
 }
 
 validate_source() {
@@ -118,6 +119,34 @@ wait_for_health() {
     sleep 2
   done
   return 1
+}
+
+install_backup_timers() {
+  local units="$LIVE/docs/deployment/systemd"
+  for unit in \
+    kalpavriksha-backup.service \
+    kalpavriksha-backup.timer \
+    kalpavriksha-database-backup.service \
+    kalpavriksha-database-backup.timer \
+    kalpavriksha-backup-status.service \
+    kalpavriksha-backup-status.timer; do
+    test -s "$units/$unit" || fail "Backup systemd unit is missing: $unit"
+    install -m 0644 "$units/$unit" "/etc/systemd/system/$unit"
+  done
+  systemctl daemon-reload
+  systemctl enable --now \
+    kalpavriksha-backup.timer \
+    kalpavriksha-database-backup.timer \
+    kalpavriksha-backup-status.timer
+  systemctl start kalpavriksha-backup-status.service
+  systemctl is-active --quiet kalpavriksha-backup.timer
+  systemctl is-active --quiet kalpavriksha-database-backup.timer
+  systemctl is-active --quiet kalpavriksha-backup-status.timer
+  systemctl list-timers \
+    kalpavriksha-backup.timer \
+    kalpavriksha-database-backup.timer \
+    kalpavriksha-backup-status.timer \
+    --no-pager >"$WORK/backup-timers.txt"
 }
 
 recover_and_deploy() {
@@ -247,8 +276,81 @@ align_main() {
   fi
   rm -rf "$LIVE/frontend/dist.previous"
   pm2 save
+  install_backup_timers
   printf '%s' "$EXPECTED_COMMIT" >"$WORK/main-align-complete"
   echo "VERIFIED GITHUB MAIN AND VPS ARE ALIGNED"
+}
+
+final_merge_and_deploy() {
+  require_common
+  load_env
+  install -d -m 700 "$WORK"
+  prepare_stage
+
+  cd "$STAGE"
+  log "Preflighting the final active-plus-recovered merge while the stable service remains online"
+  node backend/scripts/july30-finalize.mjs \
+    --mode=plan \
+    --report="$WORK/july30-final-preflight.json"
+
+  log "Creating a verified backup containing both active legacy and recovered relational states"
+  create_backup_bundle "pre-final-merge" "$STAGE"
+
+  local old_script old_cwd merge_applied=0 service_stopped=0
+  old_script="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s).find(x=>x.name===process.argv[1]);if(!p)process.exit(2);process.stdout.write(p.pm2_env.pm_exec_path||'')})" "$PM2_NAME")"
+  old_cwd="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s).find(x=>x.name===process.argv[1]);if(!p)process.exit(2);process.stdout.write(p.pm2_env.pm_cwd||'')})" "$PM2_NAME")"
+  test -f "$old_script" || fail "Could not resolve the current stable backend script"
+
+  rollback_final_service() {
+    local rc="${1:-$?}"
+    trap - ERR INT TERM
+    echo "Final merge/deployment stopped with exit $rc."
+    if [ "$service_stopped" = "1" ]; then
+      pm2 delete "$PM2_NAME" 2>/dev/null || true
+      pm2 start "$old_script" --name "$PM2_NAME" --cwd "$old_cwd" --time --update-env || true
+      pm2 save || true
+    fi
+    if [ "$merge_applied" = "1" ]; then
+      echo "The verified final merge was retained; the previous stable backend was restored."
+    fi
+    exit "$rc"
+  }
+  trap rollback_final_service ERR INT TERM
+
+  log "Stopping writes for the authoritative final merge"
+  pm2 stop "$PM2_NAME"
+  service_stopped=1
+
+  log "Replanning against the stopped active state"
+  node backend/scripts/july30-finalize.mjs \
+    --mode=plan \
+    --report="$WORK/july30-final-plan.json"
+
+  log "Applying and verifying the final dual-state merge"
+  node backend/scripts/july30-finalize.mjs \
+    --mode=apply \
+    --report="$WORK/july30-final-report.json"
+  merge_applied=1
+
+  log "Certifying the release against the final merged production database"
+  rm -f /var/lib/kalpavriksha/release-certification.json
+  npm run release:certify
+  npm run release:gate
+  cp "$RELEASE_CERTIFICATE_PATH" "$WORK/final-release-certification.json"
+
+  log "Starting the final release on an explicit production bind address"
+  pm2 delete "$PM2_NAME" 2>/dev/null || true
+  pm2 start "$STAGE/backend/src/server.js" --name "$PM2_NAME" --cwd "$STAGE/backend" --time --update-env
+  if ! wait_for_health "/api/health/live" "$WORK/live-health.json"; then rollback_final_service 1; fi
+  if ! wait_for_health "/api/health/ready" "$WORK/ready-health.json"; then rollback_final_service 1; fi
+  pm2 save
+  service_stopped=0
+
+  log "Creating the verified post-final-merge backup"
+  create_backup_bundle "post-final-merge" "$STAGE"
+  printf '%s' "$EXPECTED_COMMIT" >"$WORK/final-merge-deploy-complete"
+  trap - ERR INT TERM
+  echo "FINAL JULY 30 MERGE AND VERIFIED RELEASE DEPLOYMENT COMPLETED SUCCESSFULLY"
 }
 
 restore_stable_live() {
@@ -281,6 +383,7 @@ restore_stable_live() {
 
 case "$MODE" in
   recover-deploy) recover_and_deploy ;;
+  final-merge-deploy) final_merge_and_deploy ;;
   align-main) align_main ;;
   restore-stable) restore_stable_live ;;
   *) fail "Unknown mode: $MODE" ;;

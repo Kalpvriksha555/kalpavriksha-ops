@@ -279,3 +279,133 @@ export function nonCaseStateHash(state = {}) {
 export function attendanceHash(state = {}) {
   return sha256(Array.isArray(state.attendanceLogs) ? state.attendanceLogs : []);
 }
+
+const FINAL_MERGE_COLLECTIONS = [
+  'users', 'payments', 'performanceRecords', 'notifications', 'teamChat',
+  'whatsappInbox', 'audit', 'attendanceLogs', 'files'
+];
+
+function collectionRecordKey(collection, record, index = 0) {
+  if (!record || typeof record !== 'object') return `${collection}:value:${sha256(record)}`;
+  if (collection === 'attendanceLogs') {
+    const attendanceId = String(record.id || '').trim();
+    return attendanceId
+      ? `${collection}:id:${attendanceId}`
+      : `${collection}:attendance:${String(record.userId || record.userName || record.name || '')}:${String(record.date || record.day || record.createdAt || index)}`;
+  }
+  if (collection === 'performanceRecords') {
+    const performanceId = String(record.id || '').trim();
+    return performanceId
+      ? `${collection}:id:${performanceId}`
+      : `${collection}:performance:${String(record.userId || record.userName || record.name || '')}:${String(record.period || record.month || record.date || index)}`;
+  }
+  const explicit = String(
+    record.id || record.userId || record.paymentId || record.transactionId ||
+    record.fileId || record.messageId || ''
+  ).trim();
+  if (explicit) return `${collection}:id:${explicit}`;
+  if (collection === 'users') return `${collection}:username:${String(record.username || record.name || index)}`;
+  return `${collection}:hash:${sha256(record)}`;
+}
+
+function mergeActiveCollection(collection, recovered = [], active = []) {
+  const result = [];
+  const seen = new Set();
+  for (const values of [active, recovered]) {
+    const records = Array.isArray(values) ? values : [];
+    records.forEach((record, index) => {
+      const key = collectionRecordKey(collection, record, index);
+      if (seen.has(key)) return;
+      seen.add(key);
+      result.push(structuredClone(record));
+    });
+  }
+  return result;
+}
+
+function mergeChatReads(recovered = {}, active = {}) {
+  const readers = new Set([...Object.keys(recovered || {}), ...Object.keys(active || {})]);
+  return Object.fromEntries([...readers].map(reader => [
+    reader,
+    [...new Set([
+      ...(Array.isArray(active?.[reader]) ? active[reader] : []),
+      ...(Array.isArray(recovered?.[reader]) ? recovered[reader] : [])
+    ].map(String))]
+  ]));
+}
+
+export function mergeActiveLegacyIntoRecoveredState(recoveredState = {}, activeState = {}) {
+  const recoveredCases = Array.isArray(recoveredState.cases)
+    ? recoveredState.cases
+    : (Array.isArray(recoveredState.projects) ? recoveredState.projects : []);
+  const activeCases = Array.isArray(activeState.cases)
+    ? activeState.cases
+    : (Array.isArray(activeState.projects) ? activeState.projects : []);
+  const deletedIds = new Set([
+    ...(recoveredState.deletedProjectIds || []),
+    ...(activeState.deletedProjectIds || [])
+  ].map(String));
+  const recoveredById = new Map(recoveredCases.map(item => [recordId(item), item]));
+  const activeById = new Map(activeCases.map(item => [recordId(item), item]));
+  const finalCases = [];
+  const summary = {
+    recoveredBefore: recoveredCases.length,
+    activeBefore: activeCases.length,
+    activeOnlyAdded: 0,
+    recoveredOnlyRetained: 0,
+    mergedShared: 0,
+    skippedDeleted: 0
+  };
+
+  for (const activeCase of activeCases) {
+    const id = recordId(activeCase);
+    if (!id || deletedIds.has(id)) {
+      summary.skippedDeleted += 1;
+      continue;
+    }
+    const recoveredCase = recoveredById.get(id);
+    if (recoveredCase) {
+      finalCases.push(mergeCaseRecords(activeCase, recoveredCase, {
+        maxTimestamp: Date.now() + MAX_EXPORT_CLOCK_SKEW_MS
+      }).merged);
+      summary.mergedShared += 1;
+    } else {
+      finalCases.push(structuredClone(activeCase));
+      summary.activeOnlyAdded += 1;
+    }
+  }
+
+  for (const recoveredCase of recoveredCases) {
+    const id = recordId(recoveredCase);
+    if (!id || activeById.has(id)) continue;
+    if (deletedIds.has(id)) {
+      summary.skippedDeleted += 1;
+      continue;
+    }
+    finalCases.push(structuredClone(recoveredCase));
+    summary.recoveredOnlyRetained += 1;
+  }
+
+  const controlled = new Set([
+    'cases', 'projects', 'deletedProjectIds', 'chatReads', ...FINAL_MERGE_COLLECTIONS
+  ]);
+  const state = structuredClone(recoveredState || {});
+  for (const [key, value] of Object.entries(activeState || {})) {
+    if (!controlled.has(key)) state[key] = structuredClone(value);
+  }
+  state.cases = finalCases;
+  delete state.projects;
+  state.deletedProjectIds = [...deletedIds];
+  for (const collection of FINAL_MERGE_COLLECTIONS) {
+    state[collection] = mergeActiveCollection(
+      collection,
+      recoveredState?.[collection],
+      activeState?.[collection]
+    );
+  }
+  state.chatReads = mergeChatReads(recoveredState?.chatReads, activeState?.chatReads);
+  summary.finalCases = finalCases.length;
+  summary.finalAttendance = state.attendanceLogs.length;
+  summary.finalFiles = state.files.length;
+  return { state, summary };
+}

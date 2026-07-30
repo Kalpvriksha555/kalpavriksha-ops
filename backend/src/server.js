@@ -4190,7 +4190,7 @@ app.use((err, req, res, _next) => {
 });
 
 const PORT=process.env.PORT||8080;
-const HOST=String(process.env.HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1')).trim();
+const HOST=String(process.env.BIND_HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1')).trim();
 let httpServer = null;
 
 async function gracefulShutdown(signal, exitCode = 0) {
@@ -4247,4 +4247,3 @@ process.on('uncaughtException',error=>{
 });
 
 startServer();
-
