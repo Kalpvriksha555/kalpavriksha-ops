@@ -406,7 +406,6 @@ export const UnifiedFileViewer = ({ file, onClose, onDownload }) => {
             <button type="button" onClick={download} className="shrink-0 text-xs font-black text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-3 py-2 rounded-xl flex items-center justify-center gap-1"><Download className="w-3.5 h-3.5" /> Download</button>
           </div>
         </div>
-        </div>
       </div>
     </div>
   ), document.body);

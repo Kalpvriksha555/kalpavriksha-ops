@@ -1,0 +1,13 @@
+import 'dotenv/config';
+import fs from 'fs';
+import path from 'path';
+import { atomicJson, latestManifest, recordBackupRun, verifyManifest } from './backup-lib.mjs';
+const backupRoot=path.resolve(process.env.KALPA_BACKUP_ROOT||path.join(process.cwd(),'backups'));
+const manifestPath=path.resolve(process.argv[2]||latestManifest(backupRoot)||'');
+if(!manifestPath||!fs.existsSync(manifestPath))throw new Error('No backup manifest was found.');
+const result=verifyManifest(manifestPath,{verifyContents:true});
+const manifest={...result.manifest,ok:result.ok,status:result.ok?'VERIFIED':'FAILED',verifiedAt:new Date().toISOString(),verification:{ok:result.ok,checks:result.checks}};
+atomicJson(manifestPath,manifest);
+await recordBackupRun(process.env.DATABASE_URL,{id:manifest.id,backupType:manifest.backupType,status:manifest.status,manifestPath,databaseFile:manifest.components?.database?.file||'',filesArchive:manifest.components?.files?.file||'',databaseSha256:manifest.components?.database?.sha256||'',filesSha256:manifest.components?.files?.sha256||'',sizeBytes:Object.values(manifest.components||{}).reduce((n,item)=>n+Number(item.sizeBytes||0),0),details:{verification:manifest.verification},startedAt:manifest.createdAt,completedAt:manifest.completedAt,verifiedAt:manifest.verifiedAt}).catch(()=>{});
+console.log(JSON.stringify({ok:result.ok,manifestPath,status:manifest.status,checks:result.checks},null,2));
+if(!result.ok)process.exitCode=2;

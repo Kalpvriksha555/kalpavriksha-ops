@@ -1,3 +1,4 @@
+import { authFetch } from './authService';
 export const getStatusColor = (status) => {
   switch (status) {
     case 'Lead Received': return 'bg-slate-100 text-slate-700 border-slate-200';
@@ -22,6 +23,55 @@ export const getPriorityColor = (priority, dueDate) => {
 
 // Phase 24C: task API + sync helpers. Keep operational task mutations behind
 // this service so components do not create competing API/state code paths.
+
+const FINANCE_FIELDS = Object.freeze([
+  'ledger','financeVersion','paymentTrackingStatus','paymentTrackingUpdatedAt','paymentTrackingUpdatedBy',
+  'paymentStatus','paymentReceived','paymentAmountIn','refundAmount','payerName','transactionId',
+  'paymentDate','paymentTime','paymentAuditTrail'
+]);
+
+const toTime = (value) => {
+  if (!value) return 0;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+};
+
+export const getTaskFinanceTime = (task = {}) => Math.max(
+  0,
+  toTime(task.financeVersion),
+  toTime(task.paymentTrackingUpdatedAt),
+  toTime(task.ledger?.updatedAt),
+  toTime(task.paymentUpdatedAt),
+  toTime(task.paymentDate),
+  ...(Array.isArray(task.paymentAuditTrail) ? task.paymentAuditTrail.map(item => toTime(item?.at || item?.updatedAt || item?.createdAt)) : [0])
+);
+
+const financeScore = (task = {}) => FINANCE_FIELDS.reduce((score, field) => {
+  const value = task?.[field];
+  if (value === undefined || value === null || value === '') return score;
+  if (Array.isArray(value)) return score + (value.length ? 2 : 0);
+  if (typeof value === 'object') return score + (Object.keys(value).length ? 2 : 0);
+  return score + 1;
+}, 0);
+
+const applyFreshestTaskFinance = (target = {}, current = {}, incoming = {}) => {
+  const currentTime = getTaskFinanceTime(current);
+  const incomingTime = getTaskFinanceTime(incoming);
+  const source = incomingTime > currentTime
+    ? incoming
+    : currentTime > incomingTime
+      ? current
+      : (financeScore(incoming) > financeScore(current) ? incoming : current);
+  const next = { ...target };
+  FINANCE_FIELDS.forEach(field => {
+    if (Object.prototype.hasOwnProperty.call(source || {}, field)) next[field] = structuredClone(source[field]);
+    else delete next[field];
+  });
+  return next;
+};
+
 export const TASK_SYNC_STORAGE_KEYS = Object.freeze({
   projects: 'kalpa_projects',
   backup: 'kalpa_projects_backup',
@@ -89,7 +139,7 @@ export const mergeTaskRecord = (current = {}, incoming = {}) => {
     seen.add(key);
     return true;
   });
-  return normalizeTaskRecord(merged);
+  return normalizeTaskRecord(applyFreshestTaskFinance(merged, a, b));
 };
 
 export const mergeTaskLists = (current = [], incoming = []) => {
@@ -113,33 +163,33 @@ const throwApiError = async (response, fallback) => {
 };
 
 export const fetchBackendState = async ({ apiBase, headers = {} }) => {
-  const res = await fetch(`${apiBase}/api/state`, { cache: 'no-store', headers });
+  const res = await authFetch(`${apiBase}/api/state`, { cache: 'no-store', headers });
   if (!res.ok) throw new Error(`Backend state failed: ${res.status}`);
   return parseJsonSafe(res);
 };
 
-export const createTaskApi = async ({ apiBase, headers = {}, currentUserRole = '', task }) => {
-  const res = await fetch(`${apiBase}/api/state/projects`, {
+export const createTaskApi = async ({ apiBase, headers = {}, task }) => {
+  const res = await authFetch(`${apiBase}/api/state/projects`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ currentUserRole, project: normalizeTaskRecord(task) })
+    body: JSON.stringify({ project: normalizeTaskRecord(task) })
   });
   if (!res.ok) return throwApiError(res, 'Backend project save failed');
   return parseJsonSafe(res);
 };
 
-export const saveTasksApi = async ({ apiBase, headers = {}, currentUserRole = '', tasks = [] }) => {
-  const res = await fetch(`${apiBase}/api/state`, {
+export const saveTasksApi = async ({ apiBase, headers = {}, tasks = [] }) => {
+  const res = await authFetch(`${apiBase}/api/state`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ currentUserRole, projects: normalizeTaskList(tasks) })
+    body: JSON.stringify({ projects: normalizeTaskList(tasks) })
   });
   if (!res.ok) throw new Error(`Backend state save failed: ${res.status}`);
   return parseJsonSafe(res);
 };
 
 export const deleteTaskApi = async ({ apiBase, taskId, headers = {} }) => {
-  const res = await fetch(`${apiBase}/api/state/projects/${encodeURIComponent(String(taskId))}`, { method: 'DELETE', headers });
+  const res = await authFetch(`${apiBase}/api/state/projects/${encodeURIComponent(String(taskId))}`, { method: 'DELETE', headers });
   if (!res.ok && res.status !== 404) throw new Error(`Backend task delete failed: ${res.status}`);
   return parseJsonSafe(res);
 };
@@ -152,14 +202,35 @@ export const persistTasksToLocalCache = (tasks = [], { sanitize = (x) => x, filt
   return compact;
 };
 
-export const saveBackendStateApi = async ({ apiBase, headers = {}, payload = {}, currentUserRole = '' }) => {
-  const normalizedPayload = { ...payload, currentUserRole };
+export const saveBackendStateApi = async ({ apiBase, headers = {}, payload = {} }) => {
+  const normalizedPayload = { ...payload };
   if (Object.prototype.hasOwnProperty.call(payload, 'projects')) normalizedPayload.projects = normalizeTaskList(payload.projects || []);
-  const res = await fetch(`${apiBase}/api/state`, {
+  const res = await authFetch(`${apiBase}/api/state`, {
     method: 'POST',
     headers,
     body: JSON.stringify(normalizedPayload)
   });
   if (!res.ok) throw new Error(`Backend state save failed: ${res.status}`);
+  return parseJsonSafe(res);
+};
+
+
+export const saveFinanceStatusApi = async ({ apiBase, headers = {}, taskId, status, details = {}, expectedFinanceVersion }) => {
+  const res = await authFetch(`${apiBase}/api/state/projects/${encodeURIComponent(String(taskId))}/payment-status`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      paymentTrackingStatus: status,
+      expectedFinanceVersion,
+      ...details
+    })
+  });
+  if (!res.ok) return throwApiError(res, 'Finance save failed');
+  return parseJsonSafe(res);
+};
+
+export const fetchFinanceHistoryApi = async ({ apiBase, headers = {}, taskId }) => {
+  const res = await authFetch(`${apiBase}/api/finance/history/${encodeURIComponent(String(taskId))}`, { cache: 'no-store', headers });
+  if (!res.ok) return throwApiError(res, 'Finance history failed');
   return parseJsonSafe(res);
 };

@@ -1,3 +1,4 @@
+import { authFetch, getCsrfToken } from './authService';
 import { API_BASE } from '../config/appConfig';
 
 export const absoluteApiUrl = (url = '', version = '') => {
@@ -112,7 +113,7 @@ export const fetchProjectFilePreview = async (doc = {}) => {
   const fetchPreviewBlobFallback = async () => {
     // Last-resort inline preview fetch. Never expose this URL directly to iframe/window.open,
     // because download managers can intercept /preview. We fetch it as a blob and render a blob URL.
-    const fallbackRes = await fetch(sourceUrl, { method: 'GET', cache: 'no-store', headers: { Accept: kind === 'pdf' ? 'application/pdf,*/*' : 'image/*,*/*' } });
+    const fallbackRes = await authFetch(sourceUrl, { method: 'GET', cache: 'no-store', headers: { Accept: kind === 'pdf' ? 'application/pdf,*/*' : 'image/*,*/*' } });
     if (!fallbackRes.ok) {
       const text = await fallbackRes.text().catch(() => '');
       throw new Error(text || `Preview failed (${fallbackRes.status})`);
@@ -124,7 +125,7 @@ export const fetchProjectFilePreview = async (doc = {}) => {
 
   let res;
   try {
-    res = await fetch(dataUrl, { method: 'GET', cache: 'no-store', headers: { Accept: 'application/json' } });
+    res = await authFetch(dataUrl, { method: 'GET', cache: 'no-store', headers: { Accept: 'application/json' } });
   } catch (error) {
     return fetchPreviewBlobFallback();
   }
@@ -226,6 +227,9 @@ const readServerMessage = async (res) => {
 const uploadWithXhr = (url, form, onProgress) => new Promise((resolve, reject) => {
   const xhr = new XMLHttpRequest();
   xhr.open('POST', url, true);
+  xhr.withCredentials = true;
+  const csrfToken = getCsrfToken();
+  if (csrfToken) xhr.setRequestHeader('X-CSRF-Token', csrfToken);
   xhr.timeout = 30 * 60 * 1000; // allow large PDFs/DWGs on slow mobile data
 
   const startedAt = Date.now();
@@ -269,7 +273,6 @@ export const uploadProjectFile = async (file, projectId, type, uploadedBy, onPro
   form.append('file', file);
   form.append('projectId', projectId || '');
   form.append('type', type || 'source');
-  form.append('by', uploadedBy || 'Team');
 
   try {
     const payload = await uploadWithXhr(`${API_BASE}/api/files/upload`, form, onProgress);
@@ -527,7 +530,7 @@ export const downloadProjectFile = async (doc = {}, onProgress) => {
   }
 
   try {
-    const res = await fetch(url, { cache: 'no-store' });
+    const res = await authFetch(url, { cache: 'no-store' });
     if (!res.ok) {
       const msg = await readServerMessage(res).catch(() => `Download failed (${res.status})`);
       throw new Error(msg);
@@ -589,7 +592,7 @@ export const downloadProjectFile = async (doc = {}, onProgress) => {
 export const deleteProjectFileFromServer = async (doc = {}) => {
   if (!doc?.id) return;
   try {
-    await fetch(`${API_BASE}/api/files/${encodeURIComponent(doc.id)}`, { method: 'DELETE' });
+    await authFetch(`${API_BASE}/api/files/${encodeURIComponent(doc.id)}`, { method: 'DELETE' });
   } catch (error) {
     console.warn('Server file delete failed:', error);
   }

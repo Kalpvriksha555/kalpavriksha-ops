@@ -38,3 +38,27 @@ README_APPLY.md
 
 # Accidentally nested project backups
 kalpavriksha-ops/
+# Private runtime state (never commit or package)
+backend/src/data/*
+!backend/src/data/.gitkeep
+backend/src/uploads/*
+!backend/src/uploads/.gitkeep
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Generated release archives
+*.zip
+release/
+# Phase 6 private file storage (runtime only)
+backend/private-files/
+backend/src/data/private-files/
+**/.incoming/
+**/quarantine/
+**/trash/
+
+# Phase 8 generated release and recovery evidence
+.release/
+release-certification.json
+finance-recovery-plan*.json
+*.applied.json
+*.recovery-receipt.json

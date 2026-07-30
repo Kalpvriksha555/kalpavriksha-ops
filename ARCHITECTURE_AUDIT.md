@@ -1,3 +1,5 @@
+> **Historical reference:** File sizes and architecture notes below predate the Phase 1 security cleanup. Current security and deployment requirements are documented in `PHASE_1_SECURITY_CLEANUP.md`.
+
 # Kalpvriksha Designs Ops — Architecture Audit
 
 ## Current state

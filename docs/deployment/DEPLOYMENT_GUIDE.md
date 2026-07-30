@@ -19,8 +19,8 @@ pm2 restart kalpavriksha-backend
 5. Verify health:
 
 ```bash
-curl http://localhost:8080/api/health
-curl http://localhost:8080/api/state
+curl http://localhost:8080/api/health/live
+curl http://localhost:8080/api/health/ready
 ```
 
 ## Frontend
@@ -43,3 +43,8 @@ npm run build
 - Frontend must point to the production backend API URL.
 - Backend must have PostgreSQL connection variables configured.
 - File storage paths must remain persistent across deployments.
+
+
+## Mandatory pre-deployment backup
+
+Run `npm run backup:create` and confirm `npm run backup:status` succeeds before migrations or deployment.

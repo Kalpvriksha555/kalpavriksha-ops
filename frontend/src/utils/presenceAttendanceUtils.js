@@ -26,12 +26,7 @@ export const PRESENCE_ROLES = {
   DESIGNER: 'Designer'
 };
 
-const normalizePersonName = (name = '') => {
-  const raw = String(name || '').trim();
-  if (/khus+h?bu|khushboo|khushbu/i.test(raw)) return 'Khushbu Pandey';
-  if (/ali\s*waqar|^ali$|^waqar$/i.test(raw)) return 'Waqar';
-  return raw;
-};
+const normalizePersonName = (name = '') => String(name || '').trim();
 
 const identityKey = (value = '') => normalizePersonName(String(value || '')).toLowerCase().replace(/[^a-z0-9]/g, '');
 const samePerson = (a = '', b = '') => identityKey(a) === identityKey(b);

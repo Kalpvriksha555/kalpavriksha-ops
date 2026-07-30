@@ -1,0 +1,18 @@
+const disabled = () => { throw new Error('Legacy Firebase runtime is disabled. PostgreSQL/backend mode is authoritative.'); };
+const noopUnsubscribe = () => {};
+export const initializeApp = () => ({ name: 'backend-only' });
+export const getAuth = () => ({});
+export const getFirestore = () => ({});
+export const getStorage = () => ({});
+export const signInAnonymously = async () => disabled();
+export const signInWithCustomToken = async () => disabled();
+export const onAuthStateChanged = (_auth, callback) => { callback(null); return noopUnsubscribe; };
+export const doc = disabled;
+export const collection = disabled;
+export const setDoc = async () => disabled();
+export const deleteDoc = async () => disabled();
+export const getDocs = async () => disabled();
+export const onSnapshot = () => disabled();
+export const storageRef = disabled;
+export const uploadBytes = async () => disabled();
+export const getDownloadURL = async () => disabled();

@@ -89,6 +89,58 @@ requireInFile(serverPath, /mode\s*===\s*['"]preview['"]|preview-data|\/preview/,
 requireInFile(serverPath, /Content-Disposition[\s\S]*inline|inline[\s\S]*Content-Disposition/, 'Backend preview endpoint must support inline disposition.');
 requireInFile(serverPath, /Content-Disposition[\s\S]*attachment|attachment[\s\S]*Content-Disposition/, 'Backend download endpoint must support attachment disposition.');
 
+// Phase 2 finance durability guardrails.
+requireFile('backend/src/services/financeIntegrityService.js');
+requireInFile('backend/src/repositories/postgresStateRepository.js', /state_version bigint/, 'PostgreSQL app state versioning is missing.');
+requireInFile('backend/src/repositories/postgresStateRepository.js', /CREATE TABLE IF NOT EXISTS finance_history/, 'Append-only PostgreSQL finance history is missing.');
+requireInFile(serverPath, /FINANCE_VERSION_CONFLICT/, 'Stale finance writes must be rejected.');
+requireInFile(serverPath, /await save\(d/, 'State mutations must wait for persistence confirmation.');
+requireInFile(serverPath, /applyFreshestFinance/, 'Backend task merge must preserve finance by finance freshness.');
+requireInFile('frontend/src/services/taskService.js', /saveFinanceStatusApi/, 'Frontend finance updates must use the dedicated durable endpoint.');
+requireInFile('frontend/src/services/taskService.js', /applyFreshestTaskFinance/, 'Frontend task merge must preserve finance by finance freshness.');
+requireInFile(appPath, /financeResponse\?\.persistence/, 'Frontend must require durable finance confirmation before accepting an update.');
+
+
+// Phase 5 relational database integrity guardrails.
+requireFile('backend/src/repositories/postgresStateRepository.js');
+requireInFile('backend/src/repositories/postgresStateRepository.js', /schema_migrations/, 'Checksummed migration registry is missing.');
+requireInFile('backend/src/repositories/postgresStateRepository.js', /app_state_metadata/, 'Relational state metadata table is missing.');
+requireInFile('backend/src/repositories/postgresStateRepository.js', /state_revisions/, 'Append-only state revision ledger is missing.');
+requireInFile('backend/src/repositories/postgresStateRepository.js', /MIGRATION_CHECKSUM_MISMATCH/, 'Applied migration checksum drift must block startup.');
+requireInFile('backend/src/repositories/postgresStateRepository.js', /RELATIONAL_STATE_INTEGRITY_FAILURE/, 'Relational state integrity mismatch must block startup.');
+requireInFile(serverPath, /persistRelationalState/, 'Server mutations must use relational PostgreSQL persistence.');
+requireInFile(serverPath, /restoreRelationalRevision/, 'Guarded state revision recovery is missing.');
+if (/UPDATE app_state SET value=/.test(read(serverPath))) errors.push('Legacy app_state remains an authoritative write path.');
+
+// Phase 7 reliability, backup and recovery guardrails.
+requireFile('backend/src/services/operationalReliabilityService.js');
+requireFile('backend/scripts/backup-create.mjs');
+requireFile('backend/scripts/backup-verify.mjs');
+requireFile('backend/scripts/restore-drill.mjs');
+requireFile('frontend/src/services/systemHealthService.js');
+requireInFile(serverPath, /\/api\/health\/live/, 'Dedicated liveness probe is missing.');
+requireInFile(serverPath, /\/api\/health\/ready/, 'Dependency-aware readiness probe is missing.');
+requireInFile(serverPath, /gracefulShutdown/, 'Graceful shutdown handling is missing.');
+requireInFile(serverPath, /STATE_PERSISTENCE_FAILED/, 'Failed durable state writes must enter operational failure tracking.');
+requireInFile('backend/src/repositories/postgresStateRepository.js', /migration\('007\.001'/, 'Phase 7 reliability migration is missing.');
+requireInFile('backend/src/repositories/postgresStateRepository.js', /operational_jobs/, 'Persistent operational jobs table is missing.');
+requireInFile('backend/src/repositories/postgresStateRepository.js', /backup_runs/, 'Persistent backup-run history is missing.');
+requireInFile('backend/scripts/restore-drill.mjs', /Restore drill refused|RESTORE_DRILL_DATABASE_URL matches DATABASE_URL/, 'Restore drills must refuse the live production database.');
+
+// Phase 8 release certification and selective recovery guardrails.
+requireFile('backend/src/services/releaseCertificationService.js');
+requireFile('scripts/clean-install-verify.mjs');
+requireFile('scripts/release-certify.mjs');
+requireFile('scripts/release-gate.mjs');
+requireFile('backend/scripts/finance-recovery-plan.mjs');
+requireFile('backend/scripts/finance-recovery-apply.mjs');
+requireInFile(serverPath, /\/api\/system\/release-certification/, 'Runtime release-certificate status endpoint is missing.');
+requireInFile(serverPath, /RELEASE_CERTIFICATE_REQUIRED/, 'Readiness must enforce the production release certificate.');
+requireInFile('backend/src/repositories/postgresStateRepository.js', /migration\('008\.001'/, 'Phase 8 migration is missing.');
+requireInFile('backend/src/repositories/postgresStateRepository.js', /finance_recovery_runs/, 'Finance recovery audit history is missing.');
+requireInFile('backend/scripts/finance-recovery-apply.mjs', /targetStateVersion/, 'Finance recovery must bind to the exact live state version.');
+requireInFile('backend/src/services/releaseCertificationService.js', /APPLY FINANCE RECOVERY/, 'Finance recovery must require exact confirmation.');
+
 // High risk duplicate source implementation checks.
 const duplicateNamedSources = frontendFiles.filter((p) => /(?:App\.jsx|taskService\.js|LayerPortal\.jsx|designSystem\.jsx)$/.test(p));
 const duplicateGroups = duplicateNamedSources.reduce((acc, file) => {

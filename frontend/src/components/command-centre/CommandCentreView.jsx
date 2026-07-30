@@ -7,6 +7,9 @@ import { getStatusColor } from '../../services/taskService';
 import { formatDateKey, formatDuration, formatLastSeenDateTime, formatMinutes } from '../../utils/date';
 import { formatTaskId, getEstimateDetails, getLatestCompletedFileName, getTaskDescription } from '../../utils/taskDisplayUtils';
 import { getTaskBusySince, getUserActiveTasks, getUserBusySince, getUserFreeSince, getUserLastCompletedAt, getUserDraftingTask, getDraftingElapsedMs } from '../../utils/presenceAttendanceUtils';
+import { authFetch } from '../../services/authService';
+import { notifyUser } from '../../services/uiFeedback.js';
+import { getBackupStatusApi, getOperationalEventsApi, getOperationalJobsApi, getReliabilityStatusApi, retryOperationalJobApi } from '../../services/systemHealthService';
 
 const toMs = (value) => {
   if (!value) return 0;
@@ -109,12 +112,10 @@ const createEmployeeLifecycleProfile = (user = {}, existing = {}) => {
 const normalizeTeamUser = (u = {}) => {
   const rawName = String(u.name || '').trim();
   const rawUsername = String(u.username || '').trim();
-  const isKhushbu = /khus+h?bu|khushboo|khushbu/i.test(rawName) || /khus+h?bu|khushboo|khushbu/i.test(rawUsername);
-  const isWaqar = /ali\s*waqar|^ali$|^waqar$/i.test(rawName) || /ali|waqar/i.test(rawUsername);
   const normalized = {
     ...u,
-    name: isKhushbu ? 'Khushbu Pandey' : (isWaqar ? 'Waqar' : (rawName || u.name)),
-    username: isKhushbu ? 'khushbu' : (isWaqar ? 'waqar' : rawUsername),
+    name: rawName || u.name,
+    username: rawUsername,
     role: normalizeRole(u.role),
     status: normalizeStatus(u.status),
     isOnline: !!u.isOnline,
@@ -881,7 +882,7 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
   useEffect(() => { const timer = setInterval(() => setAvailabilityNow(Date.now()), 30000); return () => clearInterval(timer); }, []);
   const metrics = getTodayMetrics(projects, dateKey);
   const isAdmin = currentUser?.role === ROLES.ADMIN;
-  const liveActivityFeed = buildLiveActivityFeed(projects, availabilityNow);
+  const liveActivityFeed = buildLiveActivityFeed(projects, availabilityNow).slice(0, 14);
   const rawActiveBoard = metrics.activeToday.slice().sort((a,b) => (toMs(b.completedAt || b.updatedAt || b.createdAt) || 0) - (toMs(a.completedAt || a.updatedAt || a.createdAt) || 0));
   const people = getOperationalUsers(users || [], { includeAdmins: true });
   const workingTeam = people.filter(u => u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER);
@@ -1163,7 +1164,7 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
               <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Today • {liveActivityFeed.length}</span>
             </div>
             <div className="space-y-2 max-h-72 overflow-y-auto custom-scrollbar pr-1">
-              {liveActivityFeed.map(item => (
+              {liveActivityFeed.slice(0, 9).map(item => (
                 <button key={item.id} type="button" onClick={() => onSelectProject(item.project)} className="w-full text-left bg-slate-50 hover:bg-indigo-50 border border-slate-100 rounded-xl px-3 py-2.5 transition-all flex gap-3">
                   <div className="w-14 shrink-0 text-center"><p className="text-[11px] font-black text-slate-500">{formatActivityClock(item.at)}</p><p className="text-[10px] font-bold text-emerald-600 mt-0.5">{formatActivityAge(item.at, availabilityNow)}</p><p className="text-base mt-0.5">{getActivityIcon(item.type)}</p></div>
                   <div className="min-w-0 flex-1"><p className="font-black text-slate-800 text-sm truncate">{formatTaskId(item.project?.id || item.project?.caseId)} • {item.title}</p><p className="text-[11px] font-bold text-slate-500 mt-0.5 truncate">{getCustomerDisplayName(item.project)}{item.by ? ` • ${item.by}` : ''}</p></div>
@@ -1216,7 +1217,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
 
   useEffect(() => {
     let active = true;
-    fetch(absoluteApiUrl('/api/performance/diagnostics'))
+    authFetch(absoluteApiUrl('/api/performance/diagnostics'))
       .then(res => res.ok ? res.json() : null)
       .then(data => {
         if (!active || !data?.ok) return;
@@ -1230,16 +1231,16 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
   const rebuildPerformanceEngine = async () => {
     setEngineBusy(true);
     try {
-      const res = await fetch(absoluteApiUrl('/api/performance/rebuild'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'performance-dashboard' }) });
+      const res = await authFetch(absoluteApiUrl('/api/performance/rebuild'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'performance-dashboard' }) });
       const data = await res.json().catch(() => null);
       if (data?.ok) {
         setEngineDiagnostics(data.diagnostics || null);
         setEngineSummary(data.summary || null);
       } else {
-        alert(data?.error || 'Performance rebuild failed.');
+        notifyUser(data?.error || 'Performance rebuild failed.');
       }
     } catch (err) {
-      alert(err?.message || 'Performance rebuild failed.');
+      notifyUser(err?.message || 'Performance rebuild failed.');
     } finally {
       setEngineBusy(false);
     }
@@ -1782,11 +1783,63 @@ export const ProductionQAView = ({ projects = [], users = [], currentUser = null
 
 export const SystemSettingsView = ({ projects = [], users = [], currentUser = null }) => {
   const [activeTool, setActiveTool] = useState('overview');
+  const [reliability, setReliability] = useState(null);
+  const [backups, setBackups] = useState(null);
+  const [jobs, setJobs] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [systemLoading, setSystemLoading] = useState(false);
+  const [systemError, setSystemError] = useState('');
+
+  const loadSystemData = async () => {
+    setSystemLoading(true);
+    setSystemError('');
+    try {
+      const [reliabilityResult, backupResult, jobsResult, eventsResult] = await Promise.all([
+        getReliabilityStatusApi(),
+        getBackupStatusApi(),
+        getOperationalJobsApi({ limit:100 }),
+        getOperationalEventsApi({ limit:100 })
+      ]);
+      setReliability(reliabilityResult);
+      setBackups(backupResult);
+      setJobs(Array.isArray(jobsResult.jobs) ? jobsResult.jobs : []);
+      setEvents(Array.isArray(eventsResult.events) ? eventsResult.events : []);
+    } catch (error) {
+      setSystemError(error.message || 'System health information could not be loaded.');
+    } finally {
+      setSystemLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTool !== 'qa') loadSystemData();
+  }, [activeTool]);
+
+  const retryJob = async (jobId) => {
+    try {
+      await retryOperationalJobApi(jobId);
+      await loadSystemData();
+    } catch (error) {
+      setSystemError(error.message || 'The job could not be retried.');
+    }
+  };
+
   const toolCards = [
     { key: 'qa', label: 'Production QA', title: 'System readiness', text: 'Run after updates, deployments or bug reports to confirm key workflows are healthy.' },
-    { key: 'backup', label: 'Backup & Restore', title: 'Operational safety', text: 'Use the v1.0 release documentation for server backups, restore and rollback steps.' },
-    { key: 'audit', label: 'Audit Logs', title: 'Traceability', text: 'Case timelines and activity feed preserve the operational audit trail.' }
+    { key: 'backup', label: 'Backup & Restore', title: 'Operational safety', text: 'See verified database and private-file backup freshness without allowing browser-based restoration.' },
+    { key: 'operations', label: 'Failed Jobs', title: 'Reliability queue', text: 'Review failed persistence and operational work, then retry only jobs that are safe to replay.' },
+    { key: 'audit', label: 'Operational Events', title: 'Traceability', text: 'Review structured reliability events with request IDs, severity and actor information.' }
   ];
+  const failedJobs = jobs.filter(job => String(job.status || '').toUpperCase() === 'FAILED');
+  const statusClass = reliability?.ok ? 'bg-emerald-50 border-emerald-100 text-emerald-700' : 'bg-rose-50 border-rose-100 text-rose-700';
+  const formatBytes = value => {
+    const bytes = Number(value || 0);
+    if (!bytes) return '0 B';
+    const units = ['B','KB','MB','GB','TB'];
+    const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+    return `${(bytes / (1024 ** index)).toFixed(index > 1 ? 1 : 0)} ${units[index]}`;
+  };
+
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in duration-200">
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
@@ -1794,12 +1847,28 @@ export const SystemSettingsView = ({ projects = [], users = [], currentUser = nu
           <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Settings & System Health</h1>
           <p className="text-slate-500 font-medium mt-2">Admin maintenance tools are separated from daily operations to keep the main workflow clean.</p>
         </div>
-        {activeTool !== 'overview' && <button type="button" onClick={() => setActiveTool('overview')} className="bg-slate-100 text-slate-700 rounded-xl px-4 py-2.5 text-sm font-black w-fit">Back to Settings</button>}
+        <div className="flex gap-2">
+          <button type="button" onClick={loadSystemData} disabled={systemLoading} className="bg-indigo-50 text-indigo-700 rounded-xl px-4 py-2.5 text-sm font-black disabled:opacity-50">{systemLoading ? 'Refreshing…' : 'Refresh health'}</button>
+          {activeTool !== 'overview' && <button type="button" onClick={() => setActiveTool('overview')} className="bg-slate-100 text-slate-700 rounded-xl px-4 py-2.5 text-sm font-black w-fit">Back to Settings</button>}
+        </div>
       </div>
+
+      {systemError && <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700">{systemError}</div>}
+      {reliability && (
+        <div className={`rounded-3xl border-2 p-5 ${statusClass}`}>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div><p className="text-xs font-black uppercase tracking-widest">Runtime readiness</p><h2 className="text-xl font-black mt-1">{reliability.ok ? 'All required systems are ready' : 'Production attention required'}</h2></div>
+            <p className="text-sm font-black">{failedJobs.length} failed job{failedJobs.length === 1 ? '' : 's'}</p>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-2 mt-4">
+            {Object.entries(reliability.checks || {}).map(([key, ok]) => <div key={key} className="rounded-xl bg-white/70 px-3 py-2"><p className="text-[10px] font-black uppercase tracking-wider">{key.replace(/([A-Z])/g, ' $1')}</p><p className="text-sm font-black mt-1">{ok ? 'Healthy' : 'Attention'}</p></div>)}
+          </div>
+        </div>
+      )}
 
       {activeTool === 'overview' && (
         <>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
             {toolCards.map(card => (
               <button key={card.key} type="button" onClick={() => setActiveTool(card.key)} className="text-left bg-white border-2 border-slate-100 rounded-3xl p-5 shadow-sm hover:border-indigo-100 hover:shadow-md transition">
                 <p className="text-xs font-black uppercase tracking-widest text-slate-400">{card.label}</p>
@@ -1809,24 +1878,43 @@ export const SystemSettingsView = ({ projects = [], users = [], currentUser = nu
               </button>
             ))}
           </div>
-          <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm p-6">
-            <h2 className="text-xl font-black text-slate-800">Settings usage guide</h2>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
-              <div className="bg-slate-50 rounded-2xl p-4"><p className="font-black text-slate-700">Production QA</p><p className="text-sm font-bold text-slate-500 mt-1">Use only after updates, deployment, server maintenance or bug reports.</p></div>
-              <div className="bg-slate-50 rounded-2xl p-4"><p className="font-black text-slate-700">Reports</p><p className="text-sm font-bold text-slate-500 mt-1">Use for business analytics, trends, productivity, finance and SLA views.</p></div>
-              <div className="bg-slate-50 rounded-2xl p-4"><p className="font-black text-slate-700">Daily Closing</p><p className="text-sm font-bold text-slate-500 mt-1">Use once per day as the official end-of-day operational snapshot.</p></div>
-            </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="bg-white rounded-2xl border border-slate-100 p-4"><p className="text-xs font-black uppercase tracking-widest text-slate-400">Latest verified backup</p><p className="text-lg font-black text-slate-800 mt-2">{backups?.latest?.createdAt ? new Date(backups.latest.createdAt).toLocaleString() : 'Not found'}</p><p className="text-xs font-bold text-slate-500 mt-1">{backups?.status || 'Unknown'}{backups?.ageHours != null ? ` • ${backups.ageHours} hours old` : ''}</p></div>
+            <div className="bg-white rounded-2xl border border-slate-100 p-4"><p className="text-xs font-black uppercase tracking-widest text-slate-400">Private storage disk</p><p className="text-lg font-black text-slate-800 mt-2">{reliability?.disk?.storage?.usedPercent ?? '-'}% used</p><p className="text-xs font-bold text-slate-500 mt-1">{formatBytes(reliability?.disk?.storage?.freeBytes)} free</p></div>
+            <div className="bg-white rounded-2xl border border-slate-100 p-4"><p className="text-xs font-black uppercase tracking-widest text-slate-400">Database state</p><p className="text-lg font-black text-slate-800 mt-2">Version {reliability?.persistence?.stateVersion ?? '-'}</p><p className="text-xs font-bold text-slate-500 mt-1">Last durable save: {reliability?.persistence?.lastSuccess?.at ? new Date(reliability.persistence.lastSuccess.at).toLocaleString() : 'No write in this process'}</p></div>
           </div>
         </>
       )}
 
       {activeTool === 'qa' && <ProductionQAView projects={projects} users={users} currentUser={currentUser} />}
-      {activeTool === 'backup' && <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm p-6"><h2 className="text-2xl font-black text-slate-800">Backup & Restore</h2><p className="text-slate-500 font-bold mt-2">Refer to the v1.0 release package documentation for VPS backup, database backup, restore and rollback steps. This section is intentionally guidance-only so live production data cannot be changed accidentally from the browser.</p></div>}
-      {activeTool === 'audit' && <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm p-6"><h2 className="text-2xl font-black text-slate-800">Audit Logs</h2><p className="text-slate-500 font-bold mt-2">Case timelines, the Command Centre activity feed, and finance audit events together form the operational audit trail. Use individual case timelines for case-level traceability.</p></div>}
+      {activeTool === 'backup' && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm p-6"><h2 className="text-2xl font-black text-slate-800">Backup & Restore Readiness</h2><p className="text-slate-500 font-bold mt-2">Backups are created and verified from the VPS terminal. Browser restoration remains disabled to prevent accidental production data replacement.</p></div>
+          <div className="bg-white rounded-2xl border border-slate-100 overflow-hidden">
+            <div className="grid grid-cols-4 gap-3 px-4 py-3 bg-slate-50 text-[10px] font-black uppercase tracking-widest text-slate-500"><span>Created</span><span>Type</span><span>Status</span><span>Size</span></div>
+            {(backups?.manifests || []).map(item => <div key={item.id || item.manifestPath} className="grid grid-cols-4 gap-3 px-4 py-3 border-t border-slate-100 text-xs font-bold text-slate-600"><span>{item.createdAt ? new Date(item.createdAt).toLocaleString() : '-'}</span><span>{item.backupType || '-'}</span><span className={item.status === 'VERIFIED' ? 'text-emerald-600' : 'text-rose-600'}>{item.status || '-'}</span><span>{formatBytes(Object.values(item.components || {}).reduce((sum, part) => sum + Number(part?.sizeBytes || 0), 0))}</span></div>)}
+            {!(backups?.manifests || []).length && <div className="p-8 text-center text-slate-400 font-bold">No verified backup manifest has been found.</div>}
+          </div>
+        </div>
+      )}
+      {activeTool === 'operations' && (
+        <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
+          <div className="p-6 border-b border-slate-100"><h2 className="text-2xl font-black text-slate-800">Failed Jobs & Retry Safety</h2><p className="text-slate-500 font-bold mt-2">Unsafe state-write failures are never replayed automatically. Safe operational checks may be queued again after review.</p></div>
+          <div className="divide-y divide-slate-100">
+            {failedJobs.map(job => <div key={job.id} className="p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4"><div><p className="font-black text-slate-800">{job.jobType}</p><p className="text-xs font-bold text-slate-500 mt-1">{job.error || 'Unknown failure'} • {job.updatedAt ? new Date(job.updatedAt).toLocaleString() : '-'}</p><p className="text-[10px] font-black text-slate-400 mt-1">Job {job.id} • attempts {job.attempts}/{job.maxAttempts}</p></div><button type="button" onClick={() => retryJob(job.id)} disabled={job.jobType === 'STATE_PERSISTENCE'} className="rounded-xl bg-indigo-50 px-4 py-2 text-xs font-black text-indigo-700 disabled:bg-slate-100 disabled:text-slate-400">{job.jobType === 'STATE_PERSISTENCE' ? 'Manual review required' : 'Queue retry'}</button></div>)}
+            {!failedJobs.length && <div className="p-10 text-center text-emerald-600 font-black">No failed operational jobs.</div>}
+          </div>
+        </div>
+      )}
+      {activeTool === 'audit' && (
+        <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
+          <div className="p-6 border-b border-slate-100"><h2 className="text-2xl font-black text-slate-800">Operational Events</h2><p className="text-slate-500 font-bold mt-2">Structured reliability events supplement case timelines and finance audit records.</p></div>
+          <div className="divide-y divide-slate-100 max-h-[620px] overflow-y-auto">{events.map(event => <div key={event.id} className="p-4"><div className="flex items-center justify-between gap-3"><p className="font-black text-slate-800">{event.event_type || event.eventType}</p><span className={`text-[10px] font-black ${String(event.severity).includes('ERROR') || String(event.severity).includes('FATAL') ? 'text-rose-600' : 'text-slate-500'}`}>{event.severity}</span></div><p className="text-xs font-bold text-slate-500 mt-1">{event.actor || 'system'} • {event.created_at ? new Date(event.created_at).toLocaleString() : '-'}</p><p className="text-[10px] font-mono text-slate-400 mt-1">Request {event.request_id || '-'}</p></div>)}{!events.length && <div className="p-10 text-center text-slate-400 font-bold">No persistent operational events available.</div>}</div>
+        </div>
+      )}
     </div>
   );
 };
-
 
 export const DailyClosingReport = ({ projects = [], currentUser = null }) => {
   const [dateKey, setDateKey] = useState(formatDateKey());

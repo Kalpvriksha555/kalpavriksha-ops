@@ -8,6 +8,8 @@ import { MiniEmptyState } from '../shared';
 import { getVisibleNotifications } from '../../services/notificationService';
 import { formatTaskId } from '../../utils/taskDisplayUtils';
 import { CHAT_API_BASE, absoluteChatUrl, makeMessageId, QUICK_EMOJIS, isUserActuallyOnline, getOperationalUsers, identityKey, samePerson, readEntryName, ROLES, normalizeChannelKey, chatEmojiGroups, reactionEmojis } from '../../utils/chatUtils';
+import { authFetch } from '../../services/authService';
+import { notifyUser, requestConfirmation } from '../../services/uiFeedback.js';
 
 export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onDeleteMessage, onUpdateMessage, onMarkMessagesRead, appId, projects = [], onOpenTaskReference, onPreviewFile }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -445,9 +447,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     const form = new FormData();
     form.append('file', file);
     form.append('type', type);
-    form.append('by', currentUser?.name || 'Team');
-    form.append('role', currentUser?.role || 'USER');
-    const res = await fetch(`${CHAT_API_BASE}/api/files/upload`, { method: 'POST', body: form });
+    const res = await authFetch(`${CHAT_API_BASE}/api/files/upload`, { method: 'POST', body: form });
     if (!res.ok) throw new Error(await res.text());
     const payload = await res.json();
     return payload.file || {};
@@ -512,7 +512,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const startVoiceRecording = async () => {
     try {
       if (!navigator?.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
-        alert('Voice notes are not supported in this browser.');
+        notifyUser('Voice notes are not supported in this browser.');
         return;
       }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -556,7 +556,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       console.error('Voice note recording failed', error);
       setIsRecordingVoice(false);
       setVoiceStartedAt(null);
-      alert('Microphone permission is needed to record a voice note.');
+      notifyUser('Microphone permission is needed to record a voice note.');
     }
   };
 
@@ -830,9 +830,9 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     setActionMenu(null);
   };
 
-  const deleteForEveryone = (m) => {
+  const deleteForEveryone = async (m) => {
     if (!(sameCurrentUser(m.sender) || currentUser.role === ROLES.ADMIN)) return;
-    if (!window.confirm('Delete this message for everyone?')) return;
+    if (!(await requestConfirmation('Delete this message for everyone?', { title: 'Delete message', tone: 'danger', confirmLabel: 'Delete for everyone' }))) return;
     if (typeof onUpdateMessage === 'function') {
       updateMessage({ ...m, deleted: true, text: 'This message was deleted.', fileUrl: '', fileName: '', fileType: '', roomUrl: '', deletedBy: currentUser.name, deletedAt: Date.now() });
     } else if (typeof onDeleteMessage === 'function') {
@@ -1026,7 +1026,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
         previewHandler({ ...fileRecord, previewUrl: previewUrl || fileRecord.previewUrl, url: previewUrl || fileRecord.url, downloadUrl });
         return;
       }
-      alert('Preview is not ready yet. Please try again after the file finishes syncing.');
+      notifyUser('Preview is not ready yet. Please try again after the file finishes syncing.');
     };
     const handleDownloadClick = (event) => {
       event.stopPropagation();

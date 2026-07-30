@@ -1,3 +1,5 @@
+> **Superseded:** This historical report predates Phase 1. Do not reuse its environment or deployment guidance. Follow `PHASE_1_SECURITY_CLEANUP.md` and rotate all previously exposed credentials.
+
 # Kalpavriksha Production Candidate RC2 Repaired
 
 ## Purpose

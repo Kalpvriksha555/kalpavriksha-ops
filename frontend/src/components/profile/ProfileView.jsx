@@ -3,7 +3,6 @@ import { User, Upload, Lock, CheckCircle } from 'lucide-react';
 import { uploadProfilePhoto } from '../../services/profileService';
 import {
   buildInitialProfileDraft,
-  buildPasswordUpdatePayload,
   buildProfileSavePayload,
   buildRegisteredEmailPayload,
   buildRegisteredMobilePayload,
@@ -12,13 +11,12 @@ import {
   maskEmail,
   normalizeEmail,
   normalizePhone,
-  profilePhotoUrl,
-  validatePasswordChange
+  profilePhotoUrl
 } from '../../utils/profileUtils';
 
 const ROLES = { ADMIN: 'Admin', MANAGER: 'Manager', DESIGNER: 'Designer' };
 
-export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToBase64, sendRealOtp, verifyRealOtp }) => {
+export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToBase64, sendRealOtp, verifyRealOtp, onChangePassword }) => {
   const [draft, setDraft] = useState(() => buildInitialProfileDraft(currentUser));
   const [saved, setSaved] = useState(false);
   const [photoMessage, setPhotoMessage] = useState('');
@@ -79,18 +77,27 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
     setTimeout(() => setSaved(false), 2200);
   };
 
-  const handleChangePassword = () => {
+  const handleProfilePasswordChange = async () => {
     setPasswordMessage('');
-    const validationMessage = validatePasswordChange(currentUser, passwordForm);
-    if (validationMessage) {
-      setPasswordMessage(validationMessage);
+    if (!passwordForm.current) {
+      setPasswordMessage('Enter your current password.');
       return;
     }
-    const updated = buildPasswordUpdatePayload(currentUser, passwordForm);
-    setCurrentUser(updated);
-    onUpdateUser(updated);
-    setPasswordForm({ current: '', next: '', confirm: '' });
-    setPasswordMessage('Password changed successfully. Use the new password from next login.');
+    if (passwordForm.next !== passwordForm.confirm) {
+      setPasswordMessage('New password and confirmation do not match.');
+      return;
+    }
+    if (passwordForm.next.length < 10 || !/[a-z]/.test(passwordForm.next) || !/[A-Z]/.test(passwordForm.next) || !/[0-9]/.test(passwordForm.next) || /\s/.test(passwordForm.next)) {
+      setPasswordMessage('Use at least 10 characters with uppercase, lowercase and a number, without spaces.');
+      return;
+    }
+    try {
+      await onChangePassword?.({ currentPassword: passwordForm.current, newPassword: passwordForm.next });
+      setPasswordForm({ current: '', next: '', confirm: '' });
+      setPasswordMessage('Password changed securely. Other sessions were revoked.');
+    } catch (error) {
+      setPasswordMessage(error?.message || 'Password could not be changed.');
+    }
   };
 
   const sendMobileRegistrationOtp = async () => {
@@ -293,7 +300,7 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
           <input type="password" value={passwordForm.confirm} onChange={e => setPasswordForm(prev => ({ ...prev, confirm: e.target.value }))} placeholder="Confirm new password" className="border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
         </div>
         <div className="flex flex-wrap items-center gap-3 mt-4">
-          <button type="button" onClick={handleChangePassword} className="bg-indigo-600 text-white px-5 py-3 rounded-xl font-black hover:bg-indigo-700 shadow-lg shadow-indigo-100">Update Password</button>
+          <button type="button" onClick={handleProfilePasswordChange} className="bg-indigo-600 text-white px-5 py-3 rounded-xl font-black hover:bg-indigo-700 shadow-lg shadow-indigo-100">Update Password</button>
           {passwordMessage && <span className={`text-sm font-black px-4 py-2 rounded-xl border ${passwordMessage.includes('success') ? 'bg-emerald-50 border-emerald-100 text-emerald-700' : 'bg-red-50 border-red-100 text-red-600'}`}>{passwordMessage}</span>}
         </div>
       </div>

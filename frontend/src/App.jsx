@@ -1,4 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { FeedbackHost } from './components/ui/FeedbackHost.jsx';
+import { notifyUser, requestConfirmation, requestInput } from './services/uiFeedback.js';
+import { useAdaptiveWorkspaceSync } from './hooks/useAdaptiveWorkspaceSync.js';
 import { formatLastSeenDateTime, formatCallDuration, formatDateKey, formatDateTime, formatDuration, formatMinutes } from './utils/date';
 import { formatTaskId, allProjectDocs, getCompletedDocuments, getLatestCompletedFileName, getTaskDescription, getEstimateDetails, getCompletedFileBadge } from './utils/taskDisplayUtils';
 import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass, buildPaymentTrackingUpdate, getPaymentEstimateAmount, getPaymentReceivedAmount, derivePaymentTrackingStatusFromData } from './features/finance';
@@ -10,18 +13,13 @@ import { LocalModeBanner, DatabasePermissionBanner, TopNavigation, MobileSearchB
 import { PortalLayer } from './components/ui/LayerPortal';
 import { Button, IconButton, InlineAlert } from './components/ui/designSystem.jsx';
 import { ActiveToasts } from './features/notifications';
-import { ProfileView } from './features/profile';
-import { CalculatorView } from './features/calculator';
-import { TeamMeetingRoom } from './features/meetings';
-import { CommunicationHub } from './features/chat';
-import { HistoryArchiveView } from './features/archive';
-import { CommandCentreView, ProductivityDashboard, DailyClosingReport, ReportsAnalyticsView, ProductionQAView, SystemSettingsView } from './features/command-centre';
-import { ActiveOperationsView } from './features/operations';
-import { getStatusColor, getPriorityColor, fetchBackendState, createTaskApi, saveBackendStateApi, deleteTaskApi, mergeTaskLists, persistTasksToLocalCache } from './services/taskService';
+import { getStatusColor, getPriorityColor, fetchBackendState, createTaskApi, saveBackendStateApi, saveFinanceStatusApi, deleteTaskApi, mergeTaskLists, persistTasksToLocalCache } from './services/taskService';
 import { API_BASE, USE_BACKEND_STATE, ONLINE_STALE_MS, MAX_INLINE_DATA_URL_CHARS } from './config/appConfig';
 import { fileToBase64, cleanFileName } from './utils/fileUtils';
 import { absoluteApiUrl, getProjectFileDownloadUrl, getProjectFilePreviewUrl, getProjectFileActionState, isProjectFilePdf, isProjectFileImage, getProjectFileKind, canPreviewProjectFile, fetchProjectFilePreview, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile, getProjectFileCacheKey, listCachedProjectFiles, openCachedProjectFile, clearCachedProjectFile, pruneExpiredProjectFileCache } from './services/fileService';
 import { sendRealOtp, verifyRealOtp } from './services/otpService';
+import { authFetch, loginApi, getSessionApi, logoutApi, changePasswordApi, requestPasswordRecoveryApi, resetPasswordRecoveryApi, createAuthUserApi, updateAuthUserApi, resetAuthUserPasswordApi } from './services/authService';
+import { sendChatMessageApi, updateChatMessageApi, deleteChatMessageApi, markChatReadApi, markNotificationReadApi, markAllNotificationsReadApi, createNotificationApi } from './services/chatService';
 import { buildNotification, getVisibleNotifications, NOTIFICATION_CATEGORIES, getNotificationCategory, getNotificationPriority, buildActivityTimeline, isNotificationForUser } from './services/notificationService';
 import { 
   Briefcase, CheckCircle, Clock, FileText, LayoutDashboard, LogOut, 
@@ -30,39 +28,29 @@ import {
   File as FileIcon, Archive, Send, Flag, Shield, Hash, Video, Phone,
   Calendar, Filter, Check, ArrowLeft, Download, ChevronRight, ChevronLeft, Lock, Eye, EyeOff, Map as MapIcon, AlertCircle, KanbanSquare, Link as LinkIcon, BarChart3, Building2, Smile, Star, Mic, Square, Trash2, Edit3, Save, ZoomIn, ZoomOut, RotateCw, RotateCcw, Maximize2, RefreshCcw
 } from 'lucide-react';
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, setDoc, onSnapshot, collection, deleteDoc, getDocs } from 'firebase/firestore';
-import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, doc, setDoc, onSnapshot, collection, deleteDoc, getDocs, getStorage, storageRef, uploadBytes, getDownloadURL } from './services/legacyFirebaseDisabled.js';
 
-// SMART CONFIG: Safely connects to your real database
-const getFirebaseConfig = () => {
-  try {
-    if (typeof __firebase_config !== 'undefined' && __firebase_config) {
-      return typeof __firebase_config === 'string' ? JSON.parse(__firebase_config) : __firebase_config;
-    }
-  } catch(e) { console.error("Config parse error", e); }
-  
-  return {
-    apiKey: "AIzaSyChp8wyCBMBq1OEPu2dAXvhf2Xr__MyoME",
-    authDomain: "kalpvriksha-designs.firebaseapp.com",
-    projectId: "kalpvriksha-designs",
-    storageBucket: "kalpvriksha-designs.firebasestorage.app",
-    messagingSenderId: "523021216335",
-    appId: "1:523021216335:web:2edb5a72a6d105c3b6183a",
-    measurementId: "G-QL5KLFTHRN"
-  };
-};
+const lazyNamed = (loader, name) => React.lazy(() => loader().then((module) => ({ default: module[name] })));
+const ProfileView = lazyNamed(() => import('./features/profile'), 'ProfileView');
+const CalculatorView = lazyNamed(() => import('./features/calculator'), 'CalculatorView');
+const TeamMeetingRoom = lazyNamed(() => import('./features/meetings'), 'TeamMeetingRoom');
+const CommunicationHub = lazyNamed(() => import('./features/chat'), 'CommunicationHub');
+const HistoryArchiveView = lazyNamed(() => import('./features/archive'), 'HistoryArchiveView');
+const CommandCentreView = lazyNamed(() => import('./features/command-centre'), 'CommandCentreView');
+const ProductivityDashboard = lazyNamed(() => import('./features/command-centre'), 'ProductivityDashboard');
+const DailyClosingReport = lazyNamed(() => import('./features/command-centre'), 'DailyClosingReport');
+const ReportsAnalyticsView = lazyNamed(() => import('./features/command-centre'), 'ReportsAnalyticsView');
+const SystemSettingsView = lazyNamed(() => import('./features/command-centre'), 'SystemSettingsView');
+const ActiveOperationsView = lazyNamed(() => import('./features/operations'), 'ActiveOperationsView');
 
+// PostgreSQL/backend mode is authoritative. Legacy Firebase symbols remain as disabled compatibility stubs only.
+const getFirebaseConfig = () => ({ disabled: true });
 const app = initializeApp(getFirebaseConfig());
 const auth = getAuth(app);
 const db = getFirestore(app);
 const storage = getStorage(app);
-
-const rawAppId = typeof __app_id !== 'undefined' ? __app_id : 'kalpavriksha_production_v1';
-const safeAppId = String(rawAppId).split('/')[0] || 'kalpavriksha_production_v1';
-
-const isLocalMock = !USE_BACKEND_STATE && getFirebaseConfig().apiKey === "mock-key";
+const safeAppId = 'kalpavriksha_production_v1';
+const isLocalMock = false;
 
 const createOpsBroadcast = () => {
   try {
@@ -104,6 +92,24 @@ const sanitizeProjectForCache = (project) => {
 };
 
 const sanitizeProjectsForCache = (projects) => (Array.isArray(projects) ? projects.map(sanitizeProjectForCache) : []);
+
+const FINANCE_COMPARE_FIELDS = Object.freeze([
+  'ledger','financeVersion','paymentTrackingStatus','paymentTrackingUpdatedAt','paymentTrackingUpdatedBy',
+  'paymentStatus','paymentReceived','paymentAmountIn','refundAmount','payerName','transactionId',
+  'paymentDate','paymentTime','paymentAuditTrail'
+]);
+
+const financeSignature = (project = {}) => JSON.stringify(Object.fromEntries(
+  FINANCE_COMPARE_FIELDS.map(field => [field, project?.[field] ?? null])
+));
+
+const applyConfirmedFinance = (project = {}, confirmed = {}) => {
+  const next = { ...project };
+  FINANCE_COMPARE_FIELDS.forEach(field => {
+    if (Object.prototype.hasOwnProperty.call(confirmed || {}, field)) next[field] = confirmed[field];
+  });
+  return next;
+};
 
 const getPendingCreatedProjects = () => {
   try {
@@ -354,6 +360,20 @@ const mergeChatMessagesByFreshness = (current = [], incoming = []) => {
   return Array.from(byId.values()).sort((a, b) => chatTimeValue(a) - chatTimeValue(b));
 };
 
+const AUTHORIZATION_CACHE_SCOPE_KEY = 'kalpa_authorization_cache_scope_v1';
+const clearRoleScopedOperationalCaches = (user = {}) => {
+  if (typeof localStorage === 'undefined') return;
+  const scope = `phase4:${String(user.id || user.username || '').trim()}:${String(user.role || '').trim().toUpperCase()}`;
+  let existing = '';
+  try { existing = localStorage.getItem(AUTHORIZATION_CACHE_SCOPE_KEY) || ''; } catch {}
+  if (existing !== scope) {
+    ['kalpa_users','kalpa_projects','kalpa_projects_backup','kalpa_chats','kalpa_notifs','kalpa_attendance','kalpa_pending_created_projects','kalpa_pending_deleted_project_ids','kalpa_recent_created_projects'].forEach(key => {
+      try { localStorage.removeItem(key); } catch {}
+    });
+  }
+  try { localStorage.setItem(AUTHORIZATION_CACHE_SCOPE_KEY, scope); } catch {}
+};
+
 const compactLargeLocalStoragePayloads = () => {
   if (typeof localStorage === 'undefined') return;
   ['kalpa_projects', 'kalpa_projects_backup', 'kalpa_chats'].forEach((key) => {
@@ -480,16 +500,9 @@ const TASK_CATEGORIES = [
   'Floor Plan', 'Map Estimate', 'Other'
 ];
 
-// PRE-CONFIGURED TEAM ACCOUNTS
-const INITIAL_USERS = [
-  { id: 1, name: 'Ashutosh Rai', username: 'ashutosh', password: '123', role: ROLES.ADMIN, status: 'APPROVED' },
-  { id: 2, name: 'Vaibhav Singh', username: 'vaibhav', password: '123', role: ROLES.ADMIN, status: 'APPROVED' },
-  { id: 3, name: 'Shubham Upadhyay', username: 'shubham', password: '123', role: ROLES.ADMIN, status: 'APPROVED' },
-  { id: 4, name: 'Amit Kushwaha', username: 'amit', password: '123', role: ROLES.MANAGER, status: 'APPROVED' },
-  { id: 5, name: 'Waqar', username: 'waqar', password: '123', role: ROLES.DESIGNER, status: 'APPROVED' },
-  { id: 6, name: 'Nilu Gupta', username: 'nilu', password: '123', role: ROLES.DESIGNER, status: 'APPROVED' },
-  { id: 7, name: 'Khushbu Pandey', username: 'khushbu', password: '123', role: ROLES.DESIGNER, status: 'APPROVED' }
-];
+// Team accounts are loaded from the configured backend. Source packages never
+// contain employee names, usernames, or plaintext passwords.
+const INITIAL_USERS = [];
 
 
 const createEmployeeLifecycleProfile = (user = {}, existing = {}) => {
@@ -613,12 +626,10 @@ const createEmployeeLifecycleProfile = (user = {}, existing = {}) => {
 const normalizeTeamUser = (u = {}) => {
   const rawName = String(u.name || '').trim();
   const rawUsername = String(u.username || '').trim();
-  const isKhushbu = /khus+h?bu|khushboo|khushbu/i.test(rawName) || /khus+h?bu|khushboo|khushbu/i.test(rawUsername);
-  const isWaqar = /ali\s*waqar|^ali$|^waqar$/i.test(rawName) || /ali|waqar/i.test(rawUsername);
   const normalized = {
     ...u,
-    name: isKhushbu ? 'Khushbu Pandey' : (isWaqar ? 'Waqar' : (rawName || u.name)),
-    username: isKhushbu ? 'khushbu' : (isWaqar ? 'waqar' : rawUsername),
+    name: rawName || u.name,
+    username: rawUsername,
     role: normalizeRole(u.role),
     status: normalizeStatus(u.status),
     isOnline: !!u.isOnline,
@@ -1190,11 +1201,16 @@ const getDocumentReadiness = (project = {}) => {
   return { score, items };
 };
 
-const LoginScreen = ({ onLogin, users, onRecoverPassword }) => {
+const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetRecovery }) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPass, setShowPass] = useState(false);
   const [error, setError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [mustChangePassword, setMustChangePassword] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [forcedNewPassword, setForcedNewPassword] = useState('');
+  const [forcedConfirmPassword, setForcedConfirmPassword] = useState('');
   const [showRecovery, setShowRecovery] = useState(false);
   const [recoveryUser, setRecoveryUser] = useState('');
   const [recoveryMethod, setRecoveryMethod] = useState('email');
@@ -1207,119 +1223,95 @@ const LoginScreen = ({ onLogin, users, onRecoverPassword }) => {
   const [recoveryMessage, setRecoveryMessage] = useState('');
   const [otpSent, setOtpSent] = useState(false);
 
-  const activeUsers = normalizeTeamUsers(users && users.length > 0 ? users : INITIAL_USERS);
-  const handleLogin = (e) => {
-    e.preventDefault();
-    const sourceUsers = activeUsers.some(u => u.username) ? activeUsers : INITIAL_USERS;
-    const user = sourceUsers.find(u => 
-      (u.username || '').toLowerCase() === username.toLowerCase().trim() && 
-      (u.password || '123') === password && 
-      u.status === 'APPROVED'
-    );
-    
-    if (user) {
-       onLogin(user);
-    } else {
-       setError('Invalid username/password, or this login has been restricted by Admin.');
+  const passwordPolicyMessage = 'Use at least 10 characters with uppercase, lowercase and a number.';
+
+  const handleLogin = async (event) => {
+    event.preventDefault();
+    setError('');
+    setIsSubmitting(true);
+    try {
+      const response = await onLogin({ username: username.trim(), password });
+      if (response?.user?.mustChangePassword) {
+        setCurrentPassword(password);
+        setMustChangePassword(true);
+        setPassword('');
+        setError('For security, replace the temporary or legacy password before entering the portal.');
+      }
+    } catch (loginError) {
+      setError(loginError?.message || 'Invalid username or password, or this account is restricted.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
-  const recoveryMatch = activeUsers.find(u => (u.username || '').toLowerCase() === recoveryUser.toLowerCase().trim());
+  const handleForcedPasswordChange = async (event) => {
+    event.preventDefault();
+    setError('');
+    if (forcedNewPassword !== forcedConfirmPassword) {
+      setError('New password and confirmation do not match.');
+      return;
+    }
+    setIsSubmitting(true);
+    try {
+      await onChangePassword({ currentPassword, newPassword: forcedNewPassword });
+      setMustChangePassword(false);
+      setCurrentPassword('');
+      setForcedNewPassword('');
+      setForcedConfirmPassword('');
+    } catch (changeError) {
+      setError(changeError?.message || 'Password could not be changed.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   const handleSendRecoveryOtp = async () => {
     setRecoveryMessage('');
-    if (!recoveryMatch) {
-      setRecoveryMessage('No approved user found with this username.');
-      return;
-    }
-    const method = recoveryMethod === 'mobile' ? 'mobile' : 'email';
-    if (method === 'email') {
-      const registeredEmail = String(recoveryMatch.email || '').trim().toLowerCase();
-      const enteredEmail = String(recoveryEmail || '').trim().toLowerCase();
-      if (!recoveryMatch.emailRegistered) {
-        setRecoveryMessage('Email is not OTP-registered for this account. Please login and register email from Profile, or ask an Admin to reset the password.');
-        return;
-      }
-      if (!registeredEmail) {
-        setRecoveryMessage('No registered email is saved for this account. Please ask an Admin to reset the password.');
-        return;
-      }
-      if (!enteredEmail || enteredEmail !== registeredEmail) {
-        setRecoveryMessage('Registered email address does not match this account.');
-        return;
-      }
-      try {
-        const otpResponse = await sendRealOtp({ username: recoveryMatch.username, email: enteredEmail, channel: 'email', purpose: 'password_recovery' });
-        setRecoveryChallengeId(otpResponse.challengeId || '');
-        setOtpSent(true);
-        setRecoveryMessage(`OTP sent to registered email ${registeredEmail.replace(/(.{2}).+(@.+)/, '$1***$2')}.`);
-      } catch (err) {
-        setOtpSent(false);
-        setRecoveryChallengeId('');
-        setRecoveryMessage(err.message || 'Unable to send email OTP. Please contact an Admin.');
-      }
-      return;
-    }
-
-    const registeredMobile = String(recoveryMatch.phone || recoveryMatch.mobile || '').replace(/\D/g, '');
-    const enteredMobile = String(recoveryMobile || '').replace(/\D/g, '');
-    if (!recoveryMatch.mobileRegistered) {
-      setRecoveryMessage('Mobile is not OTP-registered for this account. Use Email OTP if registered, or ask an Admin to reset the password.');
-      return;
-    }
-    if (!registeredMobile) {
-      setRecoveryMessage('No registered mobile is saved for this account. Please ask an Admin to reset the password.');
-      return;
-    }
-    if (!enteredMobile || enteredMobile.slice(-10) !== registeredMobile.slice(-10)) {
-      setRecoveryMessage('Registered mobile number does not match this account.');
+    if (!recoveryUser.trim()) {
+      setRecoveryMessage('Username is required.');
       return;
     }
     try {
-      const otpResponse = await sendRealOtp({ username: recoveryMatch.username, mobile: enteredMobile, channel: 'mobile', purpose: 'password_recovery' });
-      setRecoveryChallengeId(otpResponse.challengeId || '');
-      setOtpSent(true);
-      setRecoveryMessage(`OTP sent to registered mobile ending ${registeredMobile.slice(-4)}.`);
-    } catch (err) {
+      const response = await onRequestRecovery({
+        username: recoveryUser.trim(),
+        channel: recoveryMethod,
+        email: recoveryMethod === 'email' ? recoveryEmail.trim() : '',
+        mobile: recoveryMethod === 'mobile' ? recoveryMobile.trim() : ''
+      });
+      setRecoveryChallengeId(response.challengeId || '');
+      setOtpSent(Boolean(response.challengeId));
+      if (response.devOtp) setRecoveryMessage(`Local testing OTP: ${response.devOtp}`);
+      else setRecoveryMessage(`OTP sent to the registered ${recoveryMethod}.`);
+    } catch (recoveryError) {
       setOtpSent(false);
       setRecoveryChallengeId('');
-      setRecoveryMessage(err.message || 'Unable to send mobile OTP. Please use Email OTP or contact an Admin.');
+      setRecoveryMessage(recoveryError?.message || 'Unable to send recovery OTP.');
     }
   };
 
   const handlePasswordRecovery = async () => {
     setRecoveryMessage('');
-    if (!recoveryMatch) {
-      setRecoveryMessage('No approved user found with this username.');
-      return;
-    }
     if (!otpSent || !recoveryChallengeId) {
-      setRecoveryMessage('Please send and verify OTP first.');
-      return;
-    }
-    try {
-      await verifyRealOtp({ challengeId: recoveryChallengeId, otp: recoveryOtp, purpose: 'password_recovery' });
-    } catch (err) {
-      setRecoveryMessage(err.message || 'Invalid OTP. Please check the OTP and try again.');
-      return;
-    }
-    if (!recoveryNewPass || recoveryNewPass.length < 3) {
-      setRecoveryMessage('New password must be at least 3 characters.');
+      setRecoveryMessage('Send the OTP first.');
       return;
     }
     if (recoveryNewPass !== recoveryConfirmPass) {
-      setRecoveryMessage('New password and confirm password do not match.');
+      setRecoveryMessage('New password and confirmation do not match.');
       return;
     }
-    onRecoverPassword({ ...recoveryMatch, password: recoveryNewPass, passwordUpdatedAt: Date.now(), passwordResetBy: `${recoveryMethod === 'mobile' ? 'Mobile' : 'Email'} OTP Recovery` });
-    setRecoveryMessage('Password reset successfully. You can login with the new password now.');
-    setUsername(recoveryMatch.username || '');
-    setPassword('');
-    setRecoveryOtp('');
-    setRecoveryChallengeId('');
-    setOtpSent(false);
-    setRecoveryNewPass('');
-    setRecoveryConfirmPass('');
+    try {
+      await onResetRecovery({ challengeId: recoveryChallengeId, otp: recoveryOtp, newPassword: recoveryNewPass });
+      setRecoveryMessage('Password reset successfully. Sign in with the new password.');
+      setUsername(recoveryUser.trim());
+      setPassword('');
+      setRecoveryOtp('');
+      setRecoveryChallengeId('');
+      setOtpSent(false);
+      setRecoveryNewPass('');
+      setRecoveryConfirmPass('');
+    } catch (recoveryError) {
+      setRecoveryMessage(recoveryError?.message || 'Password could not be reset.');
+    }
   };
 
   return (
@@ -1332,94 +1324,103 @@ const LoginScreen = ({ onLogin, users, onRecoverPassword }) => {
           <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Kalpvriksha Designs Ops</h1>
           <p className="text-slate-500 mt-2 font-medium">Secure Team Portal</p>
         </div>
-        
-        {error && <div className="bg-red-50 text-red-700 p-4 rounded-xl mb-6 text-sm font-bold text-center border border-red-100 animate-in shake">{error}</div>}
 
-        <form onSubmit={handleLogin} className="space-y-4">
-          <div>
-             <label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Username</label>
-             <div className="relative">
+        {error && <div className={`${mustChangePassword ? 'bg-amber-50 text-amber-800 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'} p-4 rounded-xl mb-6 text-sm font-bold text-center border`}>{error}</div>}
+
+        {mustChangePassword ? (
+          <form onSubmit={handleForcedPasswordChange} className="space-y-4">
+            <div className="rounded-2xl border border-indigo-100 bg-indigo-50 p-4 text-sm font-semibold text-indigo-800">
+              Your current password was accepted, but it is temporary or legacy. Create a strong replacement now.
+            </div>
+            <div>
+              <label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">New Password</label>
+              <input required type="password" value={forcedNewPassword} onChange={event => setForcedNewPassword(event.target.value)} className="w-full border-2 border-slate-100 px-4 py-3.5 rounded-xl focus:border-indigo-500 outline-none font-bold text-slate-800" />
+            </div>
+            <div>
+              <label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Confirm New Password</label>
+              <input required type="password" value={forcedConfirmPassword} onChange={event => setForcedConfirmPassword(event.target.value)} className="w-full border-2 border-slate-100 px-4 py-3.5 rounded-xl focus:border-indigo-500 outline-none font-bold text-slate-800" />
+            </div>
+            <p className="text-xs font-semibold text-slate-400">{passwordPolicyMessage}</p>
+            <button disabled={isSubmitting} type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-black py-3.5 rounded-xl shadow-lg shadow-indigo-100 transition-all">
+              {isSubmitting ? 'Securing account...' : 'Change Password & Continue'}
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div>
+              <label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Username</label>
+              <div className="relative">
                 <User className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
-                <input required type="text" value={username} onChange={e => setUsername(e.target.value)} className="w-full border-2 border-slate-100 pl-12 pr-4 py-3.5 rounded-xl focus:border-indigo-500 focus:ring-0 outline-none transition-colors font-bold text-slate-800" placeholder="Enter username" />
-             </div>
-          </div>
-          <div>
-             <label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Password</label>
-             <div className="relative">
-                <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
-                <input required type={showPass ? "text" : "password"} value={password} onChange={e => setPassword(e.target.value)} className="w-full border-2 border-slate-100 pl-12 pr-12 py-3.5 rounded-xl focus:border-indigo-500 focus:ring-0 outline-none transition-colors font-bold text-slate-800" placeholder="••••••••" />
-                <button type="button" onClick={() => setShowPass(!showPass)} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-indigo-600 transition-colors">
-                   {showPass ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
-                </button>
-             </div>
-          </div>
-          <div className="flex justify-end -mt-1">
-            <button type="button" onClick={() => { setShowRecovery(true); setError(''); }} className="text-xs font-black text-indigo-600 hover:text-indigo-800 uppercase tracking-widest">Forgot password?</button>
-          </div>
-          <button type="submit" className="w-full bg-slate-800 text-white py-4 rounded-xl font-black text-lg hover:bg-slate-700 transition-all shadow-xl shadow-slate-200 mt-6 hover:-translate-y-1">Secure Login</button>
-        </form>
-
-        {showRecovery && (
-          <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-3xl shadow-2xl border-2 border-slate-100 p-6 w-full max-w-md animate-in fade-in zoom-in-95">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-xl font-black text-slate-800">Password Recovery</h2>
-                <button type="button" onClick={() => setShowRecovery(false)} className="p-2 rounded-xl hover:bg-slate-50 text-slate-400"><X className="w-5 h-5" /></button>
-              </div>
-              <p className="text-sm font-semibold text-slate-500 mb-4">Enter username and choose registered email or mobile. Password reset is allowed only after OTP verification.</p>
-              <input value={recoveryUser} onChange={e => { setRecoveryUser(e.target.value); setRecoveryMessage(''); setOtpSent(false); }} placeholder="Username" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500 mb-3" />
-              <div className="grid grid-cols-2 gap-2 mb-3">
-                <button type="button" onClick={() => { setRecoveryMethod('email'); setOtpSent(false); setRecoveryMessage(''); }} className={`py-2.5 rounded-xl font-black border ${recoveryMethod === 'email' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200'}`}>Email OTP</button>
-                <button type="button" onClick={() => { setRecoveryMethod('mobile'); setOtpSent(false); setRecoveryMessage(''); }} className={`py-2.5 rounded-xl font-black border ${recoveryMethod === 'mobile' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200'}`}>Mobile OTP</button>
-              </div>
-              {recoveryMethod === 'email' ? (
-                <input value={recoveryEmail} onChange={e => { setRecoveryEmail(e.target.value); setRecoveryMessage(''); setOtpSent(false); }} placeholder="Registered email address" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500 mb-3" />
-              ) : (
-                <input value={recoveryMobile} onChange={e => { setRecoveryMobile(e.target.value); setRecoveryMessage(''); setOtpSent(false); }} placeholder="Registered mobile number" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500 mb-3" />
-              )}
-              {recoveryUser && recoveryMatch && <div className="bg-emerald-50 border border-emerald-100 text-emerald-700 p-3 rounded-xl font-bold text-sm mb-3">Account found: {recoveryMatch.name}</div>}
-              <button type="button" onClick={handleSendRecoveryOtp} className="w-full bg-indigo-50 text-indigo-700 py-3 rounded-xl font-black border border-indigo-100 mb-3">Send OTP</button>
-              {otpSent && <>
-                <input value={recoveryOtp} onChange={e => setRecoveryOtp(e.target.value)} placeholder="Enter OTP" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500 mb-3" />
-                <input type="password" value={recoveryNewPass} onChange={e => setRecoveryNewPass(e.target.value)} placeholder="New password" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500 mb-3" />
-                <input type="password" value={recoveryConfirmPass} onChange={e => setRecoveryConfirmPass(e.target.value)} placeholder="Confirm new password" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500 mb-3" />
-              </>}
-              {recoveryMessage && <div className={`${recoveryMessage.includes('success') || recoveryMessage.includes('OTP sent') ? 'bg-emerald-50 border-emerald-100 text-emerald-700' : 'bg-red-50 border-red-100 text-red-600'} border p-4 rounded-xl font-bold text-sm mb-4`}>{recoveryMessage}</div>}
-              <div className="grid grid-cols-2 gap-3 mt-5">
-                <button type="button" onClick={() => setShowRecovery(false)} className="bg-slate-100 text-slate-700 py-3 rounded-xl font-black">Cancel</button>
-                <button type="button" onClick={handlePasswordRecovery} className="bg-slate-800 text-white py-3 rounded-xl font-black">Reset Password</button>
+                <input required type="text" autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} className="w-full border-2 border-slate-100 pl-12 pr-4 py-3.5 rounded-xl focus:border-indigo-500 outline-none font-bold text-slate-800" placeholder="Enter username" />
               </div>
             </div>
-          </div>
+            <div>
+              <label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Password</label>
+              <div className="relative">
+                <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
+                <input required autoComplete="current-password" type={showPass ? 'text' : 'password'} value={password} onChange={event => setPassword(event.target.value)} className="w-full border-2 border-slate-100 pl-12 pr-12 py-3.5 rounded-xl focus:border-indigo-500 outline-none font-bold text-slate-800" placeholder="••••••••" />
+                <button type="button" onClick={() => setShowPass(value => !value)} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-indigo-600" aria-label={showPass ? 'Hide password' : 'Show password'}>{showPass ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}</button>
+              </div>
+            </div>
+            <button disabled={isSubmitting} type="submit" className="w-full bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white font-black py-3.5 rounded-xl shadow-lg transition-all">
+              {isSubmitting ? 'Signing in...' : 'Secure Sign In'}
+            </button>
+            <button type="button" onClick={() => { setShowRecovery(true); setRecoveryMessage(''); }} className="w-full text-sm font-black text-indigo-600 hover:text-indigo-700">Forgot password?</button>
+          </form>
+        )}
+
+        {showRecovery && !mustChangePassword && (
+          <PortalLayer isOpen={showRecovery} className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm z-[1000] flex items-center justify-center p-4" lockScrollClass="kalpa-password-recovery-open" role="dialog" ariaModal={true} ariaLabel="Password recovery" onEscape={() => setShowRecovery(false)} initialFocusSelector="input">
+            <div className="bg-white rounded-3xl p-6 w-full max-w-lg shadow-2xl border border-slate-100">
+              <div className="flex items-center justify-between mb-4">
+                <div><h2 className="text-xl font-black text-slate-800">Password Recovery</h2><p className="text-xs font-semibold text-slate-400 mt-1">Recovery details must exactly match the registered profile.</p></div>
+                <button type="button" onClick={() => setShowRecovery(false)} className="text-slate-400 hover:text-slate-700"><X className="w-5 h-5" /></button>
+              </div>
+              <div className="space-y-3">
+                <input value={recoveryUser} onChange={event => setRecoveryUser(event.target.value)} placeholder="Username" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
+                <div className="grid grid-cols-2 gap-2">
+                  <button type="button" onClick={() => setRecoveryMethod('email')} className={`${recoveryMethod === 'email' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'} py-2.5 rounded-xl font-black text-sm`}>Email OTP</button>
+                  <button type="button" onClick={() => setRecoveryMethod('mobile')} className={`${recoveryMethod === 'mobile' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'} py-2.5 rounded-xl font-black text-sm`}>Mobile OTP</button>
+                </div>
+                {recoveryMethod === 'email' ? <input type="email" value={recoveryEmail} onChange={event => setRecoveryEmail(event.target.value)} placeholder="Registered email" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" /> : <input value={recoveryMobile} onChange={event => setRecoveryMobile(event.target.value)} placeholder="Registered mobile" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />}
+                <button type="button" onClick={handleSendRecoveryOtp} className="w-full bg-indigo-50 text-indigo-700 border border-indigo-100 py-3 rounded-xl font-black">Send Recovery OTP</button>
+                {otpSent && <>
+                  <input value={recoveryOtp} onChange={event => setRecoveryOtp(event.target.value)} placeholder="Enter OTP" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
+                  <input type="password" value={recoveryNewPass} onChange={event => setRecoveryNewPass(event.target.value)} placeholder="New password" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
+                  <input type="password" value={recoveryConfirmPass} onChange={event => setRecoveryConfirmPass(event.target.value)} placeholder="Confirm new password" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
+                  <p className="text-xs font-semibold text-slate-400">{passwordPolicyMessage}</p>
+                  <button type="button" onClick={handlePasswordRecovery} className="w-full bg-slate-900 text-white py-3 rounded-xl font-black">Reset Password</button>
+                </>}
+                {recoveryMessage && <div className="bg-slate-50 border border-slate-100 rounded-xl p-3 text-sm font-bold text-slate-600">{recoveryMessage}</div>}
+              </div>
+            </div>
+          </PortalLayer>
         )}
       </div>
     </div>
   );
 };
 
-
-const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser, onOpenPerformance, onSelectProject }) => {
+const TeamPerformanceView = ({ users, projects, onUpdateUser, onCreateUser, onUpdateAccess, onResetPassword, currentUser, onOpenPerformance, onSelectProject }) => {
   const [selectedUser, setSelectedUser] = useState(null);
   const [newUser, setNewUser] = useState({ name: '', username: '', password: '', role: ROLES.DESIGNER });
   const [showAddForm, setShowAddForm] = useState(false);
+  const [accessMessage, setAccessMessage] = useState('');
 
   const isAdmin = currentUser.role === ROLES.ADMIN;
 
-  const handleAddUser = (e) => {
+  const handleAddUser = async (e) => {
     e.preventDefault();
+    setAccessMessage('');
     if (!newUser.name || !newUser.username || !newUser.password) return;
-    const createdAt = Date.now();
-    const createdBy = currentUser?.name || 'Admin';
-    const u = createEmployeeLifecycleProfile({
-      ...newUser,
-      id: createdAt,
-      status: 'APPROVED',
-      createdBy,
-      lifecycleEvents: [makeEmployeeLifecycleEvent('EMPLOYEE_CREATED', createdBy, { role: newUser.role })]
-    });
-    onUpdateUser(u);
-    setNewUser({ name: '', username: '', password: '', role: ROLES.DESIGNER });
-    setShowAddForm(false);
+    try {
+      await onCreateUser?.(newUser);
+      setNewUser({ name: '', username: '', password: '', role: ROLES.DESIGNER });
+      setShowAddForm(false);
+      setAccessMessage('Employee account created. The employee must change the temporary password at first sign-in.');
+    } catch (error) {
+      setAccessMessage(error?.message || 'Employee account could not be created.');
+    }
   };
 
   if (selectedUser) {
@@ -1545,7 +1546,7 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser, onOpe
              <form onSubmit={handleAddUser} className="grid grid-cols-1 sm:grid-cols-5 gap-4 items-end">
                 <div><label className="text-xs font-bold text-indigo-600 uppercase mb-1 block">Full Name</label><input required value={newUser.name} onChange={e=>setNewUser({...newUser, name: e.target.value})} className="w-full border-2 border-white rounded-xl p-2.5 font-bold outline-none focus:border-indigo-400"/></div>
                 <div><label className="text-xs font-bold text-indigo-600 uppercase mb-1 block">Username</label><input required value={newUser.username} onChange={e=>setNewUser({...newUser, username: e.target.value})} className="w-full border-2 border-white rounded-xl p-2.5 font-bold outline-none focus:border-indigo-400"/></div>
-                <div><label className="text-xs font-bold text-indigo-600 uppercase mb-1 block">Password</label><input required value={newUser.password} onChange={e=>setNewUser({...newUser, password: e.target.value})} className="w-full border-2 border-white rounded-xl p-2.5 font-bold outline-none focus:border-indigo-400"/></div>
+                <div><label className="text-xs font-bold text-indigo-600 uppercase mb-1 block">Password</label><input required type="password" autoComplete="new-password" value={newUser.password} onChange={e=>setNewUser({...newUser, password: e.target.value})} className="w-full border-2 border-white rounded-xl p-2.5 font-bold outline-none focus:border-indigo-400"/></div>
                 <div>
                   <label className="text-xs font-bold text-indigo-600 uppercase mb-1 block">Role</label>
                   <select value={newUser.role} onChange={e=>setNewUser({...newUser, role: e.target.value})} className="w-full border-2 border-white rounded-xl p-2.5 font-bold outline-none focus:border-indigo-400 bg-white">
@@ -1554,11 +1555,12 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser, onOpe
                   </select>
                 </div>
                 <button type="submit" className="bg-indigo-600 text-white font-bold py-3 rounded-xl shadow-md hover:bg-indigo-700 transition-colors">Create</button>
-                <p className="text-[10px] text-indigo-500 col-span-full mt-2">*Note: Admin promotion requires manual database approval for security.</p>
+                <p className="text-[10px] text-indigo-500 col-span-full mt-2">Temporary passwords require at least 10 characters with uppercase, lowercase and a number. The employee must replace it at first sign-in.</p>
              </form>
           </div>
         )}
 
+        {accessMessage && <div className="mb-4 rounded-2xl border border-indigo-100 bg-indigo-50 p-4 text-sm font-bold text-indigo-800">{accessMessage}</div>}
         <div className="space-y-4">
           {getManagedTeamUsers(users, { includeAdmins: true }).map(u => (
             <div key={u.id} className={`flex flex-col sm:flex-row sm:items-center justify-between p-5 rounded-2xl border gap-4 transition-all hover:border-indigo-200 hover:shadow-sm ${String(u.status || 'APPROVED').toUpperCase() === 'RESTRICTED' ? 'bg-red-50 border-red-100' : 'bg-slate-50 border-slate-100'}`}>
@@ -1575,7 +1577,7 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser, onOpe
               
               <div className="flex flex-wrap gap-3 items-center">
                 {isAdmin && u.role !== ROLES.ADMIN && (
-                   <select value={u.role} onChange={(e) => onUpdateUser({...u, role: e.target.value})} className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-xs font-bold text-slate-700 cursor-pointer outline-none focus:border-indigo-500">
+                   <select value={u.role} onChange={(e) => onUpdateAccess?.(u.id, { role: e.target.value }).catch(error => setAccessMessage(error?.message || 'Role update failed.'))} className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-xs font-bold text-slate-700 cursor-pointer outline-none focus:border-indigo-500">
                       <option value={ROLES.DESIGNER}>Designer</option>
                       <option value={ROLES.MANAGER}>Manager</option>
                    </select>
@@ -1583,21 +1585,27 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, currentUser, onOpe
                 <Badge colorClass={`py-1.5 px-4 mr-2 ${String(u.status || 'APPROVED').toUpperCase() === 'RESTRICTED' ? 'bg-red-100 text-red-700 border-red-200' : (u.role === ROLES.ADMIN ? 'bg-indigo-100 text-indigo-700 border-indigo-200' : 'bg-emerald-100 text-emerald-700 border-emerald-200')}`}>{String(u.status || 'APPROVED').toUpperCase() === 'RESTRICTED' ? 'Restricted' : u.role}</Badge>
                 
                 {isAdmin && u.role !== ROLES.ADMIN && (
-                   <button type="button" onClick={() => {
-                      const nextPassword = window.prompt(`Reset password for ${u.name}`);
-                      if (nextPassword && nextPassword.trim().length >= 3) onUpdateUser({ ...u, password: nextPassword.trim(), passwordUpdatedAt: Date.now(), passwordResetBy: currentUser.name });
+                   <button type="button" onClick={async () => {
+                      const nextPassword = await requestInput(`Set a temporary password for ${u.name}. Use at least 10 characters with uppercase, lowercase and a number.`, { title: 'Reset employee password', inputType: 'password', placeholder: 'Temporary password' });
+                      if (!nextPassword) return;
+                      try {
+                        await onResetPassword?.(u.id, nextPassword);
+                        setAccessMessage(`Temporary password reset for ${u.name}. Existing sessions were revoked.`);
+                      } catch (error) {
+                        setAccessMessage(error?.message || 'Password reset failed.');
+                      }
                    }} className="px-4 py-2.5 bg-amber-50 text-amber-700 hover:bg-amber-100 text-sm font-bold rounded-xl transition-all shadow-sm flex items-center border border-amber-100">
                       Reset Password
                    </button>
                 )}
                 {isAdmin && u.role !== ROLES.ADMIN && (
-                   <button type="button" onClick={() => onUpdateUser({ ...u, status: String(u.status || 'APPROVED').toUpperCase() === 'RESTRICTED' ? 'APPROVED' : 'RESTRICTED', restrictedAt: Date.now(), restrictedBy: currentUser.name })} className="px-4 py-2.5 bg-red-50 text-red-700 hover:bg-red-100 text-sm font-bold rounded-xl transition-all shadow-sm flex items-center border border-red-100">
+                   <button type="button" onClick={() => onUpdateAccess?.(u.id, { status: String(u.status || 'APPROVED').toUpperCase() === 'RESTRICTED' ? 'APPROVED' : 'RESTRICTED' }).catch(error => setAccessMessage(error?.message || 'Access update failed.'))} className="px-4 py-2.5 bg-red-50 text-red-700 hover:bg-red-100 text-sm font-bold rounded-xl transition-all shadow-sm flex items-center border border-red-100">
                       {String(u.status || 'APPROVED').toUpperCase() === 'RESTRICTED' ? 'Allow Login' : 'Restrict Login'}
                    </button>
                 )}
                 {isAdmin && u.role !== ROLES.ADMIN && (
-                   <button type="button" onClick={() => {
-                      if (window.confirm(`Archive login for ${u.name}? They will be hidden from active operations but old reports and task history will remain.`)) onUpdateUser({ ...u, status: 'ARCHIVED', archivedAt: Date.now(), archivedBy: currentUser.name });
+                   <button type="button" onClick={async () => {
+                      if (await requestConfirmation(`Archive login for ${u.name}? Their active sessions will be revoked.`, { title: 'Archive employee login', tone: 'danger', confirmLabel: 'Archive login' })) onUpdateAccess?.(u.id, { status: 'ARCHIVED' }).catch(error => setAccessMessage(error?.message || 'Archive failed.'));
                    }} className="px-4 py-2.5 bg-slate-900 text-white hover:bg-slate-700 text-sm font-bold rounded-xl transition-all shadow-sm flex items-center">
                       Delete Login
                    </button>
@@ -2416,7 +2424,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     if (project.status === 'Lead Received' || project.status === 'Assigned' || project.status === 'Drafting Paused' || project.status === 'Revision Pending' || project.status === 'Revision In Progress') {
       const otherDrafting = activeDraftingForUser(projects);
       if (otherDrafting) {
-        alert(`Only one task can be drafted at a time. Pause drafting on ${otherDrafting.id} before starting another task.`);
+        notifyUser(`Only one task can be drafted at a time. Pause drafting on ${otherDrafting.id} before starting another task.`);
         return;
       }
       const now = Date.now();
@@ -2433,7 +2441,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     }
     else if (project.status === 'Drafting') {
       if (getCompletedDocuments(project).length === 0) {
-        alert('Upload the completed work file first, then send it for internal review.');
+        notifyUser('Upload the completed work file first, then send it for internal review.');
         return;
       }
       updatedProject.status = 'Internal Review';
@@ -2446,7 +2454,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     }
     else if (project.status === 'Internal Review') {
       if (!canManage) {
-        alert('Only Admin or Manager can approve the final file after internal review.');
+        notifyUser('Only Admin or Manager can approve the final file after internal review.');
         return;
       }
       updatedProject.status = 'Completed';
@@ -2469,11 +2477,11 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
 
   const handleApproveFinal = () => {
     if (!canManage) {
-      alert('Only Admin or Manager can approve the final file.');
+      notifyUser('Only Admin or Manager can approve the final file.');
       return;
     }
     if (getCompletedDocuments(project).length === 0) {
-      alert('No completed work file found for approval.');
+      notifyUser('No completed work file found for approval.');
       return;
     }
     const updatedProject = {
@@ -2622,7 +2630,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const openUnifiedFilePreview = useCallback(async (doc = {}) => {
     const kind = getProjectFileKind(doc);
     if (kind === 'file') {
-      alert('Preview is available for PDF and image files. Please download this file to open it.');
+      notifyUser('Preview is available for PDF and image files. Please download this file to open it.');
       return;
     }
     const name = doc.name || doc.fileName || (kind === 'image' ? 'Image Preview' : 'PDF Preview');
@@ -2680,7 +2688,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
       return;
     }
     if (fileTransfer.active && fileTransfer.phase !== 'complete' && fileTransfer.phase !== 'error') {
-      alert(`${fileTransfer.label || 'File transfer'} is already in progress. Please wait until it completes before starting another upload/download.`);
+      notifyUser(`${fileTransfer.label || 'File transfer'} is already in progress. Please wait until it completes before starting another upload/download.`);
       return;
     }
     updateFileTransfer({ active: true, phase: 'downloading', label: 'Downloading file', fileName, fileId: doc?.id || doc?.fileId || '', transferType: 'download', progress: 1, loaded: 0, total: Number(doc?.size || 0), speedBps: 0, etaSeconds: 0, startedAt: Date.now(), message: 'Preparing download...' });
@@ -2766,7 +2774,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     const files = Array.from(e?.target?.files || []);
     if (!files || files.length === 0) return;
     if (fileTransfer.active && fileTransfer.phase !== 'complete' && fileTransfer.phase !== 'error') {
-      alert(`${fileTransfer.label || 'File transfer'} is already in progress. Please wait until it completes before starting another upload/download.`);
+      notifyUser(`${fileTransfer.label || 'File transfer'} is already in progress. Please wait until it completes before starting another upload/download.`);
       if (e?.target) e.target.value = '';
       return;
     }
@@ -2831,7 +2839,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     } catch (error) {
       console.error('File upload failed:', error);
       updateFileTransfer({ active: true, phase: 'error', label: 'Upload failed', progress: 100, message: error?.message || 'Please check your internet connection and try again.' });
-      alert(`File upload failed: ${error?.message || 'Please check your internet connection and try again.'}`);
+      notifyUser(`File upload failed: ${error?.message || 'Please check your internet connection and try again.'}`);
     } finally {
       if (type === 'completed') setIsUploadingFinal(false);
       if (e?.target) e.target.value = '';
@@ -2867,7 +2875,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     } catch (error) {
       console.error(`${attachmentType} attachment upload failed:`, error);
       updateFileTransfer({ active: true, phase: 'error', label: 'Upload failed', progress: 100, message: error?.message || 'Please check your internet connection and try again.' });
-      alert(`Attachment upload failed: ${error?.message || 'Please check your internet connection and try again.'}`);
+      notifyUser(`Attachment upload failed: ${error?.message || 'Please check your internet connection and try again.'}`);
     } finally {
       setUploading(false);
       if (event?.target) event.target.value = '';
@@ -2911,11 +2919,11 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const handleFileDelete = async (docToDelete) => {
     if (!docToDelete) return;
     if (!canDeleteProjectFile(docToDelete, user)) {
-      alert('Only Admin, Manager, or the uploader can delete this file.');
+      notifyUser('Only Admin, Manager, or the uploader can delete this file.');
       return;
     }
     const fileName = docToDelete.name || 'this file';
-    if (!window.confirm(`Delete ${fileName}? This will remove it from this task.`)) return;
+    if (!(await requestConfirmation(`Delete ${fileName}? This will remove it from this task.`, { title: 'Delete file', tone: 'danger', confirmLabel: 'Delete file' }))) return;
 
     await deleteProjectFileFromServer(docToDelete);
 
@@ -3127,7 +3135,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const markCompletedFileAsSent = async () => {
     const completedDocs = getCompletedDocuments(project);
     if (completedDocs.length === 0) {
-      alert('No completed file found. Please upload the completed file first.');
+      notifyUser('No completed file found. Please upload the completed file first.');
       return;
     }
     const latestDoc = completedDocs[completedDocs.length - 1];
@@ -3138,7 +3146,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const shareCompletedFileOnWhatsApp = async () => {
     const completedDocs = getCompletedDocuments(project);
     if (completedDocs.length === 0) {
-      alert('No completed file found for WhatsApp sharing. Please upload the completed PDF/DWG first.');
+      notifyUser('No completed file found for WhatsApp sharing. Please upload the completed PDF/DWG first.');
       return;
     }
 
@@ -3147,12 +3155,12 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     const downloadUrl = getProjectFileDownloadUrl(docToShare);
 
     if (!downloadUrl) {
-      alert('This completed file does not have a valid server download link. Please re-upload the final PDF once.');
+      notifyUser('This completed file does not have a valid server download link. Please re-upload the final PDF once.');
       return;
     }
 
     try {
-      const response = await fetch(downloadUrl, { cache: 'no-store' });
+      const response = await authFetch(downloadUrl, { cache: 'no-store' });
       if (!response.ok) {
         const serverText = await response.text().catch(() => '');
         throw new Error(serverText || `Download failed (${response.status})`);
@@ -3191,7 +3199,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
       window.open('https://web.whatsapp.com/', '_blank', 'noopener,noreferrer');
     } catch (e) {
       console.error('WhatsApp PDF share failed:', e);
-      alert(`Unable to prepare this PDF for WhatsApp. ${e?.message || 'Please re-upload the completed PDF and try again.'}`);
+      notifyUser(`Unable to prepare this PDF for WhatsApp. ${e?.message || 'Please re-upload the completed PDF and try again.'}`);
     }
   };
 
@@ -4083,7 +4091,7 @@ function AppShell() {
     const kind = getProjectFileKind(doc);
     const name = doc.name || doc.fileName || (kind === 'image' ? 'Image Preview' : 'PDF Preview');
     if (kind === 'file' && !canPreviewProjectFile(doc)) {
-      alert('Preview is available for PDF and image files only. Use Download to save this file.');
+      notifyUser('Preview is available for PDF and image files only. Use Download to save this file.');
       return;
     }
     setGlobalFilePreview((current) => {
@@ -4159,14 +4167,10 @@ function AppShell() {
   }, [darkMode]);
   
   const activeUsers = normalizeTeamUsers(users && users.length > 0 ? users : INITIAL_USERS);
-  const financeSafeHeaders = React.useMemo(() => ({
-    'X-User-Role': currentUser?.role || '',
-    'X-User-Name': currentUser?.name || ''
-  }), [currentUser?.role, currentUser?.name]);
+  const financeSafeHeaders = React.useMemo(() => ({}), []);
   const jsonFinanceSafeHeaders = React.useMemo(() => ({
-    'Content-Type': 'application/json',
-    ...financeSafeHeaders
-  }), [financeSafeHeaders]);
+    'Content-Type': 'application/json'
+  }), []);
 
   const postPresenceUpdate = useCallback((action = 'heartbeat', userPatch = currentUser) => {
     if (!USE_BACKEND_STATE || !backendStateReady || !userPatch) return;
@@ -4180,7 +4184,7 @@ function AppShell() {
       isOnline: action === 'logout' ? false : true,
       breakStartedAt: userPatch.breakStartedAt || null
     };
-    fetch(`${API_BASE}/api/presence`, {
+    authFetch(`${API_BASE}/api/presence`, {
       method: 'POST',
       headers: jsonFinanceSafeHeaders,
       body: JSON.stringify({ action, user: identity })
@@ -4226,20 +4230,21 @@ function AppShell() {
     });
   }, []);
 
-  // Central production persistence: hydrate and save operational state through backend.
-  // When DATABASE_URL is configured in backend/.env, this is persisted in PostgreSQL.
+  // Central production persistence: operational data is hydrated only after
+  // the backend has verified the secure session. Cached business data is never
+  // used as an unauthenticated production fallback.
   useEffect(() => {
-    if (!USE_BACKEND_STATE) return;
+    if (!USE_BACKEND_STATE || !isAuthReady || !currentUser) return;
     let cancelled = false;
+    setBackendStateReady(false);
+    setIsDbReady(false);
     const hydrate = async () => {
       try {
         const data = await fetchBackendState({ apiBase: API_BASE, headers: financeSafeHeaders });
         if (cancelled) return;
-        if (Array.isArray(data.users) && data.users.length) setUsers(normalizeTeamUsers(data.users));
+        if (Array.isArray(data.users)) setUsers(normalizeTeamUsers(data.users));
         if (Array.isArray(data.deletedProjectIds)) replaceConfirmedDeletedProjects(data.deletedProjectIds);
-        if (Array.isArray(data.projects)) {
-          applyProjectSnapshot(data.projects, { source: 'backend-hydrate' });
-        }
+        if (Array.isArray(data.projects)) applyProjectSnapshot(data.projects, { source: 'backend-hydrate' });
         if (Array.isArray(data.chatMessages)) {
           const incomingChats = sanitizeChatsForCache(data.chatMessages);
           setChatMessages(incomingChats);
@@ -4254,106 +4259,65 @@ function AppShell() {
         setDbError(null);
         setShowLocalBanner(data.database === 'json-file');
       } catch (err) {
-        console.warn('Backend/PostgreSQL state unavailable, using local cache fallback:', err.message);
-        try {
-          const savedUsers = localStorage.getItem('kalpa_users');
-          const savedProjects = localStorage.getItem('kalpa_projects');
-          const savedProjectsBackup = localStorage.getItem('kalpa_projects_backup');
-          const savedChats = localStorage.getItem('kalpa_chats');
-          const savedNotifs = localStorage.getItem('kalpa_notifs');
-          const savedLogs = localStorage.getItem('kalpa_attendance');
-          setUsers(normalizeTeamUsers(savedUsers ? JSON.parse(savedUsers) : INITIAL_USERS));
-          const localProjects = savedProjects ? JSON.parse(savedProjects) : [];
-          const backupProjects = savedProjectsBackup ? JSON.parse(savedProjectsBackup) : [];
-          applyProjectSnapshot(mergeProjectsByFreshness(sanitizeProjectsForCache(localProjects), sanitizeProjectsForCache(backupProjects)), { source: 'backend-fallback-cache' });
-          setChatMessages(savedChats ? sanitizeChatsForCache(JSON.parse(savedChats)) : []);
-          setNotifications(savedNotifs ? JSON.parse(savedNotifs) : []);
-          setAttendanceLogs(savedLogs ? JSON.parse(savedLogs) : []);
-          setShowLocalBanner(true);
-        } catch (cacheErr) {
-          console.warn('Local cache fallback failed:', cacheErr.message);
-          setUsers(normalizeTeamUsers(INITIAL_USERS));
-          setProjects(prev => prev || []);
-        }
+        if (cancelled) return;
+        console.error('Authenticated backend state could not be loaded:', err);
+        setDbError(err?.message || 'The secure workspace could not be loaded.');
+        setProjects(() => []);
+        setUsers([]);
+        setChatMessages([]);
+        setNotifications([]);
+        setAttendanceLogs([]);
+        setPerformanceRecords([]);
+        setPerformanceSummary(null);
         setBackendStateReady(true);
         setIsDbReady(true);
       }
     };
     hydrate();
     return () => { cancelled = true; };
-  }, [financeSafeHeaders, applyProjectSnapshot]);
+  }, [isAuthReady, currentUser?.id, currentUser?.role, financeSafeHeaders, applyProjectSnapshot]);
 
-  // Production presence poll: all roles use the same backend truth for users,
-  // so Admin/Manager/Designer screens do not disagree about online/offline state.
-  useEffect(() => {
-    if (!USE_BACKEND_STATE || !backendStateReady) return;
-    let cancelled = false;
-    const refreshPresence = async () => {
-      try {
-        const data = await fetchBackendState({ apiBase: API_BASE, headers: financeSafeHeaders });
-        if (cancelled || !Array.isArray(data.users)) return;
-        setUsers(prev => normalizeTeamUsers([...(prev || []), ...data.users]));
-        if (Array.isArray(data.deletedProjectIds)) replaceConfirmedDeletedProjects(data.deletedProjectIds);
-        if (Array.isArray(data.projects)) {
-          applyProjectSnapshot(data.projects, { source: 'backend-poll' });
-        }
-        if (Array.isArray(data.chatMessages)) {
-          setChatMessages(prev => {
-            const merged = mergeChatMessagesByFreshness(prev, data.chatMessages);
-            try { localStorage.setItem('kalpa_chats', JSON.stringify(sanitizeChatsForCache(merged))); } catch(e) {}
-            return merged;
-          });
-        }
-        if (Array.isArray(data.notifications)) {
-          setNotifications(prev => {
-            const byId = new Map();
-            [...(prev || []), ...data.notifications].forEach(n => { if (n?.id) byId.set(String(n.id), { ...(byId.get(String(n.id)) || {}), ...n }); });
-            return Array.from(byId.values()).sort((a,b) => Number(b.id || 0) - Number(a.id || 0));
-          });
-        }
-        if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, data.attendanceLogs));
-        if (Array.isArray(data.performanceRecords)) setPerformanceRecords(data.performanceRecords);
-        if (data.performanceSummary && typeof data.performanceSummary === 'object') setPerformanceSummary(data.performanceSummary);
-        setShowLocalBanner(data.database === 'json-file');
-        setDbError(null);
-      } catch (e) {}
-    };
-    refreshPresence();
-    const timer = setInterval(refreshPresence, 10000);
-    window.addEventListener('focus', refreshPresence);
-    document.addEventListener('visibilitychange', refreshPresence);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-      window.removeEventListener('focus', refreshPresence);
-      document.removeEventListener('visibilitychange', refreshPresence);
-    };
+  // Visibility-aware workspace synchronisation replaces the old ten-second full-state poll.
+  const refreshWorkspaceSnapshot = useCallback(async () => {
+    if (!USE_BACKEND_STATE || !backendStateReady || !currentUserRef.current) return;
+    try {
+      const data = await fetchBackendState({ apiBase: API_BASE, headers: financeSafeHeaders });
+      if (Array.isArray(data.users)) setUsers(prev => normalizeTeamUsers([...(prev || []), ...data.users]));
+      if (Array.isArray(data.deletedProjectIds)) replaceConfirmedDeletedProjects(data.deletedProjectIds);
+      if (Array.isArray(data.projects)) applyProjectSnapshot(data.projects, { source: 'adaptive-sync' });
+      if (Array.isArray(data.chatMessages)) {
+        setChatMessages(prev => {
+          const merged = mergeChatMessagesByFreshness(prev, data.chatMessages);
+          try { localStorage.setItem('kalpa_chats', JSON.stringify(sanitizeChatsForCache(merged))); } catch(e) {}
+          return merged;
+        });
+      }
+      if (Array.isArray(data.notifications)) {
+        setNotifications(prev => {
+          const byId = new Map();
+          [...(prev || []), ...data.notifications].forEach(n => { if (n?.id) byId.set(String(n.id), { ...(byId.get(String(n.id)) || {}), ...n }); });
+          return Array.from(byId.values()).sort((a,b) => Number(b.id || 0) - Number(a.id || 0));
+        });
+      }
+      if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, data.attendanceLogs));
+      if (Array.isArray(data.performanceRecords)) setPerformanceRecords(data.performanceRecords);
+      if (data.performanceSummary && typeof data.performanceSummary === 'object') setPerformanceSummary(data.performanceSummary);
+      setShowLocalBanner(data.database === 'json-file');
+      setDbError(null);
+    } catch (error) {
+      console.warn('Adaptive workspace sync failed', error);
+    }
   }, [backendStateReady, financeSafeHeaders, applyProjectSnapshot]);
 
-  useEffect(() => {
-    if (!USE_BACKEND_STATE || !backendStateReady || !isDbReady) return;
-    const timer = setTimeout(() => {
-      const payload = {
-        // Attendance Engine V3 presence is owned by /api/presence.
-        // Never POST client users back through /api/state; that created a
-        // second writer which fought the heartbeat stream and caused slow flicker.
-        // Project deletion is owned by the dedicated DELETE endpoint/outbox.
-        // Never upload browser tombstone cache through whole-state sync.
-        chatMessages: sanitizeChatsForCache(chatMessages || []),
-        notifications: notifications || [],
-        // Attendance is owned by /api/presence in backend mode. Posting it here
-        // created a feedback loop where stale client snapshots overwrote fresh
-        // backend counters and made the page flicker.
-      };
-      saveBackendStateApi({
-        apiBase: API_BASE,
-        headers: jsonFinanceSafeHeaders,
-        currentUserRole: currentUser?.role || '',
-        payload
-      }).catch(err => console.warn('Backend/PostgreSQL state save failed:', err.message));
-    }, 900);
-    return () => clearTimeout(timer);
-  }, [backendStateReady, isDbReady, chatMessages, notifications, currentUser?.role, jsonFinanceSafeHeaders]);
+  useAdaptiveWorkspaceSync({
+    enabled: Boolean(USE_BACKEND_STATE && backendStateReady && currentUser),
+    refresh: refreshWorkspaceSnapshot,
+    visibleIntervalMs: 60_000,
+    hiddenIntervalMs: 5 * 60_000,
+  });
+
+  // Phase 4: chat, notification, presence, task and finance changes use dedicated authorised endpoints.
+  // Whole-state browser writes are intentionally disabled.
 
 
   // Durable create-task outbox: a task that was created in the UI remains protected
@@ -4373,7 +4337,6 @@ function AppShell() {
           const data = await createTaskApi({
             apiBase: API_BASE,
             headers: jsonFinanceSafeHeaders,
-            currentUserRole: currentUser?.role || '',
             task: sanitizeProjectForCache(project)
           });
           const savedProject = data.project || data.case || project;
@@ -4487,6 +4450,14 @@ function AppShell() {
     if (!currentUser) return;
     const latest = activeUsers.find(u => u.id === currentUser.id);
     if (latest && (latest.role !== currentUser.role || latest.name !== currentUser.name || latest.profilePhoto !== currentUser.profilePhoto || latest.username !== currentUser.username)) {
+      const roleChanged = latest.role !== currentUser.role;
+      if (roleChanged) {
+        clearRoleScopedOperationalCaches(latest);
+        setProjects(() => []);
+        setChatMessages([]);
+        setNotifications([]);
+        setAttendanceLogs([]);
+      }
       setCurrentUser(prev => ({ ...prev, ...latest }));
       if (activeTab === 'ledger' && latest.role !== ROLES.ADMIN) setActiveTab('command');
       if (activeTab === 'closing' && latest.role !== ROLES.ADMIN) setActiveTab('command');
@@ -4494,8 +4465,21 @@ function AppShell() {
   }, [users, currentUser?.id]);
 
   useEffect(() => {
-    if (USE_BACKEND_STATE || isLocalMock) {
-      setFirebaseUser({ uid: USE_BACKEND_STATE ? 'backend-state-user' : 'local-dev-user' });
+    if (USE_BACKEND_STATE) {
+      let cancelled = false;
+      setFirebaseUser({ uid: 'backend-state-user' });
+      getSessionApi()
+        .then((session) => {
+          if (!cancelled && session?.authenticated && session?.user) { clearRoleScopedOperationalCaches(session.user); setCurrentUser(session.user); }
+          else if (!cancelled) { setCurrentUser(null); currentUserRef.current = null; setBackendStateReady(false); setIsDbReady(false); }
+        })
+        .catch(() => {})
+        .finally(() => { if (!cancelled) setIsAuthReady(true); });
+      return () => { cancelled = true; };
+    }
+
+    if (isLocalMock) {
+      setFirebaseUser({ uid: 'local-dev-user' });
       setIsAuthReady(true);
       return;
     }
@@ -4541,7 +4525,7 @@ function AppShell() {
       setUsers(normalizeTeamUsers(savedUsers ? JSON.parse(savedUsers) : INITIAL_USERS));
       const localProjects = savedProjects ? JSON.parse(savedProjects) : [];
       const backupProjects = savedProjectsBackup ? JSON.parse(savedProjectsBackup) : [];
-      setProjects(filterDeletedProjects(protectRecentlyCreatedProjects(sanitizeProjectsForCache(localProjects), sanitizeProjectsForCache(backupProjects))));
+      setProjects(() => filterDeletedProjects(protectRecentlyCreatedProjects(sanitizeProjectsForCache(localProjects), sanitizeProjectsForCache(backupProjects))));
       setChatMessages(savedChats ? sanitizeChatsForCache(JSON.parse(savedChats)) : []);
       setNotifications(savedNotifs ? JSON.parse(savedNotifs) : []);
       setAttendanceLogs(savedLogs ? JSON.parse(savedLogs) : []);
@@ -4781,16 +4765,58 @@ function AppShell() {
     if (belongsToCurrentUser && desktopNotificationsEnabled && typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
       try { new Notification('Kalpvriksha Designs Ops', { body: title, tag: String(newNotif.id) }); } catch(e) {}
     }
-    try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'notifications', newNotif.id.toString()), newNotif); } catch(e){}
+    if (USE_BACKEND_STATE) {
+      try {
+        const payload = await createNotificationApi(newNotif);
+        if (payload?.notification) setNotifications(prev => [payload.notification, ...(prev || []).filter(item => String(item.id) !== String(newNotif.id))].slice(0, 200));
+      } catch(error) { console.warn('Notification save failed:', error.message); }
+    } else {
+      try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'notifications', newNotif.id.toString()), newNotif); } catch(e){}
+    }
   };
 
   const handleUpdateProject = async (updatedProject, oldProject) => {
+    const previousProject = oldProject ? normalizeProjectRecord(oldProject) : null;
     const spawnedProjects = Array.isArray(updatedProject?._spawnProjects) ? updatedProject._spawnProjects : [];
     if (updatedProject && Object.prototype.hasOwnProperty.call(updatedProject, '_spawnProjects')) {
       const { _spawnProjects, ...cleanProject } = updatedProject;
       updatedProject = cleanProject;
     }
     updatedProject = normalizeProjectRecord({ ...updatedProject, updatedAt: Date.now(), syncVersion: Date.now() });
+
+    const financeChanged = previousProject && financeSignature(previousProject) !== financeSignature(updatedProject);
+    if (financeChanged && currentUser?.role === ROLES.ADMIN && USE_BACKEND_STATE && backendStateReady && isDbReady) {
+      try {
+        const financeResponse = await saveFinanceStatusApi({
+          apiBase: API_BASE,
+          headers: jsonFinanceSafeHeaders,
+          taskId: updatedProject.id || updatedProject.caseId,
+          status: getPaymentTrackingStatus(updatedProject),
+          expectedFinanceVersion: Number(previousProject.financeVersion || 0),
+          details: {
+            amountIn: getPaymentReceivedAmount(updatedProject),
+            paymentDate: updatedProject.ledger?.date || updatedProject.paymentDate || '',
+            paymentTime: updatedProject.paymentTime || '',
+            mode: updatedProject.ledger?.mode || '',
+            transactionId: updatedProject.ledger?.txnId || updatedProject.transactionId || '',
+            payerName: updatedProject.ledger?.receivedFrom || updatedProject.payerName || '',
+            note: updatedProject.paymentAuditTrail?.[0]?.note || ''
+          }
+        });
+        const confirmed = financeResponse?.project || financeResponse?.case;
+        if (!confirmed || !financeResponse?.persistence?.database) {
+          throw new Error('The finance update was not confirmed by durable storage.');
+        }
+        updatedProject = normalizeProjectRecord(applyConfirmedFinance(updatedProject, confirmed));
+      } catch (error) {
+        console.error('Finance save blocked:', error);
+        notifyUser(error?.message || 'Finance could not be saved to the server. No local finance change was accepted.');
+        applyProjectSnapshot([previousProject], { source: 'finance-save-reverted' });
+        setSelectedProject(previousProject);
+        return;
+      }
+    }
+
     const normalizedSpawned = spawnedProjects.map(p => normalizeProjectRecord({ ...p, updatedAt: p.updatedAt || Date.now(), syncVersion: p.syncVersion || Date.now() }));
 
     // When a temporary revision work item is finally approved, copy its outcome back to the permanent original task.
@@ -4831,7 +4857,7 @@ function AppShell() {
 
     const projectsToSave = [updatedProject, ...normalizedSpawned, ...(linkedOriginalUpdate ? [linkedOriginalUpdate] : [])];
     projectsToSave.forEach(p => { if (isAssignedValue(p.assignedTo)) recordAssignmentLedger(p); });
-    oldProject = oldProject ? normalizeProjectRecord(oldProject) : oldProject;
+    oldProject = previousProject;
     const changedPrimaryTaskId = oldProject?.id && updatedProject?.id && String(oldProject.id) !== String(updatedProject.id);
     if (changedPrimaryTaskId) rememberDeletedProjects(oldProject.id, oldProject.caseId);
     // Update the screen immediately. Previously the app waited for Firestore;
@@ -4870,7 +4896,6 @@ function AppShell() {
           const data = await createTaskApi({
             apiBase: API_BASE,
             headers: jsonFinanceSafeHeaders,
-            currentUserRole: currentUser?.role || '',
             task: sanitizeProjectForCache(projectToSave)
           });
           forgetPendingCreatedProjects(projectToSave.id, projectToSave.caseId);
@@ -4919,20 +4944,20 @@ function AppShell() {
       const estimateAmount = getPaymentEstimateAmount(project);
       const existingAmount = getPaymentReceivedAmount(project);
       const defaultAmount = existingAmount || estimateAmount || '';
-      const amountInput = window.prompt(`Enter amount received for ${project.id}${estimateAmount ? ` (estimate ₹${Number(estimateAmount).toLocaleString('en-IN')})` : ''}:`, defaultAmount ? String(defaultAmount) : '');
+      const amountInput = await requestInput(`Enter amount received for ${project.id}${estimateAmount ? ` (estimate ₹${Number(estimateAmount).toLocaleString('en-IN')})` : ''}:`, { title: 'Record payment amount', inputType: 'number', defaultValue: defaultAmount ? String(defaultAmount) : '', placeholder: 'Amount received' });
       if (amountInput === null || String(amountInput).trim() === '') return;
       const amount = Number(String(amountInput).replace(/[^0-9.-]/g, ''));
       if (!Number.isFinite(amount) || amount <= 0) {
-        alert('Please enter a valid received amount before marking payment as Paid.');
+        notifyUser('Please enter a valid received amount before marking payment as Paid.');
         return;
       }
       const today = new Date().toISOString().slice(0, 10);
-      const paymentDate = window.prompt('Enter payment date (YYYY-MM-DD):', project.ledger?.date || project.paymentDate || today);
+      const paymentDate = await requestInput('Enter payment date (YYYY-MM-DD):', { title: 'Payment date', inputType: 'date', defaultValue: project.ledger?.date || project.paymentDate || today });
       if (paymentDate === null || !String(paymentDate).trim()) return;
-      const mode = window.prompt('Enter payment mode (Cash / UPI / Bank Transfer / Cheque):', project.ledger?.mode || '');
+      const mode = await requestInput('Enter payment mode (Cash / UPI / Bank Transfer / Cheque):', { title: 'Payment mode', defaultValue: project.ledger?.mode || '', placeholder: 'Cash, UPI, Bank Transfer or Cheque' });
       if (mode === null || !String(mode).trim()) return;
-      const transactionId = window.prompt('Reference / Transaction ID (optional):', project.ledger?.txnId || project.transactionId || '') || '';
-      const note = window.prompt('Remarks (optional):', '') || '';
+      const transactionId = await requestInput('Reference / Transaction ID (optional):', { title: 'Payment reference', defaultValue: project.ledger?.txnId || project.transactionId || '', placeholder: 'Optional reference' }) || '';
+      const note = await requestInput('Remarks (optional):', { title: 'Payment remarks', placeholder: 'Optional remarks' }) || '';
       const updatedProject = buildPaymentTrackingUpdate(project, 'Paid', currentUser, {
         amountIn: amount,
         paymentDate: String(paymentDate).trim(),
@@ -4949,6 +4974,10 @@ function AppShell() {
   };
 
   const handleDeleteTask = async (taskId) => {
+     if (![ROLES.ADMIN, ROLES.MANAGER].includes(currentUser?.role)) {
+       notifyUser('Only an Admin or Manager can permanently delete a task.');
+       return;
+     }
      const id = String(taskId);
      const target = (projects || []).find(p => String(p.id) === id || String(p.caseId || '') === id) || selectedProject || {};
      const deleteIds = [...new Set([id, target?.id, target?.caseId, ...(target?.previousTaskIds || [])].map(x => String(x || '')).filter(Boolean))];
@@ -4985,6 +5014,11 @@ function AppShell() {
 
   const handleSendMessage = async (msg) => {
     if (!firebaseUser) return;
+    if (USE_BACKEND_STATE) {
+      const saved = await sendChatMessageApi(msg);
+      setChatMessages(prev => mergeChatMessagesByFreshness(prev || [], [saved]));
+      return saved;
+    }
     const normalizedMsg = { ...msg, readBy: msg.readBy || [{ name: msg.sender, time: msg.time }] };
     setChatMessages(prev => {
       const next = [...prev, normalizedMsg].sort((a,b) => a.id - b.id);
@@ -5053,7 +5087,7 @@ function AppShell() {
       if (isLocalMock) localStorage.setItem('kalpa_chats', JSON.stringify(sanitizeChatsForCache(next)));
       return next;
     });
-    if (firebaseUser && updates.length) {
+    if (firebaseUser && updates.length && !USE_BACKEND_STATE) {
       updates.forEach(m => setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'chats', m.id.toString()), m).catch(e=>{}));
     }
     // Clear chat/mention notifications as soon as the relevant chat is opened/read.
@@ -5070,14 +5104,21 @@ function AppShell() {
       if (isLocalMock) localStorage.setItem('kalpa_notifs', JSON.stringify(next));
       return next;
     });
-    if (firebaseUser && readRelevantNotifications.length) {
+    if (firebaseUser && readRelevantNotifications.length && !USE_BACKEND_STATE) {
       readRelevantNotifications.forEach(n => setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'notifications', n.id.toString()), n).catch(e=>{}));
     }
+    if (USE_BACKEND_STATE) await markChatReadApi(activeChannel).catch(error => console.warn('Chat read update failed:', error.message));
   };
 
 
   const handleUpdateMessage = async (updatedMsg) => {
     if (!updatedMsg || !updatedMsg.id) return;
+    if (USE_BACKEND_STATE) {
+      const payload = await updateChatMessageApi(updatedMsg.id, updatedMsg);
+      const saved = payload.message || updatedMsg;
+      setChatMessages(prev => mergeChatMessagesByFreshness((prev || []).filter(message => String(message.id) !== String(saved.id)), [saved]));
+      return saved;
+    }
     const normalizedMsg = sanitizeChatMessageForCache({ ...updatedMsg });
     setChatMessages(prev => {
       const next = (prev || []).map(m => String(m.id) === String(normalizedMsg.id) ? normalizedMsg : m).sort((a,b) => Number(a.id || 0) - Number(b.id || 0));
@@ -5089,6 +5130,11 @@ function AppShell() {
 
   const handleDeleteMessage = async (msgId) => {
     if (!firebaseUser) return;
+    if (USE_BACKEND_STATE) {
+      const payload = await deleteChatMessageApi(msgId);
+      if (payload.message) setChatMessages(prev => mergeChatMessagesByFreshness((prev || []).filter(message => String(message.id) !== String(msgId)), [payload.message]));
+      return;
+    }
     try { await deleteDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'chats', msgId.toString())); } catch(e){}
   };
 
@@ -5105,7 +5151,8 @@ function AppShell() {
       if (isLocalMock) localStorage.setItem('kalpa_notifs', JSON.stringify(next));
       return next;
     });
-    changed.forEach(n => setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'notifications', n.id.toString()), n).catch(e=>{}));
+    if (USE_BACKEND_STATE) await markNotificationReadApi(notifId).catch(error => console.warn('Notification read update failed:', error.message));
+    else changed.forEach(n => setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'notifications', n.id.toString()), n).catch(e=>{}));
   };
 
   const markNotifsAsRead = async () => {
@@ -5121,13 +5168,14 @@ function AppShell() {
       if (isLocalMock) localStorage.setItem('kalpa_notifs', JSON.stringify(next));
       return next;
     });
-    changed.forEach(n => setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'notifications', n.id.toString()), n).catch(e=>{}));
+    if (USE_BACKEND_STATE) await markAllNotificationsReadApi().catch(error => console.warn('Notification read-all failed:', error.message));
+    else changed.forEach(n => setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'notifications', n.id.toString()), n).catch(e=>{}));
   };
 
   const requestDesktopNotifications = async () => {
     try {
       if (typeof window === 'undefined' || !('Notification' in window)) {
-        alert('Desktop notifications are not supported in this browser.');
+        notifyUser('Desktop notifications are not supported in this browser.');
         return;
       }
       const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
@@ -5167,7 +5215,7 @@ function AppShell() {
       saveLocal('kalpa_users', next);
       return next;
     });
-    if (!firebaseUser) return;
+    if (USE_BACKEND_STATE || !firebaseUser) return;
     try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'users', normalizedUser.id.toString()), normalizedUser); } catch(e){}
   };
 
@@ -5250,41 +5298,82 @@ function AppShell() {
     }
   };
 
-  const handleLogin = (user) => {
-    const loginNow = Date.now();
-    const onlineUser = { ...user, isOnline: true, availability: 'Available', lastLoginAt: loginNow, lastSeenAt: loginNow, lastHeartbeatAt: loginNow, availabilityUpdatedAt: loginNow, breakStartedAt: null };
-    setCurrentUser(onlineUser);
-    recordLoginAttendance(onlineUser, loginNow);
-    handleUpdateUser(onlineUser);
+  const clearAuthenticatedWorkspace = ({ clearCache = true } = {}) => {
+    setCurrentUser(null);
+    currentUserRef.current = null;
+    setSelectedProject(null);
+    setBackendStateReady(false);
+    setIsDbReady(false);
+    setUsers([]);
+    setProjects(() => []);
+    setChatMessages([]);
+    setNotifications([]);
+    setAttendanceLogs([]);
+    setPerformanceRecords([]);
+    setPerformanceSummary(null);
+    if (clearCache) {
+      ['kalpa_users', 'kalpa_projects', 'kalpa_projects_backup', 'kalpa_chats', 'kalpa_notifs', 'kalpa_attendance', AUTHORIZATION_CACHE_SCOPE_KEY].forEach(key => {
+        try { localStorage.removeItem(key); } catch(e) {}
+      });
+    }
   };
 
-  const handleLogout = () => {
-    if (currentUser) {
-      updateTodayAttendance((log, now, timeStr) => {
-        const isOnBreak = currentUser.availability === 'Break' || log.status === 'On Break' || !!log.currentBreakStartedAt;
-        const accrued = buildAttendanceAccrual(log, now, isOnBreak);
-        const events = Array.isArray(log.breakEvents) ? log.breakEvents : [];
-        const updatedEvents = events.map(ev => ev.start && !ev.end ? { ...ev, end: now, endTime: timeStr, minutes: Math.floor(Math.max(0, now - Number(ev.start)) / 60000) } : ev);
-        return {
-          ...log,
-          ...accrued,
-          logoutTime: timeStr,
-          logoutAt: now,
-          isOnline: false,
-          status: 'Logged Out',
-          currentBreakStartedAt: null,
-          breakEvents: updatedEvents,
-          lastTick: now
-        };
-      });
-      const logoutNow = Date.now();
-      const offlineUser = { ...currentUser, isOnline: false, availability: 'Unavailable', lastLogoutAt: logoutNow, lastSeenAt: logoutNow, lastHeartbeatAt: logoutNow, availabilityUpdatedAt: logoutNow, breakStartedAt: null };
-      handleUpdateUser(offlineUser);
-      postPresenceUpdate('logout', offlineUser);
-    }
-    setCurrentUser(null);
-    setSelectedProject(null);
+  const establishAuthenticatedWorkspace = (user) => {
+    if (!user) return;
+    clearRoleScopedOperationalCaches(user);
+    const authenticatedUser = { ...user, isOnline: true };
+    setCurrentUser(authenticatedUser);
+    currentUserRef.current = authenticatedUser;
+    setBackendStateReady(false);
+    setIsDbReady(false);
+    setDbError(null);
   };
+
+  const handleLogin = async ({ username, password }) => {
+    const response = await loginApi({ username, password });
+    if (response?.user && !response.user.mustChangePassword) establishAuthenticatedWorkspace(response.user);
+    return response;
+  };
+
+  const handleChangePassword = async ({ currentPassword, newPassword }) => {
+    const response = await changePasswordApi({ currentPassword, newPassword });
+    if (response?.user) establishAuthenticatedWorkspace(response.user);
+    return response;
+  };
+
+  const handleRequestPasswordRecovery = (payload) => requestPasswordRecoveryApi(payload);
+  const handleResetPasswordRecovery = (payload) => resetPasswordRecoveryApi(payload);
+
+  const handleCreateAuthUser = async (input) => {
+    const response = await createAuthUserApi(input);
+    if (response?.user) setUsers(prev => normalizeTeamUsers([...(prev || []), response.user]));
+    return response;
+  };
+
+  const handleUpdateAuthUser = async (userId, patch) => {
+    const response = await updateAuthUserApi(userId, patch);
+    if (response?.user) {
+      setUsers(prev => normalizeTeamUsers((prev || []).map(user => String(user.id) === String(userId) ? { ...user, ...response.user } : user)));
+      if (String(currentUserRef.current?.id || '') === String(userId)) setCurrentUser(prev => prev ? { ...prev, ...response.user } : prev);
+    }
+    return response;
+  };
+
+  const handleResetAuthPassword = (userId, password) => resetAuthUserPasswordApi(userId, password);
+
+  const handleLogout = async () => {
+    const liveUser = currentUserRef.current;
+    if (liveUser) postPresenceUpdate('logout', { ...liveUser, isOnline: false, availability: 'Unavailable' });
+    try { await logoutApi(); } catch(e) { console.warn('Secure logout request failed:', e); }
+    clearAuthenticatedWorkspace({ clearCache: true });
+  };
+
+  useEffect(() => {
+    if (!USE_BACKEND_STATE) return undefined;
+    const expire = () => clearAuthenticatedWorkspace({ clearCache: true });
+    window.addEventListener('kalpa-auth-expired', expire);
+    return () => window.removeEventListener('kalpa-auth-expired', expire);
+  }, []);
 
   const toggleBreak = () => {
     if (!currentUser) return;
@@ -5337,33 +5426,34 @@ function AppShell() {
       <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
         <div className="bg-red-50 p-8 rounded-3xl border-2 border-red-200 w-full max-w-lg text-center shadow-2xl">
           <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-4" />
-          <h2 className="text-2xl font-black text-red-700 mb-2">Cloud Connection Blocked</h2>
-          <p className="text-slate-800 font-medium mb-6">Firebase rejected the login attempt with the following error:</p>
+          <h2 className="text-2xl font-black text-red-700 mb-2">Secure sign-in unavailable</h2>
+          <p className="text-slate-800 font-medium mb-6">The application could not establish a secure session with the backend.</p>
           <div className="bg-white p-4 rounded-xl border border-red-100 text-sm text-red-600 font-mono text-left mb-6 overflow-x-auto">
              {authError}
           </div>
           <div className="bg-orange-50 p-4 rounded-xl border border-orange-200 text-left">
-            <p className="font-bold text-orange-800 mb-2">How to fix this right now:</p>
-            <ol className="list-decimal pl-5 text-sm text-orange-700 space-y-1 font-medium mb-4">
-              <li>Turn off Ad-blockers or Brave Shields for this page.</li>
-              <li>Go to the <a href="https://console.firebase.google.com/" target="_blank" rel="noreferrer" className="underline font-bold">Firebase Console</a></li>
-              <li>Click <strong>Authentication</strong> on the left menu.</li>
-              <li>Click the <strong>Sign-in method</strong> tab at the top.</li>
-              <li>Make sure <strong>Anonymous</strong> is set to <span className="text-emerald-600 font-bold">Enabled</span>.</li>
-            </ol>
+            <p className="font-bold text-orange-800 mb-2">Safe next steps</p>
+            <p className="text-sm text-orange-700 font-medium">Check the network connection, confirm the configured API URL is reachable, and reload the page. Contact the administrator if the secure backend remains unavailable.</p>
           </div>
         </div>
       </div>
     );
   }
 
-  if ((USE_BACKEND_STATE ? !isDbReady : (!firebaseUser || !isDbReady))) {
+  if (!isAuthReady || (!USE_BACKEND_STATE && !firebaseUser)) {
     return <PageLoadingScreen />;
   }
 
   if (!currentUser) {
-    return <LoginScreen onLogin={handleLogin} users={activeUsers} onRecoverPassword={handleUpdateUser} />;
+    return <LoginScreen
+      onLogin={handleLogin}
+      onChangePassword={handleChangePassword}
+      onRequestRecovery={handleRequestPasswordRecovery}
+      onResetRecovery={handleResetPasswordRecovery}
+    />;
   }
+
+  if (!isDbReady) return <PageLoadingScreen />;
 
   const canManage = currentUser.role === ROLES.ADMIN || currentUser.role === ROLES.MANAGER;
   if (currentUser.role === ROLES.DESIGNER && activeTab === 'board') setTimeout(() => setActiveTab('command'), 0);
@@ -5453,6 +5543,7 @@ function AppShell() {
 
   return (
     <div className={`min-h-screen bg-slate-50/50 font-sans text-slate-900 pb-20 antialiased selection:bg-indigo-100 selection:text-indigo-900 transition-colors duration-300 ${darkMode ? 'kd-dark' : ''}`}>
+      <a href="#kalpa-main-content" className="kalpa-skip-link">Skip to main content</a>
       
       
       <ActiveToasts notifications={notifications} currentUser={currentUser} />{showLocalBanner && <LocalModeBanner onClose={() => setShowLocalBanner(false)} />}
@@ -5493,12 +5584,14 @@ function AppShell() {
             <div className="flex justify-end mb-3">
               <button type="button" onClick={() => setShowProfilePanel(false)} className="bg-white text-slate-700 px-4 py-2 rounded-xl font-black shadow-lg border border-slate-100 hover:bg-slate-50 flex items-center"><X className="w-4 h-4 mr-2" /> Close Profile</button>
             </div>
-            <ProfileView currentUser={currentUser} onUpdateUser={handleUpdateUser} setCurrentUser={setCurrentUser} fileToBase64={fileToBase64} sendRealOtp={sendRealOtp} verifyRealOtp={verifyRealOtp} />
+            <React.Suspense fallback={<PageLoadingScreen title="Loading profile" subtitle="Preparing account settings…" />}>
+              <ProfileView currentUser={currentUser} onUpdateUser={handleUpdateUser} setCurrentUser={setCurrentUser} fileToBase64={fileToBase64} sendRealOtp={sendRealOtp} verifyRealOtp={verifyRealOtp} onChangePassword={handleChangePassword} />
+            </React.Suspense>
           </div>
         </div>
       )}
 
-      <main className="max-w-[1400px] mx-auto px-3 sm:px-6 lg:px-8 py-5 sm:py-8 animate-in fade-in duration-300">
+      <main id="kalpa-main-content" tabIndex="-1" className="max-w-[1400px] mx-auto px-3 sm:px-6 lg:px-8 py-5 sm:py-8 animate-in fade-in duration-300">
         <MobileSearchBar globalSearch={globalSearch} setGlobalSearch={setGlobalSearch} />
         
         {!globalSearch.trim() && !selectedProject && savedGlobalFilters.length > 0 && (
@@ -5597,6 +5690,7 @@ function AppShell() {
           <MainTabNavigation currentUser={currentUser} ROLES={ROLES} activeTab={activeTab} setActiveTab={setActiveTab} />
         )}
 
+        <React.Suspense fallback={<PageLoadingScreen title="Loading workspace" subtitle="Preparing this section…" />}>
         {selectedProject ? (
           <TaskDetailView project={selectedProject} user={currentUser} onBack={closeTaskDetail} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} />
         ) : activeTab === 'command' ? (
@@ -5614,11 +5708,21 @@ function AppShell() {
         ) : activeTab === 'archive' ? (
           <HistoryArchiveView projects={projects} currentUser={currentUser} archiveViewState={archiveViewState} setArchiveViewState={setArchiveViewState} onSelectProject={(p) => openTaskDetail(p, 'archive')} onPaymentStatusChange={handlePaymentStatusChange} />
         ) : activeTab === 'team' ? (
-          <TeamPerformanceView users={activeUsers} projects={projects} onUpdateUser={handleUpdateUser} currentUser={currentUser} onOpenPerformance={() => setActiveTab('productivity')} onSelectProject={(p) => openTaskDetail(p, 'team')} />
+          <TeamPerformanceView
+            users={activeUsers}
+            projects={projects}
+            onUpdateUser={handleUpdateUser}
+            onCreateUser={handleCreateAuthUser}
+            onUpdateAccess={handleUpdateAuthUser}
+            onResetPassword={handleResetAuthPassword}
+            currentUser={currentUser}
+            onOpenPerformance={() => setActiveTab('productivity')}
+            onSelectProject={(p) => openTaskDetail(p, 'team')}
+          />
         ) : activeTab === 'attendance' ? (
           <AttendanceView attendanceLogs={attendanceLogs} users={activeUsers} projects={projects} />
         ) : activeTab === 'profile' ? (
-          <ProfileView currentUser={currentUser} onUpdateUser={handleUpdateUser} setCurrentUser={setCurrentUser} fileToBase64={fileToBase64} sendRealOtp={sendRealOtp} verifyRealOtp={verifyRealOtp} />
+          <ProfileView currentUser={currentUser} onUpdateUser={handleUpdateUser} setCurrentUser={setCurrentUser} fileToBase64={fileToBase64} sendRealOtp={sendRealOtp} verifyRealOtp={verifyRealOtp} onChangePassword={handleChangePassword} />
         ) : activeTab === 'calculator' ? (
           <CalculatorView />
         ) : activeTab === 'meeting' ? (
@@ -5649,6 +5753,7 @@ function AppShell() {
             onPaymentStatusChange={handlePaymentStatusChange}
           />
         )}
+        </React.Suspense>
       </main>
 
       {globalFilePreview && (
@@ -5724,7 +5829,7 @@ function AppShell() {
         </PortalLayer>
       )}
 
-      {!showNewLead && <CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} projects={projects} onOpenTaskReference={openTaskReferenceFromChat} onPreviewFile={openUnifiedFilePreview} />}
+      {!showNewLead && <React.Suspense fallback={null}><CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} projects={projects} onOpenTaskReference={openTaskReferenceFromChat} onPreviewFile={openUnifiedFilePreview} /></React.Suspense>}
 
       {!selectedProject && !showNewLead && <MobileBottomNavigation currentUser={currentUser} ROLES={ROLES} activeTab={activeTab} setActiveTab={setActiveTab} unreadNotifs={unreadNotifs} />}
 
@@ -5797,7 +5902,7 @@ function AppShell() {
                rememberPendingCreatedProject(newP);
                const nextProjects = filterDeletedProjects(mergeProjectsByFreshness((projects || []).filter(p => String(p.id) !== String(newP.id)), [newP, ...getRecentCreatedProjects(), ...getPendingCreatedProjects()]));
                persistAndBroadcastProjects(nextProjects);
-               setProjects(nextProjects);
+               setProjects(() => nextProjects);
                setSelectedBoardDate(formatDateKey(newP.createdAt));
                setActiveTab('board');
                try { window.localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(filterDeletedProjects(nextProjects)))); } catch(e) {}
@@ -5806,8 +5911,7 @@ function AppShell() {
                    const saveData = await createTaskApi({
                      apiBase: API_BASE,
                      headers: jsonFinanceSafeHeaders,
-                     currentUserRole: currentUser?.role || '',
-                     task: sanitizeProjectForCache(newP)
+                              task: sanitizeProjectForCache(newP)
                    });
                    if (saveData?.project || saveData?.case) {
                      const savedProject = saveData.project || saveData.case;
@@ -5934,441 +6038,11 @@ function AppShell() {
         </PortalLayer>
       )}
 
-      <style dangerouslySetInnerHTML={{__html: `
-        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 20px; }
-        .kalpa-empty-state { border-style: dashed; }
-        .kalpa-soft-enter { animation: kalpaSoftEnter .22s ease-out both; }
-        @keyframes kalpaSoftEnter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-        @media (prefers-reduced-motion: reduce) {
-          * { scroll-behavior: auto !important; animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
-        }
-        /* Dark Theme 2.0: contrast, cards, tables, badges, chat, notifications */
-        .kd-dark {
-          background: radial-gradient(circle at top left, rgba(79,70,229,.14), transparent 34%), #0b1220 !important;
-          color: #f8fafc !important;
-        }
-        .kd-dark header,
-        .kd-dark .sticky,
-        .kd-dark .bg-white,
-        .kd-dark .bg-white\/95,
-        .kd-dark .bg-white\/90,
-        .kd-dark .bg-white\/80,
-        .kd-dark .bg-white\/70,
-        .kd-dark .bg-white\/60 {
-          background-color: rgba(15,23,42,.94) !important;
-          color: #f8fafc !important;
-          border-color: rgba(148,163,184,.24) !important;
-        }
-        .kd-dark .bg-slate-50,
-        .kd-dark .bg-slate-50\/50,
-        .kd-dark .bg-slate-100,
-        .kd-dark .bg-slate-100\/70,
-        .kd-dark .bg-slate-100\/80,
-        .kd-dark .bg-slate-200,
-        .kd-dark .bg-indigo-50,
-        .kd-dark .bg-blue-50,
-        .kd-dark .bg-violet-50 {
-          background-color: rgba(30,41,59,.82) !important;
-          color: #e2e8f0 !important;
-          border-color: rgba(148,163,184,.24) !important;
-        }
-        .kd-dark .bg-emerald-50,
-        .kd-dark .bg-green-50 { background-color: rgba(6,78,59,.36) !important; color: #bbf7d0 !important; border-color: rgba(52,211,153,.28) !important; }
-        .kd-dark .bg-amber-50,
-        .kd-dark .bg-yellow-50 { background-color: rgba(120,53,15,.36) !important; color: #fde68a !important; border-color: rgba(251,191,36,.28) !important; }
-        .kd-dark .bg-red-50,
-        .kd-dark .bg-rose-50 { background-color: rgba(127,29,29,.35) !important; color: #fecaca !important; border-color: rgba(248,113,113,.28) !important; }
-        .kd-dark .text-slate-950,
-        .kd-dark .text-slate-900,
-        .kd-dark .text-slate-800,
-        .kd-dark .text-slate-700,
-        .kd-dark h1,
-        .kd-dark h2,
-        .kd-dark h3,
-        .kd-dark h4,
-        .kd-dark b,
-        .kd-dark strong {
-          color: #f8fafc !important;
-          text-shadow: none !important;
-        }
-        .kd-dark .text-slate-600,
-        .kd-dark .text-slate-500,
-        .kd-dark .text-slate-400,
-        .kd-dark small,
-        .kd-dark .muted {
-          color: #cbd5e1 !important;
-        }
-        .kd-dark .text-slate-300 { color: #e2e8f0 !important; }
-        .kd-dark .text-indigo-600,
-        .kd-dark .text-indigo-700,
-        .kd-dark .text-blue-600,
-        .kd-dark .text-blue-700 { color: #a5b4fc !important; }
-        .kd-dark .text-emerald-600,
-        .kd-dark .text-emerald-700,
-        .kd-dark .text-green-600,
-        .kd-dark .text-green-700 { color: #86efac !important; }
-        .kd-dark .text-amber-600,
-        .kd-dark .text-amber-700,
-        .kd-dark .text-orange-600,
-        .kd-dark .text-orange-700 { color: #fbbf24 !important; }
-        .kd-dark .text-red-600,
-        .kd-dark .text-red-700,
-        .kd-dark .text-rose-600,
-        .kd-dark .text-rose-700 { color: #fca5a5 !important; }
-        .kd-dark .border-slate-50,
-        .kd-dark .border-slate-100,
-        .kd-dark .border-slate-200,
-        .kd-dark .border-slate-300,
-        .kd-dark .divide-slate-100 > :not([hidden]) ~ :not([hidden]),
-        .kd-dark .divide-slate-200 > :not([hidden]) ~ :not([hidden]) {
-          border-color: rgba(148,163,184,.22) !important;
-        }
-        .kd-dark table,
-        .kd-dark thead,
-        .kd-dark tbody,
-        .kd-dark tr,
-        .kd-dark td,
-        .kd-dark th {
-          color: #e5e7eb !important;
-          border-color: rgba(148,163,184,.18) !important;
-        }
-        .kd-dark tbody tr:hover,
-        .kd-dark .hover\:bg-slate-50:hover,
-        .kd-dark .hover\:bg-indigo-50:hover {
-          background-color: rgba(79,70,229,.16) !important;
-        }
-        .kd-dark input,
-        .kd-dark textarea,
-        .kd-dark select {
-          background-color: rgba(15,23,42,.9) !important;
-          color: #f8fafc !important;
-          border-color: rgba(148,163,184,.34) !important;
-          box-shadow: inset 0 1px 0 rgba(255,255,255,.03) !important;
-        }
-        .kd-dark input::placeholder,
-        .kd-dark textarea::placeholder { color: #94a3b8 !important; opacity: 1 !important; }
-        .kd-dark button:not(.bg-indigo-600):not(.bg-slate-900):not(.bg-emerald-600):not(.bg-red-600):not(.bg-blue-600),
-        .kd-dark .rounded-xl,
-        .kd-dark .rounded-2xl,
-        .kd-dark .rounded-3xl {
-          border-color: rgba(148,163,184,.22) !important;
-        }
-        .kd-dark .shadow-sm,
-        .kd-dark .shadow-md,
-        .kd-dark .shadow-lg,
-        .kd-dark .shadow-xl,
-        .kd-dark .shadow-2xl {
-          box-shadow: 0 18px 45px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.03) !important;
-        }
-        .kd-dark .opacity-40,
-        .kd-dark .opacity-50,
-        .kd-dark .opacity-60 {
-          opacity: .85 !important;
-        }
-        .kd-dark .disabled\:opacity-70:disabled,
-        .kd-dark button:disabled {
-          opacity: .55 !important;
-        }
-        .kd-dark .kalpa-chat-panel,
-        .kd-dark .kalpa-chat-shell {
-          background: rgba(15,23,42,.98) !important;
-          color: #f8fafc !important;
-          border-color: rgba(148,163,184,.24) !important;
-        }
-        .kd-dark .kalpa-chat-bubble {
-          color: #f8fafc !important;
-        }
-        .kd-dark .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #64748b; }
-        .kd-dark .custom-scrollbar::-webkit-scrollbar-track { background-color: rgba(15,23,42,.35); }
-        .kd-dark .backdrop-blur-xl,
-        .kd-dark .backdrop-blur-2xl {
-          backdrop-filter: blur(20px) saturate(150%) !important;
-        }
-        @media (max-width: 640px) {
-          .kalpa-chat-shell-closed {
-            inset: auto 1rem 1rem auto !important;
-            left: auto !important;
-            top: auto !important;
-            width: auto !important;
-            height: auto !important;
-            max-width: calc(100vw - 2rem) !important;
-            pointer-events: none !important;
-          }
-          .kalpa-chat-shell-open {
-            inset: 0 !important;
-            width: 100vw !important;
-            height: 100dvh !important;
-            pointer-events: auto !important;
-          }
-          .kalpa-chat-launcher { pointer-events: auto !important; }
-        }
-
-/* Kalpavriksha Theme Engine 3.0 — dark-mode readability and semantic surface fix
-   Purpose: eliminate white-on-white / washed-out dark mode cards after Tailwind extraction.
-   Scope: visual-only; no business logic touched. */
-.kd-dark,
-.kd-dark-root {
-  --kd-bg: #07111f;
-  --kd-bg-soft: #0b1220;
-  --kd-surface: #111827;
-  --kd-surface-2: #162033;
-  --kd-surface-3: #1e293b;
-  --kd-surface-hover: #24324a;
-  --kd-border: rgba(148, 163, 184, 0.24);
-  --kd-border-strong: rgba(148, 163, 184, 0.38);
-  --kd-text: #f8fafc;
-  --kd-text-2: #e2e8f0;
-  --kd-text-3: #cbd5e1;
-  --kd-muted: #94a3b8;
-  --kd-faint: #64748b;
-  --kd-accent: #a5b4fc;
-  --kd-accent-strong: #818cf8;
-  --kd-success: #86efac;
-  --kd-warning: #fbbf24;
-  --kd-danger: #fca5a5;
-  --kd-shadow: 0 24px 60px rgba(0,0,0,.44), inset 0 1px 0 rgba(255,255,255,.04);
-}
-
-.kd-dark {
-  background: radial-gradient(circle at 18% 0%, rgba(99,102,241,.20), transparent 30%), linear-gradient(135deg, #08111f 0%, #0b1220 45%, #091827 100%) !important;
-  color: var(--kd-text) !important;
-}
-
-/* Surfaces: convert white/light cards and light gradients to true dark surfaces. */
-.kd-dark .bg-white,
-.kd-dark .bg-white\/95,
-.kd-dark .bg-white\/90,
-.kd-dark .bg-white\/80,
-.kd-dark .bg-white\/70,
-.kd-dark .bg-white\/60,
-.kd-dark .bg-slate-50,
-.kd-dark .bg-slate-50\/50,
-.kd-dark .bg-slate-100,
-.kd-dark .bg-slate-100\/70,
-.kd-dark .bg-slate-100\/80,
-.kd-dark .bg-slate-200,
-.kd-dark .bg-gray-50,
-.kd-dark .bg-gray-100,
-.kd-dark .bg-zinc-50,
-.kd-dark .bg-zinc-100 {
-  background-color: var(--kd-surface) !important;
-  color: var(--kd-text) !important;
-  border-color: var(--kd-border) !important;
-}
-
-/* Tailwind gradient cards that used from-white/to-slate-50 were staying bright. */
-.kd-dark .from-white,
-.kd-dark .from-slate-50,
-.kd-dark .from-gray-50,
-.kd-dark .from-zinc-50 {
-  --tw-gradient-from: var(--kd-surface) var(--tw-gradient-from-position) !important;
-  --tw-gradient-to: rgba(17,24,39,0) var(--tw-gradient-to-position) !important;
-  --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
-}
-.kd-dark .via-white,
-.kd-dark .via-slate-50,
-.kd-dark .via-gray-50 {
-  --tw-gradient-stops: var(--tw-gradient-from), var(--kd-surface-2) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
-}
-.kd-dark .to-white,
-.kd-dark .to-slate-50,
-.kd-dark .to-gray-50,
-.kd-dark .to-zinc-50,
-.kd-dark .to-slate-100,
-.kd-dark .to-gray-100 {
-  --tw-gradient-to: var(--kd-surface-2) var(--tw-gradient-to-position) !important;
-}
-.kd-dark .bg-gradient-to-br.from-white,
-.kd-dark .bg-gradient-to-br.from-slate-50,
-.kd-dark .bg-gradient-to-r.from-white,
-.kd-dark .bg-gradient-to-r.from-slate-50,
-.kd-dark .bg-gradient-to-b.from-white,
-.kd-dark .bg-gradient-to-b.from-slate-50 {
-  background-image: linear-gradient(135deg, var(--kd-surface), var(--kd-surface-2)) !important;
-  color: var(--kd-text) !important;
-}
-
-/* Common panels/cards/tables. */
-.kd-dark table,
-.kd-dark thead,
-.kd-dark tbody,
-.kd-dark tr,
-.kd-dark td,
-.kd-dark th,
-.kd-dark .rounded-xl,
-.kd-dark .rounded-2xl,
-.kd-dark .rounded-3xl,
-.kd-dark .shadow-sm,
-.kd-dark .shadow-md,
-.kd-dark .shadow-lg,
-.kd-dark .shadow-xl,
-.kd-dark .shadow-2xl {
-  border-color: var(--kd-border) !important;
-}
-.kd-dark .shadow-sm,
-.kd-dark .shadow-md,
-.kd-dark .shadow-lg,
-.kd-dark .shadow-xl,
-.kd-dark .shadow-2xl {
-  box-shadow: var(--kd-shadow) !important;
-}
-.kd-dark thead,
-.kd-dark th {
-  background: rgba(15,23,42,.72) !important;
-  color: var(--kd-text-3) !important;
-}
-.kd-dark tbody tr,
-.kd-dark td {
-  color: var(--kd-text-2) !important;
-}
-.kd-dark tbody tr:hover,
-.kd-dark .hover\:bg-slate-50:hover,
-.kd-dark .hover\:bg-indigo-50:hover,
-.kd-dark .hover\:bg-white:hover {
-  background-color: var(--kd-surface-hover) !important;
-}
-
-/* Typography hierarchy: keep primary info readable; preserve semantic status colors below. */
-.kd-dark h1,
-.kd-dark h2,
-.kd-dark h3,
-.kd-dark h4,
-.kd-dark h5,
-.kd-dark h6,
-.kd-dark .text-slate-950,
-.kd-dark .text-slate-900,
-.kd-dark .text-slate-800,
-.kd-dark .text-gray-950,
-.kd-dark .text-gray-900,
-.kd-dark .text-gray-800,
-.kd-dark strong,
-.kd-dark b {
-  color: var(--kd-text) !important;
-}
-.kd-dark .text-slate-700,
-.kd-dark .text-slate-600,
-.kd-dark .text-gray-700,
-.kd-dark .text-gray-600 {
-  color: var(--kd-text-2) !important;
-}
-.kd-dark .text-slate-500,
-.kd-dark .text-slate-400,
-.kd-dark .text-gray-500,
-.kd-dark .text-gray-400,
-.kd-dark small,
-.kd-dark .muted {
-  color: var(--kd-text-3) !important;
-}
-.kd-dark .text-slate-300,
-.kd-dark .text-gray-300 {
-  color: var(--kd-text-2) !important;
-}
-.kd-dark .text-white {
-  color: var(--kd-text) !important;
-}
-
-/* Keep colored status text vivid. */
-.kd-dark .text-indigo-600,
-.kd-dark .text-indigo-700,
-.kd-dark .text-blue-600,
-.kd-dark .text-blue-700,
-.kd-dark .text-violet-600,
-.kd-dark .text-violet-700 { color: var(--kd-accent) !important; }
-.kd-dark .text-emerald-600,
-.kd-dark .text-emerald-700,
-.kd-dark .text-green-600,
-.kd-dark .text-green-700 { color: var(--kd-success) !important; }
-.kd-dark .text-amber-600,
-.kd-dark .text-amber-700,
-.kd-dark .text-yellow-600,
-.kd-dark .text-yellow-700,
-.kd-dark .text-orange-600,
-.kd-dark .text-orange-700 { color: var(--kd-warning) !important; }
-.kd-dark .text-red-600,
-.kd-dark .text-red-700,
-.kd-dark .text-rose-600,
-.kd-dark .text-rose-700 { color: var(--kd-danger) !important; }
-
-/* Soft status badge backgrounds. */
-.kd-dark .bg-indigo-50,
-.kd-dark .bg-blue-50,
-.kd-dark .bg-violet-50 { background-color: rgba(79,70,229,.20) !important; color: #c7d2fe !important; border-color: rgba(129,140,248,.30) !important; }
-.kd-dark .bg-emerald-50,
-.kd-dark .bg-green-50 { background-color: rgba(6,78,59,.34) !important; color: #bbf7d0 !important; border-color: rgba(52,211,153,.30) !important; }
-.kd-dark .bg-amber-50,
-.kd-dark .bg-yellow-50 { background-color: rgba(120,53,15,.34) !important; color: #fde68a !important; border-color: rgba(251,191,36,.30) !important; }
-.kd-dark .bg-red-50,
-.kd-dark .bg-rose-50 { background-color: rgba(127,29,29,.34) !important; color: #fecaca !important; border-color: rgba(248,113,113,.30) !important; }
-
-/* Forms, filters, calendar inputs. */
-.kd-dark input,
-.kd-dark textarea,
-.kd-dark select {
-  background-color: rgba(15,23,42,.92) !important;
-  color: var(--kd-text) !important;
-  border-color: var(--kd-border-strong) !important;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.04) !important;
-}
-.kd-dark input::placeholder,
-.kd-dark textarea::placeholder {
-  color: var(--kd-muted) !important;
-  opacity: 1 !important;
-}
-
-/* Navigation/tab bar and non-primary buttons. */
-.kd-dark .sticky,
-.kd-dark header,
-.kd-dark nav {
-  background-color: rgba(11,18,32,.94) !important;
-  color: var(--kd-text) !important;
-  border-color: var(--kd-border) !important;
-}
-.kd-dark button:not(.bg-indigo-600):not(.bg-slate-900):not(.bg-emerald-600):not(.bg-red-600):not(.bg-blue-600):not(.bg-violet-600):not(.bg-purple-600) {
-  border-color: var(--kd-border) !important;
-}
-
-/* Command Centre / operations flow boxes that previously became blank white. */
-.kd-dark .kalpa-empty-state,
-.kd-dark [class*="min-h-"][class*="rounded"],
-.kd-dark [class*="border-2"][class*="rounded"] {
-  border-color: var(--kd-border) !important;
-}
-.kd-dark .opacity-40,
-.kd-dark .opacity-50,
-.kd-dark .opacity-60 {
-  opacity: .92 !important;
-}
-.kd-dark .disabled\:opacity-70:disabled,
-.kd-dark button:disabled {
-  opacity: .62 !important;
-}
-
-/* Chat/notification floating surfaces. */
-.kd-dark .kalpa-chat-panel,
-.kd-dark .kalpa-chat-shell,
-.kd-dark .kalpa-chat-sidebar,
-.kd-dark .kalpa-chat-main {
-  background: rgba(15,23,42,.98) !important;
-  color: var(--kd-text) !important;
-  border-color: var(--kd-border) !important;
-}
-.kd-dark .kalpa-chat-bubble {
-  color: var(--kd-text) !important;
-}
-
-/* Scrollbars. */
-.kd-dark ::-webkit-scrollbar-thumb { background-color: #475569; border-radius: 999px; }
-.kd-dark ::-webkit-scrollbar-track { background-color: rgba(15,23,42,.35); }
-.kd-dark .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #64748b; }
-.kd-dark .custom-scrollbar::-webkit-scrollbar-track { background-color: rgba(15,23,42,.35); }
-
-      `}} />
+      
     </div>
   );
 }
 
 export default function App() {
-  return <AppErrorBoundary><AppShell /></AppErrorBoundary>;
+  return <AppErrorBoundary><FeedbackHost /><AppShell /></AppErrorBoundary>;
 }

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Kalpavriksha verified backup daily
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 Asia/Kolkata
+Persistent=true
+RandomizedDelaySec=600
+Unit=kalpavriksha-backup.service
+
+[Install]
+WantedBy=timers.target

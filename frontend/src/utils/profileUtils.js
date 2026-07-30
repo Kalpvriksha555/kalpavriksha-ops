@@ -73,19 +73,6 @@ export const buildProfileSavePayload = (currentUser = {}, draft = {}) => {
   };
 };
 
-export const validatePasswordChange = (currentUser = {}, passwordForm = {}) => {
-  if ((currentUser.password || '123') !== passwordForm.current) return 'Current password is incorrect.';
-  if (!passwordForm.next || passwordForm.next.length < 3) return 'New password must be at least 3 characters.';
-  if (passwordForm.next !== passwordForm.confirm) return 'New password and confirm password do not match.';
-  return '';
-};
-
-export const buildPasswordUpdatePayload = (currentUser = {}, passwordForm = {}) => ({
-  ...currentUser,
-  password: passwordForm.next,
-  passwordUpdatedAt: Date.now()
-});
-
 export const buildRegisteredMobilePayload = (currentUser = {}, draft = {}) => ({
   ...currentUser,
   ...draft,

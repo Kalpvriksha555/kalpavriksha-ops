@@ -1,0 +1,16 @@
+[Unit]
+Description=Kalpavriksha verified PostgreSQL and private-file backup
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/var/www/kalpavriksha-ops
+EnvironmentFile=/var/www/kalpavriksha-ops/backend/.env
+ExecStart=/usr/bin/npm run backup:create
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+PrivateTmp=true
+NoNewPrivileges=true

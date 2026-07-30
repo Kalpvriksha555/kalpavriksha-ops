@@ -1,5 +1,11 @@
 # Changelog
 
+## Current hardening Phase 8
+- Added source-hashed, expiring release certification and deployment gates.
+- Added clean-install isolation and frontend unit tests.
+- Added transaction-safe selective finance recovery with dry-run plans and audit receipts.
+- Added migration 008.001 for release and recovery evidence.
+
 ## v1.0
 - Added release documentation package.
 - Added deployment, backup, restore and rollback guides.
@@ -24,3 +30,10 @@
 
 ## Phase 5A
 - Case timeline and audit trail foundation.
+
+## Phase 3 Secure Authentication
+- Replaced browser-side password comparison with server-side scrypt credentials.
+- Added Secure/HTTP-only sessions, CSRF protection, session revocation and login lockout.
+- Added one-time legacy credential migration and forced password replacement.
+- Added secure employee access and password-management endpoints.
+- Added authentication runtime verification and restart tests.

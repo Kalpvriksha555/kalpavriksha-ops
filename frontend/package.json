@@ -1,8 +1,7 @@
 {
   "name": "kalpvriksha-designs-frontend",
-  "version": "2.0.0",
+  "version": "2.9.1-local-cors-hotfix",
   "type": "module",
-  "packageManager": "yarn@1.22.22",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
@@ -10,16 +9,19 @@
     "verify": "npm run build"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "lucide-react": "latest",
-    "firebase": "^11.10.0"
+    "@vitejs/plugin-react": "6.0.3",
+    "lucide-react": "1.23.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "vite": "8.1.4"
   },
   "devDependencies": {
-    "autoprefixer": "^10.4.21",
-    "postcss": "^8.5.15",
-    "tailwindcss": "^3.4.17"
+    "autoprefixer": "10.5.2",
+    "postcss": "^8.5.25",
+    "tailwindcss": "3.4.19"
+  },
+  "engines": {
+    "node": ">=20.19.0",
+    "npm": ">=10.0.0"
   }
 }

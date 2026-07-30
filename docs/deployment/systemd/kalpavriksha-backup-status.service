@@ -1,0 +1,12 @@
+[Unit]
+Description=Check Kalpavriksha backup freshness
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/var/www/kalpavriksha-ops
+EnvironmentFile=/var/www/kalpavriksha-ops/backend/.env
+ExecStart=/usr/bin/npm run backup:status
+PrivateTmp=true
+NoNewPrivileges=true

@@ -35,6 +35,13 @@ const configurationFile = configurationCandidates.find(file => fs.existsSync(fil
 const configuredEnvironment = configurationFile ? parseEnvFile(configurationFile) : {};
 // Explicit shell variables always win, including an intentionally empty DATABASE_URL.
 const runtimeEnvironment = { ...configuredEnvironment, ...process.env };
+if (production) {
+  runtimeEnvironment.NODE_ENV = 'production';
+  delete runtimeEnvironment.ALLOW_JSON_FALLBACK;
+} else {
+  runtimeEnvironment.NODE_ENV ||= 'development';
+  runtimeEnvironment.ALLOW_JSON_FALLBACK ||= 'true';
+}
 
 const run = (name, args, cwd) => {
   const child = spawn(npmCommand, args, {
@@ -74,8 +81,8 @@ console.log(`Kalpavriksha full stack starting in ${production ? 'production prev
 console.log('Frontend: http://localhost:5173');
 console.log('Backend:  http://localhost:8080');
 console.log(configurationFile
-  ? 'Existing backend configuration detected; live shared data will be used when reachable.'
-  : 'No backend configuration detected; using the bundled backend/src/data/db.json snapshot.');
+  ? 'Existing backend configuration detected; PostgreSQL will be used when DATABASE_URL is valid.'
+  : 'No backend configuration detected; starting an empty, isolated local JSON sandbox.');
 
 process.on('SIGINT', () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));

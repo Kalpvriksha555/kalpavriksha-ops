@@ -4,52 +4,186 @@ import cors from 'cors';
 import multer from 'multer';
 import { nanoid } from 'nanoid';
 import fs from 'fs';
+import crypto from 'crypto';
 import path from 'path';
 import QRCode from 'qrcode';
 import { fileURLToPath } from 'url';
 import pg from 'pg';
 import nodemailer from 'nodemailer';
 import { addCaseTimelineEvent, mergeTimelineEvents, normalizeCaseTimeline, normalizeTimelineEvent } from './services/timelineService.js';
+import { FINANCE_FIELDS, applyFreshestFinance, buildFinanceSnapshot, financeFreshness, financeSnapshotHash, mergePaymentRecords } from './services/financeIntegrityService.js';
+import { hashPassword, verifyPassword, passwordPolicyErrors, isWeakLegacyPassword, randomOpaqueToken, tokenHash, randomOtp, normalizeUsername, normalizeAuthRole, normalizeAuthStatus, stripCredentialFields, publicSessionUser } from './services/authService.js';
+import { ROLE_CAPABILITIES, authorizationActor, canAccessCase, canMutateCase, canAccessFileDocument, canDeleteFileDocument, filterCasesForUser, hasCapability, isCaseAssignedToUser, normalizePermissionRole, notificationBelongsToUser } from './services/authorizationService.js';
+import { attachRequestId, createRateLimiter, rejectDangerousJson, requireJsonForBody, secureResponseHeaders } from './middleware/security.js';
+import { getRelationalHealth, loadRelationalState, persistRelationalState, reloadRelationalState, restoreRelationalRevision, runRelationalMigrations } from './repositories/postgresStateRepository.js';
+import { buildFileReconciliationReport, createFileStorage, FileValidationError } from './services/fileStorageService.js';
+import { createOperationalJobStore, filesystemUsage, inspectBackupManifests, recordOperationalEvent, requestLogMiddleware, structuredLog } from './services/operationalReliabilityService.js';
+import { readAndVerifyReleaseCertificate } from './services/releaseCertificationService.js';
+import { createCorsOriginPolicy, parseCorsOrigins } from './config/corsPolicy.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DATA_DIR = process.env.KALPA_DATA_DIR ? path.resolve(process.env.KALPA_DATA_DIR) : path.join(__dirname, 'data');
-const UPLOAD_DIR = process.env.KALPA_UPLOAD_DIR ? path.resolve(process.env.KALPA_UPLOAD_DIR) : path.join(__dirname, 'uploads');
+const LEGACY_UPLOAD_DIR = process.env.KALPA_LEGACY_UPLOAD_DIR
+  ? path.resolve(process.env.KALPA_LEGACY_UPLOAD_DIR)
+  : (process.env.KALPA_UPLOAD_DIR ? path.resolve(process.env.KALPA_UPLOAD_DIR) : path.join(__dirname, 'uploads'));
+const FILE_STORAGE_ROOT = process.env.KALPA_FILE_STORAGE_ROOT
+  ? path.resolve(process.env.KALPA_FILE_STORAGE_ROOT)
+  : path.join(DATA_DIR, 'private-files');
+const BACKUP_ROOT = process.env.KALPA_BACKUP_ROOT ? path.resolve(process.env.KALPA_BACKUP_ROOT) : path.join(DATA_DIR, 'backups');
+const RELEASE_CERTIFICATE_PATH = process.env.RELEASE_CERTIFICATE_PATH ? path.resolve(process.env.RELEASE_CERTIFICATE_PATH) : path.join(DATA_DIR, 'release-certification.json');
+const RELEASE_CERTIFICATE_MAX_AGE_HOURS = Math.max(1, Math.min(168, Number(process.env.RELEASE_CERTIFICATE_MAX_AGE_HOURS || 24)));
+const BACKUP_MAX_AGE_HOURS = Math.max(1, Math.min(720, Number(process.env.BACKUP_MAX_AGE_HOURS || 26)));
+const DISK_WARNING_PERCENT = Math.max(50, Math.min(98, Number(process.env.DISK_WARNING_PERCENT || 80)));
+const DISK_CRITICAL_PERCENT = Math.max(DISK_WARNING_PERCENT + 1, Math.min(100, Number(process.env.DISK_CRITICAL_PERCENT || 90)));
 const DB_FILE = process.env.KALPA_DB_FILE ? path.resolve(process.env.KALPA_DB_FILE) : path.join(DATA_DIR, 'db.json');
+const AUTH_FILE = process.env.KALPA_AUTH_FILE ? path.resolve(process.env.KALPA_AUTH_FILE) : path.join(DATA_DIR, 'auth.json');
+const SESSION_COOKIE_NAME = String(process.env.SESSION_COOKIE_NAME || 'kv_session').trim();
+const SESSION_TTL_HOURS = Math.max(1, Math.min(168, Number(process.env.SESSION_TTL_HOURS || 12)));
+const SESSION_TTL_MS = SESSION_TTL_HOURS * 60 * 60 * 1000;
+const LOGIN_LOCK_MINUTES = Math.max(1, Math.min(120, Number(process.env.LOGIN_LOCK_MINUTES || 15)));
+const LOGIN_MAX_ATTEMPTS = Math.max(3, Math.min(20, Number(process.env.LOGIN_MAX_ATTEMPTS || 5)));
+const JSON_BODY_LIMIT = String(process.env.JSON_BODY_LIMIT || '8mb');
+const MAX_STATE_PROJECTS_PER_WRITE = Math.max(1, Math.min(5000, Number(process.env.MAX_STATE_PROJECTS_PER_WRITE || 1500)));
+const MAX_CHAT_TEXT_LENGTH = Math.max(100, Math.min(50000, Number(process.env.MAX_CHAT_TEXT_LENGTH || 10000)));
+const MAX_TIMELINE_TEXT_LENGTH = Math.max(100, Math.min(10000, Number(process.env.MAX_TIMELINE_TEXT_LENGTH || 2000)));
+const MAX_CASE_TEXT_LENGTH = Math.max(100, Math.min(20000, Number(process.env.MAX_CASE_TEXT_LENGTH || 5000)));
+const STATE_REVISION_RETENTION = Math.max(25, Math.min(5000, Number(process.env.STATE_REVISION_RETENTION || 200)));
+const WHATSAPP_WEBHOOK_SECRET = String(process.env.WHATSAPP_WEBHOOK_SECRET || '').trim();
+const RUNTIME_MODE = String(process.env.NODE_ENV || 'development').trim().toLowerCase();
+const IS_PRODUCTION = RUNTIME_MODE === 'production';
+const BACKUP_REQUIRED = IS_PRODUCTION ? String(process.env.BACKUP_REQUIRED || 'true').trim().toLowerCase() !== 'false' : String(process.env.BACKUP_REQUIRED || '').trim().toLowerCase() === 'true';
+const RELEASE_CERTIFICATE_REQUIRED = IS_PRODUCTION ? String(process.env.RELEASE_CERTIFICATE_REQUIRED || 'true').trim().toLowerCase() !== 'false' : String(process.env.RELEASE_CERTIFICATE_REQUIRED || '').trim().toLowerCase() === 'true';
+const ALLOW_JSON_FALLBACK = !IS_PRODUCTION && String(process.env.ALLOW_JSON_FALLBACK || '').trim().toLowerCase() === 'true';
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+fs.mkdirSync(LEGACY_UPLOAD_DIR, { recursive: true });
+fs.mkdirSync(BACKUP_ROOT, { recursive: true });
+
+const BACKEND_PACKAGE_VERSION = (() => {
+  try { return JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')).version || ''; } catch { return ''; }
+})();
 
 const { Pool } = pg;
 const DATABASE_URL = process.env.DATABASE_URL || '';
-let USE_POSTGRES = /^postgres(ql)?:\/\//i.test(DATABASE_URL);
+const USE_POSTGRES = /^postgres(ql)?:\/\//i.test(DATABASE_URL);
 const pool = USE_POSTGRES ? new Pool({
   connectionString: DATABASE_URL,
   ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
   connectionTimeoutMillis: Number(process.env.DB_CONNECT_TIMEOUT_MS || 10000)
 }) : null;
+const operationalJobs = createOperationalJobStore({ pool, dataDir:DATA_DIR, usePostgres:USE_POSTGRES });
+const serverStartedAt = new Date().toISOString();
+let shuttingDown = false;
+let lastPersistenceFailure = null;
+let lastPersistenceSuccess = null;
 let memoryState = null;
 let postgresReady = false;
+let stateVersion = 0;
+let legacyCredentialCandidates = [];
+let persistenceQueue = Promise.resolve();
+const snapshotVersions = new WeakMap();
 
 const safeName = (name='file') => String(name).replace(/[^a-zA-Z0-9.\-_]/g, '_');
-const MAX_UPLOAD_SIZE_MB = Number(process.env.MAX_UPLOAD_SIZE_MB || 1024);
+const MAX_UPLOAD_SIZE_MB = Math.max(1, Math.min(500, Number(process.env.MAX_UPLOAD_SIZE_MB || 100)));
+const MAX_UPLOAD_FILES = Math.max(1, Math.min(100, Number(process.env.MAX_UPLOAD_FILES || 20)));
+const MAX_INLINE_PREVIEW_MB = Math.max(1, Math.min(50, Number(process.env.MAX_INLINE_PREVIEW_MB || 15)));
+const MAX_INLINE_PREVIEW_BYTES = MAX_INLINE_PREVIEW_MB * 1024 * 1024;
+const fileStorage = createFileStorage({
+  root: FILE_STORAGE_ROOT,
+  legacyRoots: [LEGACY_UPLOAD_DIR]
+});
+if (IS_PRODUCTION && !String(process.env.KALPA_FILE_STORAGE_ROOT || '').trim()) {
+  throw new Error('KALPA_FILE_STORAGE_ROOT is required in production and must point to persistent private storage outside the deployment directory.');
+}
+if (IS_PRODUCTION && String(process.env.FILE_STORAGE_PERSISTENT || '').trim().toLowerCase() !== 'true') {
+  throw new Error('FILE_STORAGE_PERSISTENT=true is required in production after persistent storage has been mounted and verified.');
+}
+const storageHealthAtStartup = fileStorage.health();
+if (!storageHealthAtStartup.ok) throw new Error(`Private file storage is not writable: ${storageHealthAtStartup.error || FILE_STORAGE_ROOT}`);
+
 const upload = multer({
   storage: multer.diskStorage({
-    destination: (_req, _file, cb) => {
-      fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-      cb(null, UPLOAD_DIR);
-    },
-    filename: (_req, file, cb) => cb(null, `${Date.now()}-${nanoid(6)}-${safeName(file.originalname)}`)
+    destination: (_req, _file, cb) => cb(null, fileStorage.tempDestination()),
+    filename: (_req, file, cb) => cb(null, `${Date.now()}-${nanoid(12)}-${safeName(file.originalname || 'incoming')}.upload`)
   }),
-  // Practical production safety limit. Number of files is intentionally not capped.
-  limits: { fileSize: MAX_UPLOAD_SIZE_MB * 1024 * 1024 }
+  limits: {
+    fileSize: MAX_UPLOAD_SIZE_MB * 1024 * 1024,
+    files: MAX_UPLOAD_FILES,
+    fields: 100,
+    parts: MAX_UPLOAD_FILES + 100
+  }
 });
 
 function uploadErrorPayload(err) {
   const code = err?.code || '';
   if (code === 'LIMIT_FILE_SIZE') return { status: 413, error: `File is larger than the configured ${MAX_UPLOAD_SIZE_MB} MB upload limit.` };
+  if (code === 'LIMIT_FILE_COUNT') return { status: 413, error: `A maximum of ${MAX_UPLOAD_FILES} files can be uploaded in one request.` };
+  if (code === 'LIMIT_FIELD_COUNT' || code === 'LIMIT_PART_COUNT') return { status: 400, error: 'The upload contains too many form fields or parts.' };
   if (code === 'LIMIT_UNEXPECTED_FILE') return { status: 400, error: 'Upload field mismatch. Please refresh the page and try again.' };
   return { status: 400, error: err?.message || 'Upload failed before the file reached the server.' };
+}
+
+function cleanupIncomingUploads(files = []) {
+  const tempRoot=path.resolve(fileStorage.tempRoot);
+  for (const file of Array.isArray(files) ? files : []) {
+    try {
+      const candidate=file?.path ? path.resolve(file.path) : '';
+      if (candidate && candidate.startsWith(`${tempRoot}${path.sep}`) && fs.existsSync(candidate)) fs.unlinkSync(candidate);
+    } catch {}
+  }
+}
+
+async function prepareSecureUploads(req, purpose = 'FILE', options = {}) {
+  const files = Array.isArray(req.files) ? req.files : (req.file ? [req.file] : []);
+  const prepared = [];
+  try {
+    for (const file of files) {
+      const secured = await fileStorage.validateAndStore(file, { purpose });
+      if (options.imagesOnly && !String(secured.detectedMime || '').startsWith('image/')) {
+        if (!secured.deduplicated) fileStorage.softDelete(secured.storageKey, { reason: 'PROFILE_PHOTO_NON_IMAGE' });
+        throw new FileValidationError('PROFILE_PHOTO_INVALID', 'Profile photos must contain a valid supported image.', 400);
+      }
+      Object.assign(file, {
+        filename: secured.storageKey,
+        storageKey: secured.storageKey,
+        storedName: secured.storageKey,
+        sha256: secured.sha256,
+        securityStatus: secured.securityStatus,
+        antivirusStatus: secured.antivirusStatus,
+        antivirusEngine: secured.antivirusEngine,
+        storageProvider: secured.storageProvider,
+        detectedMime: secured.detectedMime,
+        suppliedMime: secured.suppliedMime,
+        mimetype: secured.detectedMime,
+        originalname: secured.originalName,
+        size: secured.size,
+        deduplicated: secured.deduplicated,
+        storedAt: secured.storedAt,
+        path: fileStorage.resolve({ storageKey: secured.storageKey })?.fp || ''
+      });
+      prepared.push(file);
+    }
+    req.files = prepared;
+    req.file = prepared[0] || null;
+    return prepared;
+  } catch (error) {
+    cleanupIncomingUploads(files);
+    for (const file of prepared) {
+      if (file?.storageKey && !file?.deduplicated) fileStorage.softDelete(file.storageKey,{reason:'UPLOAD_BATCH_ROLLED_BACK'});
+    }
+    throw error;
+  }
+}
+
+function fileUploadFailure(res, error, fallback = 'File upload failed.') {
+  const status = Number(error?.statusCode || 400);
+  return res.status(status).json({ ok:false, code:error?.code || 'FILE_VALIDATION_FAILED', error:error?.message || fallback, details:error?.details || undefined });
+}
+
+function isResolvedStoragePathAllowed(fp = '') {
+  const resolved = path.resolve(String(fp || ''));
+  return [fileStorage.root, LEGACY_UPLOAD_DIR].some(root => resolved === path.resolve(root) || resolved.startsWith(`${path.resolve(root)}${path.sep}`));
 }
 function uploadAny(req, res, next) {
   upload.any()(req, res, (err) => {
@@ -58,6 +192,7 @@ function uploadAny(req, res, next) {
       return res.status(payload.status).json({ ok:false, error:payload.error, code:err.code || 'UPLOAD_ERROR' });
     }
     req.files = Array.isArray(req.files) ? req.files : [];
+    res.once('finish', () => cleanupIncomingUploads(req.files));
     next();
   });
 }
@@ -68,6 +203,7 @@ function uploadSingle(fieldName) {
         const payload = uploadErrorPayload(err);
         return res.status(payload.status).json({ ok:false, error:payload.error, code:err.code || 'UPLOAD_ERROR' });
       }
+      if (req.file) res.once('finish', () => cleanupIncomingUploads([req.file]));
       next();
     });
   };
@@ -79,106 +215,681 @@ const statuses = ['NEW_LEAD','ASSIGNED','IN_PROGRESS','DESIGN_SUBMITTED','MANAGE
 const sourceDocTypes = ['Sale Deed','ATS','Technical Report','GPS Photo','Property Photo','Site Photo','Bank Technical','Admin Instruction','Excel Sheet','Word Document','Image/Photo','AutoCAD DWG/DXF','Other'];
 const finalDocTypes = ['Completed PDF','Completed DWG','Completed DXF','Completed Excel','Completed Word','Completed Image/Photo','Revised PDF','Revised DWG/DXF','Other'];
 
+// Source packages must never contain staff credentials, client records, messages,
+// attendance, payments, or uploaded documents. PostgreSQL remains the source of
+// truth in production; this empty seed exists only for an explicitly enabled
+// local JSON sandbox.
 const seed = {
-  users:[
-    { id: 1, name: 'Ashutosh Rai', username: 'ashutosh', password: '123', role: 'Admin', status: 'APPROVED' },
-    { id: 2, name: 'Vaibhav Singh', username: 'vaibhav', password: '123', role: 'Admin', status: 'APPROVED' },
-    { id: 3, name: 'Shubham Upadhyay', username: 'shubham', password: '123', role: 'Admin', status: 'APPROVED' },
-    { id: 4, name: 'Amit Kushwaha', username: 'amit', password: '123', role: 'Manager', status: 'APPROVED' },
-    { id: 5, name: 'Waqar', username: 'waqar', password: '123', role: 'Designer', status: 'APPROVED' },
-    { id: 6, name: 'Nilu Gupta', username: 'nilu', password: '123', role: 'Designer', status: 'APPROVED' },
-    { id: 7, name: 'Khushbu Pandey', username: 'khushbu', password: '123', role: 'Designer', status: 'APPROVED' }
-  ],
-  cases:[], deletedProjectIds:[], payments:[], performanceRecords:[], notifications:[], teamChat:[], whatsappInbox:[], audit:[], attendanceLogs:[], chatReads:{ADMIN:[],MANAGER:[],DESIGNER:[]}
+  users:[],
+  cases:[],
+  deletedProjectIds:[],
+  payments:[],
+  performanceRecords:[],
+  notifications:[],
+  teamChat:[],
+  whatsappInbox:[],
+  audit:[],
+  attendanceLogs:[],
+  files:[],
+  chatReads:{ADMIN:[],MANAGER:[],DESIGNER:[]}
 };
+
+function assertPersistenceConfiguration() {
+  if (IS_PRODUCTION && !String(process.env.CORS_ORIGIN || '').trim()) {
+    throw new Error('Production startup blocked: CORS_ORIGIN must explicitly list the trusted frontend origin(s).');
+  }
+  if (IS_PRODUCTION && !USE_POSTGRES) {
+    throw new Error('Production startup blocked: DATABASE_URL must contain a valid PostgreSQL connection string.');
+  }
+  if (IS_PRODUCTION && BACKUP_REQUIRED && !String(process.env.KALPA_BACKUP_ROOT || '').trim()) {
+    throw new Error('Production startup blocked: KALPA_BACKUP_ROOT must point to persistent backup storage outside the release directory.');
+  }
+  if (IS_PRODUCTION && BACKUP_REQUIRED && String(process.env.BACKUP_STORAGE_PERSISTENT || '').trim().toLowerCase() !== 'true') {
+    throw new Error('Production startup blocked: BACKUP_STORAGE_PERSISTENT=true is required after independent backup storage is mounted and verified.');
+  }
+  if (!USE_POSTGRES && !ALLOW_JSON_FALLBACK) {
+    throw new Error('No persistence backend configured. Set DATABASE_URL, or set ALLOW_JSON_FALLBACK=true only for an isolated local-development sandbox.');
+  }
+}
 
 async function ensurePostgres() {
   if (!USE_POSTGRES || postgresReady) return;
-  await pool.query(`CREATE TABLE IF NOT EXISTS app_state (
-    key text PRIMARY KEY,
-    value jsonb NOT NULL,
-    updated_at timestamptz NOT NULL DEFAULT now()
-  )`);
-  await pool.query(`CREATE TABLE IF NOT EXISTS files_meta (
-    id text PRIMARY KEY,
-    case_id text,
-    name text,
-    stored_name text,
-    mime text,
-    size bigint,
-    purpose text,
-    uploaded_by text,
-    uploaded_at timestamptz DEFAULT now(),
-    meta jsonb DEFAULT '{}'::jsonb
-  )`);
+  await runRelationalMigrations(pool);
   postgresReady = true;
 }
 
 function readJsonFallback(){
+  if (!ALLOW_JSON_FALLBACK) {
+    throw new Error('JSON fallback access blocked outside the explicit local-development sandbox.');
+  }
   if(!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify(seed,null,2));
   return JSON.parse(fs.readFileSync(DB_FILE,'utf8'));
 }
 
+function captureLegacyCredentialCandidates(rawState = {}) {
+  legacyCredentialCandidates = (Array.isArray(rawState?.users) ? rawState.users : [])
+    .filter(user => user && (user.password || user.passwordHash || user.password_hash))
+    .map(user => ({
+      id: String(user.id || '').trim(),
+      username: normalizeUsername(user.username || ''),
+      password: String(user.password || user.passwordHash || user.password_hash || ''),
+      role: user.role,
+      status: user.status
+    }));
+}
+
 async function initStore(){
+  assertPersistenceConfiguration();
   if (USE_POSTGRES) {
     await ensurePostgres();
-    const row = await pool.query('SELECT value FROM app_state WHERE key=$1', ['main']);
-    if (row.rows.length) {
-      memoryState = norm(row.rows[0].value);
-    } else {
-      memoryState = norm(readJsonFallback());
-      await pool.query('INSERT INTO app_state(key,value) VALUES($1,$2::jsonb) ON CONFLICT (key) DO NOTHING', ['main', JSON.stringify(memoryState)]);
-    }
+    const loaded = await loadRelationalState(pool, { normalizeState: norm, seedState: seed });
+    if (loaded.legacyState) captureLegacyCredentialCandidates(loaded.legacyState);
+    else captureLegacyCredentialCandidates(loaded.state);
+    memoryState = norm(loaded.state);
+    stateVersion = Number(loaded.stateVersion || 0);
   } else {
-    memoryState = norm(readJsonFallback());
+    const rawState = readJsonFallback();
+    captureLegacyCredentialCandidates(rawState);
+    stateVersion = Number(rawState.__stateVersion || 0);
+    delete rawState.__stateVersion;
+    memoryState = norm(rawState);
   }
 }
 
 function db(){
-  if (!memoryState) memoryState = norm(readJsonFallback());
-  return structuredClone(memoryState);
+  if (!memoryState) throw new Error('Application state is not initialized.');
+  const snapshot = structuredClone(memoryState);
+  snapshotVersions.set(snapshot, stateVersion);
+  return snapshot;
 }
 
-function save(d){
+async function reloadCommittedState(){
+  if (!USE_POSTGRES) return;
+  const loaded = await reloadRelationalState(pool, { normalizeState: norm });
+  memoryState = norm(loaded.state);
+  stateVersion = Number(loaded.stateVersion || 0);
+}
+
+function save(d, metadata = {}){
   const normalized = norm(d);
+  const expectedVersion = Number(snapshotVersions.get(d) ?? stateVersion);
+  if (expectedVersion !== stateVersion) {
+    const error = new Error(`This update was created from stale application state. Expected local version ${expectedVersion}, current version ${stateVersion}. Refresh and retry.`);
+    error.statusCode = 409;
+    error.code = 'STATE_VERSION_CONFLICT';
+    return Promise.reject(error);
+  }
+  const targetVersion = expectedVersion + 1;
+  // Make queued changes visible to later requests in this process. The queued
+  // PostgreSQL transaction still has to succeed before the API returns success.
   memoryState = structuredClone(normalized);
+  stateVersion = targetVersion;
 
-  // Production uses PostgreSQL as the source of truth. Avoid writing the full
-  // app_state JSON file on every upload/chat/task action because that synchronous
-  // disk write can make file uploads feel slow on a VPS. Keep JSON writes for
-  // local fallback mode, or enable WRITE_JSON_BACKUP=true explicitly.
-  if (!USE_POSTGRES || process.env.WRITE_JSON_BACKUP === 'true') {
-    fs.writeFileSync(DB_FILE, JSON.stringify(normalized,null,2));
-  }
+  const persist = async () => {
+    if (!USE_POSTGRES) {
+      normalized.__stateVersion = targetVersion;
+      fs.writeFileSync(DB_FILE, JSON.stringify(normalized,null,2));
+      delete normalized.__stateVersion;
+      if (Array.isArray(metadata.authOperations) && metadata.authOperations.length) applyLocalAuthOperations(metadata.authOperations);
+      return { stateVersion:targetVersion, persistedAt: now(), database: 'json-file' };
+    }
 
-  if (USE_POSTGRES) {
-    ensurePostgres()
-      .then(() => pool.query('INSERT INTO app_state(key,value,updated_at) VALUES($1,$2::jsonb,now()) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()', ['main', JSON.stringify(normalized)]))
-      .catch(err => console.error('PostgreSQL save failed:', err.message));
-  }
+    await ensurePostgres();
+    try {
+      const inferredActor = metadata.actor
+        || metadata.financeEvent?.actor
+        || normalized.audit?.[0]?.actor
+        || normalized.audit?.[0]?.by
+        || normalized.audit?.[0]?.user
+        || 'system';
+      const result = await persistRelationalState(pool, {
+        state: normalized,
+        expectedVersion,
+        targetVersion,
+        metadata: { ...metadata, actor: inferredActor },
+        applyAuthOperationsWithClient,
+        financeSnapshotHash,
+        revisionRetention: STATE_REVISION_RETENTION
+      });
+      if (process.env.WRITE_JSON_BACKUP === 'true') fs.writeFileSync(DB_FILE, JSON.stringify(normalized,null,2));
+      return result;
+    } catch (error) {
+      await reloadCommittedState().catch(() => {});
+      throw error;
+    }
+  };
+
+  const queued = persistenceQueue.then(persist, persist).then(async result => {
+    lastPersistenceSuccess = { at:now(), stateVersion:targetVersion, database:result?.database || (USE_POSTGRES ? 'postgresql-relational' : 'json-file') };
+    lastPersistenceFailure = null;
+    return result;
+  }, async error => {
+    lastPersistenceFailure = { at:now(), code:error?.code || 'PERSISTENCE_FAILED', message:error?.message || String(error), expectedVersion, targetVersion };
+    await operationalJobs.recordFailure('STATE_PERSISTENCE', error, { expectedVersion, targetVersion, reason:metadata.reason || (metadata.financeEvent ? 'finance_update' : 'state_update') }, { maxAttempts:5 }).catch(() => {});
+    await recordOperationalEvent(pool, USE_POSTGRES, { eventType:'STATE_PERSISTENCE_FAILED', severity:'ERROR', actor:metadata.actor || metadata.financeEvent?.actor || 'system', details:lastPersistenceFailure }).catch(() => {});
+    throw error;
+  });
+  persistenceQueue = queued.catch(() => {});
+  return queued;
 }
 
 async function loadDb(){
-  if (USE_POSTGRES) {
-    await ensurePostgres();
-    const row = await pool.query('SELECT value FROM app_state WHERE key=$1', ['main']);
-    if (row.rows.length) return norm(row.rows[0].value);
-  }
   return db();
 }
 
 async function getDbStatus(){
   if (USE_POSTGRES) {
     await ensurePostgres();
-    const r = await pool.query('SELECT now() as now');
-    return { database:'postgresql', connected:true, time:r.rows[0].now };
+    return getRelationalHealth(pool);
   }
-  return { database:'json-file', connected:true, time:now(), warning:'DATABASE_URL is not set. JSON fallback is not suitable for production.' };
+  return { database:'json-file', connected:true, time:now(), localSandbox:true, warning:'Local JSON sandbox is enabled. Production requires PostgreSQL.', stateVersion };
 }
+
+async function databaseReadinessProbe() {
+  const started = Date.now();
+  if (!USE_POSTGRES) return { ok:ALLOW_JSON_FALLBACK, database:'json-file', latencyMs:Date.now()-started, localSandbox:true };
+  try {
+    await Promise.race([
+      pool.query('SELECT 1 AS ok'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Database readiness probe timed out.')), Number(process.env.READINESS_DB_TIMEOUT_MS || 5000)))
+    ]);
+    return { ok:true, database:'postgresql-relational', latencyMs:Date.now()-started };
+  } catch (error) {
+    return { ok:false, database:'postgresql-relational', latencyMs:Date.now()-started, error:error.message || String(error) };
+  }
+}
+
+async function buildReliabilityStatus({ detailed = false } = {}) {
+  const [database, failedJobs] = await Promise.all([
+    databaseReadinessProbe(),
+    operationalJobs.list({ status:'FAILED', limit:50 }).catch(() => [])
+  ]);
+  const storage = fileStorage.health();
+  const storageDisk = filesystemUsage(FILE_STORAGE_ROOT);
+  const backupDisk = filesystemUsage(BACKUP_ROOT);
+  const backups = inspectBackupManifests(BACKUP_ROOT, { maxAgeHours:BACKUP_MAX_AGE_HOURS });
+  const releaseCertificate = readAndVerifyReleaseCertificate(RELEASE_CERTIFICATE_PATH, {
+    expectedBackendVersion: BACKEND_PACKAGE_VERSION,
+    maxAgeHours: RELEASE_CERTIFICATE_MAX_AGE_HOURS,
+    requireCleanInstall: true,
+    requireBackup: RELEASE_CERTIFICATE_REQUIRED && BACKUP_REQUIRED
+  });
+  const diskCritical = [storageDisk,backupDisk].some(item => item.ok && item.usedPercent >= DISK_CRITICAL_PERCENT);
+  const diskWarning = [storageDisk,backupDisk].some(item => item.ok && item.usedPercent >= DISK_WARNING_PERCENT);
+  const persistenceHealthy = !lastPersistenceFailure || (lastPersistenceSuccess && new Date(lastPersistenceSuccess.at).getTime() >= new Date(lastPersistenceFailure.at).getTime());
+  const checks = {
+    shuttingDown:!shuttingDown,
+    database:database.ok,
+    privateStorage:!!storage.ok,
+    diskSpace:!diskCritical,
+    backup:!BACKUP_REQUIRED || backups.ok,
+    releaseCertificate:!RELEASE_CERTIFICATE_REQUIRED || releaseCertificate.ok,
+    persistence:persistenceHealthy
+  };
+  const ok = Object.values(checks).every(Boolean);
+  const base = {
+    ok,
+    status:ok ? 'READY' : 'NOT_READY',
+    checkedAt:now(),
+    uptimeSeconds:Math.round(process.uptime()),
+    startedAt:serverStartedAt,
+    checks,
+    warning:diskWarning && !diskCritical ? `Disk usage is above ${DISK_WARNING_PERCENT}%.` : '',
+    failedJobCount:failedJobs.length
+  };
+  if (!detailed) return base;
+  return {
+    ...base,
+    database,
+    storage:{...storage,root:undefined,tempRoot:undefined},
+    disk:{storage:storageDisk,backups:backupDisk,warningPercent:DISK_WARNING_PERCENT,criticalPercent:DISK_CRITICAL_PERCENT},
+    backups,
+    releaseCertificate:{ required:RELEASE_CERTIFICATE_REQUIRED, path:RELEASE_CERTIFICATE_PATH, ...releaseCertificate },
+    persistence:{lastSuccess:lastPersistenceSuccess,lastFailure:lastPersistenceFailure,stateVersion},
+    failedJobs
+  };
+}
+
+
+const emptyAuthStore = () => ({ credentials: [], sessions: [], events: [] });
+
+function readLocalAuthStore() {
+  if (!ALLOW_JSON_FALLBACK) throw new Error('Local authentication storage is available only in the explicit development sandbox.');
+  fs.mkdirSync(path.dirname(AUTH_FILE), { recursive: true });
+  if (!fs.existsSync(AUTH_FILE)) fs.writeFileSync(AUTH_FILE, JSON.stringify(emptyAuthStore(), null, 2));
+  try {
+    const parsed = JSON.parse(fs.readFileSync(AUTH_FILE, 'utf8'));
+    return {
+      credentials: Array.isArray(parsed.credentials) ? parsed.credentials : [],
+      sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
+      events: Array.isArray(parsed.events) ? parsed.events : []
+    };
+  } catch {
+    const fresh = emptyAuthStore();
+    fs.writeFileSync(AUTH_FILE, JSON.stringify(fresh, null, 2));
+    return fresh;
+  }
+}
+
+function writeLocalAuthStore(store = emptyAuthStore()) {
+  if (!ALLOW_JSON_FALLBACK) throw new Error('Local authentication storage is available only in the explicit development sandbox.');
+  fs.mkdirSync(path.dirname(AUTH_FILE), { recursive: true });
+  fs.writeFileSync(AUTH_FILE, JSON.stringify(store, null, 2));
+}
+
+function authCredentialRecord(input = {}) {
+  return {
+    user_id: String(input.user_id || input.userId || '').trim(),
+    username: normalizeUsername(input.username),
+    password_hash: String(input.password_hash || input.passwordHash || ''),
+    role: normalizeAuthRole(input.role),
+    status: normalizeAuthStatus(input.status),
+    must_change_password: Boolean(input.must_change_password ?? input.mustChangePassword),
+    password_version: Math.max(1, Number(input.password_version || input.passwordVersion || 1)),
+    failed_attempts: Math.max(0, Number(input.failed_attempts || input.failedAttempts || 0)),
+    locked_until: input.locked_until || input.lockedUntil || null,
+    password_changed_at: input.password_changed_at || input.passwordChangedAt || null,
+    created_at: input.created_at || input.createdAt || now(),
+    updated_at: input.updated_at || input.updatedAt || now()
+  };
+}
+
+function applyLocalAuthOperations(operations = []) {
+  const store = readLocalAuthStore();
+  for (const operation of operations || []) {
+    const type = String(operation?.type || '');
+    if (type === 'upsertCredential') {
+      const next = authCredentialRecord(operation.credential || operation);
+      const index = store.credentials.findIndex(item => String(item.user_id) === next.user_id || normalizeUsername(item.username) === next.username);
+      if (index >= 0) store.credentials[index] = { ...store.credentials[index], ...next, created_at: store.credentials[index].created_at || next.created_at, updated_at: now() };
+      else store.credentials.push(next);
+    } else if (type === 'deleteCredential') {
+      const userId = String(operation.userId || operation.user_id || '');
+      store.credentials = store.credentials.filter(item => String(item.user_id) !== userId);
+      store.sessions = store.sessions.map(session => String(session.user_id) === userId && !session.revoked_at ? { ...session, revoked_at: now() } : session);
+    } else if (type === 'revokeSessions') {
+      const userId = String(operation.userId || operation.user_id || '');
+      const exceptHash = String(operation.exceptTokenHash || '');
+      store.sessions = store.sessions.map(session => String(session.user_id) === userId && String(session.token_hash) !== exceptHash && !session.revoked_at ? { ...session, revoked_at: now() } : session);
+    }
+  }
+  writeLocalAuthStore(store);
+}
+
+async function applyAuthOperationsWithClient(client, operations = []) {
+  for (const operation of operations || []) {
+    const type = String(operation?.type || '');
+    if (type === 'upsertCredential') {
+      const value = authCredentialRecord(operation.credential || operation);
+      await client.query(
+        `INSERT INTO auth_credentials(user_id, username, password_hash, role, status, must_change_password, password_version, failed_attempts, locked_until, password_changed_at, created_at, updated_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,COALESCE($11::timestamptz,now()),now())
+         ON CONFLICT (user_id) DO UPDATE SET
+           username=EXCLUDED.username,
+           password_hash=EXCLUDED.password_hash,
+           role=EXCLUDED.role,
+           status=EXCLUDED.status,
+           must_change_password=EXCLUDED.must_change_password,
+           password_version=EXCLUDED.password_version,
+           failed_attempts=EXCLUDED.failed_attempts,
+           locked_until=EXCLUDED.locked_until,
+           password_changed_at=EXCLUDED.password_changed_at,
+           updated_at=now()`,
+        [value.user_id, value.username, value.password_hash, value.role, value.status, value.must_change_password, value.password_version, value.failed_attempts, value.locked_until, value.password_changed_at, value.created_at]
+      );
+    } else if (type === 'deleteCredential') {
+      const userId = String(operation.userId || operation.user_id || '');
+      await client.query('UPDATE auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE user_id=$1', [userId]);
+      await client.query('DELETE FROM auth_credentials WHERE user_id=$1', [userId]);
+    } else if (type === 'revokeSessions') {
+      const userId = String(operation.userId || operation.user_id || '');
+      const exceptHash = String(operation.exceptTokenHash || '');
+      if (exceptHash) await client.query('UPDATE auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE user_id=$1 AND token_hash<>$2', [userId, exceptHash]);
+      else await client.query('UPDATE auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE user_id=$1', [userId]);
+    }
+  }
+}
+
+async function findCredentialByUsername(username = '') {
+  const normalized = normalizeUsername(username);
+  if (!normalized) return null;
+  if (USE_POSTGRES) {
+    await ensurePostgres();
+    const result = await pool.query('SELECT * FROM auth_credentials WHERE username=$1 LIMIT 1', [normalized]);
+    return result.rows[0] || null;
+  }
+  return readLocalAuthStore().credentials.find(item => normalizeUsername(item.username) === normalized) || null;
+}
+
+async function findCredentialByUserId(userId = '') {
+  const value = String(userId || '');
+  if (!value) return null;
+  if (USE_POSTGRES) {
+    await ensurePostgres();
+    const result = await pool.query('SELECT * FROM auth_credentials WHERE user_id=$1 LIMIT 1', [value]);
+    return result.rows[0] || null;
+  }
+  return readLocalAuthStore().credentials.find(item => String(item.user_id) === value) || null;
+}
+
+async function countCredentials() {
+  if (USE_POSTGRES) {
+    await ensurePostgres();
+    const result = await pool.query('SELECT count(*)::int AS count FROM auth_credentials');
+    return Number(result.rows[0]?.count || 0);
+  }
+  return readLocalAuthStore().credentials.length;
+}
+
+async function recordAuthEvent({ userId = '', username = '', eventType = '', req = null, details = {} } = {}) {
+  const event = {
+    user_id: String(userId || ''),
+    username: normalizeUsername(username),
+    event_type: String(eventType || 'AUTH_EVENT'),
+    ip_address: String(req?.ip || req?.socket?.remoteAddress || ''),
+    user_agent: String(req?.get?.('user-agent') || ''),
+    details: details && typeof details === 'object' ? details : {},
+    created_at: now()
+  };
+  if (USE_POSTGRES) {
+    await ensurePostgres();
+    await pool.query(
+      'INSERT INTO auth_events(user_id, username, event_type, ip_address, user_agent, details) VALUES($1,$2,$3,$4,$5,$6::jsonb)',
+      [event.user_id || null, event.username || null, event.event_type, event.ip_address || null, event.user_agent || null, JSON.stringify(event.details)]
+    );
+    return;
+  }
+  const store = readLocalAuthStore();
+  store.events.unshift({ id: nanoid(10), ...event });
+  store.events = store.events.slice(0, 2000);
+  writeLocalAuthStore(store);
+}
+
+async function updateLoginFailure(credential = {}, req = null) {
+  const nextAttempts = Number(credential.failed_attempts || 0) + 1;
+  const lockedUntil = nextAttempts >= LOGIN_MAX_ATTEMPTS ? new Date(Date.now() + LOGIN_LOCK_MINUTES * 60 * 1000).toISOString() : null;
+  if (USE_POSTGRES) {
+    await pool.query('UPDATE auth_credentials SET failed_attempts=$2, locked_until=$3, updated_at=now() WHERE user_id=$1', [credential.user_id, nextAttempts, lockedUntil]);
+  } else {
+    const store = readLocalAuthStore();
+    store.credentials = store.credentials.map(item => String(item.user_id) === String(credential.user_id) ? { ...item, failed_attempts: nextAttempts, locked_until: lockedUntil, updated_at: now() } : item);
+    writeLocalAuthStore(store);
+  }
+  await recordAuthEvent({ userId: credential.user_id, username: credential.username, eventType: lockedUntil ? 'LOGIN_LOCKED' : 'LOGIN_FAILED', req, details: { failedAttempts: nextAttempts } });
+}
+
+async function clearLoginFailures(credential = {}) {
+  if (USE_POSTGRES) await pool.query('UPDATE auth_credentials SET failed_attempts=0, locked_until=NULL, updated_at=now() WHERE user_id=$1', [credential.user_id]);
+  else {
+    const store = readLocalAuthStore();
+    store.credentials = store.credentials.map(item => String(item.user_id) === String(credential.user_id) ? { ...item, failed_attempts: 0, locked_until: null, updated_at: now() } : item);
+    writeLocalAuthStore(store);
+  }
+}
+
+async function updateCredentialPassword(userId = '', passwordHash = '', mustChangePassword = false) {
+  const existing = await findCredentialByUserId(userId);
+  if (!existing) throw new Error('Authentication credential was not found.');
+  const nextVersion = Number(existing.password_version || 1) + 1;
+  const changedAt = now();
+  if (USE_POSTGRES) {
+    await pool.query(
+      `UPDATE auth_credentials SET password_hash=$2, must_change_password=$3, password_version=$4,
+       failed_attempts=0, locked_until=NULL, password_changed_at=$5, updated_at=now() WHERE user_id=$1`,
+      [userId, passwordHash, Boolean(mustChangePassword), nextVersion, changedAt]
+    );
+  } else {
+    const store = readLocalAuthStore();
+    store.credentials = store.credentials.map(item => String(item.user_id) === String(userId) ? { ...item, password_hash: passwordHash, must_change_password: Boolean(mustChangePassword), password_version: nextVersion, failed_attempts: 0, locked_until: null, password_changed_at: changedAt, updated_at: changedAt } : item);
+    writeLocalAuthStore(store);
+  }
+  return { ...existing, password_hash: passwordHash, must_change_password: Boolean(mustChangePassword), password_version: nextVersion, password_changed_at: changedAt };
+}
+
+async function createAuthSession(credential = {}, req = null) {
+  const rawToken = randomOpaqueToken(32);
+  const hashedToken = tokenHash(rawToken);
+  const csrfToken = randomOpaqueToken(24);
+  const createdAt = now();
+  const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+  const session = {
+    token_hash: hashedToken,
+    user_id: String(credential.user_id),
+    csrf_token: csrfToken,
+    password_version: Number(credential.password_version || 1),
+    created_at: createdAt,
+    expires_at: expiresAt,
+    last_seen_at: createdAt,
+    revoked_at: null,
+    ip_address: String(req?.ip || req?.socket?.remoteAddress || ''),
+    user_agent: String(req?.get?.('user-agent') || '')
+  };
+  if (USE_POSTGRES) {
+    await ensurePostgres();
+    await pool.query(
+      `INSERT INTO auth_sessions(token_hash,user_id,csrf_token,password_version,created_at,expires_at,last_seen_at,ip_address,user_agent)
+       VALUES($1,$2,$3,$4,$5,$6,$5,$7,$8)`,
+      [session.token_hash, session.user_id, session.csrf_token, session.password_version, session.created_at, session.expires_at, session.ip_address || null, session.user_agent || null]
+    );
+  } else {
+    const store = readLocalAuthStore();
+    store.sessions.push(session);
+    store.sessions = store.sessions.filter(item => !item.revoked_at && new Date(item.expires_at).getTime() > Date.now() - 24 * 60 * 60 * 1000).slice(-5000);
+    writeLocalAuthStore(store);
+  }
+  return { rawToken, ...session };
+}
+
+async function findAuthSession(rawToken = '') {
+  const hashed = tokenHash(rawToken);
+  if (!rawToken) return null;
+  if (USE_POSTGRES) {
+    await ensurePostgres();
+    const result = await pool.query('SELECT * FROM auth_sessions WHERE token_hash=$1 LIMIT 1', [hashed]);
+    return result.rows[0] || null;
+  }
+  return readLocalAuthStore().sessions.find(item => item.token_hash === hashed) || null;
+}
+
+async function touchAuthSession(tokenHashValue = '') {
+  if (!tokenHashValue) return;
+  if (USE_POSTGRES) await pool.query('UPDATE auth_sessions SET last_seen_at=now() WHERE token_hash=$1 AND revoked_at IS NULL', [tokenHashValue]);
+  else {
+    const store = readLocalAuthStore();
+    store.sessions = store.sessions.map(item => item.token_hash === tokenHashValue ? { ...item, last_seen_at: now() } : item);
+    writeLocalAuthStore(store);
+  }
+}
+
+async function revokeAuthSession(tokenHashValue = '') {
+  if (!tokenHashValue) return;
+  if (USE_POSTGRES) await pool.query('UPDATE auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE token_hash=$1', [tokenHashValue]);
+  else {
+    const store = readLocalAuthStore();
+    store.sessions = store.sessions.map(item => item.token_hash === tokenHashValue && !item.revoked_at ? { ...item, revoked_at: now() } : item);
+    writeLocalAuthStore(store);
+  }
+}
+
+async function revokeAllUserSessions(userId = '', exceptTokenHash = '') {
+  if (USE_POSTGRES) {
+    if (exceptTokenHash) await pool.query('UPDATE auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE user_id=$1 AND token_hash<>$2', [String(userId), exceptTokenHash]);
+    else await pool.query('UPDATE auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE user_id=$1', [String(userId)]);
+  } else {
+    applyLocalAuthOperations([{ type: 'revokeSessions', userId: String(userId), exceptTokenHash }]);
+  }
+}
+
+function parseRequestCookies(req = {}) {
+  const cookies = {};
+  String(req.headers?.cookie || '').split(';').forEach(part => {
+    const index = part.indexOf('=');
+    if (index <= 0) return;
+    const key = part.slice(0, index).trim();
+    const value = part.slice(index + 1).trim();
+    if (key) cookies[key] = decodeURIComponent(value);
+  });
+  return cookies;
+}
+
+function setSessionCookie(res, rawToken = '') {
+  const options = {
+    httpOnly: true,
+    secure: IS_PRODUCTION,
+    sameSite: 'lax',
+    path: '/',
+    maxAge: SESSION_TTL_MS
+  };
+  if (process.env.SESSION_COOKIE_DOMAIN) options.domain = String(process.env.SESSION_COOKIE_DOMAIN).trim();
+  res.cookie(SESSION_COOKIE_NAME, rawToken, options);
+}
+
+function clearSessionCookie(res) {
+  const options = { httpOnly: true, secure: IS_PRODUCTION, sameSite: 'lax', path: '/' };
+  if (process.env.SESSION_COOKIE_DOMAIN) options.domain = String(process.env.SESSION_COOKIE_DOMAIN).trim();
+  res.clearCookie(SESSION_COOKIE_NAME, options);
+}
+
+function findStateUserByIdOrUsername(userId = '', username = '') {
+  const d = memoryState || seed;
+  return (d.users || []).find(user => String(user.id || '') === String(userId || '') || normalizeUsername(user.username) === normalizeUsername(username)) || null;
+}
+
+async function resolveRequestAuthentication(req = {}) {
+  const rawToken = parseRequestCookies(req)[SESSION_COOKIE_NAME] || '';
+  if (!rawToken) return null;
+  const session = await findAuthSession(rawToken);
+  if (!session || session.revoked_at || new Date(session.expires_at).getTime() <= Date.now()) {
+    if (session?.token_hash) await revokeAuthSession(session.token_hash).catch(() => {});
+    return null;
+  }
+  const credential = await findCredentialByUserId(session.user_id);
+  if (!credential || Number(credential.password_version || 1) !== Number(session.password_version || 1)) {
+    await revokeAuthSession(session.token_hash).catch(() => {});
+    return null;
+  }
+  const user = findStateUserByIdOrUsername(credential.user_id, credential.username);
+  if (!user || normalizeAuthStatus(user.status || credential.status) !== 'APPROVED' || normalizeAuthStatus(credential.status) !== 'APPROVED') {
+    await revokeAuthSession(session.token_hash).catch(() => {});
+    return null;
+  }
+  const lastSeen = new Date(session.last_seen_at || 0).getTime();
+  if (!lastSeen || Date.now() - lastSeen > 5 * 60 * 1000) await touchAuthSession(session.token_hash).catch(() => {});
+  return { rawToken, session, credential, user: publicSessionUser(user, credential) };
+}
+
+function isPublicApiPath(req = {}) {
+  const routePath = String(req.path || '');
+  return routePath === '/health' || routePath === '/health/live' || routePath === '/health/ready' || routePath === '/meta' || routePath === '/auth/login' || routePath === '/auth/session' || routePath === '/auth/recovery/request' || routePath === '/auth/recovery/reset';
+}
+
+function isSafeMethod(method = '') {
+  return ['GET', 'HEAD', 'OPTIONS'].includes(String(method || '').toUpperCase());
+}
+
+async function authenticationGate(req, res, next) {
+  try {
+    if (isPublicApiPath(req)) return next();
+    const auth = await resolveRequestAuthentication(req);
+    if (!auth) {
+      clearSessionCookie(res);
+      return res.status(401).json({ ok: false, code: 'AUTH_REQUIRED', error: 'Sign in is required.' });
+    }
+    req.auth = auth;
+    if (auth.user.mustChangePassword && !['/auth/change-password', '/auth/logout', '/auth/session'].includes(String(req.path || ''))) {
+      return res.status(428).json({ ok: false, code: 'PASSWORD_CHANGE_REQUIRED', error: 'Change the temporary or legacy password before continuing.', user: auth.user });
+    }
+    if (!isSafeMethod(req.method)) {
+      const supplied = String(req.get?.('x-csrf-token') || '');
+      const expected = String(auth.session.csrf_token || '');
+      if (!supplied || !expected || supplied.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) {
+        return res.status(403).json({ ok: false, code: 'CSRF_TOKEN_INVALID', error: 'The security token is missing or invalid. Refresh the page and try again.' });
+      }
+    }
+    next();
+  } catch (error) {
+    next(error);
+  }
+}
+
+function requireAdminSession(req, res, next) {
+  if (normalizeAuthRole(req.auth?.user?.role) !== 'ADMIN') return res.status(403).json({ ok: false, code: 'ADMIN_REQUIRED', error: 'Admin access is required.' });
+  next();
+}
+
+async function migrateLegacyCredentials() {
+  const d = db();
+  const operations = [];
+  let stateChanged = false;
+  for (let index = 0; index < (d.users || []).length; index += 1) {
+    const original = d.users[index] || {};
+    const username = normalizeUsername(original.username);
+    const userId = String(original.id || username || '').trim();
+    if (!username || !userId) continue;
+    const existing = await findCredentialByUserId(userId) || await findCredentialByUsername(username);
+    const legacyCandidate = legacyCredentialCandidates.find(candidate =>
+      (candidate.id && candidate.id === userId) || (candidate.username && candidate.username === username)
+    );
+    const legacyPassword = String(legacyCandidate?.password || original.password || original.passwordHash || '').trim();
+    let credential = existing;
+    if (!credential && legacyPassword) {
+      credential = authCredentialRecord({
+        user_id: userId,
+        username,
+        password_hash: await hashPassword(legacyPassword),
+        role: original.role,
+        status: original.status,
+        must_change_password: true,
+        password_version: 1
+      });
+      operations.push({ type: 'upsertCredential', credential });
+    } else if (credential) {
+      operations.push({
+        type: 'upsertCredential',
+        credential: {
+          ...credential,
+          user_id: userId,
+          username,
+          role: original.role,
+          status: original.status,
+          must_change_password: Boolean(credential.must_change_password)
+        }
+      });
+    }
+    const safe = stripCredentialFields(original);
+    if (JSON.stringify(safe) !== JSON.stringify(original)) stateChanged = true;
+    d.users[index] = safe;
+  }
+
+  if ((await countCredentials()) === 0 && operations.length === 0) {
+    const bootstrapUsername = normalizeUsername(process.env.BOOTSTRAP_ADMIN_USERNAME || '');
+    const bootstrapPassword = String(process.env.BOOTSTRAP_ADMIN_PASSWORD || '');
+    const bootstrapName = String(process.env.BOOTSTRAP_ADMIN_NAME || 'System Administrator').trim();
+    if (bootstrapUsername || bootstrapPassword) {
+      const errors = passwordPolicyErrors(bootstrapPassword);
+      if (!bootstrapUsername || errors.length) throw new Error(`Bootstrap Admin configuration is invalid. ${errors.join(' ') || 'BOOTSTRAP_ADMIN_USERNAME is required.'}`);
+      const userId = `admin-${nanoid(10)}`;
+      const user = employeeLifecycleProfile({ id: userId, name: bootstrapName, username: bootstrapUsername, role: 'Admin', status: 'APPROVED', createdAt: Date.now(), createdBy: 'Secure bootstrap' }, {});
+      d.users.push(stripCredentialFields(user));
+      operations.push({
+        type: 'upsertCredential',
+        credential: authCredentialRecord({ user_id: userId, username: bootstrapUsername, password_hash: await hashPassword(bootstrapPassword), role: 'ADMIN', status: 'APPROVED', must_change_password: false, password_version: 1, password_changed_at: now() })
+      });
+      stateChanged = true;
+    }
+  }
+
+  if (operations.length || stateChanged) await save(d, { authOperations: operations });
+  if ((await countCredentials()) === 0) {
+    throw new Error('No secure login credential exists. Set BOOTSTRAP_ADMIN_USERNAME and BOOTSTRAP_ADMIN_PASSWORD for the one-time secure bootstrap, or restore the existing user records before startup.');
+  }
+  legacyCredentialCandidates = [];
+}
+
 
 function norm(d){
   d ||= structuredClone(seed);
-  d.users ||= seed.users; d.cases ||= d.projects || []; d.deletedProjectIds ||= []; d.payments ||= []; d.notifications ||= []; d.teamChat ||= d.chatMessages || []; d.whatsappInbox ||= []; d.audit ||= []; d.attendanceLogs ||= []; d.chatReads ||= {ADMIN:[],MANAGER:[],DESIGNER:[]};
+  d.users ||= seed.users; d.cases ||= d.projects || []; d.deletedProjectIds ||= []; d.payments = (Array.isArray(d.payments) ? d.payments : []).filter(Boolean); d.notifications ||= []; d.teamChat ||= d.chatMessages || []; d.whatsappInbox ||= []; d.audit ||= []; d.attendanceLogs ||= []; d.chatReads ||= {ADMIN:[],MANAGER:[],DESIGNER:[]};
   d.users = cleanTeamUsers(d.users);
   d.performanceRecords = Array.isArray(d.performanceRecords) ? d.performanceRecords : [];
   d.deletedProjectIds = [...new Set((d.deletedProjectIds || []).map(x => String(x)).filter(Boolean))];
@@ -523,7 +1234,9 @@ function mergeCaseRecords(existing = {}, incoming = {}) {
     base[field] = mergeCaseCollection(a[field], b[field]);
   }
   base.timeline = mergeTimelineEvents(a.timeline, b.timeline, a.history, b.history);
-  return normalizeCaseAssignee(base);
+  // Finance has its own freshness clock. A newer task/status edit must never
+  // replace a later finance update with an older browser snapshot.
+  return normalizeCaseAssignee(applyFreshestFinance(base, a, b));
 }
 
 function getCaseIdentitySet(c = {}) {
@@ -578,11 +1291,7 @@ function rememberDeletedProject(d, id){
 
 function now(){ return new Date().toISOString(); }
 
-const FINANCE_FIELDS = [
-  'ledger', 'paymentTrackingStatus', 'paymentTrackingUpdatedAt', 'paymentTrackingUpdatedBy',
-  'paymentStatus', 'paymentReceived', 'paymentAmountIn', 'refundAmount',
-  'payerName', 'transactionId', 'paymentDate', 'paymentTime', 'paymentAuditTrail'
-];
+
 
 function normalizeRoleValue(value = '') {
   return String(value || '').trim().toUpperCase();
@@ -593,7 +1302,7 @@ function isAdminRoleValue(value = '') {
 }
 
 function requestRole(req = {}) {
-  return req.get?.('x-user-role') || req.body?.currentUserRole || req.body?.role || req.query?.role || '';
+  return req.auth?.user?.role || '';
 }
 
 function isFinanceAdminRequest(req = {}) {
@@ -601,7 +1310,203 @@ function isFinanceAdminRequest(req = {}) {
 }
 
 function denyFinanceAccess(res) {
-  return res.status(403).json({ ok:false, error:'Finance access is restricted to Admin users only.' });
+  return res.status(403).json({ ok:false, code:'FINANCE_ADMIN_REQUIRED', error:'Finance access is restricted to Admin users only.' });
+}
+
+function requestActor(req = {}) {
+  return authorizationActor(req.auth?.user || {});
+}
+
+function authorizationDenied(req, res, code = 'FORBIDDEN', error = 'You do not have permission to perform this action.') {
+  const actor = requestActor(req);
+  recordAuthEvent({
+    userId: actor.id,
+    username: actor.username,
+    eventType: 'AUTHORIZATION_DENIED',
+    req,
+    details: { code, method: req.method, path: req.originalUrl || req.url || '', role: actor.role }
+  }).catch(() => {});
+  return res.status(403).json({ ok:false, code, error, requestId:req.requestId || '' });
+}
+
+function requireCapability(capability, error = '') {
+  return (req, res, next) => {
+    if (!hasCapability(req.auth?.user || {}, capability)) {
+      return authorizationDenied(req, res, 'CAPABILITY_REQUIRED', error || `Permission ${capability} is required.`);
+    }
+    next();
+  };
+}
+
+function requireAnyRole(...rolesAllowed) {
+  const allowed = new Set(rolesAllowed.flat().map(normalizePermissionRole).filter(Boolean));
+  return (req, res, next) => {
+    const role = normalizePermissionRole(req.auth?.user?.role);
+    if (!allowed.has(role)) return authorizationDenied(req, res, 'ROLE_NOT_ALLOWED', 'Your role is not allowed to perform this action.');
+    next();
+  };
+}
+
+function textValue(value, field, maxLength = MAX_CASE_TEXT_LENGTH, { required = false } = {}) {
+  const normalized = String(value ?? '').trim();
+  if (required && !normalized) {
+    const error = new Error(`${field} is required.`);
+    error.statusCode = 400;
+    error.code = 'VALIDATION_ERROR';
+    throw error;
+  }
+  if (normalized.length > maxLength) {
+    const error = new Error(`${field} cannot exceed ${maxLength} characters.`);
+    error.statusCode = 400;
+    error.code = 'VALIDATION_ERROR';
+    throw error;
+  }
+  return normalized;
+}
+
+function numericValue(value, field, { min = 0, max = 1_000_000_000, fallback = 0 } = {}) {
+  if (value === '' || value === undefined || value === null) return fallback;
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < min || number > max) {
+    const error = new Error(`${field} must be a number between ${min} and ${max}.`);
+    error.statusCode = 400;
+    error.code = 'VALIDATION_ERROR';
+    throw error;
+  }
+  return number;
+}
+
+function assertArrayLimit(value, field, max = 5000) {
+  if (value !== undefined && !Array.isArray(value)) {
+    const error = new Error(`${field} must be an array.`);
+    error.statusCode = 400;
+    error.code = 'VALIDATION_ERROR';
+    throw error;
+  }
+  if (Array.isArray(value) && value.length > max) {
+    const error = new Error(`${field} cannot contain more than ${max} records in one request.`);
+    error.statusCode = 413;
+    error.code = 'PAYLOAD_TOO_LARGE';
+    throw error;
+  }
+}
+
+function recordKey(record = {}, index = 0) {
+  return String(record.id || record.fileId || record.eventId || record.createdAt || record.at || record.time || `${record.title || record.action || 'record'}:${index}`);
+}
+
+function mergeAppendOnly(existing = [], incoming = []) {
+  const map = new Map();
+  (Array.isArray(existing) ? existing : []).forEach((record, index) => map.set(recordKey(record, index), structuredClone(record)));
+  (Array.isArray(incoming) ? incoming : []).forEach((record, index) => {
+    const key = recordKey(record, index);
+    if (!map.has(key)) map.set(key, structuredClone(record));
+  });
+  return [...map.values()];
+}
+
+const DESIGNER_MUTABLE_TASK_FIELDS = Object.freeze([
+  'status', 'updatedAt', 'syncVersion', 'startedAt', 'draftingStartedAt', 'currentDraftingStartedAt',
+  'draftingResumedAt', 'draftingPausedAt', 'draftingElapsedMsBeforePause', 'draftingElapsedMs',
+  'submittedAt', 'draftingCompletedAt', 'internalReviewStartedAt', 'reviewStatus', 'finalConclusion',
+  'revisionRequestedAt', 'revisionRequestedBy', 'revisionNote', 'workStartedAt', 'workCompletedAt'
+]);
+
+const DESIGNER_ALLOWED_STATUS_KEYS = new Set([
+  'DRAFTING', 'DRAFTINGPAUSED', 'INPROGRESS', 'DESIGNSUBMITTED', 'MANAGERREVIEW',
+  'INTERNALREVIEW', 'REVISIONINPROGRESS', 'REOPENEDFORREVISION', 'REVISIONPENDING'
+]);
+
+function statusKey(value = '') {
+  return String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function authorizedProjectUpdate(existing = {}, incoming = {}, req = {}) {
+  const actor = requestActor(req);
+  const role = actor.role;
+  if (!existing || !existing.id) return incoming;
+  if (!canMutateCase(req.auth?.user || {}, existing, 'update')) {
+    const error = new Error('You cannot modify this task.');
+    error.statusCode = 403;
+    error.code = 'TASK_UPDATE_FORBIDDEN';
+    throw error;
+  }
+
+  if (role === 'ADMIN' || role === 'MANAGER') {
+    let next = preserveFinanceFields(existing, incoming);
+    next.id = existing.id;
+    next.caseId = incoming.caseId || existing.caseId;
+    next.createdAt = existing.createdAt;
+    next.createdBy = existing.createdBy || existing.creatorName || actor.name;
+    next.creatorName = existing.creatorName || existing.createdBy || actor.name;
+    next.createdByRole = existing.createdByRole || actor.role;
+    next.updatedAt = Date.now();
+    next.syncVersion = Date.now();
+    next.updatedBy = actor.name;
+    next.ownership = { ...(existing.ownership || {}), ...(incoming.ownership || {}), editedBy:actor.name };
+    if (String(next.assignedTo || next.assigneeName || '') !== String(existing.assignedTo || existing.assigneeName || '')) {
+      next.assignedBy = actor.name;
+      next.assignmentVersion = Date.now();
+      next.assignedAt = Date.now();
+      next.ownership.assignedBy = actor.name;
+    }
+    return next;
+  }
+
+  const next = structuredClone(existing);
+  for (const field of DESIGNER_MUTABLE_TASK_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(incoming || {}, field)) next[field] = structuredClone(incoming[field]);
+  }
+  if (!DESIGNER_ALLOWED_STATUS_KEYS.has(statusKey(next.status))) next.status = existing.status;
+  next.documents = mergeAppendOnly(existing.documents || [], incoming.documents || []);
+  next.completedFiles = mergeAppendOnly(existing.completedFiles || [], incoming.completedFiles || []);
+  next.workFiles = mergeAppendOnly(existing.workFiles || [], incoming.workFiles || []);
+  next.subTasks = mergeAppendOnly(existing.subTasks || [], incoming.subTasks || []);
+  next.notes = mergeAppendOnly(existing.notes || [], incoming.notes || []);
+  next.comments = mergeAppendOnly(existing.comments || [], incoming.comments || []);
+  next.revisions = mergeAppendOnly(existing.revisions || [], incoming.revisions || []);
+  next.timeline = mergeTimelineEvents(existing.timeline || [], incoming.timeline || []);
+  next.history = mergeAppendOnly(existing.history || [], incoming.history || []);
+  next.pausedDraftingSessions = mergeAppendOnly(existing.pausedDraftingSessions || [], incoming.pausedDraftingSessions || []);
+  next.updatedAt = Date.now();
+  next.syncVersion = Date.now();
+  next.updatedBy = actor.name;
+  if (next.draftingPausedAt) next.pausedBy = actor.name;
+  return preserveFinanceFields(existing, next);
+}
+
+function authorizeCase(req, res, caseRecord, action = 'read') {
+  const allowed = action === 'read'
+    ? canAccessCase(req.auth?.user || {}, caseRecord)
+    : canMutateCase(req.auth?.user || {}, caseRecord, action);
+  if (!allowed) {
+    authorizationDenied(req, res, 'CASE_ACCESS_DENIED', 'You do not have access to this task.');
+    return false;
+  }
+  return true;
+}
+
+function requireCaseAction(action = 'read') {
+  return (req, res, next) => {
+    const d = db();
+    const caseRecord = findCaseByAnyId(d.cases || [], req.params.id || req.body?.caseId || req.body?.projectId || '');
+    if (!caseRecord) return res.status(404).json({ ok:false, code:'CASE_NOT_FOUND', error:'Case not found.' });
+    if (!authorizeCase(req, res, caseRecord, action)) return;
+    req.caseRecord = caseRecord;
+    next();
+  };
+}
+
+function assertExpectedFinanceVersion(record = {}, body = {}) {
+  if (body.expectedFinanceVersion === undefined || body.expectedFinanceVersion === null || body.expectedFinanceVersion === '') return;
+  const expected = Number(body.expectedFinanceVersion);
+  const current = Number(record.financeVersion || 0);
+  if (!Number.isFinite(expected) || expected !== current) {
+    const error = new Error(`Finance data changed on the server. Expected finance version ${expected}, current version ${current}. Refresh before saving.`);
+    error.statusCode = 409;
+    error.code = 'FINANCE_VERSION_CONFLICT';
+    throw error;
+  }
 }
 
 function preserveFinanceFields(existing = {}, incoming = {}) {
@@ -686,6 +1591,7 @@ function upsertInlinePaymentLedger(d, c, status, body = {}) {
     throw err;
   }
   const computedStatus = status === 'Paid' ? deriveServerPaymentStatus({ ...c, paymentAmountIn: amount, ledger: { ...(c.ledger || {}), amountIn: amount } }, status) : deriveServerPaymentStatus(c, status);
+  c.financeVersion = Number(c.financeVersion || 0) + 1;
   c.paymentTrackingStatus = computedStatus;
   c.paymentTrackingUpdatedAt = Date.now();
   c.paymentTrackingUpdatedBy = by;
@@ -695,9 +1601,11 @@ function upsertInlinePaymentLedger(d, c, status, body = {}) {
     paymentStatus: computedStatus,
     updatedAt: Date.now(),
     updatedBy: by,
+    financeVersion: c.financeVersion,
   };
 
-  if (computedStatus === 'Paid') {
+  if (amount > 0) {
+    const receiptStatus = computedStatus === 'Paid' ? 'YES' : 'PARTIAL';
     c.paymentAuditTrail ||= [];
     c.paymentAuditTrail.unshift({
       id: nanoid(8),
@@ -708,15 +1616,20 @@ function upsertInlinePaymentLedger(d, c, status, body = {}) {
       newStatus: computedStatus,
       oldAmount: previousAmountIn,
       newAmount: amount,
-      note: body.note || 'Admin marked payment as Paid from inline payment control'
+      note: body.note || (computedStatus === 'Paid' ? 'Admin recorded full payment from inline payment control' : 'Admin recorded a partial payment from inline payment control')
     });
-    c.paymentStatus = 'YES';
-    c.paymentReceived = 'YES';
+    c.paymentStatus = receiptStatus;
+    c.paymentReceived = receiptStatus;
     c.paymentAmountIn = amount;
-    c.paymentDate = body.paymentDate || nowIso.slice(0, 10);
-    c.paymentTime = body.paymentTime || new Date().toTimeString().slice(0, 5);
+    c.paymentDate = body.paymentDate || c.paymentDate || nowIso.slice(0, 10);
+    c.paymentTime = body.paymentTime || c.paymentTime || new Date().toTimeString().slice(0, 5);
+    c.payerName = body.payerName || body.receivedFrom || c.payerName || '';
+    c.transactionId = body.transactionId || body.txnId || c.transactionId || '';
     c.ledger.amountIn = amount;
-    c.ledger.date = c.ledger.date || c.paymentDate;
+    c.ledger.date = body.paymentDate || body.date || c.ledger.date || c.paymentDate;
+    c.ledger.mode = body.mode || c.ledger.mode || '';
+    c.ledger.txnId = body.transactionId || body.txnId || c.ledger.txnId || c.transactionId || '';
+    c.ledger.receivedFrom = body.payerName || body.receivedFrom || c.ledger.receivedFrom || c.payerName || c.customerName || '';
     c.ledger.autoFilledFromPaymentStatus = true;
     c.ledger.financeLedgerLinked = true;
     c.ledger.financeLedgerId = existing?.id || c.ledger.financeLedgerId || nanoid(8);
@@ -728,14 +1641,17 @@ function upsertInlinePaymentLedger(d, c, status, body = {}) {
         customerName: c.customerName || '',
         bank: c.client || c.bank || c.bankName || '',
         branch: c.branch || c.branchName || '',
-        paymentReceived: 'YES',
+        paymentReceived: receiptStatus,
         paymentAmountIn: amount,
         paymentDate: c.paymentDate,
         paymentTime: c.paymentTime,
+        payerName: c.payerName,
+        transactionId: c.transactionId,
+        mode: c.ledger.mode || '',
         ledgerStatus: 'ACTIVE',
         updatedAt: nowIso,
         updatedBy: by,
-        note: body.note || 'Auto-updated from inline payment status',
+        note: body.note || (computedStatus === 'Paid' ? 'Full payment recorded from inline status' : 'Partial payment recorded from inline status'),
       });
     } else {
       d.payments.unshift({
@@ -859,13 +1775,13 @@ function cleanTeamUsers(users = []) {
   const map = new Map();
   (users || []).forEach(raw => {
     if (!raw) return;
-    const u = employeeLifecycleProfile({ ...raw, role: normalizeRole(raw.role), status: normalizeStatus(raw.status || 'APPROVED') }, map.get(teamIdentityKey(raw)) || {});
+    const u = stripCredentialFields(employeeLifecycleProfile({ ...raw, role: normalizeRole(raw.role), status: normalizeStatus(raw.status || 'APPROVED') }, map.get(teamIdentityKey(raw)) || {}));
     if (!validTeamRole(u.role)) return;
     if (systemUserPattern.test(String(u.name || '')) || systemUserPattern.test(String(u.username || ''))) return;
     if (u.status === 'DELETED' || u.status === 'REJECTED' || u.status === 'ARCHIVED') return;
     const key = teamIdentityKey(u);
     if (!key) return;
-    map.set(key, employeeLifecycleProfile({ ...(map.get(key) || {}), ...u }, map.get(key) || {}));
+    map.set(key, stripCredentialFields(employeeLifecycleProfile({ ...(map.get(key) || {}), ...u }, map.get(key) || {})));
   });
   return [...map.values()];
 }
@@ -876,7 +1792,7 @@ const presenceTimestamp = (u = {}) => Math.max(
   toMs(u.availabilityUpdatedAt)
 );
 function sanitizePresenceUser(user = {}, nowMs = Date.now()) {
-  const u = { ...user, role: normalizeRole(user.role), status: normalizeStatus(user.status) };
+  const u = { ...stripCredentialFields(user), role: normalizeRole(user.role), status: normalizeStatus(user.status) };
   const last = presenceTimestamp(u);
   const trulyOnline = !!u.isOnline && !!last && (nowMs - last) <= PRESENCE_STALE_MS;
   if (!trulyOnline) {
@@ -1291,6 +2207,19 @@ async function sendOtpEmail(email, otp) {
 }
 
 function addAudit(d, by, action, entity){ d.audit.unshift({id:nanoid(8),at:now(),by,action,entity}); }
+async function recordFileStorageEvent({fileId='',caseId='',action='FILE_EVENT',actor='',storageKey='',sha256='',details={}}={}) {
+  if (!USE_POSTGRES) return;
+  try {
+    await ensurePostgres();
+    await pool.query(
+      `INSERT INTO file_storage_events(file_id,case_id,action,actor,storage_key,sha256,details)
+       VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)`,
+      [String(fileId || ''),String(caseId || ''),String(action || 'FILE_EVENT'),String(actor || ''),String(storageKey || ''),String(sha256 || ''),JSON.stringify(details || {})]
+    );
+  } catch(error) {
+    console.warn('File storage audit event failed:', error.message);
+  }
+}
 function notify(d, to, text, category='normal', target=''){
   d.notifications.unshift({id:nanoid(8),to,text,category,target,status:'UNREAD',createdAt:now()});
 }
@@ -1310,7 +2239,36 @@ function classify(name='', mime=''){
 }
 function docPayload(file, uploadedBy, role, purpose='SOURCE', caseId=''){
   const id = nanoid(8);
-  return {id,caseId,name:file.originalname,storedName:file.filename,mime:file.mimetype,mimeType:file.mimetype,size:file.size,type:classify(file.originalname,file.mimetype),purpose,uploadedBy,uploadedByRole:role,uploadedAt:now(),url:`/api/uploads/${file.filename}`,previewUrl:`/api/files/${id}/preview`,downloadUrl:`/api/files/${id}/download`};
+  const storageKey = file.storageKey || file.storedName || file.filename || '';
+  const detectedMime = file.detectedMime || file.mimetype || 'application/octet-stream';
+  return {
+    id,
+    caseId,
+    name:file.originalname,
+    originalName:file.originalname,
+    storageKey,
+    storedName:path.basename(storageKey),
+    mime:detectedMime,
+    mimeType:detectedMime,
+    suppliedMime:file.suppliedMime || '',
+    size:Number(file.size || 0),
+    sha256:file.sha256 || '',
+    type:classify(file.originalname,detectedMime),
+    purpose,
+    uploadedBy,
+    uploadedByRole:role,
+    uploadedAt:now(),
+    storedAt:file.storedAt || now(),
+    securityStatus:file.securityStatus || 'VALIDATED',
+    antivirusStatus:file.antivirusStatus || 'NOT_CONFIGURED',
+    antivirusEngine:file.antivirusEngine || '',
+    storageProvider:file.storageProvider || 'local-private',
+    deduplicated:Boolean(file.deduplicated),
+    storageStatus:'AVAILABLE',
+    url:`/api/files/${id}/download`,
+    previewUrl:`/api/files/${id}/preview`,
+    downloadUrl:`/api/files/${id}/download`
+  };
 }
 
 function fileBaseName(value=''){
@@ -1320,35 +2278,65 @@ function fileBaseName(value=''){
 function normalizeFileName(value=''){
   return String(value || '').trim().toLowerCase().replace(/\s+/g,'_');
 }
+function safeHeaderFileName(value='file'){
+  return String(value || 'file').replace(/[\r\n\0]/g,'').replace(/["\\]/g,'_').slice(0,180) || 'file';
+}
 function listUploadFiles(){
-  try { return fs.readdirSync(UPLOAD_DIR).filter(name => fs.statSync(path.join(UPLOAD_DIR, name)).isFile()); }
+  try { return fs.readdirSync(LEGACY_UPLOAD_DIR).filter(name => fs.statSync(path.join(LEGACY_UPLOAD_DIR, name)).isFile()); }
   catch { return []; }
 }
 function addFileRegistryEntry(d, doc={}){
   if (!doc || !doc.id) return doc;
   d.files ||= [];
   const existing = d.files.find(f => String(f.id) === String(doc.id));
+  const storageKey = doc.storageKey || doc.storedName || fileBaseName(doc.url || doc.fileUrl || '');
+  const storedName = doc.storedName || fileBaseName(storageKey);
   const entry = {
     id: String(doc.id),
     caseId: doc.caseId || doc.projectId || '',
-    name: doc.name || doc.fileName || doc.originalName || doc.storedName || 'file',
-    storedName: doc.storedName || fileBaseName(doc.url || doc.fileUrl || ''),
+    name: doc.name || doc.fileName || doc.originalName || storageKey || 'file',
+    originalName: doc.originalName || doc.name || doc.fileName || 'file',
+    storageKey,
+    storedName,
     mime: doc.mime || doc.mimeType || 'application/octet-stream',
+    mimeType: doc.mimeType || doc.mime || 'application/octet-stream',
+    suppliedMime: doc.suppliedMime || '',
     size: Number(doc.size || 0),
+    sha256: doc.sha256 || '',
     purpose: doc.purpose || doc.type || 'FILE',
     uploadedBy: doc.uploadedBy || doc.by || 'Team',
+    uploadedByRole: doc.uploadedByRole || '',
     uploadedAt: doc.uploadedAt || now(),
-    url: doc.url || (doc.storedName ? `/uploads/${doc.storedName}` : ''),
+    storedAt: doc.storedAt || doc.uploadedAt || now(),
+    securityStatus: doc.securityStatus || (doc.sha256 ? 'VALIDATED' : 'LEGACY_UNVERIFIED'),
+    antivirusStatus: doc.antivirusStatus || (doc.sha256 ? 'NOT_CONFIGURED' : 'LEGACY_UNSCANNED'),
+    antivirusEngine: doc.antivirusEngine || '',
+    storageProvider: doc.storageProvider || (String(storageKey).startsWith('objects/') ? 'local-private' : 'legacy-local'),
+    storageStatus: doc.storageStatus || 'UNKNOWN',
+    chatScope: doc.chatScope || '',
+    chatParticipants: Array.isArray(doc.chatParticipants) ? doc.chatParticipants : [],
+    url: `/api/files/${doc.id}/download`,
     previewUrl: `/api/files/${doc.id}/preview`,
     downloadUrl: `/api/files/${doc.id}/download`
   };
+  const resolved = resolveStoredUploadFile(entry);
+  entry.storageStatus = String(entry.storageStatus || '').toUpperCase() === 'DELETED'
+    ? 'DELETED'
+    : (resolved ? 'AVAILABLE' : 'MISSING');
+  if (entry.storageStatus === 'DELETED') entry.url = entry.previewUrl = entry.downloadUrl = '';
   if (existing) Object.assign(existing, entry);
   else d.files.unshift(entry);
-  doc.downloadUrl = entry.downloadUrl;
-  doc.previewUrl = entry.previewUrl;
-  if (!doc.mimeType && entry.mime) doc.mimeType = entry.mime;
-  if (!doc.url && entry.url) doc.url = entry.url;
-  if (!doc.storedName && entry.storedName) doc.storedName = entry.storedName;
+  Object.assign(doc, {
+    storageKey: entry.storageKey,
+    storedName: entry.storedName,
+    downloadUrl: entry.downloadUrl,
+    previewUrl: entry.previewUrl,
+    url: entry.url,
+    mimeType: doc.mimeType || entry.mime,
+    storageStatus: entry.storageStatus,
+    securityStatus: doc.securityStatus || entry.securityStatus,
+    storageProvider: doc.storageProvider || entry.storageProvider
+  });
   return doc;
 }
 function allKnownFileDocs(d={}){
@@ -1367,58 +2355,126 @@ function allKnownFileDocs(d={}){
   return [...(d.files || []), ...caseDocs, ...chatDocs].filter(Boolean);
 }
 function resolveStoredUploadFile(doc={}){
-  const candidates = [
-    doc.storedName,
-    doc.stored_name,
-    fileBaseName(doc.url || ''),
-    fileBaseName(doc.fileUrl || ''),
-    fileBaseName(doc.downloadUrl || ''),
-  ].filter(Boolean);
-  for (const stored of candidates) {
-    const fp = path.resolve(UPLOAD_DIR, stored);
-    if (fp.startsWith(path.resolve(UPLOAD_DIR)) && fs.existsSync(fp)) return { stored, fp };
-  }
-  // Backward compatibility: older records often saved only the original filename.
-  const uploadFiles = listUploadFiles();
-  const wanted = normalizeFileName(doc.name || doc.fileName || doc.originalName || '');
-  if (wanted) {
-    const exact = uploadFiles.find(name => normalizeFileName(name) === wanted);
-    if (exact) return { stored: exact, fp: path.resolve(UPLOAD_DIR, exact) };
-    const suffix = uploadFiles.find(name => normalizeFileName(name).endsWith(wanted));
-    if (suffix) return { stored: suffix, fp: path.resolve(UPLOAD_DIR, suffix) };
-  }
-  return null;
+  return fileStorage.resolve(doc);
 }
 function resolveFileById(d, id){
   const docs = allKnownFileDocs(d);
-  let doc = docs.find(x => String(x.id || x.fileId || '') === String(id));
-  if (!doc) {
-    // Some legacy frontend records used the stored file name itself as the id.
-    const uploadFiles = listUploadFiles();
-    const stored = uploadFiles.find(name => String(name) === String(id) || normalizeFileName(name) === normalizeFileName(id));
-    if (stored) doc = { id, name: stored, storedName: stored, url: `/uploads/${stored}` };
-  }
+  const requested = String(id || '');
+  const normalized = normalizeFileName(requested);
+  const doc = docs.find(x => String(x.id || x.fileId || '') === requested)
+    || docs.find(x => [x.storageKey, x.storedName, x.stored_name].filter(Boolean).some(value => String(value) === requested || normalizeFileName(value) === normalized));
   if (!doc) return { doc:null, resolved:null };
   return { doc, resolved: resolveStoredUploadFile(doc) };
+}
+
+function resolveAuthorizedFile(req, res, id) {
+  const d = db();
+  const result = resolveFileById(d, id);
+  if (result.doc && String(result.doc.storageStatus || '').toUpperCase() === 'DELETED') {
+    res.status(410).json({ok:false,code:'FILE_DELETED',error:'This file was deleted and retained only as an audit record.'});
+    return { d, doc:null, resolved:null, denied:true };
+  }
+  if (result.doc && !canAccessFileDocument(req.auth?.user || {}, result.doc, d.cases || [])) {
+    authorizationDenied(req, res, 'FILE_ACCESS_DENIED', 'You do not have access to this file.');
+    return { d, doc:null, resolved:null, denied:true };
+  }
+  return { d, ...result, denied:false };
 }
 function normalizePersistedFileLinks(d){
   d.files ||= [];
   for (const doc of allKnownFileDocs(d)) {
     if (!doc || !doc.id) continue;
-    doc.downloadUrl = `/api/files/${doc.id}/download`;
+    if (String(doc.storageStatus || '').toUpperCase() === 'DELETED') {
+      doc.url=''; doc.downloadUrl=''; doc.previewUrl='';
+    } else {
+      doc.url = `/api/files/${doc.id}/download`;
+      doc.downloadUrl = `/api/files/${doc.id}/download`;
+      doc.previewUrl = `/api/files/${doc.id}/preview`;
+    }
     addFileRegistryEntry(d, doc);
   }
   return d;
 }
 function sanitize(d, role){
   const out=structuredClone(d);
-  if(role!=='ADMIN'){
+  const normalizedRole = normalizeAuthRole(role);
+  out.users = (out.users || []).map(stripCredentialFields);
+  if(normalizedRole!=='ADMIN'){
     delete out.payments;
-    out.cases=out.cases.map(c=>{ const {estimateAmount,paymentStatus,paymentAmountIn,refundAmount,payerName,transactionId,paymentDate,paymentTime,...rest}=c; return rest; });
+    out.cases=(out.cases || []).map(c=>{
+      const safe={...c};
+      for (const field of FINANCE_FIELDS) delete safe[field];
+      delete safe.estimateAmount;
+      delete safe.amountReceived;
+      delete safe.receivedAmount;
+      return safe;
+    });
   }
-  if(role==='DESIGNER') out.audit=[];
+  if(normalizedRole==='DESIGNER') out.audit=[];
   return out;
 }
+function chatReadKey(req = {}) {
+  const actor = requestActor(req);
+  return actor.id || actor.username || actor.role || 'UNKNOWN';
+}
+
+function chatIdentityKeys(user = {}) {
+  const actor=authorizationActor(user);
+  return [actor.id,actor.username,actor.name].map(value=>String(value || '').trim().toLowerCase()).filter(Boolean);
+}
+
+function canAccessChatMessage(user = {}, message = {}) {
+  const role=normalizePermissionRole(user.role);
+  if (role === 'ADMIN' || role === 'MANAGER') return true;
+  if (role !== 'DESIGNER') return false;
+  const keys=chatIdentityKeys(user);
+  const sender=[message.senderId,message.userId,message.sender,message.by].map(value=>String(value || '').trim().toLowerCase()).filter(Boolean);
+  const recipient=String(message.recipient || 'global').trim().toLowerCase();
+  return recipient === 'global' || sender.some(value=>keys.includes(value)) || keys.includes(recipient);
+}
+
+function scopedTeamChat(d = {}, req = {}) {
+  return (d.teamChat || []).filter(message=>canAccessChatMessage(req.auth?.user || {},message));
+}
+
+function scopedNotifications(d = {}, req = {}) {
+  const actor = req.auth?.user || {};
+  return (d.notifications || []).filter(notification => notificationBelongsToUser(notification, actor));
+}
+
+function scopedAttendance(d = {}, req = {}) {
+  const actor = requestActor(req);
+  if (actor.role === 'ADMIN' || actor.role === 'MANAGER') return d.attendanceLogs || [];
+  return (d.attendanceLogs || []).filter(log => {
+    const values = [log.userId, log.username, log.userName, log.name].map(value => String(value || '').trim().toLowerCase());
+    return values.includes(actor.id.toLowerCase()) || values.includes(actor.username.toLowerCase()) || values.includes(actor.name.toLowerCase());
+  });
+}
+
+function scopedState(d = {}, req = {}) {
+  const actor = req.auth?.user || {};
+  const role = normalizePermissionRole(actor.role);
+  const visibleCases = filterCasesForUser(filterDeletedCases(d.cases || [], d.deletedProjectIds || []), actor);
+  const safeCases = sanitize({ ...d, cases:visibleCases }, role).cases || [];
+  const payload = {
+    users:sanitizePresenceUsers(d.users || []),
+    cases:safeCases,
+    projects:safeCases,
+    deletedProjectIds:d.deletedProjectIds || [],
+    teamChat:scopedTeamChat(d, req),
+    chatMessages:scopedTeamChat(d, req),
+    notifications:scopedNotifications(d, req),
+    attendanceLogs:scopedAttendance(d, req),
+    performanceRecords:mergePerformanceRecords(d.performanceRecords || [], buildPerformanceRecordsFromCases(d.cases || []))
+  };
+  payload.performanceSummary = buildPerformanceSummary(payload.performanceRecords, d.users || []);
+  if (role === 'ADMIN') {
+    payload.payments = (d.payments || []).filter(Boolean);
+    payload.audit = d.audit || [];
+  }
+  return payload;
+}
+
 function isActiveCase(c={}){ return !['COMPLETED','CLOSED'].includes(String(c.status||'').toUpperCase()); }
 function caseBusySince(c={}){ return toMs(c.startedAt)||toMs(c.assignedAt)||toMs(c.createdAt); }
 function teamStatus(d){
@@ -1435,7 +2491,7 @@ function dailyLedger(d, dateStr=new Date().toISOString().slice(0,10)){
   const same=(iso)=>String(iso||'').slice(0,10)===dateStr;
   const byLocation={};
   d.cases.filter(c=>same(c.createdAt)).forEach(c=>{ byLocation[c.city||'Unknown']=(byLocation[c.city||'Unknown']||0)+1; });
-  const pays=d.payments.filter(p=>same(p.paymentDate||p.createdAt));
+  const pays=(d.payments || []).filter(Boolean).filter(p=>same(p.paymentDate||p.createdAt));
   return {date:dateStr,totalCases:Object.values(byLocation).reduce((a,b)=>a+b,0),byLocation,paymentReceived:pays.reduce((s,p)=>s+Number(p.paymentAmountIn||0),0),refund:pays.reduce((s,p)=>s+Number(p.refundAmount||0),0),pending:d.cases.reduce((s,c)=>s+((c.paymentStatus==='RECEIVED')?0:Number(c.estimateAmount||0)-Number(c.paymentAmountIn||0)),0),payments:pays};
 }
 function mentionTargets(text, users){
@@ -1449,16 +2505,281 @@ function parseLead(text=''){
 }
 
 const app=express();
-app.use(cors({ origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',').map(s => s.trim()).filter(Boolean) : true }));
-app.use((req,res,next)=>{
-  res.setHeader('Cache-Control','no-store, no-cache, must-revalidate, private');
-  res.setHeader('X-Content-Type-Options','nosniff');
-  res.setHeader('X-Frame-Options','SAMEORIGIN');
-  res.setHeader('Referrer-Policy','strict-origin-when-cross-origin');
-  next();
+if (IS_PRODUCTION) app.set('trust proxy', 1);
+app.disable('x-powered-by');
+const configuredCorsOrigins = parseCorsOrigins(process.env.CORS_ORIGIN);
+const isCorsOriginAllowed = createCorsOriginPolicy({
+  configuredOrigins: configuredCorsOrigins,
+  production: IS_PRODUCTION
 });
-app.use(express.json({limit: process.env.JSON_BODY_LIMIT || '30mb'}));
-app.use('/uploads',express.static(UPLOAD_DIR));
+const corsOptions = {
+  credentials: true,
+  origin(origin, callback) {
+    if (isCorsOriginAllowed(origin)) return callback(null, true);
+    const error = new Error('Origin is not allowed by CORS policy.');
+    error.statusCode = 403;
+    error.code = 'CORS_ORIGIN_DENIED';
+    callback(error);
+  },
+  methods: ['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','X-CSRF-Token','X-Request-Id','X-Webhook-Secret'],
+  exposedHeaders: ['X-Request-Id','Content-Disposition','Content-Length','Content-Type','RateLimit-Limit','RateLimit-Remaining','RateLimit-Reset','Retry-After']
+};
+const loginRateLimiter = createRateLimiter({ windowMs:15 * 60 * 1000, max:20, prefix:'login', key:req => `login:${req.ip || req.socket?.remoteAddress || 'unknown'}:${normalizeUsername(req.body?.username || '')}` });
+const recoveryRateLimiter = createRateLimiter({ windowMs:15 * 60 * 1000, max:8, prefix:'recovery' });
+const otpRateLimiter = createRateLimiter({ windowMs:10 * 60 * 1000, max:8, prefix:'otp' });
+const emailTestRateLimiter = createRateLimiter({ windowMs:60 * 60 * 1000, max:5, prefix:'email-test' });
+const apiWriteRateLimiter = createRateLimiter({ windowMs:60 * 1000, max:Number(process.env.API_WRITE_RATE_LIMIT || 300), prefix:'api-write', key:req => `api-write:${req.auth?.user?.id || req.ip || req.socket?.remoteAddress || 'unknown'}` });
+app.use(attachRequestId);
+app.use(requestLogMiddleware);
+app.use(secureResponseHeaders);
+app.use(cors(corsOptions));
+app.use(express.json({limit: JSON_BODY_LIMIT}));
+app.use(rejectDangerousJson);
+app.use('/api', requireJsonForBody);
+app.use('/api', authenticationGate);
+app.use('/api', (req,res,next) => isSafeMethod(req.method) ? next() : apiWriteRateLimiter(req,res,next));
+app.get('/uploads/:filename', authenticationGate, (req,res)=>{
+  const filename=safeName(path.basename(String(req.params.filename || '')));
+  if (!filename) return res.status(404).send('File not found');
+  const mode=String(req.query.mode || '').toLowerCase();
+  const suffix=mode ? `?mode=${encodeURIComponent(mode)}` : '';
+  res.redirect(307, `/api/uploads/${encodeURIComponent(filename)}${suffix}`);
+});
+
+
+app.post('/api/auth/login', loginRateLimiter, async (req, res) => {
+  const username = normalizeUsername(req.body?.username || '');
+  const password = String(req.body?.password || '');
+  try {
+    if (!username || !password) return res.status(400).json({ ok: false, code: 'LOGIN_FIELDS_REQUIRED', error: 'Username and password are required.' });
+    const credential = await findCredentialByUsername(username);
+    const lockedUntil = credential?.locked_until ? new Date(credential.locked_until).getTime() : 0;
+    if (lockedUntil > Date.now()) {
+      await recordAuthEvent({ userId: credential.user_id, username, eventType: 'LOGIN_BLOCKED_LOCK', req });
+      return res.status(423).json({ ok: false, code: 'LOGIN_LOCKED', error: `Too many failed attempts. Try again after ${new Date(lockedUntil).toLocaleTimeString()}.` });
+    }
+    const valid = credential ? await verifyPassword(password, credential.password_hash) : false;
+    const stateUser = credential ? findStateUserByIdOrUsername(credential.user_id, credential.username) : null;
+    const approved = stateUser && normalizeAuthStatus(stateUser.status || credential?.status) === 'APPROVED' && normalizeAuthStatus(credential?.status) === 'APPROVED';
+    if (!credential || !valid || !approved) {
+      if (credential) await updateLoginFailure(credential, req);
+      else await recordAuthEvent({ username, eventType: 'LOGIN_FAILED_UNKNOWN_USER', req });
+      return res.status(401).json({ ok: false, code: 'LOGIN_FAILED', error: 'Invalid username or password, or this account is restricted.' });
+    }
+    await clearLoginFailures(credential);
+    const refreshedCredential = await findCredentialByUserId(credential.user_id) || credential;
+    const session = await createAuthSession(refreshedCredential, req);
+    setSessionCookie(res, session.rawToken);
+    const user = publicSessionUser(stateUser, refreshedCredential);
+    await recordAuthEvent({ userId: user.id, username: user.username, eventType: 'LOGIN_SUCCEEDED', req, details: { mustChangePassword: user.mustChangePassword } });
+    res.json({ ok: true, authenticated: true, user, csrfToken: session.csrf_token, expiresAt: session.expires_at, sessionHours: SESSION_TTL_HOURS });
+  } catch (error) {
+    res.status(500).json({ ok: false, code: 'LOGIN_ERROR', error: error.message || 'Login failed.' });
+  }
+});
+
+app.get('/api/auth/session', async (req, res) => {
+  try {
+    const auth = await resolveRequestAuthentication(req);
+    if (!auth) {
+      clearSessionCookie(res);
+      return res.status(401).json({ ok: false, authenticated: false, code: 'AUTH_REQUIRED', error: 'No active session.' });
+    }
+    res.json({ ok: true, authenticated: true, user: auth.user, csrfToken: auth.session.csrf_token, expiresAt: auth.session.expires_at, sessionHours: SESSION_TTL_HOURS });
+  } catch (error) {
+    res.status(500).json({ ok: false, authenticated: false, error: error.message || 'Session check failed.' });
+  }
+});
+
+app.post('/api/auth/logout', async (req, res) => {
+  await revokeAuthSession(req.auth?.session?.token_hash || '').catch(() => {});
+  await recordAuthEvent({ userId: req.auth?.user?.id, username: req.auth?.user?.username, eventType: 'LOGOUT', req }).catch(() => {});
+  clearSessionCookie(res);
+  res.json({ ok: true });
+});
+
+app.post('/api/auth/logout-all', async (req, res) => {
+  await revokeAllUserSessions(req.auth?.user?.id || '');
+  await recordAuthEvent({ userId: req.auth?.user?.id, username: req.auth?.user?.username, eventType: 'LOGOUT_ALL', req }).catch(() => {});
+  clearSessionCookie(res);
+  res.json({ ok: true });
+});
+
+app.post('/api/auth/change-password', async (req, res) => {
+  try {
+    const currentPassword = String(req.body?.currentPassword || '');
+    const newPassword = String(req.body?.newPassword || '');
+    const errors = passwordPolicyErrors(newPassword);
+    if (errors.length) return res.status(400).json({ ok: false, code: 'PASSWORD_POLICY_FAILED', error: errors.join(' '), errors });
+    const credential = await findCredentialByUserId(req.auth.user.id);
+    if (!credential || !(await verifyPassword(currentPassword, credential.password_hash))) {
+      await recordAuthEvent({ userId: req.auth.user.id, username: req.auth.user.username, eventType: 'PASSWORD_CHANGE_FAILED', req });
+      return res.status(401).json({ ok: false, code: 'CURRENT_PASSWORD_INVALID', error: 'Current password is incorrect.' });
+    }
+    if (await verifyPassword(newPassword, credential.password_hash)) return res.status(400).json({ ok: false, code: 'PASSWORD_REUSE', error: 'Choose a password different from the current password.' });
+    const updated = await updateCredentialPassword(req.auth.user.id, await hashPassword(newPassword), false);
+    await revokeAllUserSessions(req.auth.user.id);
+    const nextSession = await createAuthSession(updated, req);
+    setSessionCookie(res, nextSession.rawToken);
+    const stateUser = findStateUserByIdOrUsername(updated.user_id, updated.username);
+    const user = publicSessionUser(stateUser, updated);
+    await recordAuthEvent({ userId: user.id, username: user.username, eventType: 'PASSWORD_CHANGED', req });
+    res.json({ ok: true, user, csrfToken: nextSession.csrf_token, expiresAt: nextSession.expires_at });
+  } catch (error) {
+    res.status(500).json({ ok: false, code: 'PASSWORD_CHANGE_ERROR', error: error.message || 'Password could not be changed.' });
+  }
+});
+
+app.post('/api/auth/recovery/request', recoveryRateLimiter, async (req, res) => {
+  try {
+    const username = normalizeUsername(req.body?.username || '');
+    const channel = String(req.body?.channel || 'email').toLowerCase() === 'mobile' ? 'mobile' : 'email';
+    const credential = await findCredentialByUsername(username);
+    const user = credential ? findStateUserByIdOrUsername(credential.user_id, credential.username) : null;
+    if (!credential || !user || normalizeAuthStatus(user.status || credential.status) !== 'APPROVED') {
+      return res.status(400).json({ ok: false, code: 'RECOVERY_DETAILS_INVALID', error: 'The account or registered recovery details do not match.' });
+    }
+    const enteredEmail = normalizeEmail(req.body?.email || '');
+    const enteredMobile = normalizeMobile(req.body?.mobile || '');
+    const registeredEmail = normalizeEmail(user.email || '');
+    const registeredMobile = normalizeMobile(user.phone || user.mobile || '');
+    if (channel === 'email') {
+      if (!user.emailRegistered || !registeredEmail || enteredEmail !== registeredEmail) return res.status(400).json({ ok: false, code: 'RECOVERY_DETAILS_INVALID', error: 'The account or registered recovery details do not match.' });
+    } else if (!user.mobileRegistered || !registeredMobile || enteredMobile.slice(-10) !== registeredMobile.slice(-10)) {
+      return res.status(400).json({ ok: false, code: 'RECOVERY_DETAILS_INVALID', error: 'The account or registered recovery details do not match.' });
+    }
+    const otp = randomOtp();
+    const delivery = channel === 'email' ? await sendOtpEmail(registeredEmail, otp) : await sendOtpSms(registeredMobile, otp);
+    const challengeId = nanoid(16);
+    otpStore.set(challengeId, { userId: credential.user_id, username, channel, purpose: 'password_recovery', otp, expiresAt: Date.now() + 5 * 60 * 1000, attempts: 0 });
+    const response = { ok: true, challengeId, channel, expiresInSeconds: 300 };
+    if (delivery?.localOnly && localEmailOtpAllowed()) response.devOtp = otp;
+    await recordAuthEvent({ userId: credential.user_id, username, eventType: 'PASSWORD_RECOVERY_REQUESTED', req, details: { channel } });
+    res.json(response);
+  } catch (error) {
+    res.status(503).json({ ok: false, code: 'RECOVERY_SEND_FAILED', error: error.message || 'Recovery OTP could not be sent.' });
+  }
+});
+
+app.post('/api/auth/recovery/reset', recoveryRateLimiter, async (req, res) => {
+  try {
+    const challengeId = String(req.body?.challengeId || '');
+    const otp = String(req.body?.otp || '').trim();
+    const newPassword = String(req.body?.newPassword || '');
+    const record = otpStore.get(challengeId);
+    if (!record || record.purpose !== 'password_recovery') return res.status(400).json({ ok: false, code: 'RECOVERY_SESSION_INVALID', error: 'Password recovery session was not found. Request a new OTP.' });
+    if (record.expiresAt < Date.now()) {
+      otpStore.delete(challengeId);
+      return res.status(400).json({ ok: false, code: 'OTP_EXPIRED', error: 'OTP expired. Request a new OTP.' });
+    }
+    record.attempts += 1;
+    if (record.attempts > 5) {
+      otpStore.delete(challengeId);
+      return res.status(429).json({ ok: false, code: 'OTP_ATTEMPTS_EXCEEDED', error: 'Too many incorrect attempts. Request a new OTP.' });
+    }
+    if (record.otp !== otp) return res.status(400).json({ ok: false, code: 'OTP_INVALID', error: 'Invalid OTP.' });
+    const errors = passwordPolicyErrors(newPassword);
+    if (errors.length) return res.status(400).json({ ok: false, code: 'PASSWORD_POLICY_FAILED', error: errors.join(' '), errors });
+    const updated = await updateCredentialPassword(record.userId, await hashPassword(newPassword), false);
+    await revokeAllUserSessions(record.userId);
+    otpStore.delete(challengeId);
+    await recordAuthEvent({ userId: record.userId, username: record.username, eventType: 'PASSWORD_RECOVERED', req });
+    res.json({ ok: true, username: updated.username });
+  } catch (error) {
+    res.status(500).json({ ok: false, code: 'RECOVERY_RESET_FAILED', error: error.message || 'Password could not be reset.' });
+  }
+});
+
+app.get('/api/auth/health', requireAdminSession, async (_req, res) => {
+  try {
+    let activeSessions = 0;
+    let lockedCredentials = 0;
+    if (USE_POSTGRES) {
+      const sessions = await pool.query('SELECT count(*)::int AS count FROM auth_sessions WHERE revoked_at IS NULL AND expires_at>now()');
+      const locked = await pool.query('SELECT count(*)::int AS count FROM auth_credentials WHERE locked_until>now()');
+      activeSessions = Number(sessions.rows[0]?.count || 0);
+      lockedCredentials = Number(locked.rows[0]?.count || 0);
+    } else {
+      const store = readLocalAuthStore();
+      activeSessions = store.sessions.filter(item => !item.revoked_at && new Date(item.expires_at).getTime() > Date.now()).length;
+      lockedCredentials = store.credentials.filter(item => item.locked_until && new Date(item.locked_until).getTime() > Date.now()).length;
+    }
+    res.json({ ok: true, credentialCount: await countCredentials(), activeSessions, lockedCredentials, passwordHash: 'scrypt-v1', httpOnlyCookie: true, csrfProtection: true, sessionHours: SESSION_TTL_HOURS });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message || 'Authentication health could not be loaded.' });
+  }
+});
+
+app.post('/api/auth/users', requireAdminSession, async (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    const username = normalizeUsername(req.body?.username || '');
+    const password = String(req.body?.password || '');
+    const role = normalizeAuthRole(req.body?.role || 'DESIGNER');
+    if (!name || !username) return res.status(400).json({ ok: false, error: 'Name and username are required.' });
+    if (role === 'ADMIN') return res.status(400).json({ ok: false, error: 'Creating another Admin requires controlled database approval.' });
+    const errors = passwordPolicyErrors(password);
+    if (errors.length) return res.status(400).json({ ok: false, code: 'PASSWORD_POLICY_FAILED', error: errors.join(' '), errors });
+    if (await findCredentialByUsername(username)) return res.status(409).json({ ok: false, code: 'USERNAME_EXISTS', error: 'This username already exists.' });
+    const d = db();
+    const userId = String(req.body?.id || `user-${nanoid(12)}`);
+    const displayRole = role === 'MANAGER' ? 'Manager' : 'Designer';
+    const user = stripCredentialFields(employeeLifecycleProfile({ id: userId, name, username, role: displayRole, status: 'APPROVED', createdAt: Date.now(), createdBy: req.auth.user.name }, {}));
+    d.users.push(user);
+    d.users = cleanTeamUsers(d.users);
+    const credential = authCredentialRecord({ user_id: userId, username, password_hash: await hashPassword(password), role, status: 'APPROVED', must_change_password: true, password_version: 1 });
+    const persistence = await save(d, { authOperations: [{ type: 'upsertCredential', credential }] });
+    await recordAuthEvent({ userId, username, eventType: 'USER_CREDENTIAL_CREATED', req, details: { role, createdBy: req.auth.user.name } });
+    res.status(201).json({ ok: true, user: publicSessionUser(user, credential), persistence });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ ok: false, code: error.code || '', error: error.message || 'User could not be created.' });
+  }
+});
+
+app.patch('/api/auth/users/:id', requireAdminSession, async (req, res) => {
+  try {
+    const d = db();
+    const index = (d.users || []).findIndex(user => String(user.id) === String(req.params.id));
+    if (index < 0) return res.status(404).json({ ok: false, error: 'User was not found.' });
+    const existingUser = d.users[index];
+    const existingCredential = await findCredentialByUserId(existingUser.id);
+    if (!existingCredential) return res.status(409).json({ ok: false, code: 'CREDENTIAL_MISSING', error: 'This account has no secure credential. Reset its password first.' });
+    if (normalizeAuthRole(existingUser.role) === 'ADMIN' && String(existingUser.id) !== String(req.auth.user.id)) return res.status(403).json({ ok: false, error: 'Another Admin account cannot be modified here.' });
+    const username = req.body?.username !== undefined ? normalizeUsername(req.body.username) : normalizeUsername(existingUser.username);
+    const usernameOwner = await findCredentialByUsername(username);
+    if (usernameOwner && String(usernameOwner.user_id) !== String(existingUser.id)) return res.status(409).json({ ok: false, code: 'USERNAME_EXISTS', error: 'This username already exists.' });
+    const role = req.body?.role !== undefined ? normalizeAuthRole(req.body.role) : normalizeAuthRole(existingUser.role);
+    const status = req.body?.status !== undefined ? normalizeAuthStatus(req.body.status) : normalizeAuthStatus(existingUser.status);
+    const nextUser = stripCredentialFields(employeeLifecycleProfile({ ...existingUser, name: req.body?.name !== undefined ? String(req.body.name).trim() : existingUser.name, username, role: role === 'ADMIN' ? 'Admin' : role === 'MANAGER' ? 'Manager' : 'Designer', status }, existingUser));
+    d.users[index] = nextUser;
+    const nextCredential = { ...existingCredential, username, role, status };
+    const authOperations = [{ type: 'upsertCredential', credential: nextCredential }];
+    if (status !== 'APPROVED') authOperations.push({ type: 'revokeSessions', userId: existingUser.id });
+    const persistence = await save(d, { authOperations });
+    await recordAuthEvent({ userId: existingUser.id, username, eventType: 'USER_ACCESS_UPDATED', req, details: { role, status, updatedBy: req.auth.user.name } });
+    res.json({ ok: true, user: publicSessionUser(nextUser, nextCredential), persistence });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ ok: false, code: error.code || '', error: error.message || 'User access could not be updated.' });
+  }
+});
+
+app.post('/api/auth/users/:id/reset-password', requireAdminSession, async (req, res) => {
+  try {
+    const password = String(req.body?.password || '');
+    const errors = passwordPolicyErrors(password);
+    if (errors.length) return res.status(400).json({ ok: false, code: 'PASSWORD_POLICY_FAILED', error: errors.join(' '), errors });
+    const credential = await findCredentialByUserId(req.params.id);
+    if (!credential) return res.status(404).json({ ok: false, error: 'User credential was not found.' });
+    const updated = await updateCredentialPassword(req.params.id, await hashPassword(password), true);
+    await revokeAllUserSessions(req.params.id);
+    await recordAuthEvent({ userId: req.params.id, username: credential.username, eventType: 'PASSWORD_RESET_BY_ADMIN', req, details: { resetBy: req.auth.user.name } });
+    res.json({ ok: true, userId: req.params.id, username: updated.username, mustChangePassword: true });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message || 'Password could not be reset.' });
+  }
+});
+
 
 function sendProfilePhotoPlaceholder(res) {
   res.status(200);
@@ -1468,68 +2789,55 @@ function sendProfilePhotoPlaceholder(res) {
 }
 
 function resolveProfilePhotoPath(requestedName = '') {
-  const requested = safeName(fileBaseName(requestedName || ''));
+  const requested = String(requestedName || '').trim();
   const d = db();
-  const candidates = [];
-  if (requested) candidates.push(requested);
-  for (const user of (d.users || [])) {
-    const photoBase = safeName(fileBaseName(user.profilePhoto || ''));
-    const storedBase = safeName(fileBaseName(user.profilePhotoFile || ''));
-    if (!requested || photoBase === requested || storedBase === requested) {
-      if (user.profilePhotoFile) candidates.push(fileBaseName(user.profilePhotoFile));
-      if (user.profilePhoto) candidates.push(fileBaseName(user.profilePhoto));
-    }
-  }
-  for (const candidate of [...new Set(candidates.filter(Boolean))]) {
-    const resolved = resolveStoredUploadFile({ storedName: candidate, name: candidate, url: `/uploads/${candidate}` });
-    if (resolved?.fp) return resolved.fp;
-  }
-  return '';
+  const user = (d.users || []).find(item => [item.id, item.username, item.name, fileBaseName(item.profilePhoto || ''), fileBaseName(item.profilePhotoFile || '')]
+    .filter(Boolean).some(value => String(value) === requested || safeName(String(value)) === safeName(requested)));
+  if (!user) return '';
+  const resolved = fileStorage.resolve({
+    storageKey: user.profilePhotoStorageKey || user.profilePhotoFile || '',
+    storedName: user.profilePhotoFile || '',
+    name: user.profilePhotoOriginalName || fileBaseName(user.profilePhoto || '')
+  });
+  return resolved?.fp && isResolvedStoragePathAllowed(resolved.fp) ? resolved.fp : '';
 }
 
-app.get('/api/profile/photo/:filename', (req, res) => {
+app.get('/api/profile/photo/:filename', async (req, res) => {
   try {
     const fp = resolveProfilePhotoPath(req.params.filename || '');
     if (!fp) return sendProfilePhotoPlaceholder(res);
     res.setHeader('Cache-Control', 'private, max-age=86400');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.sendFile(fp);
-  } catch (err) {
+  } catch {
     sendProfilePhotoPlaceholder(res);
   }
 });
 
-app.get('/api/uploads/:filename', (req, res) => {
-  try {
-    const filename = safeName(req.params.filename || '');
-    if (!filename) return res.status(404).send('File not found');
-    const fp = path.resolve(UPLOAD_DIR, filename);
-    if (!fp.startsWith(path.resolve(UPLOAD_DIR)) || !fs.existsSync(fp)) return res.status(404).send('File not found');
-    const mode = String(req.query.mode || '').toLowerCase();
-    const lowerName = filename.toLowerCase();
-    const isPdf = lowerName.endsWith('.pdf');
-    const imageMimeByExt = lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg') ? 'image/jpeg'
-      : lowerName.endsWith('.png') ? 'image/png'
-      : lowerName.endsWith('.gif') ? 'image/gif'
-      : lowerName.endsWith('.webp') ? 'image/webp'
-      : lowerName.endsWith('.bmp') ? 'image/bmp'
-      : lowerName.endsWith('.svg') ? 'image/svg+xml'
-      : '';
-    const isImage = Boolean(imageMimeByExt);
-    res.setHeader('Access-Control-Expose-Headers','Content-Disposition, Content-Length, Content-Type, Accept-Ranges');
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-    if (isPdf) res.type('application/pdf');
-    else if (isImage) res.type(imageMimeByExt);
-    if (mode === 'preview') {
-      if (!isPdf && !isImage) return res.status(415).send('Preview is available for PDF and image files only.');
-      res.setHeader('Content-Disposition', `inline; filename="${String(filename).replace(/"/g, '')}"`);
-    }
-    res.sendFile(fp);
-  } catch (err) {
-    res.status(500).send('Unable to load file');
+app.get('/api/uploads/:filename', async (req, res) => {
+  const filename = safeName(req.params.filename || '');
+  if (!filename) return res.status(404).send('File not found');
+  const d = db();
+  const doc = allKnownFileDocs(d).find(item => {
+    const stored = item.storageKey || item.storedName || item.stored_name || fileBaseName(item.url || item.fileUrl || '');
+    return fileBaseName(String(stored || '')) === filename || String(stored || '') === filename;
+  });
+  if (!doc || !canAccessFileDocument(req.auth?.user || {}, doc, d.cases || [])) {
+    return authorizationDenied(req, res, 'FILE_ACCESS_DENIED', 'You do not have access to this file.');
   }
+  const mode = String(req.query.mode || '').toLowerCase() === 'preview' ? 'preview' : 'download';
+  return res.redirect(307, `/api/files/${encodeURIComponent(doc.id)}/${mode}`);
 });
 
-app.get('/api/health', (_req, res) => res.json({ ok:true, service:'Kalpvriksha OTP/API', time:now(), smsProvider:process.env.SMS_PROVIDER || '', emailProvider:process.env.EMAIL_PROVIDER || '' }));
+app.get('/api/health', async (_req, res) => {
+  const status = await buildReliabilityStatus({ detailed:false });
+  res.status(status.ok ? 200 : 503).json({ ...status, service:'Kalpvriksha Ops API' });
+});
+app.get('/api/health/live', (_req, res) => res.status(shuttingDown ? 503 : 200).json({ ok:!shuttingDown, status:shuttingDown ? 'SHUTTING_DOWN' : 'ALIVE', service:'Kalpvriksha Ops API', time:now(), uptimeSeconds:Math.round(process.uptime()) }));
+app.get('/api/health/ready', async (_req, res) => {
+  const status = await buildReliabilityStatus({ detailed:false });
+  res.status(status.ok ? 200 : 503).json(status);
+});
 
 function getEmailStatusPayload() {
   const provider = emailProvider();
@@ -1550,10 +2858,10 @@ function getEmailStatusPayload() {
   };
 }
 
-app.get('/api/email/health', (_req, res) => res.json(getEmailStatusPayload()));
-app.get('/api/email/status', (_req, res) => res.json(getEmailStatusPayload()));
+app.get('/api/email/health', requireAdminSession, async (_req, res) => res.json(getEmailStatusPayload()));
+app.get('/api/email/status', requireAdminSession, async (_req, res) => res.json(getEmailStatusPayload()));
 
-app.post('/api/email/test', async (req,res)=>{
+app.post('/api/email/test', requireAdminSession, emailTestRateLimiter, async (req,res)=>{
   try {
     const to = normalizeEmail(req.body.email || req.body.to || '');
     if (!to.includes('@')) return res.status(400).json({ ok:false, error:'Valid email is required.' });
@@ -1569,7 +2877,7 @@ app.post('/api/email/test', async (req,res)=>{
   }
 });
 
-app.post('/api/otp/send', async (req,res)=>{
+app.post('/api/otp/send', otpRateLimiter, async (req,res)=>{
   try {
     const username = String(req.body.username || '').trim().toLowerCase();
     const mobile = normalizeMobile(req.body.mobile || '');
@@ -1579,7 +2887,7 @@ app.post('/api/otp/send', async (req,res)=>{
     if (!username) return res.status(400).json({ ok:false, error:'Username is required.' });
     if (channel === 'email' && !email.includes('@')) return res.status(400).json({ ok:false, error:'A valid registered email address is required.' });
     if (channel !== 'email' && mobile.length < 10) return res.status(400).json({ ok:false, error:'A valid registered mobile number is required.' });
-    const otp = String(Math.floor(100000 + Math.random() * 900000));
+    const otp = randomOtp();
     const delivery = channel === 'email' ? await sendOtpEmail(email, otp) : await sendOtpSms(mobile, otp);
     const challengeId = nanoid(12);
     otpStore.set(challengeId, { username, channel, mobileSuffix: mobile.slice(-10), email, purpose, otp, expiresAt: Date.now() + 5*60*1000, attempts: 0 });
@@ -1594,7 +2902,7 @@ app.post('/api/otp/send', async (req,res)=>{
     res.status(503).json({ ok:false, error: err.message || 'Could not send OTP.' });
   }
 });
-app.post('/api/otp/verify', (req,res)=>{
+app.post('/api/otp/verify', otpRateLimiter, async (req,res)=>{
   const challengeId = String(req.body.challengeId || '');
   const otp = String(req.body.otp || '').trim();
   const purpose = String(req.body.purpose || 'otp');
@@ -1609,40 +2917,36 @@ app.post('/api/otp/verify', (req,res)=>{
   res.json({ ok:true });
 });
 
-app.get('/',(_req,res)=>res.json({ok:true,app:'Kalpvriksha Designs ERP'}));
-app.get('/api/meta',(_req,res)=>res.json({roles,serviceTypes,statuses,sourceDocTypes,finalDocTypes}));
-app.get('/api/bootstrap',(req,res)=>{ const role=req.query.role||'ADMIN'; const d=db(); const safe=sanitize(d,role); const readIds=d.chatReads?.[role]||[]; const unreadChat=d.teamChat.filter(m=>!readIds.includes(m.id)).length; const mentionUnread=d.teamChat.filter(m=>!readIds.includes(m.id)&&(m.mentions||[]).some(x=>String(x).toUpperCase()===role || String(x).toLowerCase().includes(role.toLowerCase()))).length; res.json({...safe,meta:{teamStatus:teamStatus(d),dailyLedger:dailyLedger(d),unreadChat,mentionUnread}}); });
-
-app.get('/api/state',(req,res)=>{
-  const d=db();
-  const role = requestRole(req);
-  const isAdmin = isAdminRoleValue(role);
-  const payload = {
-    ok:true,
-    database: USE_POSTGRES ? 'postgresql' : 'json-file',
-    users:sanitizePresenceUsers(d.users || []),
-    projects:filterDeletedCases(d.cases || [], d.deletedProjectIds || []),
-    deletedProjectIds:d.deletedProjectIds || [],
-    chatMessages:d.teamChat || [],
-    notifications:d.notifications || [],
-    attendanceLogs:d.attendanceLogs || [],
-    payments:d.payments || [],
-    audit:d.audit || [],
-    performanceRecords: mergePerformanceRecords(d.performanceRecords || [], buildPerformanceRecordsFromCases(d.cases || [])),
-    performanceSummary: buildPerformanceSummary(mergePerformanceRecords(d.performanceRecords || [], buildPerformanceRecordsFromCases(d.cases || [])), d.users || []),
-    savedAt:now()
-  };
-  if (!isAdmin) {
-    const sanitized = sanitize({ ...d, cases: payload.projects }, 'NON_ADMIN');
-    payload.projects = sanitized.cases || [];
-    delete payload.payments;
-    delete payload.audit;
-    // Performance records are non-financial operational analytics and are safe for the team dashboards.
-  }
-  res.json(payload);
+app.get('/',async (_req,res)=>res.json({ok:true,app:'Kalpvriksha Designs ERP'}));
+app.get('/api/meta',async (_req,res)=>res.json({roles,serviceTypes,statuses,sourceDocTypes,finalDocTypes}));
+app.get('/api/bootstrap', requireCapability('state:read'), async (req,res)=>{
+  const d = db();
+  const scoped = scopedState(d, req);
+  const readIds = d.chatReads?.[chatReadKey(req)] || [];
+  const unreadChat = (d.teamChat || []).filter(message => !readIds.includes(message.id)).length;
+  const actor = requestActor(req);
+  const mentionUnread = (d.teamChat || []).filter(message => !readIds.includes(message.id) && (message.mentions || []).some(value => {
+    const text = String(value || '').trim().toLowerCase();
+    return text === actor.role.toLowerCase() || text === actor.name.toLowerCase() || text === actor.username.toLowerCase();
+  })).length;
+  const meta = { teamStatus:teamStatus(d), unreadChat, mentionUnread, permissions:ROLE_CAPABILITIES?.[actor.role] || [] };
+  if (actor.role === 'ADMIN') meta.dailyLedger = dailyLedger(d);
+  res.json({ ...scoped, meta, stateVersion });
 });
 
-app.get('/api/performance-records', (req, res) => {
+app.get('/api/state', requireCapability('state:read'), async (req,res)=>{
+  const d = db();
+  const scoped = scopedState(d, req);
+  res.json({
+    ok:true,
+    database:USE_POSTGRES ? 'postgresql' : 'json-file',
+    ...scoped,
+    savedAt:now(),
+    stateVersion
+  });
+});
+
+app.get('/api/performance-records', requireCapability('performance:read'), async (req, res) => {
   const d = db();
   const generated = buildPerformanceRecordsFromCases(d.cases || []);
   const records = mergePerformanceRecords(d.performanceRecords || [], generated);
@@ -1650,24 +2954,24 @@ app.get('/api/performance-records', (req, res) => {
   res.json({ ok: true, records, summary, diagnostics: buildPerformanceDiagnostics(d.cases || [], records) });
 });
 
-app.get('/api/performance/diagnostics', (req, res) => {
+app.get('/api/performance/diagnostics', requireCapability('performance:read'), async (req, res) => {
   const d = db();
   const generated = buildPerformanceRecordsFromCases(d.cases || []);
   const records = mergePerformanceRecords(d.performanceRecords || [], generated);
   res.json({ ok: true, diagnostics: buildPerformanceDiagnostics(d.cases || [], records), summary: buildPerformanceSummary(records, d.users || []) });
 });
 
-app.post('/api/performance/rebuild', (req, res) => {
+app.post('/api/performance/rebuild', requireCapability('performance:rebuild'), async (req, res) => {
   const d = db();
   const generated = buildPerformanceRecordsFromCases(d.cases || []);
   const records = mergePerformanceRecords([], generated);
   d.performanceRecords = records;
-  save(d);
+  await save(d);
   const summary = buildPerformanceSummary(records, d.users || []);
   res.json({ ok: true, rebuilt: records.length, records, summary, diagnostics: buildPerformanceDiagnostics(d.cases || [], records) });
 });
 
-app.get('/api/app-state', async (req, res) => {
+app.get('/api/app-state', requireAdminSession, async (req, res) => {
   try {
     const state = await loadDb();
     if (!isFinanceAdminRequest(req)) {
@@ -1680,207 +2984,580 @@ app.get('/api/app-state', async (req, res) => {
   }
 });
 
-app.get('/api/system/status', async (_req, res) => {
+app.get('/api/system/status', requireCapability('system:read'), async (_req, res) => {
   try {
-    const db = await getDbStatus();
-    const cloudConnected = db.database === 'postgresql' && db.connected === true;
-    res.json({ ok: true, cloudConnected, database: db.database, connected: db.connected, localMode: !cloudConnected });
+    const [db, reliability] = await Promise.all([getDbStatus(), buildReliabilityStatus({ detailed:false })]);
+    const cloudConnected = String(db.database || '').startsWith('postgresql') && db.connected === true;
+    res.status(reliability.ok ? 200 : 503).json({ ok:reliability.ok, cloudConnected, database:db.database, connected:db.connected, localMode:!cloudConnected, reliability });
   } catch (e) {
-    res.status(500).json({ ok: false, cloudConnected: false, localMode: true, error: e.message });
+    res.status(500).json({ ok:false, cloudConnected:false, localMode:true, error:e.message });
+  }
+});
+
+app.get('/api/system/reliability', requireAdminSession, async (_req,res)=>{
+  try {
+    const status = await buildReliabilityStatus({ detailed:true });
+    res.status(status.ok ? 200 : 503).json(status);
+  } catch(error) {
+    res.status(500).json({ok:false,code:error.code || 'RELIABILITY_STATUS_FAILED',error:error.message || 'Reliability status could not be loaded.'});
+  }
+});
+
+app.get('/api/system/backups', requireAdminSession, async (_req,res)=>{
+  const backups = inspectBackupManifests(BACKUP_ROOT,{maxAgeHours:BACKUP_MAX_AGE_HOURS});
+  res.status(!BACKUP_REQUIRED || backups.ok ? 200 : 503).json({ok:!BACKUP_REQUIRED || backups.ok,required:BACKUP_REQUIRED,...backups});
+});
+
+app.get('/api/system/release-certification', requireAdminSession, async (_req,res)=>{
+  const certification = readAndVerifyReleaseCertificate(RELEASE_CERTIFICATE_PATH, {
+    expectedBackendVersion: BACKEND_PACKAGE_VERSION,
+    maxAgeHours: RELEASE_CERTIFICATE_MAX_AGE_HOURS,
+    requireCleanInstall: true,
+    requireBackup: RELEASE_CERTIFICATE_REQUIRED && BACKUP_REQUIRED
+  });
+  const ok = !RELEASE_CERTIFICATE_REQUIRED || certification.ok;
+  res.status(ok ? 200 : 503).json({ ok, required:RELEASE_CERTIFICATE_REQUIRED, backendVersion:BACKEND_PACKAGE_VERSION, ...certification });
+});
+
+app.get('/api/system/jobs', requireAdminSession, async (req,res)=>{
+  try {
+    const jobs = await operationalJobs.list({status:String(req.query.status || ''),limit:Number(req.query.limit || 100)});
+    res.json({ok:true,jobs,failedCount:jobs.filter(job=>job.status==='FAILED').length});
+  } catch(error) {
+    res.status(500).json({ok:false,code:'OPERATIONAL_JOBS_FAILED',error:error.message || 'Operational jobs could not be loaded.'});
+  }
+});
+
+app.post('/api/system/jobs/:id/retry', requireAdminSession, async (req,res)=>{
+  try {
+    const jobs = await operationalJobs.list({limit:500});
+    const job = jobs.find(item=>item.id===String(req.params.id));
+    if (!job) return res.status(404).json({ok:false,code:'JOB_NOT_FOUND',error:'Operational job was not found.'});
+    if (job.jobType === 'STATE_PERSISTENCE') return res.status(409).json({ok:false,code:'UNSAFE_AUTOMATIC_RETRY',error:'A failed state write cannot be replayed automatically because newer data may exist. Review the database revision and retry the original user action.'});
+    const retried = await operationalJobs.retry(job.id,requestActor(req).name);
+    await recordOperationalEvent(pool,USE_POSTGRES,{eventType:'OPERATIONAL_JOB_RETRY_REQUESTED',severity:'INFO',actor:requestActor(req).name,requestId:req.requestId,details:{jobId:job.id,jobType:job.jobType}}).catch(()=>{});
+    res.json({ok:true,job:retried});
+  } catch(error) {
+    res.status(500).json({ok:false,code:'JOB_RETRY_FAILED',error:error.message || 'The job could not be queued for retry.'});
+  }
+});
+
+app.get('/api/system/events', requireAdminSession, async (req,res)=>{
+  if (!USE_POSTGRES) return res.json({ok:true,events:[],warning:'Persistent operational events require PostgreSQL.'});
+  try {
+    const limit=Math.max(1,Math.min(500,Number(req.query.limit || 100)));
+    const result=await pool.query('SELECT id,event_type,severity,actor,request_id,details,created_at FROM operational_events ORDER BY created_at DESC LIMIT $1',[limit]);
+    res.json({ok:true,events:result.rows});
+  } catch(error) {
+    res.status(500).json({ok:false,code:'OPERATIONAL_EVENTS_FAILED',error:error.message || 'Operational events could not be loaded.'});
   }
 });
 
 
 
-
-app.post('/api/state/projects', (req, res) => {
+app.post('/api/state/projects', async (req, res) => {
   try {
     const d = db();
+    const actor = requestActor(req);
     const incoming = req.body?.project || req.body?.case || req.body;
-    if (!incoming || (!incoming.id && !incoming.caseId)) return res.status(400).json({ ok:false, error:'Project id is required.' });
-    const projectId = String(incoming.id || incoming.caseId || '').trim();
+    if (!incoming || typeof incoming !== 'object' || (!incoming.id && !incoming.caseId)) {
+      return res.status(400).json({ ok:false, code:'PROJECT_ID_REQUIRED', error:'Project id is required.' });
+    }
+    const projectId = textValue(incoming.id || incoming.caseId, 'Project id', 200, { required:true });
     const incomingIds = getCaseIdentitySet(incoming);
     const tombstones = new Set((d.deletedProjectIds || []).map(String));
     if (incomingIds.some(id => tombstones.has(id))) {
       return res.status(409).json({ ok:false, code:'PROJECT_DELETED', error:'This task was permanently deleted and cannot be restored by a stale client.', deletedProjectIds:d.deletedProjectIds || [] });
     }
-    const isFinanceAdmin = isFinanceAdminRequest(req);
-    const safeIncoming = !isFinanceAdmin ? preserveFinanceForNonAdminCases(d.cases || [], [incoming])[0] || incoming : incoming;
+
+    const existing = findCaseByAnyId(d.cases || [], projectId) || findCaseByAnyId(d.cases || [], incoming.caseId || '');
+    let safeIncoming;
+    if (existing) {
+      safeIncoming = authorizedProjectUpdate(existing, incoming, req);
+    } else {
+      if (!hasCapability(req.auth?.user || {}, 'task:create')) return authorizationDenied(req, res, 'TASK_CREATE_FORBIDDEN', 'Only Admins and Managers can create tasks.');
+      safeIncoming = preserveFinanceFields({}, structuredClone(incoming));
+      safeIncoming.id = projectId;
+      safeIncoming.caseId = incoming.caseId || projectId;
+      safeIncoming.createdAt = incoming.createdAt || Date.now();
+      safeIncoming.updatedAt = Date.now();
+      safeIncoming.syncVersion = Date.now();
+      safeIncoming.createdBy = actor.name;
+      safeIncoming.creatorName = actor.name;
+      safeIncoming.createdByRole = actor.role;
+      safeIncoming.updatedBy = actor.name;
+      safeIncoming.ownership = { ...(incoming.ownership || {}), createdBy:actor.name, editedBy:actor.name };
+      safeIncoming.history = mergeAppendOnly([], incoming.history || []);
+      safeIncoming.timeline = mergeTimelineEvents([], incoming.timeline || []);
+    }
+
     d.cases = mergeCasesPreservingFreshest(d.cases || [], [safeIncoming], d.deletedProjectIds || []);
-    const saved = findCaseByAnyId(d.cases || [], projectId) || findCaseByAnyId(d.cases || [], incoming.caseId || projectId) || safeIncoming;
-    save(d);
+    const saved = findCaseByAnyId(d.cases || [], projectId) || findCaseByAnyId(d.cases || [], safeIncoming.caseId || projectId) || safeIncoming;
+    addAudit(d, actor.name, existing ? 'Task updated' : 'Task created', saved.caseId || saved.id);
+    const persistence = await save(d);
     const performanceRecords = mergePerformanceRecords(d.performanceRecords || [], buildPerformanceRecordsFromCases(d.cases || []));
-    res.json({ ok:true, project:saved, case:saved, deletedProjectIds:d.deletedProjectIds || [], counts:{ cases:(d.cases || []).length, performanceRecords:performanceRecords.length } });
+    const visible = sanitize({ ...d, cases:[saved] }, actor.role).cases?.[0] || saved;
+    res.json({ ok:true, project:visible, case:visible, deletedProjectIds:d.deletedProjectIds || [], counts:{ cases:(d.cases || []).length, performanceRecords:performanceRecords.length }, persistence });
   } catch (e) {
-    res.status(500).json({ ok:false, error:e.message || 'Project save failed.' });
+    res.status(e.statusCode || 500).json({ ok:false, code:e.code || '', error:e.message || 'Project save failed.', requestId:req.requestId || '' });
   }
 });
 
-app.delete('/api/state/projects/:id', (req,res)=>{
-  const d=db();
-  const id=String(req.params.id || '');
-  const before=(d.cases || []).length;
-  (d.cases || []).filter(c => String(c.id) === id || String(c.caseId) === id).forEach(c => { rememberDeletedProject(d, c.id); rememberDeletedProject(d, c.caseId); });
+app.delete('/api/state/projects/:id', requireAnyRole('ADMIN','MANAGER'), requireCaseAction('delete'), async (req,res)=>{
+  const d = db();
+  const actor = requestActor(req);
+  const id = textValue(req.params.id, 'Project id', 200, { required:true });
+  const before = (d.cases || []).length;
+  (d.cases || []).filter(c => String(c.id) === id || String(c.caseId) === id).forEach(c => {
+    rememberDeletedProject(d, c.id);
+    rememberDeletedProject(d, c.caseId);
+    addAudit(d, actor.name, 'Task permanently deleted', c.caseId || c.id);
+  });
   rememberDeletedProject(d, id);
-  d.cases=filterDeletedCases(d.cases || [], d.deletedProjectIds || []);
+  d.cases = filterDeletedCases(d.cases || [], d.deletedProjectIds || []);
   d.notifications = (d.notifications || []).filter(n => String(n.caseId || n.projectId || n.targetId || '') !== id);
-  save(d);
-  res.json({ok:true, deleted: before - d.cases.length, deletedProjectIds:d.deletedProjectIds || [], counts:{cases:d.cases.length}});
+  await save(d);
+  res.json({ok:true, deleted:before - d.cases.length, deletedProjectIds:d.deletedProjectIds || [], counts:{cases:d.cases.length}});
 });
 
-app.post('/api/presence', (req, res) => {
+app.post('/api/presence', requireCapability('presence:self'), async (req, res) => {
+  try {
+    const d = db();
+    const actor = requestActor(req);
+    const body = req.body || {};
+    const action = String(body.action || 'heartbeat').toLowerCase();
+    const safeAction = ['login','heartbeat','break','resume','logout'].includes(action) ? action : 'heartbeat';
+    const stateUser = findStateUserByIdOrUsername(actor.id, actor.username);
+    if (!stateUser) return res.status(404).json({ ok:false, code:'USER_NOT_FOUND', error:'Signed-in user record was not found.' });
+    const requestedAvailability = ['Available','Busy','Break','Unavailable'].includes(String(body.availability || body.user?.availability || ''))
+      ? String(body.availability || body.user?.availability)
+      : stateUser.availability;
+    const user = applyPresenceUpdate(d, {
+      ...stateUser,
+      id:actor.id,
+      username:actor.username,
+      name:actor.name,
+      role:stateUser.role,
+      status:stateUser.status,
+      availability:requestedAvailability,
+      breakStartedAt:safeAction === 'break' ? Date.now() : stateUser.breakStartedAt
+    }, safeAction);
+    await save(d);
+    res.json({ ok:true, user, users:sanitizePresenceUsers(d.users || []), attendanceLogs:scopedAttendance(d, req) });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ ok:false, code:e.code || '', error:e.message || 'Presence update failed.' });
+  }
+});
+
+app.post('/api/state', async (req,res)=>{
   try {
     const d = db();
     const body = req.body || {};
-    const action = String(body.action || 'heartbeat').toLowerCase();
-    const userPatch = body.user || body;
-    if (!userPatch || (!userPatch.id && !userPatch.username && !userPatch.email && !userPatch.name)) {
-      return res.status(400).json({ ok:false, error:'User identity is required for presence update.' });
+    const actor = requestActor(req);
+    const hasProjects = Array.isArray(body.projects) || Array.isArray(body.cases);
+    const incomingCases = Array.isArray(body.projects) ? body.projects : (Array.isArray(body.cases) ? body.cases : []);
+    assertArrayLimit(incomingCases, 'projects', MAX_STATE_PROJECTS_PER_WRITE);
+    const authorizedIncoming = [];
+    for (const incoming of incomingCases.filter(Boolean)) {
+      if (!incoming.id && !incoming.caseId) continue;
+      const existing = findCaseByAnyId(d.cases || [], incoming.id || incoming.caseId) || findCaseByAnyId(d.cases || [], incoming.caseId || incoming.id);
+      if (existing) authorizedIncoming.push(authorizedProjectUpdate(existing, incoming, req));
+      else {
+        if (!hasCapability(req.auth?.user || {}, 'task:create')) {
+          const error = new Error('Only Admins and Managers can create tasks.');
+          error.statusCode = 403;
+          error.code = 'TASK_CREATE_FORBIDDEN';
+          throw error;
+        }
+        const created = preserveFinanceFields({}, structuredClone(incoming));
+        created.createdBy = actor.name;
+        created.creatorName = actor.name;
+        created.createdByRole = actor.role;
+        created.updatedBy = actor.name;
+        created.createdAt ||= Date.now();
+        created.updatedAt = Date.now();
+        created.syncVersion = Date.now();
+        created.ownership = { ...(created.ownership || {}), createdBy:actor.name, editedBy:actor.name };
+        authorizedIncoming.push(created);
+      }
     }
-    const safeAction = ['login','heartbeat','break','resume','logout'].includes(action) ? action : 'heartbeat';
-    const user = applyPresenceUpdate(d, userPatch, safeAction);
-    save(d);
-    res.json({ ok:true, user, users:sanitizePresenceUsers(d.users || []), attendanceLogs:d.attendanceLogs || [] });
+    if (hasProjects) d.cases = mergeCasesPreservingFreshest(d.cases || [], authorizedIncoming, d.deletedProjectIds || []);
+    else d.cases = dedupeRenamedCases(filterDeletedCases(d.cases || [], d.deletedProjectIds || []), d.deletedProjectIds || []);
+    d.users = sanitizePresenceUsers(d.users || []);
+    d.payments = (d.payments || []).filter(Boolean);
+    const ignoredFields = ['users','deletedProjectIds','chatMessages','teamChat','notifications','attendanceLogs','payments','audit']
+      .filter(field => Object.prototype.hasOwnProperty.call(body, field));
+    const persistence = await save(d);
+    const performanceRecords = mergePerformanceRecords(d.performanceRecords || [], buildPerformanceRecordsFromCases(d.cases || []));
+    res.json({ok:true, database:USE_POSTGRES ? 'postgresql' : 'json-file', savedAt:now(), ignoredFields, deletedProjectIds:d.deletedProjectIds || [], performanceRecords, counts:{users:d.users.length, cases:d.cases.length, performanceRecords:performanceRecords.length, chatMessages:d.teamChat.length, notifications:d.notifications.length, attendanceLogs:d.attendanceLogs.length}, persistence});
   } catch (e) {
-    res.status(500).json({ ok:false, error:e.message || 'Presence update failed.' });
+    res.status(e.statusCode || 500).json({ ok:false, code:e.code || '', error:e.message || 'State save failed.', requestId:req.requestId || '' });
   }
 });
 
-app.post('/api/state',(req,res)=>{
-  const d=db();
-  const body=req.body || {};
-  d.users = Array.isArray(body.users) ? mergeUsersPreservingLatestPresence(d.users || [], body.users) : sanitizePresenceUsers(d.users || []);
-  const incomingDeleted = Array.isArray(body.deletedProjectIds) ? body.deletedProjectIds : [];
-  d.deletedProjectIds = [...new Set([...(d.deletedProjectIds || []), ...incomingDeleted].map(x => String(x)).filter(Boolean))];
-  const incomingCases = Array.isArray(body.projects) ? body.projects : (Array.isArray(body.cases) ? body.cases : []);
-  const isFinanceAdmin = isFinanceAdminRequest(req);
-  const safeIncomingCases = (Array.isArray(body.projects) || Array.isArray(body.cases)) && !isFinanceAdmin
-    ? preserveFinanceForNonAdminCases(d.cases || [], incomingCases)
-    : incomingCases;
-  d.cases = Array.isArray(body.projects) || Array.isArray(body.cases)
-    ? mergeCasesPreservingFreshest(d.cases || [], safeIncomingCases, d.deletedProjectIds || [])
-    : dedupeRenamedCases(filterDeletedCases(d.cases || [], d.deletedProjectIds || []), d.deletedProjectIds || []);
-  d.teamChat = Array.isArray(body.chatMessages) ? body.chatMessages : (Array.isArray(body.teamChat) ? body.teamChat : d.teamChat);
-  d.notifications = Array.isArray(body.notifications) ? body.notifications : d.notifications;
-  d.attendanceLogs = Array.isArray(body.attendanceLogs) ? mergeAttendanceLogsPreservingLatest(d.attendanceLogs || [], body.attendanceLogs, d.users || []) : normalizeAttendanceLogsForSave(d.attendanceLogs || [], d.users || []);
-  d.payments = isFinanceAdmin && Array.isArray(body.payments) ? body.payments : d.payments;
-  d.audit = isFinanceAdmin && Array.isArray(body.audit) ? body.audit : d.audit;
-  save(d);
-  const performanceRecords = mergePerformanceRecords(d.performanceRecords || [], buildPerformanceRecordsFromCases(d.cases || []));
-  res.json({ok:true, database: USE_POSTGRES ? 'postgresql' : 'json-file', savedAt:now(), deletedProjectIds:d.deletedProjectIds || [], performanceRecords, counts:{users:d.users.length, cases:d.cases.length, performanceRecords:performanceRecords.length, chatMessages:d.teamChat.length, notifications:d.notifications.length, attendanceLogs:d.attendanceLogs.length}});
+
+app.post('/api/cases', requireAnyRole('ADMIN','MANAGER'), uploadAny, async (req,res)=>{
+  try {
+    const d = db();
+    const body = req.body || {};
+    const actor = requestActor(req);
+    let assignee = (d.users || []).find(user => String(user.id || '') === String(body.assigneeId || ''));
+    if (!assignee) assignee = leastBusy(d);
+    const manager = sanitizePresenceUsers(d.users).find(user => normalizeRole(user.role) === 'Manager');
+    const createdAt = now();
+    const serviceType = serviceTypes.includes(String(body.serviceType || '')) ? String(body.serviceType) : 'Other';
+    const priority = ['Normal','High','Urgent'].includes(String(body.priority || '')) ? String(body.priority) : 'Normal';
+    const city = textValue(body.city || 'Lucknow', 'City', 120, { required:true });
+    const c = {
+      id:nanoid(8),
+      caseId:nextCaseNo(d, city),
+      source:'Manual',
+      createdByRole:actor.role,
+      createdBy:actor.name,
+      creatorName:actor.name,
+      customerName:textValue(body.customerName || 'New Customer', 'Customer name', 200, { required:true }),
+      customerPhone:textValue(body.customerPhone || '', 'Customer phone', 30),
+      bankerName:textValue(body.bankerName || '', 'Banker name', 200),
+      bank:textValue(body.bank || '', 'Bank', 200),
+      branch:textValue(body.branch || '', 'Branch', 200),
+      serviceType,
+      otherDescription:textValue(body.otherDescription || '', 'Description', MAX_CASE_TEXT_LENGTH),
+      city,
+      propertyAddress:textValue(body.propertyAddress || '', 'Property address', MAX_CASE_TEXT_LENGTH),
+      estimateAmount:numericValue(body.estimateAmount, 'Estimate amount', { min:0, max:100_000_000, fallback:0 }),
+      priority,
+      status:'ASSIGNED',
+      assigneeId:assignee?.id,
+      assigneeName:assignee?.name,
+      assigneeRole:assignee?.role,
+      assignedTo:assignee?.name || 'Unassigned',
+      assignedBy:actor.name,
+      assignedAt:Date.now(),
+      assignmentVersion:Date.now(),
+      managerId:manager?.id,
+      managerName:manager?.name,
+      createdAt,
+      updatedAt:Date.now(),
+      syncVersion:Date.now(),
+      startedAt:null,
+      completedAt:null,
+      dueAt:textValue(body.dueAt || '', 'Due date', 100),
+      paymentStatus:'PENDING',
+      documents:[], comments:[], revisions:[], history:[{at:createdAt,by:actor.name,action:'Lead created and task assigned'}], timeline:[],
+      ownership:{ createdBy:actor.name, assignedBy:actor.name, assignedTo:assignee?.name || 'Unassigned' }
+    };
+    addCaseTimelineEvent(c, { type:'created', by:actor.name, at:createdAt, title:'Case Created', remarks:`${c.caseId} created for ${c.customerName}` });
+    if (assignee) addCaseTimelineEvent(c, { type:'assigned', by:actor.name, at:createdAt, title:`Assigned to ${assignee.name}`, remarks:'Initial smart assignment' });
+    await prepareSecureUploads(req, 'SOURCE');
+    for (const file of req.files || []) c.documents.push(addFileRegistryEntry(d, docPayload(file, actor.name, actor.role, 'SOURCE', c.id)));
+    if ((req.files || []).length) addCaseTimelineEvent(c, { type:'source_uploaded', by:actor.name, title:`${req.files.length} source file(s) uploaded` });
+    d.cases.unshift(c);
+    notifyRole(d,'ADMIN',`New case ${c.caseId} created by ${actor.name}`,'task',c.id);
+    notifyRole(d,'MANAGER',`New case ${c.caseId} created by ${actor.name}`,'task',c.id);
+    if (assignee) notifyUser(d,assignee.name,`New task assigned: ${c.caseId}`,'task',c.id);
+    addAudit(d,actor.name,'Case created',c.caseId);
+    await save(d);
+    await Promise.all((c.documents || []).map(doc=>recordFileStorageEvent({fileId:doc.id,caseId:c.id,action:'FILE_UPLOADED',actor:actor.name,storageKey:doc.storageKey,sha256:doc.sha256,details:{purpose:doc.purpose,name:doc.name}})));
+    res.status(201).json(c);
+  } catch (error) {
+    if (error instanceof FileValidationError) return fileUploadFailure(res, error, 'Case file upload failed.');
+    res.status(error.statusCode || 500).json({ ok:false, code:error.code || '', error:error.message || 'Case creation failed.' });
+  }
 });
 
-
-app.post('/api/cases', uploadAny, async (req,res)=>{
-  const d=db(); const body=req.body; const creatorName=body.creatorName||body.createdBy||'Admin';
-  let assignee=d.users.find(u=>u.id===body.assigneeId); if(!assignee) assignee=leastBusy(d);
-  const manager=sanitizePresenceUsers(d.users).find(u=>normalizeRole(u.role)==='Manager');
-  const createdAt = now();
-  const c={id:nanoid(8),caseId:nextCaseNo(d,body.city),source:body.source||'Manual',createdByRole:body.createdByRole||'ADMIN',creatorName,customerName:body.customerName||'New Customer',customerPhone:body.customerPhone||'',bankerName:body.bankerName||'',bank:body.bank||'',branch:body.branch||'',serviceType:body.serviceType||'Map Estimate',otherDescription:body.otherDescription||'',city:body.city||'Lucknow',propertyAddress:body.propertyAddress||'',estimateAmount:body.serviceType==='Map Estimate'||body.serviceType?.includes('Estimate')?Number(body.estimateAmount||0):Number(body.estimateAmount||0),priority:body.priority||'Normal',status:'ASSIGNED',assigneeId:assignee?.id,assigneeName:assignee?.name,assigneeRole:assignee?.role,managerId:manager?.id,managerName:manager?.name,createdAt,startedAt:null,completedAt:null,dueAt:body.dueAt||'',paymentStatus:'PENDING',documents:[],comments:[],revisions:[],history:[{at:createdAt,by:creatorName,action:'Lead created and task assigned'}],timeline:[]};
-  addCaseTimelineEvent(c, { type:'created', by:creatorName, at:createdAt, title:'Case Created', remarks:`${c.caseId} created for ${c.customerName}` });
-  if (assignee) addCaseTimelineEvent(c, { type:'assigned', by:creatorName, at:createdAt, title:`Assigned to ${assignee.name}`, remarks:'Initial smart assignment' });
-  for(const f of (req.files||[])) c.documents.push(addFileRegistryEntry(d, docPayload(f,creatorName,body.createdByRole||'ADMIN','SOURCE',c.id)));
-  if ((req.files || []).length) addCaseTimelineEvent(c, { type:'source_uploaded', by:creatorName, title:`${req.files.length} source file(s) uploaded` });
-  d.cases.unshift(c); notifyRole(d,'ADMIN',`New case ${c.caseId} created by ${creatorName}`,'task',c.id); notifyRole(d,'MANAGER',`New case ${c.caseId} created by ${creatorName}`,'task',c.id); if(assignee) notifyUser(d,assignee.name,`New task assigned: ${c.caseId}`,'task',c.id); addAudit(d,creatorName,'Case created',c.caseId); save(d); res.json(c);
-});
-app.post('/api/cases/:id/assign',(req,res)=>{ const d=db(); const c=findCaseByAnyId(d.cases, req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const u=d.users.find(x=>x.id===req.body.assigneeId); if(!u) return res.status(400).json({error:'Assignee not found'}); const by=req.body.by||'Manager'; c.assigneeId=u.id; c.assigneeName=u.name; c.assigneeRole=u.role; c.status='ASSIGNED'; c.assignedAt=now(); c.history.unshift({at:now(),by,action:`Assigned to ${u.name}`}); addCaseTimelineEvent(c,{type:'assigned',by,title:`Assigned to ${u.name}`,remarks:req.body.remarks||''}); notifyUser(d,u.name,`Task assigned to you: ${c.caseId}`,'task',c.id); addAudit(d,by,'Task assigned',c.caseId); save(d); res.json(c); });
-app.post('/api/cases/:id/start',(req,res)=>{ const d=db(); const c=findCaseByAnyId(d.cases, req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const by=req.body.by||c.assigneeName||'Designer'; c.status='IN_PROGRESS'; c.startedAt ||= now(); c.history.unshift({at:now(),by,action:'Work started'}); addCaseTimelineEvent(c,{type:'started',by,title:'Designer Started',remarks:req.body.remarks||''}); save(d); res.json(c); });
-app.post('/api/cases/:id/upload-source', uploadAny,(req,res)=>{ const d=db(); const c=findCaseByAnyId(d.cases, req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const by=req.body.by||'Admin'; for(const f of req.files||[]) c.documents.push(addFileRegistryEntry(d, docPayload(f,by,req.body.role||'ADMIN','SOURCE',c.id))); c.history.unshift({at:now(),by,action:`Uploaded ${req.files?.length||0} source file(s)`}); addCaseTimelineEvent(c,{type:'source_uploaded',by,title:`${req.files?.length||0} source file(s) uploaded`}); notifyUser(d,c.assigneeName,`New source files added for ${c.caseId}`,'task',c.id); save(d); res.json(c); });
-app.post('/api/cases/:id/upload-final', uploadAny,(req,res)=>{ const d=db(); const c=findCaseByAnyId(d.cases, req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const by=req.body.by||c.assigneeName||'Designer'; const isRevision=String(req.body.isRevision||'false')==='true' || c.status==='REOPENED_FOR_REVISION'; for(const f of req.files||[]) { const doc=addFileRegistryEntry(d, docPayload(f,by,req.body.role||'DESIGNER',isRevision?'REVISION_FINAL':'FINAL',c.id)); doc.type = isRevision ? 'Revised File' : 'Completed File'; doc.folder = isRevision ? 'revised-completed' : 'completed'; c.documents.push(doc); }
-  c.status='MANAGER_REVIEW'; c.history.unshift({at:now(),by,action:isRevision?'Revised file uploaded':'Completed file uploaded for manager review'}); addCaseTimelineEvent(c,{type:isRevision?'revision_uploaded':'completion_uploaded',by,title:isRevision?'Revision Completion Uploaded':'Completion Uploaded',remarks:`${req.files?.length||0} file(s) uploaded`}); addCaseTimelineEvent(c,{type:'internal_review',by:'System',title:'Internal Review Pending',remarks:'Completion is awaiting manager review'}); notifyRole(d,'MANAGER',`${isRevision?'Revised':'Completed'} file uploaded: ${c.caseId}`,'completed',c.id); notifyRole(d,'ADMIN',`${isRevision?'Revised':'Completed'} file uploaded: ${c.caseId}`,'completed',c.id); addAudit(d,by,'Final upload',c.caseId); save(d); res.json(c); });
-app.post('/api/cases/:id/manager-complete', async (req,res)=>{ const d=db(); const c=findCaseByAnyId(d.cases, req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const by=req.body.by||'Manager'; c.status='COMPLETED'; c.completedAt=now(); c.history.unshift({at:now(),by,action:'Reviewed by manager and marked complete'}); addCaseTimelineEvent(c,{type:'approved',by,title:'Approved',remarks:'Reviewed by manager and marked complete'}); notifyRole(d,'ADMIN',`Case completed after manager review: ${c.caseId}`,'completed',c.id); notifyUser(d,c.assigneeName,`Case marked complete: ${c.caseId}`,'completed',c.id); addAudit(d,by,'Case completed',c.caseId); save(d); res.json(c); });
-app.post('/api/cases/:id/revision',(req,res)=>{ const d=db(); const c=findCaseByAnyId(d.cases, req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); c.status='REOPENED_FOR_REVISION'; c.priority='Urgent'; const rev={id:nanoid(8),note:req.body.note||'Banker revision requested',by:req.body.by||'Admin/Manager',createdAt:now()}; c.revisions.unshift(rev); c.history.unshift({at:now(),by:rev.by,action:'Revision opened as urgent'}); addCaseTimelineEvent(c,{type:'revision_created',by:rev.by,at:rev.createdAt,title:'Revision Created',remarks:rev.note}); notifyUser(d,c.assigneeName,`URGENT revision task: ${c.caseId} - ${rev.note}`,'task',c.id); notifyRole(d,'MANAGER',`URGENT revision opened: ${c.caseId}`,'task',c.id); save(d); res.json(c); });
-
-
-app.get('/api/cases/:id/timeline', (req,res)=>{
-  const d=db();
-  const c=findCaseByAnyId(d.cases || [], req.params.id);
-  if(!c) return res.status(404).json({ok:false,error:'Case not found'});
-  c.timeline = normalizeCaseTimeline(c);
-  res.json({ok:true, caseId:c.id, caseNo:c.caseId, timeline:c.timeline});
+app.post('/api/cases/:id/assign', requireAnyRole('ADMIN','MANAGER'), requireCaseAction('update'), async (req,res)=>{
+  const d = db();
+  const c = req.caseRecord;
+  const actor = requestActor(req);
+  const assigneeId = textValue(req.body.assigneeId, 'Assignee', 200, { required:true });
+  const user = (d.users || []).find(item => String(item.id || '') === assigneeId && normalizeAuthStatus(item.status || 'APPROVED') === 'APPROVED');
+  if (!user) return res.status(400).json({ok:false,code:'ASSIGNEE_NOT_FOUND',error:'Assignee not found or inactive.'});
+  c.assigneeId=user.id; c.assigneeName=user.name; c.assigneeRole=user.role; c.assignedTo=user.name; c.assignedBy=actor.name;
+  c.status='ASSIGNED'; c.assignedAt=Date.now(); c.assignmentVersion=Date.now(); c.updatedAt=Date.now(); c.syncVersion=Date.now();
+  c.ownership={...(c.ownership || {}),assignedTo:user.name,assignedBy:actor.name};
+  c.history ||= []; c.history.unshift({at:now(),by:actor.name,action:`Assigned to ${user.name}`});
+  addCaseTimelineEvent(c,{type:'assigned',by:actor.name,title:`Assigned to ${user.name}`,remarks:textValue(req.body.remarks || '', 'Remarks', MAX_TIMELINE_TEXT_LENGTH)});
+  notifyUser(d,user.name,`Task assigned to you: ${c.caseId}`,'task',c.id); addAudit(d,actor.name,'Task assigned',c.caseId);
+  await save(d); res.json(c);
 });
 
-app.post('/api/cases/:id/timeline', (req,res)=>{
-  const d=db();
-  const c=findCaseByAnyId(d.cases || [], req.params.id);
-  if(!c) return res.status(404).json({ok:false,error:'Case not found'});
-  const event=addCaseTimelineEvent(c, { type:req.body.type || 'manual', by:req.body.by || req.body.user || 'System', title:req.body.title || req.body.text || 'Timeline Event', remarks:req.body.remarks || req.body.note || '', meta:req.body.meta || {} });
-  addAudit(d,event.by,'Timeline event added',c.caseId);
-  save(d);
+app.post('/api/cases/:id/start', requireCaseAction('start'), async (req,res)=>{
+  const d=db(); const c=req.caseRecord; const actor=requestActor(req);
+  c.status='IN_PROGRESS'; c.startedAt ||= now(); c.updatedAt=Date.now(); c.syncVersion=Date.now();
+  c.history ||= []; c.history.unshift({at:now(),by:actor.name,action:'Work started'});
+  addCaseTimelineEvent(c,{type:'started',by:actor.name,title:'Designer Started',remarks:textValue(req.body.remarks || '', 'Remarks', MAX_TIMELINE_TEXT_LENGTH)});
+  await save(d); res.json(c);
+});
+
+app.post('/api/cases/:id/upload-source', requireAnyRole('ADMIN','MANAGER'), requireCaseAction('update'), uploadAny, async (req,res)=>{
+  try {
+    const d=db(); const c=req.caseRecord; const actor=requestActor(req);
+    await prepareSecureUploads(req, 'SOURCE');
+    if (!(req.files || []).length) return res.status(400).json({ok:false,code:'FILE_REQUIRED',error:'Select at least one source file.'});
+    for(const file of req.files || []) c.documents.push(addFileRegistryEntry(d, docPayload(file,actor.name,actor.role,'SOURCE',c.id)));
+    c.history ||= []; c.history.unshift({at:now(),by:actor.name,action:`Uploaded ${req.files?.length || 0} source file(s)`});
+    addCaseTimelineEvent(c,{type:'source_uploaded',by:actor.name,title:`${req.files?.length || 0} source file(s) uploaded`});
+    notifyUser(d,c.assigneeName,`New source files added for ${c.caseId}`,'task',c.id); await save(d);
+    await Promise.all((req.files || []).map(file=>{const doc=(c.documents || []).find(item=>item.storageKey===file.storageKey);return recordFileStorageEvent({fileId:doc?.id,caseId:c.id,action:'FILE_UPLOADED',actor:actor.name,storageKey:file.storageKey,sha256:file.sha256,details:{purpose:'SOURCE',name:file.originalname}});}));
+    res.json(c);
+  } catch (error) {
+    if (error instanceof FileValidationError) return fileUploadFailure(res,error,'Source file upload failed.');
+    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'Source file upload failed.'});
+  }
+});
+
+app.post('/api/cases/:id/upload-final', requireCaseAction('upload-final'), uploadAny, async (req,res)=>{
+  try {
+    const d=db(); const c=req.caseRecord; const actor=requestActor(req);
+    const isRevision=String(req.body.isRevision || 'false') === 'true' || c.status === 'REOPENED_FOR_REVISION';
+    await prepareSecureUploads(req, isRevision ? 'REVISION_FINAL' : 'FINAL');
+    if (!(req.files || []).length) return res.status(400).json({ok:false,code:'FILE_REQUIRED',error:'Select at least one completed file.'});
+    for(const file of req.files || []) {
+      const doc=addFileRegistryEntry(d, docPayload(file,actor.name,actor.role,isRevision?'REVISION_FINAL':'FINAL',c.id));
+      doc.type=isRevision?'Revised File':'Completed File'; doc.folder=isRevision?'revised-completed':'completed'; c.documents.push(doc);
+    }
+    c.status='MANAGER_REVIEW'; c.updatedAt=Date.now(); c.syncVersion=Date.now();
+    c.history ||= []; c.history.unshift({at:now(),by:actor.name,action:isRevision?'Revised file uploaded':'Completed file uploaded for manager review'});
+    addCaseTimelineEvent(c,{type:isRevision?'revision_uploaded':'completion_uploaded',by:actor.name,title:isRevision?'Revision Completion Uploaded':'Completion Uploaded',remarks:`${req.files?.length || 0} file(s) uploaded`});
+    addCaseTimelineEvent(c,{type:'internal_review',by:'System',title:'Internal Review Pending',remarks:'Completion is awaiting manager review'});
+    notifyRole(d,'MANAGER',`${isRevision?'Revised':'Completed'} file uploaded: ${c.caseId}`,'completed',c.id);
+    notifyRole(d,'ADMIN',`${isRevision?'Revised':'Completed'} file uploaded: ${c.caseId}`,'completed',c.id);
+    addAudit(d,actor.name,'Final upload',c.caseId); await save(d);
+    await Promise.all((req.files || []).map(file=>{const doc=(c.documents || []).find(item=>item.storageKey===file.storageKey);return recordFileStorageEvent({fileId:doc?.id,caseId:c.id,action:'FILE_UPLOADED',actor:actor.name,storageKey:file.storageKey,sha256:file.sha256,details:{purpose:isRevision?'REVISION_FINAL':'FINAL',name:file.originalname}});}));
+    res.json(c);
+  } catch (error) {
+    if (error instanceof FileValidationError) return fileUploadFailure(res,error,'Completed file upload failed.');
+    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'Completed file upload failed.'});
+  }
+});
+
+app.post('/api/cases/:id/manager-complete', requireAnyRole('ADMIN','MANAGER'), requireCaseAction('review'), async (req,res)=>{
+  const d=db(); const c=req.caseRecord; const actor=requestActor(req);
+  c.status='COMPLETED'; c.completedAt=now(); c.updatedAt=Date.now(); c.syncVersion=Date.now();
+  c.history ||= []; c.history.unshift({at:now(),by:actor.name,action:'Reviewed by manager and marked complete'});
+  addCaseTimelineEvent(c,{type:'approved',by:actor.name,title:'Approved',remarks:'Reviewed by manager and marked complete'});
+  notifyRole(d,'ADMIN',`Case completed after manager review: ${c.caseId}`,'completed',c.id);
+  notifyUser(d,c.assigneeName,`Case marked complete: ${c.caseId}`,'completed',c.id);
+  addAudit(d,actor.name,'Case completed',c.caseId); await save(d); res.json(c);
+});
+
+app.post('/api/cases/:id/revision', requireAnyRole('ADMIN','MANAGER'), requireCaseAction('revision'), async (req,res)=>{
+  const d=db(); const c=req.caseRecord; const actor=requestActor(req);
+  c.status='REOPENED_FOR_REVISION'; c.priority='Urgent'; c.updatedAt=Date.now(); c.syncVersion=Date.now();
+  const rev={id:nanoid(8),note:textValue(req.body.note || 'Banker revision requested','Revision note',MAX_TIMELINE_TEXT_LENGTH,{required:true}),by:actor.name,createdAt:now()};
+  c.revisions ||= []; c.revisions.unshift(rev); c.history ||= []; c.history.unshift({at:now(),by:actor.name,action:'Revision opened as urgent'});
+  addCaseTimelineEvent(c,{type:'revision_created',by:actor.name,at:rev.createdAt,title:'Revision Created',remarks:rev.note});
+  notifyUser(d,c.assigneeName,`URGENT revision task: ${c.caseId} - ${rev.note}`,'task',c.id);
+  notifyRole(d,'MANAGER',`URGENT revision opened: ${c.caseId}`,'task',c.id); await save(d); res.json(c);
+});
+
+app.get('/api/cases/:id/timeline', requireCaseAction('read'), async (req,res)=>{
+  const c=req.caseRecord; c.timeline=normalizeCaseTimeline(c);
+  res.json({ok:true,caseId:c.id,caseNo:c.caseId,timeline:c.timeline});
+});
+
+app.post('/api/cases/:id/timeline', requireCaseAction('timeline'), async (req,res)=>{
+  const d=db(); const c=req.caseRecord; const actor=requestActor(req);
+  const event=addCaseTimelineEvent(c,{
+    type:textValue(req.body.type || 'manual','Event type',100),
+    by:actor.name,
+    title:textValue(req.body.title || req.body.text || 'Timeline Event','Timeline title',MAX_TIMELINE_TEXT_LENGTH,{required:true}),
+    remarks:textValue(req.body.remarks || req.body.note || '','Timeline remarks',MAX_TIMELINE_TEXT_LENGTH),
+    meta:req.body.meta && typeof req.body.meta === 'object' ? req.body.meta : {}
+  });
+  addAudit(d,actor.name,'Timeline event added',c.caseId); await save(d);
   res.json({ok:true,event,timeline:c.timeline,case:c});
 });
 
-app.post('/api/state/projects/:id/payment-status', (req, res) => {
+app.post('/api/state/projects/:id/payment-status', async (req, res) => {
   if (!isFinanceAdminRequest(req)) return denyFinanceAccess(res);
   try {
     const d = db();
     const c = findCaseByAnyId(d.cases || [], req.params.id);
     if (!c) return res.status(404).json({ ok:false, error:'Case not found' });
+    assertExpectedFinanceVersion(c, req.body || {});
+    const previousSnapshot = buildFinanceSnapshot(c);
     const status = normalizePaymentTrackingStatus(req.body.paymentTrackingStatus || req.body.status || req.body.paymentStatus);
-    const updated = upsertInlinePaymentLedger(d, c, status, req.body || {});
+    const actor = requestActor(req);
+    const updated = upsertInlinePaymentLedger(d, c, status, { ...(req.body || {}), by:actor.name, updatedBy:actor.name });
     updated.updatedAt = Date.now();
     updated.syncVersion = Date.now();
-    save(d);
-    res.json({ ok:true, project:updated, case:updated, payments:d.payments || [] });
+    const nextSnapshot = buildFinanceSnapshot(updated);
+    const persistence = await save(d, {
+      financeEvent: {
+        caseId: String(updated.id || updated.caseId || req.params.id),
+        caseNo: updated.caseId || updated.id || '',
+        action: `Payment status changed to ${updated.paymentTrackingStatus || status}`,
+        actor: actor.name,
+        previousSnapshot,
+        nextSnapshot
+      }
+    });
+    res.json({ ok:true, project:updated, case:updated, payments:d.payments || [], financeVersion:updated.financeVersion, persistence });
   } catch (e) {
-    res.status(e.statusCode || 500).json({ ok:false, error:e.message || 'Payment status update failed' });
+    res.status(e.statusCode || 500).json({ ok:false, code:e.code || '', error:e.message || 'Payment status update failed' });
   }
 });
 
-app.post('/api/cases/:id/payment',(req,res)=>{ if (!isFinanceAdminRequest(req)) return denyFinanceAccess(res); const d=db(); const c=d.cases.find(x=>x.id===req.params.id); if(!c) return res.status(404).json({error:'Case not found'}); const received=String(req.body.paymentReceived||'').toUpperCase(); if(!['YES','NO','PARTIAL','REFUND'].includes(received)) return res.status(400).json({error:'paymentReceived is mandatory: YES, NO, PARTIAL or REFUND'}); const p={id:nanoid(8),caseId:c.id,caseNo:c.caseId,location:c.city,bankerName:c.bankerName,bank:c.bank,branch:c.branch,paymentReceived:received,paymentAmountIn:Number(req.body.paymentAmountIn||0),refundAmount:Number(req.body.refundAmount||0),paymentDate:req.body.paymentDate||new Date().toISOString().slice(0,10),paymentTime:req.body.paymentTime||new Date().toTimeString().slice(0,5),payerName:req.body.payerName||'',transactionId:req.body.transactionId||'',mode:req.body.mode||'',note:req.body.note||'',createdAt:now(),createdBy:req.body.by||'Admin'}; d.payments.unshift(p); Object.assign(c,{paymentStatus:received,paymentAmountIn:p.paymentAmountIn,refundAmount:p.refundAmount,payerName:p.payerName,transactionId:p.transactionId,paymentDate:p.paymentDate,paymentTime:p.paymentTime}); c.history.unshift({at:now(),by:p.createdBy,action:`Payment ledger updated: ${received}`}); addAudit(d,p.createdBy,'Payment ledger updated',c.caseId); save(d); res.json(p); });
-
-
-app.post('/api/profile/photo', uploadSingle('photo'), (req, res) => {
+app.post('/api/cases/:id/payment', async (req,res)=>{
+  if (!isFinanceAdminRequest(req)) return denyFinanceAccess(res);
   try {
-    if (!req.file) return res.status(400).json({ ok:false, error:'No photo uploaded' });
-    if (!String(req.file.mimetype || '').startsWith('image/')) {
-      try { fs.unlinkSync(req.file.path); } catch (e) {}
-      return res.status(400).json({ ok:false, error:'Only image files are allowed for profile photo.' });
-    }
-    const d = db();
-    const userId = String(req.body.userId || '').trim();
-    const username = String(req.body.username || '').trim().toLowerCase();
-    const user = (d.users || []).find(u => String(u.id || '') === userId || String(u.username || '').toLowerCase() === username);
-    const profilePhoto = `/api/profile/photo/${req.file.filename}`;
-    if (user) {
-      user.profilePhoto = profilePhoto;
-      user.profilePhotoFile = req.file.filename;
-      user.profileUpdatedAt = Date.now();
-      user.profilePhotoUpdatedAt = Date.now();
-      save(d);
-    }
-    res.json({ ok:true, profilePhoto, url:profilePhoto, storedName:req.file.filename, updated:!!user });
-  } catch (err) {
-    res.status(500).json({ ok:false, error:err.message || 'Profile photo upload failed' });
+    const d=db();
+    const c=findCaseByAnyId(d.cases || [], req.params.id);
+    if(!c) return res.status(404).json({ok:false,error:'Case not found'});
+    assertExpectedFinanceVersion(c, req.body || {});
+    const previousSnapshot = buildFinanceSnapshot(c);
+    const received=String(req.body.paymentReceived||'').toUpperCase();
+    if(!['YES','NO','PARTIAL','REFUND'].includes(received)) return res.status(400).json({ok:false,error:'paymentReceived is mandatory: YES, NO, PARTIAL or REFUND'});
+    const nowIso = now();
+    const actor = requestActor(req);
+    const p={id:nanoid(8),caseId:c.id,caseNo:c.caseId,location:c.city || c.location || '',bankerName:c.bankerName,bank:c.bank || c.client || '',branch:c.branch,paymentReceived:received,paymentAmountIn:numericValue(req.body.paymentAmountIn,'Payment amount',{min:0,max:100_000_000,fallback:0}),refundAmount:numericValue(req.body.refundAmount,'Refund amount',{min:0,max:100_000_000,fallback:0}),paymentDate:textValue(req.body.paymentDate||nowIso.slice(0,10),'Payment date',20),paymentTime:textValue(req.body.paymentTime||new Date().toTimeString().slice(0,5),'Payment time',20),payerName:textValue(req.body.payerName||'','Payer name',200),transactionId:textValue(req.body.transactionId||'','Transaction ID',200),mode:textValue(req.body.mode||'','Payment mode',100),note:textValue(req.body.note||'','Payment note',MAX_TIMELINE_TEXT_LENGTH),createdAt:nowIso,createdBy:actor.name,updatedAt:nowIso,updatedBy:actor.name};
+    d.payments = mergePaymentRecords(d.payments || [], [p]);
+    c.financeVersion = Number(c.financeVersion || 0) + 1;
+    Object.assign(c,{paymentTrackingStatus:normalizePaymentTrackingStatus(received),paymentTrackingUpdatedAt:Date.now(),paymentTrackingUpdatedBy:p.createdBy,paymentStatus:received,paymentReceived:received,paymentAmountIn:p.paymentAmountIn,refundAmount:p.refundAmount,payerName:p.payerName,transactionId:p.transactionId,paymentDate:p.paymentDate,paymentTime:p.paymentTime,ledger:{...(c.ledger || {}),amountIn:p.paymentAmountIn,date:p.paymentDate,mode:p.mode,txnId:p.transactionId,status:normalizePaymentTrackingStatus(received),updatedAt:Date.now(),updatedBy:p.createdBy,financeVersion:c.financeVersion}});
+    c.paymentAuditTrail ||= [];
+    c.paymentAuditTrail.unshift({id:nanoid(8),at:nowIso,by:p.createdBy,action:'Payment ledger updated',newStatus:c.paymentTrackingStatus,newAmount:p.paymentAmountIn,refundAmount:p.refundAmount,note:p.note});
+    c.history ||= [];
+    c.history.unshift({at:nowIso,by:p.createdBy,action:`Payment ledger updated: ${received}`});
+    addAudit(d,p.createdBy,'Payment ledger updated',c.caseId);
+    const nextSnapshot = buildFinanceSnapshot(c);
+    const persistence = await save(d, {financeEvent:{caseId:String(c.id || c.caseId),caseNo:c.caseId || c.id || '',action:`Payment ledger updated: ${received}`,actor:p.createdBy,previousSnapshot,nextSnapshot}});
+    res.json({ok:true,payment:p,project:c,case:c,financeVersion:c.financeVersion,persistence});
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ok:false,code:e.code || '',error:e.message || 'Payment ledger update failed'});
   }
 });
 
-app.post('/api/files/upload', uploadAny, (req, res) => {
-  const incomingFiles = req.files || [];
-  const fileFromAnyField = incomingFiles[0];
-  if (!fileFromAnyField) return res.status(400).json({ ok:false, error: 'No file uploaded' });
-  req.file = fileFromAnyField;
-  const d = db();
-  const type = String(req.body.type || 'source').toLowerCase();
-  const purpose = type === 'completed' ? 'FINAL' : (type === 'working' ? 'WORKING' : 'SOURCE');
-  const file = docPayload(req.file, req.body.by || 'Team', req.body.role || 'USER', purpose, req.body.projectId || req.body.caseId || '');
-  file.type = type;
-  file.folder = type;
-  addFileRegistryEntry(d, file);
-  save(d);
-  res.json({ ok: true, file });
+
+app.get('/api/finance/history/:id', async (req, res) => {
+  if (!isFinanceAdminRequest(req)) return denyFinanceAccess(res);
+  try {
+    const d = db();
+    const c = findCaseByAnyId(d.cases || [], req.params.id);
+    const caseId = String(c?.id || req.params.id || '');
+    const caseNo = String(c?.caseId || req.params.id || '');
+    if (USE_POSTGRES) {
+      await ensurePostgres();
+      const result = await pool.query(
+        `SELECT id, case_id, case_no, action, actor, state_version, previous_snapshot, next_snapshot, snapshot_hash, created_at
+         FROM finance_history
+         WHERE case_id = $1 OR case_no = $2
+         ORDER BY created_at DESC
+         LIMIT 200`,
+        [caseId, caseNo]
+      );
+      return res.json({ ok:true, caseId, caseNo, history:result.rows });
+    }
+    return res.json({ ok:true, caseId, caseNo, history:(c?.paymentAuditTrail || []).map((event, index) => ({ id:event.id || index, action:event.action || 'Finance updated', actor:event.by || '', created_at:event.at || event.time || '', state_version:null, next_snapshot:buildFinanceSnapshot(c) })) });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ ok:false, code:e.code || '', error:e.message || 'Finance history could not be loaded.' });
+  }
 });
-app.get('/api/files/:id',(req,res)=>{
+
+app.get('/api/finance/health', async (req, res) => {
+  if (!isFinanceAdminRequest(req)) return denyFinanceAccess(res);
+  try {
+    const d = db();
+    const financeCases = (d.cases || []).filter(c => financeFreshness(c) > 0);
+    const latestFinanceAt = Math.max(0, ...financeCases.map(financeFreshness));
+    let historyCount = 0;
+    let latestHistoryAt = null;
+    if (USE_POSTGRES) {
+      await ensurePostgres();
+      const result = await pool.query('SELECT count(*)::int AS count, max(created_at) AS latest_at FROM finance_history');
+      historyCount = Number(result.rows[0]?.count || 0);
+      latestHistoryAt = result.rows[0]?.latest_at || null;
+    }
+    res.json({ ok:true, database:USE_POSTGRES ? 'postgresql' : 'json-file', stateVersion, financeCases:financeCases.length, paymentRecords:(d.payments || []).filter(Boolean).length, latestFinanceAt:latestFinanceAt || null, historyCount, latestHistoryAt, durableWrites:true, staleFinanceProtection:true });
+  } catch (e) {
+    res.status(500).json({ ok:false, error:e.message || 'Finance health check failed.' });
+  }
+});
+
+
+app.post('/api/profile/photo', uploadSingle('photo'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ ok:false, code:'FILE_REQUIRED', error:'No photo uploaded.' });
+    if (Number(req.file.size || 0) > 5 * 1024 * 1024) return res.status(413).json({ok:false,code:'PROFILE_PHOTO_TOO_LARGE',error:'Profile photos must be no larger than 5 MB.'});
+    req.files=[req.file];
+    await prepareSecureUploads(req,'PROFILE',{imagesOnly:true});
+    const d = db();
+    const actor = requestActor(req);
+    const user = findStateUserByIdOrUsername(actor.id, actor.username);
+    if (!user) return res.status(404).json({ ok:false, error:'Signed-in user record was not found.' });
+    const previousKey = user.profilePhotoStorageKey || user.profilePhotoFile || '';
+    const profilePhoto = `/api/profile/photo/${encodeURIComponent(user.id || user.username)}`;
+    user.profilePhoto = profilePhoto;
+    user.profilePhotoFile = req.file.storageKey;
+    user.profilePhotoStorageKey = req.file.storageKey;
+    user.profilePhotoSha256 = req.file.sha256;
+    user.profilePhotoMime = req.file.mimetype;
+    user.profilePhotoOriginalName = req.file.originalname;
+    user.profileUpdatedAt = Date.now();
+    user.profilePhotoUpdatedAt = Date.now();
+    await save(d);
+    if (previousKey && previousKey !== req.file.storageKey) {
+      const stillUsed=(d.users || []).some(item=>String(item.id)!==String(user.id) && [item.profilePhotoStorageKey,item.profilePhotoFile].includes(previousKey));
+      if (!stillUsed && String(previousKey).startsWith('objects/')) fileStorage.softDelete(previousKey,{reason:'PROFILE_PHOTO_REPLACED',userId:user.id,actor:actor.name});
+    }
+    res.json({ ok:true, profilePhoto, url:profilePhoto, storedName:path.basename(req.file.storageKey), storageKey:req.file.storageKey, sha256:req.file.sha256, updated:true });
+  } catch (error) {
+    if (error instanceof FileValidationError) return fileUploadFailure(res,error,'Profile photo upload failed.');
+    res.status(error.statusCode || 500).json({ ok:false, code:error.code || '', error:error.message || 'Profile photo upload failed' });
+  }
+});
+
+app.post('/api/files/upload', uploadAny, async (req, res) => {
+  try {
+    const incomingFiles = req.files || [];
+    if (!incomingFiles.length) return res.status(400).json({ ok:false, code:'FILE_REQUIRED', error:'No file uploaded.' });
+    if (incomingFiles.length !== 1) return res.status(400).json({ok:false,code:'SINGLE_FILE_REQUIRED',error:'This endpoint accepts one file at a time.'});
+    const d = db();
+    const actor = requestActor(req);
+    const type = String(req.body.type || 'source').toLowerCase();
+    const allowedTypes = new Set(['source','working','completed','chat']);
+    if (!allowedTypes.has(type)) return res.status(400).json({ok:false,code:'FILE_PURPOSE_INVALID',error:'Invalid file purpose.'});
+    const projectId = textValue(req.body.projectId || req.body.caseId || '', 'Project id', 200);
+    const caseRecord = projectId ? findCaseByAnyId(d.cases || [], projectId) : null;
+    if (projectId && !caseRecord) return res.status(404).json({ ok:false, code:'CASE_NOT_FOUND', error:'The target task was not found.' });
+    if (type === 'source') {
+      if (!['ADMIN','MANAGER'].includes(actor.role)) return authorizationDenied(req, res, 'SOURCE_UPLOAD_FORBIDDEN', 'Only Admins and Managers can upload source files.');
+    } else if (projectId && !canMutateCase(req.auth?.user || {}, caseRecord, type === 'completed' ? 'upload-final' : 'upload-working')) {
+      return authorizationDenied(req, res, 'FILE_UPLOAD_FORBIDDEN', 'You cannot upload files to this task.');
+    } else if (!projectId && type !== 'chat' && !['ADMIN','MANAGER'].includes(actor.role)) {
+      return authorizationDenied(req, res, 'UNSCOPED_UPLOAD_FORBIDDEN', 'A task reference is required for this upload.');
+    }
+    const purpose = type === 'completed' ? 'FINAL' : (type === 'working' ? 'WORKING' : (type === 'chat' ? 'CHAT' : 'SOURCE'));
+    await prepareSecureUploads(req,purpose);
+    const file = docPayload(req.file, actor.name, actor.role, purpose, projectId);
+    file.type = type;
+    file.folder = type;
+    if (type === 'chat') {
+      file.chatScope = String(req.body.chatScope || 'PRIVATE').toUpperCase() === 'GLOBAL' ? 'GLOBAL' : 'PRIVATE';
+      file.chatParticipants = [actor.id,actor.username,actor.name,req.body.recipientId,req.body.recipientUsername,req.body.recipient]
+        .map(value=>String(value || '').trim().toLowerCase()).filter(Boolean);
+    }
+    addFileRegistryEntry(d, file);
+    await save(d);
+    await recordFileStorageEvent({fileId:file.id,caseId:projectId,action:'FILE_UPLOADED',actor:actor.name,storageKey:file.storageKey,sha256:file.sha256,details:{purpose,name:file.name}});
+    res.status(201).json({ ok:true, file });
+  } catch (error) {
+    if (error instanceof FileValidationError) return fileUploadFailure(res,error,'File upload failed.');
+    res.status(error.statusCode || 500).json({ ok:false, code:error.code || '', error:error.message || 'File upload failed.' });
+  }
+});
+
+app.get('/api/files/:id',async (req,res)=>{
   const mode = String(req.query.mode || '').toLowerCase();
   if(mode !== 'preview' && mode !== 'download') {
     return res.status(400).json({ ok:false, error:'Use ?mode=preview or ?mode=download' });
   }
-  const d=db();
-  const { doc, resolved } = resolveFileById(d, req.params.id);
+  const { doc, resolved, denied } = resolveAuthorizedFile(req, res, req.params.id);
+  if (denied) return;
   if(!doc) return res.status(404).send('File record not found. It may be an older unsaved upload. Please refresh the page or re-upload the file.');
   if(!resolved) return res.status(410).send('File unavailable on server. The record exists, but the physical file is missing. Please re-upload this file once.');
   const { stored, fp } = resolved;
-  if(!fp.startsWith(path.resolve(UPLOAD_DIR))) return res.status(400).send('Invalid file path');
+  if(!isResolvedStoragePathAllowed(fp)) return res.status(400).send('Invalid file path');
   const fileName = doc.name || doc.fileName || stored;
   const mime = String(doc.mime || doc.mimeType || '').toLowerCase();
   const lowerName = String(fileName || '').toLowerCase();
@@ -1890,23 +3567,24 @@ app.get('/api/files/:id',(req,res)=>{
     : lowerName.endsWith('.gif') ? 'image/gif'
     : lowerName.endsWith('.webp') ? 'image/webp'
     : lowerName.endsWith('.bmp') ? 'image/bmp'
-    : lowerName.endsWith('.svg') ? 'image/svg+xml'
     : '';
   const isImage = mime.startsWith('image/') || Boolean(imageMimeByExt);
   if(mode === 'preview' && !isPdf && !isImage) return res.status(415).send('Preview is available for PDF and image files only.');
   const fileSize = fs.statSync(fp).size;
   res.setHeader('Access-Control-Expose-Headers','Content-Disposition, Content-Length, Content-Type, Accept-Ranges');
-  res.setHeader('Cache-Control', mode === 'preview' ? 'private, max-age=0, must-revalidate' : 'private, max-age=0, must-revalidate');
+  res.setHeader('Cache-Control', 'private, no-store, max-age=0, must-revalidate');
+  res.setHeader('X-Content-Type-Options','nosniff');
+  if (mode === 'preview') res.setHeader('Content-Security-Policy',"sandbox; default-src 'none'; img-src 'self' data: blob:; style-src 'unsafe-inline'");
   res.setHeader('Content-Length', String(fileSize));
   if(isPdf) res.type('application/pdf');
   else if(isImage) res.type(mime.startsWith('image/') ? mime : imageMimeByExt || 'application/octet-stream');
   else if(doc.mime || doc.mimeType) res.type(doc.mime || doc.mimeType);
-  res.setHeader('Content-Disposition', `${mode === 'preview' ? 'inline' : 'attachment'}; filename="${String(fileName).replace(/"/g, '')}"`);
+  res.setHeader('Content-Disposition', `${mode === 'preview' ? 'inline' : 'attachment'}; filename="${safeHeaderFileName(fileName)}"`);
   return res.sendFile(fp);
 });
-app.get('/api/files/:id/status',(req,res)=>{
-  const d = db();
-  const { doc, resolved } = resolveFileById(d, req.params.id);
+app.get('/api/files/:id/status',async (req,res)=>{
+  const { doc, resolved, denied } = resolveAuthorizedFile(req, res, req.params.id);
+  if (denied) return;
   res.json({
     ok: true,
     found: !!doc,
@@ -1919,13 +3597,13 @@ app.get('/api/files/:id/status',(req,res)=>{
   });
 });
 
-app.get('/api/files/:id/preview-data',(req,res)=>{
-  const d=db();
-  const { doc, resolved } = resolveFileById(d, req.params.id);
+app.get('/api/files/:id/preview-data',async (req,res)=>{
+  const { doc, resolved, denied } = resolveAuthorizedFile(req, res, req.params.id);
+  if (denied) return;
   if(!doc) return res.status(404).json({ ok:false, error:'File record not found. Please refresh the page or re-upload the file.' });
   if(!resolved) return res.status(410).json({ ok:false, error:'File unavailable on server. Please re-upload this file once.' });
   const { stored, fp } = resolved;
-  if(!fp.startsWith(path.resolve(UPLOAD_DIR))) return res.status(400).json({ ok:false, error:'Invalid file path' });
+  if(!isResolvedStoragePathAllowed(fp)) return res.status(400).json({ ok:false, error:'Invalid file path' });
   const fileName = doc.name || doc.fileName || stored;
   const mime = String(doc.mime || doc.mimeType || '').toLowerCase();
   const lowerName = String(fileName || '').toLowerCase();
@@ -1935,20 +3613,21 @@ app.get('/api/files/:id/preview-data',(req,res)=>{
     : lowerName.endsWith('.gif') ? 'image/gif'
     : lowerName.endsWith('.webp') ? 'image/webp'
     : lowerName.endsWith('.bmp') ? 'image/bmp'
-    : lowerName.endsWith('.svg') ? 'image/svg+xml'
     : '';
   const isImage = mime.startsWith('image/') || Boolean(imageMimeByExt);
   if(!isPdf && !isImage) return res.status(415).json({ ok:false, error:'Preview is available for PDF and image files only.' });
   const stat = fs.statSync(fp);
+  if (stat.size > MAX_INLINE_PREVIEW_BYTES) return res.status(413).json({ok:false,code:'INLINE_PREVIEW_TOO_LARGE',error:`Inline preview data is limited to ${MAX_INLINE_PREVIEW_MB} MB. Use the streamed preview or download instead.`});
   const mimeType = isPdf ? 'application/pdf' : (mime.startsWith('image/') ? mime : imageMimeByExt || 'application/octet-stream');
   const base64 = fs.readFileSync(fp).toString('base64');
-  res.setHeader('Cache-Control','private, max-age=0, must-revalidate');
+  res.setHeader('Cache-Control','private, no-store, max-age=0, must-revalidate');
+  res.setHeader('X-Content-Type-Options','nosniff');
   return res.json({ ok:true, id: doc.id || req.params.id, name: fileName, kind: isPdf ? 'pdf' : 'image', mimeType, size: stat.size, dataUrl: `data:${mimeType};base64,${base64}` });
 });
 
-app.get('/api/files/:id/preview',(req,res)=>{
-  const d=db();
-  const { doc, resolved } = resolveFileById(d, req.params.id);
+app.get('/api/files/:id/preview',async (req,res)=>{
+  const { doc, resolved, denied } = resolveAuthorizedFile(req, res, req.params.id);
+  if (denied) return;
   if(!doc) {
     return res.status(404).send('File record not found. It may be an older unsaved upload. Please refresh the page or re-upload the file.');
   }
@@ -1956,7 +3635,7 @@ app.get('/api/files/:id/preview',(req,res)=>{
     return res.status(410).send('File unavailable on server. The record exists, but the physical file is missing. Please re-upload this file once.');
   }
   const { stored, fp } = resolved;
-  if(!fp.startsWith(path.resolve(UPLOAD_DIR))) return res.status(400).send('Invalid file path');
+  if(!isResolvedStoragePathAllowed(fp)) return res.status(400).send('Invalid file path');
   const fileName = doc.name || doc.fileName || stored;
   const mime = String(doc.mime || doc.mimeType || '').toLowerCase();
   const lowerName = String(fileName || '').toLowerCase();
@@ -1966,21 +3645,21 @@ app.get('/api/files/:id/preview',(req,res)=>{
     : lowerName.endsWith('.gif') ? 'image/gif'
     : lowerName.endsWith('.webp') ? 'image/webp'
     : lowerName.endsWith('.bmp') ? 'image/bmp'
-    : lowerName.endsWith('.svg') ? 'image/svg+xml'
     : '';
   const isImage = mime.startsWith('image/') || Boolean(imageMimeByExt);
   if(!isPdf && !isImage) return res.status(415).send('Preview is available for PDF and image files only.');
   const fileSize = fs.statSync(fp).size;
   res.setHeader('Access-Control-Expose-Headers','Content-Disposition, Content-Length, Content-Type');
-  res.setHeader('Cache-Control','private, max-age=0, must-revalidate');
+  res.setHeader('Cache-Control','private, no-store, max-age=0, must-revalidate');
+  res.setHeader('X-Content-Type-Options','nosniff');
   res.setHeader('Content-Type', isPdf ? 'application/pdf' : (mime.startsWith('image/') ? mime : imageMimeByExt || 'application/octet-stream'));
   res.setHeader('Content-Length', String(fileSize));
-  res.setHeader('Content-Disposition', `inline; filename="${String(fileName).replace(/"/g, '')}"`);
+  res.setHeader('Content-Disposition', `inline; filename="${safeHeaderFileName(fileName)}"`);
   return res.sendFile(fp);
 });
-app.get('/api/files/:id/download',(req,res)=>{
-  const d=db();
-  const { doc, resolved } = resolveFileById(d, req.params.id);
+app.get('/api/files/:id/download',async (req,res)=>{
+  const { doc, resolved, denied } = resolveAuthorizedFile(req, res, req.params.id);
+  if (denied) return;
   if(!doc) {
     return res.status(404).send('File record not found. It may be an older unsaved upload. Please refresh the page or re-upload the file.');
   }
@@ -1988,74 +3667,167 @@ app.get('/api/files/:id/download',(req,res)=>{
     return res.status(410).send('File unavailable on server. The record exists, but the physical file is missing. Please re-upload this file once.');
   }
   const { stored, fp } = resolved;
-  if(!fp.startsWith(path.resolve(UPLOAD_DIR))) return res.status(400).send('Invalid file path');
+  if(!isResolvedStoragePathAllowed(fp)) return res.status(400).send('Invalid file path');
   res.setHeader('Access-Control-Expose-Headers','Content-Disposition, Content-Length, Content-Type');
-  res.setHeader('Cache-Control','private, max-age=0, must-revalidate');
+  res.setHeader('Cache-Control','private, no-store, max-age=0, must-revalidate');
+  res.setHeader('X-Content-Type-Options','nosniff');
   const fileSize = fs.statSync(fp).size;
   const fileName = doc.name || doc.fileName || stored;
   res.setHeader('Content-Length', String(fileSize));
   if (/\.pdf$/i.test(fileName) || String(doc.mime || doc.mimeType || '').toLowerCase().includes('pdf')) res.type('application/pdf');
   else if (doc.mime || doc.mimeType) res.type(doc.mime || doc.mimeType);
-  res.download(fp, fileName);
+  res.download(fp, safeHeaderFileName(fileName));
 });
 
-app.delete('/api/files/:id',(req,res)=>{
-  const d=db();
-  let removed = false;
-  let storedNames = [];
-  const matches = (doc) => String(doc?.id || '') === String(req.params.id);
+app.delete('/api/files/:id',async (req,res)=>{
+  try {
+    const d=db();
+    const target = resolveFileById(d, req.params.id).doc;
+    if (!target) return res.status(404).json({ ok:false, code:'FILE_NOT_FOUND', error:'File record not found.' });
+    if (!canDeleteFileDocument(req.auth?.user || {}, target, d.cases || [])) return authorizationDenied(req, res, 'FILE_DELETE_FORBIDDEN', 'You cannot delete this file.');
+    const actor = requestActor(req);
+    const targetId=String(target.id || req.params.id);
+    const targetKey=String(target.storageKey || target.storedName || target.stored_name || '');
+    const matches = doc => String(doc?.id || '') === targetId;
+    let removed=false;
 
-  for (const c of d.cases || []) {
-    const docs = c.documents || [];
-    const completed = c.completedFiles || [];
-    [...docs, ...completed].filter(matches).forEach(doc => {
-      const resolved = resolveStoredUploadFile(doc);
-      const stored = resolved?.stored || doc.storedName || fileBaseName(doc.url || '');
-      if (stored) storedNames.push(stored);
-    });
-    c.documents = docs.filter(doc => !matches(doc));
-    c.completedFiles = completed.filter(doc => !matches(doc));
-    if (c.documents.length !== docs.length || c.completedFiles.length !== completed.length) {
-      removed = true;
-      c.history ||= [];
-      c.history.unshift({ at: now(), by: req.body?.by || 'Team', action: 'File deleted' });
+    for (const c of d.cases || []) {
+      const fields=['documents','completedFiles','sourceFiles','workFiles','files'];
+      let changed=false;
+      for (const field of fields) {
+        const before=Array.isArray(c[field]) ? c[field] : [];
+        const after=before.filter(doc=>!matches(doc));
+        if (after.length!==before.length) { c[field]=after; changed=true; removed=true; }
+      }
+      if (changed) {
+        c.history ||= [];
+        c.history.unshift({ at: now(), by: actor.name, action: `File deleted: ${target.name || targetId}` });
+        addCaseTimelineEvent(c,{type:'file_deleted',by:actor.name,title:'File deleted',remarks:target.name || targetId});
+      }
     }
-  }
 
-  for (const m of d.teamChat || []) {
-    const files = m.files || [];
-    files.filter(matches).forEach(doc => {
-      const resolved = resolveStoredUploadFile(doc);
-      const stored = resolved?.stored || doc.storedName || fileBaseName(doc.url || '');
-      if (stored) storedNames.push(stored);
-    });
-    m.files = files.filter(doc => !matches(doc));
-    if (m.files.length !== files.length) removed = true;
-  }
-
-  const registryBefore = d.files || [];
-  registryBefore.filter(matches).forEach(doc => {
-    const resolved = resolveStoredUploadFile(doc);
-    const stored = resolved?.stored || doc.storedName || fileBaseName(doc.url || '');
-    if (stored) storedNames.push(stored);
-  });
-  d.files = registryBefore.filter(doc => !matches(doc));
-  if (d.files.length !== registryBefore.length) removed = true;
-
-  [...new Set(storedNames)].forEach(stored => {
-    const fp = path.resolve(UPLOAD_DIR, stored);
-    if (fp.startsWith(path.resolve(UPLOAD_DIR)) && fs.existsSync(fp)) {
-      try { fs.unlinkSync(fp); } catch(e) { console.warn('File unlink failed:', e.message); }
+    for (const message of d.teamChat || []) {
+      for (const field of ['files','attachments']) {
+        const before=Array.isArray(message[field]) ? message[field] : [];
+        const after=before.filter(doc=>!matches(doc));
+        if (after.length!==before.length) { message[field]=after; removed=true; }
+      }
+      if (message.file && matches(message.file)) { delete message.file; removed=true; }
     }
-  });
 
-  if (removed) save(d);
-  res.json({ ok: true, removed });
+    d.files ||= [];
+    let registry=d.files.find(doc=>String(doc?.id || '')===targetId);
+    if (!registry) { registry={...target,id:targetId}; d.files.unshift(registry); }
+    Object.assign(registry,{
+      storageStatus:'DELETED',
+      deletedAt:now(),
+      deletedBy:actor.name,
+      deletedByRole:actor.role,
+      deleteReason:textValue(req.body?.reason || 'Deleted by authorised user','Delete reason',500),
+      url:'',previewUrl:'',downloadUrl:''
+    });
+    removed=true;
+
+    const activeSameObject=targetKey && d.files.some(doc=>String(doc?.id || '')!==targetId
+      && String(doc?.storageStatus || '').toUpperCase()!=='DELETED'
+      && String(doc?.storageKey || doc?.storedName || '')===targetKey);
+    let physicalAction='retained';
+    if (targetKey && !activeSameObject && String(targetKey).startsWith('objects/')) {
+      const trashed=fileStorage.softDelete(targetKey,{fileId:targetId,originalName:target.name || '',actor:actor.name,reason:registry.deleteReason});
+      if (trashed) physicalAction='moved-to-trash';
+    }
+
+    addAudit(d,actor.name,'File deleted',`${targetId}:${target.name || ''}`);
+    if (removed) await save(d);
+    await recordFileStorageEvent({fileId:targetId,caseId:target.caseId || '',action:'FILE_DELETED',actor:actor.name,storageKey:targetKey,sha256:target.sha256 || '',details:{physicalAction,reason:registry.deleteReason}});
+    res.json({ ok:true, removed, fileId:targetId, storageStatus:'DELETED', physicalAction });
+  } catch(error) {
+    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'File deletion failed.'});
+  }
 });
-app.get('/api/cases/:id/share-whatsapp',(req,res)=>{
+
+app.get('/api/system/files/storage-health', requireAdminSession, async (_req,res)=>{
+  const health=fileStorage.health();
+  res.status(health.ok ? 200 : 503).json({
+    ok:health.ok,
+    provider:'local-private',
+    writable:health.writable,
+    objectCount:health.objects,
+    antivirusMode:health.antivirusMode,
+    antivirusRequired:health.antivirusRequired,
+    persistentConfigured:!IS_PRODUCTION || String(process.env.FILE_STORAGE_PERSISTENT || '').toLowerCase()==='true',
+    legacyCompatibilityRootConfigured:Boolean(LEGACY_UPLOAD_DIR)
+  });
+});
+
+app.get('/api/system/files/reconciliation', requireAdminSession, async (_req,res)=>{
   const d=db();
-  const c=findCaseByAnyId(d.cases || [], req.params.id);
-  if(!c) return res.status(404).json({error:'Case not found'});
+  const report=buildFileReconciliationReport(d,fileStorage,{docs:d.files || []});
+  const legacyAvailable=report.available.filter(item=>item.provider==='legacy-local').length;
+  res.json({ok:true,...report,legacyAvailable,storage:fileStorage.health()});
+});
+
+app.post('/api/system/files/reconciliation', requireAdminSession, async (req,res)=>{
+  try {
+    if (String(req.body?.confirm || '')!=='RECONCILE FILE STORAGE') {
+      return res.status(400).json({ok:false,code:'CONFIRMATION_REQUIRED',error:'Type RECONCILE FILE STORAGE to run the safe reconciliation.'});
+    }
+    const d=db();
+    d.files ||= [];
+    const before=buildFileReconciliationReport(d,fileStorage,{docs:d.files});
+    let imported=0, markedMissing=0, refreshed=0;
+    const actor=requestActor(req);
+    for (const registry of d.files) {
+      if (!registry?.id || String(registry.storageStatus || '').toUpperCase()==='DELETED') continue;
+      const resolved=fileStorage.resolve(registry);
+      if (resolved?.provider==='legacy-local') {
+        try {
+          const secured=await fileStorage.importLegacyFile(registry);
+          if (secured) {
+            const patch={
+              storageKey:secured.storageKey,storedName:secured.storageKey,sha256:secured.sha256,
+              size:secured.size,mime:secured.detectedMime,mimeType:secured.detectedMime,
+              securityStatus:'VALIDATED',storageProvider:'local-private',storageStatus:'AVAILABLE',
+              storedAt:secured.storedAt,url:`/api/files/${registry.id}/download`,
+              previewUrl:`/api/files/${registry.id}/preview`,downloadUrl:`/api/files/${registry.id}/download`
+            };
+            for (const doc of allKnownFileDocs(d)) if (String(doc?.id || '')===String(registry.id)) Object.assign(doc,patch);
+            imported++;
+          }
+        } catch(error) {
+          registry.storageStatus='QUARANTINED';
+          registry.securityStatus='VALIDATION_FAILED';
+          registry.storageError=error.message || 'Legacy file validation failed.';
+        }
+      } else if (resolved) {
+        const stat=fs.statSync(resolved.fp);
+        const patch={storageStatus:'AVAILABLE',storageProvider:resolved.provider,size:Number(registry.size || stat.size)};
+        for (const doc of allKnownFileDocs(d)) if (String(doc?.id || '')===String(registry.id)) Object.assign(doc,patch);
+        refreshed++;
+      } else {
+        const patch={storageStatus:'MISSING',storageCheckedAt:now()};
+        for (const doc of allKnownFileDocs(d)) if (String(doc?.id || '')===String(registry.id)) Object.assign(doc,patch);
+        markedMissing++;
+      }
+    }
+    addAudit(d,actor.name,'File storage reconciliation',`imported=${imported};missing=${markedMissing};refreshed=${refreshed}`);
+    await save(d);
+    const after=buildFileReconciliationReport(d,fileStorage,{docs:d.files});
+    if (USE_POSTGRES) {
+      try {
+        await pool.query(`INSERT INTO file_reconciliation_runs(actor,imported_count,missing_count,refreshed_count,before_counts,after_counts) VALUES($1,$2,$3,$4,$5::jsonb,$6::jsonb)`,[actor.name,imported,markedMissing,refreshed,JSON.stringify(before.counts),JSON.stringify(after.counts)]);
+      } catch(error) { console.warn('File reconciliation audit failed:',error.message); }
+    }
+    await recordFileStorageEvent({action:'FILE_RECONCILIATION',actor:actor.name,details:{imported,markedMissing,refreshed,before:before.counts,after:after.counts}});
+    res.json({ok:true,imported,markedMissing,refreshed,before:before.counts,after:after.counts,report:after});
+  } catch(error) {
+    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'File reconciliation failed.'});
+  }
+});
+
+app.get('/api/cases/:id/share-whatsapp', requireAnyRole('ADMIN','MANAGER'), requireCaseAction('read'), async (req,res)=>{
+  const d=db();
+  const c=req.caseRecord;
   const finalDocs=[...(c.completedFiles || []), ...(c.documents||[])]
     .filter(doc => ['FINAL','REVISION_FINAL'].includes(String(doc.purpose || '').toUpperCase()) || ['completed file','revised file','completed'].includes(String(doc.type || '').toLowerCase()));
   if(!finalDocs.length) return res.status(400).json({error:'No completed document available to share'});
@@ -2112,35 +3884,367 @@ ${id} `) || haystack.includes(` ${id}
   return Array.from(found.values()).slice(0, 5);
 }
 
-app.post('/api/chat', uploadAny,(req,res)=>{ const d=db(); const text=req.body.text||''; let explicitTaskRefs=[]; try { explicitTaskRefs=req.body.taskRefs?JSON.parse(req.body.taskRefs||'[]'):[]; } catch(e) { explicitTaskRefs=[]; } const taskRefs=resolveChatTaskReferences(text, explicitTaskRefs, d.cases||[]); const ments=mentionTargets(text,d.users).concat(req.body.mentions?JSON.parse(req.body.mentions||'[]'):[]); const unique=[...new Set(ments)]; const msg={id:nanoid(8),by:req.body.by||'Team',role:req.body.role||'ADMIN',caseId:req.body.caseId||'',text,mentions:unique,taskRefs,files:(req.files||[]).map(f=>addFileRegistryEntry(d, docPayload(f,req.body.by||'Team',req.body.role||'ADMIN','CHAT'))),createdAt:now()}; d.teamChat.unshift(msg); if(unique.length){ unique.forEach(name=>notifyUser(d,name,`You were mentioned by ${msg.by} in team chat`,'mention','chat')); } else if(taskRefs.length){ notifyRole(d,'ADMIN',`${msg.by} mentioned task ${taskRefs[0].id || taskRefs[0].caseId} in team chat`,'task','chat'); notifyRole(d,'MANAGER',`${msg.by} mentioned task ${taskRefs[0].id || taskRefs[0].caseId} in team chat`,'task','chat'); notifyRole(d,'DESIGNER',`${msg.by} mentioned task ${taskRefs[0].id || taskRefs[0].caseId} in team chat`,'task','chat'); } else { notifyRole(d,'ADMIN','New normal chat message','normal','chat'); notifyRole(d,'MANAGER','New normal chat message','normal','chat'); notifyRole(d,'DESIGNER','New normal chat message','normal','chat'); } save(d); res.json(msg); });
-app.post('/api/chat/read',(req,res)=>{ const d=db(); const role=req.body.role||'ADMIN'; d.chatReads ||= {}; d.chatReads[role]=(d.teamChat||[]).map(m=>m.id); d.notifications.forEach(n=>{ if(n.target==='chat' && (n.to===role || n.to===req.body.name || n.category==='mention')) n.status='READ'; }); save(d); res.json({ok:true}); });
-app.post('/api/notifications/:id/read',(req,res)=>{ const d=db(); const n=d.notifications.find(x=>x.id===req.params.id); if(n) n.status='READ'; save(d); res.json({ok:true}); });
-app.post('/whatsapp/mock/incoming', uploadAny,(req,res)=>{ const d=db(); const parsed=parseLead(req.body.text||''); const assignee=leastBusy(d); const c={id:nanoid(8),caseId:nextCaseNo(d,parsed.city),source:'WhatsApp',createdByRole:'BANKER',creatorName:req.body.fromName||req.body.from||'WhatsApp Banker',customerName:parsed.customerName,customerPhone:'',bankerName:req.body.fromName||'WhatsApp Banker',bank:req.body.bank||'',branch:req.body.branch||'',serviceType:parsed.serviceType,city:parsed.city,propertyAddress:parsed.propertyAddress,estimateAmount:Number(parsed.estimateAmount||0),priority:'Normal',status:'ASSIGNED',assigneeId:assignee?.id,assigneeName:assignee?.name,assigneeRole:assignee?.role,createdAt:now(),completedAt:null,paymentStatus:'PENDING',documents:(req.files||[]).map(f=>addFileRegistryEntry(d, docPayload(f,'WhatsApp','BANKER','SOURCE'))),comments:[],revisions:[],history:[{at:now(),by:'WhatsApp',action:'Lead created from WhatsApp'}]}; d.cases.unshift(c); d.whatsappInbox.unshift({id:nanoid(8),from:req.body.from,fromName:req.body.fromName,text:req.body.text,createdAt:now(),caseId:c.caseId}); notifyRole(d,'ADMIN',`New WhatsApp case ${c.caseId} from ${c.creatorName}`,'task',c.id); notifyRole(d,'MANAGER',`New WhatsApp case ${c.caseId} from ${c.creatorName}`,'task',c.id); notifyUser(d,c.assigneeName,`New WhatsApp task assigned: ${c.caseId}`,'task',c.id); save(d); res.json(c); });
-app.get('/api/qr/:caseId', async (req,res)=>{ const data=await QRCode.toDataURL(`${publicUrl()}/case/${req.params.caseId}`); res.json({qr:data}); });
-
-app.get('/api/db/health', async (_req,res)=>{
+app.post('/api/chat', async (req,res)=>{
   try {
-    if (USE_POSTGRES) {
-      await ensurePostgres();
-      const r = await pool.query('SELECT now() as now');
-      const d = db();
-      return res.json({ok:true,database:'postgresql',connected:true,time:r.rows[0].now,counts:{users:(d.users||[]).length,cases:(d.cases||[]).length,chatMessages:(d.teamChat||[]).length,notifications:(d.notifications||[]).length,attendanceLogs:(d.attendanceLogs||[]).length}});
+    const d=db();
+    const actor=requestActor(req);
+    const text=textValue(req.body.text || '', 'Message', MAX_CHAT_TEXT_LENGTH);
+    const recipient=textValue(req.body.recipient || 'global','Recipient',200) || 'global';
+    if (recipient !== 'global') {
+      const recipientKey=String(recipient).trim().toLowerCase();
+      const recipientExists=(d.users || []).some(user=>[user.id,user.username,user.name].map(value=>String(value || '').trim().toLowerCase()).includes(recipientKey));
+      if (!recipientExists) return res.status(400).json({ok:false,code:'CHAT_RECIPIENT_INVALID',error:'The selected chat recipient does not exist.'});
     }
-    const d = db();
-    return res.json({ok:true,database:'json-file',connected:true,file:DB_FILE,warning:'Set DATABASE_URL to use PostgreSQL for production.',counts:{users:(d.users||[]).length,cases:(d.cases||[]).length,chatMessages:(d.teamChat||[]).length,notifications:(d.notifications||[]).length,attendanceLogs:(d.attendanceLogs||[]).length}});
-  } catch (err) {
-    return res.status(500).json({ok:false,database:USE_POSTGRES?'postgresql':'json-file',error:err.message});
+    let explicitTaskRefs=[];
+    try { explicitTaskRefs=Array.isArray(req.body.taskRefs) ? req.body.taskRefs : (req.body.taskRefs ? JSON.parse(req.body.taskRefs || '[]') : []); } catch { explicitTaskRefs=[]; }
+    assertArrayLimit(explicitTaskRefs, 'taskRefs', 20);
+    const accessibleCases=filterCasesForUser(d.cases || [], req.auth?.user || {});
+    const taskRefs=resolveChatTaskReferences(text, explicitTaskRefs, accessibleCases);
+    let explicitMentions=[];
+    try { explicitMentions=Array.isArray(req.body.mentions) ? req.body.mentions : (req.body.mentions ? JSON.parse(req.body.mentions || '[]') : []); } catch { explicitMentions=[]; }
+    assertArrayLimit(explicitMentions, 'mentions', 50);
+    const mentions=mentionTargets(text,d.users).concat(explicitMentions.map(value => textValue(value,'Mention',200)));
+    const unique=[...new Set(mentions)].slice(0,50);
+    const caseId=textValue(req.body.caseId || '', 'Case id', 200);
+    if (caseId) {
+      const caseRecord=findCaseByAnyId(d.cases || [], caseId);
+      if (!caseRecord || !canAccessCase(req.auth?.user || {}, caseRecord)) return authorizationDenied(req,res,'CHAT_CASE_ACCESS_DENIED','You cannot attach this message to that task.');
+    }
+    const requestedFiles=Array.isArray(req.body.files) ? req.body.files : [];
+    assertArrayLimit(requestedFiles,'files',20);
+    const files=[];
+    for (const reference of requestedFiles) {
+      const fileId=String(reference?.id || reference?.fileId || '').trim();
+      if (!fileId) continue;
+      const resolved=resolveFileById(d,fileId).doc;
+      if (!resolved || !canAccessFileDocument(req.auth?.user || {},resolved,d.cases || [])) {
+        return authorizationDenied(req,res,'CHAT_FILE_ACCESS_DENIED','A referenced chat attachment is unavailable or not permitted.');
+      }
+      resolved.chatScope=recipient === 'global' ? 'GLOBAL' : 'DIRECT';
+      resolved.chatParticipants=recipient === 'global'
+        ? []
+        : [...new Set([actor.id,actor.username,actor.name,recipient].map(value=>String(value || '').trim()).filter(Boolean))];
+      files.push(structuredClone(resolved));
+    }
+    const createdAt=now();
+    const msg={
+      id:nanoid(10),
+      by:actor.name,
+      sender:actor.name,
+      senderId:actor.id,
+      role:actor.role,
+      senderRole:actor.role,
+      recipient,
+      caseId,
+      text,
+      mentions:unique,
+      taskRefs,
+      files,
+      file:files[0] || null,
+      fileUrl:req.body.fileUrl && files.length ? String(files[0].downloadUrl || files[0].url || '') : '',
+      fileName:files[0]?.name || '',
+      fileType:files[0]?.mime || files[0]?.mimeType || '',
+      roomUrl:textValue(req.body.roomUrl || '', 'Meeting room URL', 1000),
+      readBy:[{name:actor.name,userId:actor.id,time:createdAt}],
+      sentAt:Date.now(),
+      createdAt
+    };
+    d.teamChat.unshift(msg);
+    if(unique.length) unique.forEach(name=>notifyUser(d,name,`You were mentioned by ${actor.name} in team chat`,'mention','chat'));
+    else if(recipient !== 'global') notifyUser(d,recipient,`New message from ${actor.name}: ${(text || msg.fileName || 'Attachment').slice(0,80)}`,'chat','chat');
+    else if(taskRefs.length) {
+      notifyRole(d,'ADMIN',`${actor.name} mentioned task ${taskRefs[0].id || taskRefs[0].caseId} in team chat`,'task','chat');
+      notifyRole(d,'MANAGER',`${actor.name} mentioned task ${taskRefs[0].id || taskRefs[0].caseId} in team chat`,'task','chat');
+      notifyRole(d,'DESIGNER',`${actor.name} mentioned task ${taskRefs[0].id || taskRefs[0].caseId} in team chat`,'task','chat');
+    } else ['ADMIN','MANAGER','DESIGNER'].forEach(role=>notifyRole(d,role,'New normal chat message','normal','chat'));
+    await save(d); res.status(201).json(msg);
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'Chat message could not be sent.'});
   }
 });
 
-const PORT=process.env.PORT||8080;
-initStore()
-  .then(()=>app.listen(PORT,()=>console.log(`Kalpvriksha API running on http://localhost:${PORT} using ${USE_POSTGRES ? 'PostgreSQL' : 'JSON fallback'}`)))
-  .catch(err=>{
-    console.error('PostgreSQL unavailable; starting with the bundled JSON snapshot:', err.message);
-    USE_POSTGRES = false;
-    postgresReady = false;
-    memoryState = norm(readJsonFallback());
-    app.listen(PORT,()=>console.log('Kalpvriksha API running on http://localhost:' + PORT + ' using JSON fallback'));
+app.patch('/api/chat/:id', async (req,res)=>{
+  try {
+    const d=db();
+    const actor=requestActor(req);
+    const message=(d.teamChat || []).find(item=>String(item.id)===String(req.params.id));
+    if (!message) return res.status(404).json({ok:false,code:'CHAT_MESSAGE_NOT_FOUND',error:'Message not found.'});
+    if (!canAccessChatMessage(req.auth?.user || {},message)) return authorizationDenied(req,res,'CHAT_ACCESS_DENIED','You do not have access to this chat message.');
+    const isAuthor=[message.senderId,message.userId].map(String).includes(actor.id) || String(message.sender || message.by || '').trim().toLowerCase()===actor.name.toLowerCase();
+    const canModerate=['ADMIN','MANAGER'].includes(actor.role);
+    if (req.body.text !== undefined || req.body.deleted !== undefined) {
+      if (!isAuthor && !canModerate) return authorizationDenied(req,res,'CHAT_EDIT_FORBIDDEN','Only the sender, Admin, or Manager can edit or delete this message.');
+      if (req.body.deleted === true) {
+        message.deleted=true; message.text='This message was deleted.'; message.deletedBy=actor.name; message.deletedAt=now();
+        message.fileUrl=''; message.fileName=''; message.fileType=''; message.roomUrl='';
+      } else {
+        message.text=textValue(req.body.text || '','Message',MAX_CHAT_TEXT_LENGTH);
+        message.editedBy=actor.name; message.editedAt=now();
+      }
+    }
+    if (req.body.reactions && typeof req.body.reactions === 'object') {
+      const reactions={};
+      for (const [emoji, users] of Object.entries(req.body.reactions).slice(0,30)) {
+        const key=textValue(emoji,'Reaction',20);
+        const names=(Array.isArray(users) ? users : []).map(value=>textValue(typeof value==='string'?value:value?.name || '','Reaction user',200)).filter(Boolean).slice(0,100);
+        reactions[key]=[...new Set(names)];
+      }
+      message.reactions=reactions;
+    }
+    if (req.body.markRead === true || Array.isArray(req.body.readBy)) {
+      message.readBy=mergeAppendOnly(message.readBy || [], [{name:actor.name,userId:actor.id,time:now()}]);
+    }
+    message.updatedAt=now();
+    await save(d); res.json({ok:true,message});
+  } catch(error) {
+    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'Message update failed.'});
+  }
+});
+
+app.delete('/api/chat/:id', async (req,res)=>{
+  const d=db();
+  const actor=requestActor(req);
+  const message=(d.teamChat || []).find(item=>String(item.id)===String(req.params.id));
+  if (!message) return res.status(404).json({ok:false,code:'CHAT_MESSAGE_NOT_FOUND',error:'Message not found.'});
+  if (!canAccessChatMessage(req.auth?.user || {},message)) return authorizationDenied(req,res,'CHAT_ACCESS_DENIED','You do not have access to this chat message.');
+  const isAuthor=String(message.senderId || '')===actor.id || String(message.sender || message.by || '').trim().toLowerCase()===actor.name.toLowerCase();
+  if (!isAuthor && !['ADMIN','MANAGER'].includes(actor.role)) return authorizationDenied(req,res,'CHAT_DELETE_FORBIDDEN','Only the sender, Admin, or Manager can delete this message.');
+  message.deleted=true; message.text='This message was deleted.'; message.deletedBy=actor.name; message.deletedAt=now();
+  message.fileUrl=''; message.fileName=''; message.fileType=''; message.roomUrl=''; message.updatedAt=now();
+  await save(d); res.json({ok:true,message});
+});
+
+app.post('/api/chat/read', async (req,res)=>{
+  const d=db();
+  const actor=requestActor(req);
+  const key=chatReadKey(req);
+  const activeChannel=textValue(req.body.activeChannel || '__all__','Active channel',200);
+  d.chatReads ||= {};
+  const readable=[];
+  for (const message of d.teamChat || []) {
+    if (!canAccessChatMessage(req.auth?.user || {},message)) continue;
+    const sender=String(message.sender || message.by || '').trim().toLowerCase();
+    const recipient=String(message.recipient || 'global').trim().toLowerCase();
+    const mine=[actor.name,actor.username,actor.id].map(value=>String(value || '').trim().toLowerCase());
+    const relevant=activeChannel==='__all__'
+      || (activeChannel==='global' && recipient==='global')
+      || (recipient && mine.includes(recipient))
+      || (String(activeChannel).toLowerCase()===sender && mine.includes(recipient));
+    if (!relevant) continue;
+    readable.push(message.id);
+    message.readBy=mergeAppendOnly(message.readBy || [],[{name:actor.name,userId:actor.id,time:now()}]);
+  }
+  d.chatReads[key]=[...new Set([...(d.chatReads[key] || []),...readable])];
+  (d.notifications || []).forEach(notification=>{
+    if(notification.target==='chat' && notificationBelongsToUser(notification, req.auth?.user || {})) {
+      notification.status='READ'; notification.readAt=now(); notification.readBy=actor.name;
+    }
   });
+  await save(d); res.json({ok:true,readBy:actor.name,count:readable.length});
+});
+
+app.post('/api/notifications', async (req,res)=>{
+  try {
+    const d=db();
+    const actor=requestActor(req);
+    const targetRole=normalizePermissionRole(req.body.targetRole || req.body.role || '');
+    const targetUser=textValue(req.body.targetUser || req.body.user || '', 'Notification recipient', 200);
+    const title=textValue(req.body.title || req.body.text || '', 'Notification title', 500, {required:true});
+    const type=textValue(req.body.type || req.body.category || 'info', 'Notification type', 50);
+    const category=textValue(req.body.category || type || 'normal', 'Notification category', 50);
+    const priority=textValue(req.body.priority || 'Normal', 'Notification priority', 30);
+    const ownTargets=[actor.id,actor.username,actor.name].map(value=>String(value || '').trim().toLowerCase());
+    const targetUserKey=String(targetUser || '').trim().toLowerCase();
+    const privileged=['ADMIN','MANAGER'].includes(actor.role);
+    const designerAllowed=actor.role==='DESIGNER' && ((targetRole==='ADMIN' || targetRole==='MANAGER') || (targetUserKey && ownTargets.includes(targetUserKey)));
+    if (!privileged && !designerAllowed) return authorizationDenied(req,res,'NOTIFICATION_CREATE_FORBIDDEN','You cannot create a notification for this recipient.');
+    if (!targetRole && !targetUser) return res.status(400).json({ok:false,code:'NOTIFICATION_TARGET_REQUIRED',error:'A notification role or user is required.'});
+    const to=targetUser || targetRole;
+    const notification={id:nanoid(8),to,targetRole:targetRole || '',targetUser:targetUser || '',title,text:title,type,category,priority,target:textValue(req.body.target || '', 'Notification target', 200),caseId:textValue(req.body.caseId || req.body.projectId || '', 'Notification task', 200),status:'UNREAD',createdAt:now(),createdBy:actor.name,createdById:actor.id};
+    d.notifications.unshift(notification);
+    addAudit(d, actor.name, 'Notification created', notification.id);
+    await save(d);
+    res.status(201).json({ok:true,notification});
+  } catch(error) {
+    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'Notification could not be created.'});
+  }
+});
+
+app.post('/api/notifications/:id/read', async (req,res)=>{
+  const d=db();
+  const notification=(d.notifications || []).find(item=>String(item.id)===String(req.params.id));
+  if (!notification) return res.status(404).json({ok:false,code:'NOTIFICATION_NOT_FOUND',error:'Notification not found.'});
+  if (!notificationBelongsToUser(notification, req.auth?.user || {})) return authorizationDenied(req,res,'NOTIFICATION_ACCESS_DENIED','You cannot update this notification.');
+  notification.status='READ'; notification.readAt=now(); notification.readBy=requestActor(req).name;
+  await save(d); res.json({ok:true});
+});
+
+app.post('/api/notifications/read-all', async (req,res)=>{
+  const d=db(); const actor=requestActor(req); let count=0;
+  for (const notification of d.notifications || []) {
+    if (!notificationBelongsToUser(notification, req.auth?.user || {})) continue;
+    if (notification.status !== 'READ') count += 1;
+    notification.status='READ'; notification.readAt=now(); notification.readBy=actor.name;
+  }
+  await save(d); res.json({ok:true,count});
+});
+
+app.post('/whatsapp/mock/incoming', authenticationGate, apiWriteRateLimiter, requireAdminSession, uploadAny, async (req,res)=>{
+  try {
+    if (IS_PRODUCTION) {
+      if (!WHATSAPP_WEBHOOK_SECRET) return res.status(503).json({ok:false,code:'WEBHOOK_DISABLED',error:'The mock WhatsApp webhook is disabled in production.'});
+      const supplied=String(req.get('x-webhook-secret') || '');
+      if (!supplied || supplied.length !== WHATSAPP_WEBHOOK_SECRET.length || !crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(WHATSAPP_WEBHOOK_SECRET))) {
+        return authorizationDenied(req,res,'WEBHOOK_SECRET_INVALID','Webhook secret is invalid.');
+      }
+    }
+    const d=db();
+    const parsed=parseLead(textValue(req.body.text || '','WhatsApp text',MAX_CASE_TEXT_LENGTH,{required:true}));
+    const assignee=leastBusy(d);
+    const fromName=textValue(req.body.fromName || req.body.from || 'WhatsApp Banker','Sender name',200);
+    const caseInternalId=nanoid(8);
+    await prepareSecureUploads(req,'SOURCE');
+    const c={id:caseInternalId,caseId:nextCaseNo(d,parsed.city),source:'WhatsApp',createdByRole:'BANKER',creatorName:fromName,createdBy:fromName,customerName:parsed.customerName,customerPhone:'',bankerName:fromName,bank:textValue(req.body.bank || '','Bank',200),branch:textValue(req.body.branch || '','Branch',200),serviceType:parsed.serviceType,city:parsed.city,propertyAddress:parsed.propertyAddress,estimateAmount:Number(parsed.estimateAmount || 0),priority:'Normal',status:'ASSIGNED',assigneeId:assignee?.id,assigneeName:assignee?.name,assigneeRole:assignee?.role,assignedTo:assignee?.name || 'Unassigned',createdAt:now(),completedAt:null,paymentStatus:'PENDING',documents:(req.files || []).map(file=>addFileRegistryEntry(d,docPayload(file,'WhatsApp','BANKER','SOURCE',caseInternalId))),comments:[],revisions:[],history:[{at:now(),by:'WhatsApp',action:'Lead created from WhatsApp'}]};
+    d.cases.unshift(c); d.whatsappInbox.unshift({id:nanoid(8),from:textValue(req.body.from || '','Sender',100),fromName,text:req.body.text,createdAt:now(),caseId:c.caseId});
+    notifyRole(d,'ADMIN',`New WhatsApp case ${c.caseId} from ${c.creatorName}`,'task',c.id); notifyRole(d,'MANAGER',`New WhatsApp case ${c.caseId} from ${c.creatorName}`,'task',c.id); notifyUser(d,c.assigneeName,`New WhatsApp task assigned: ${c.caseId}`,'task',c.id);
+    await save(d); res.status(201).json(c);
+  } catch(error) {
+    if (error instanceof FileValidationError) return fileUploadFailure(res,error,'WhatsApp attachment upload failed.');
+    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'WhatsApp lead could not be created.'});
+  }
+});
+
+app.get('/api/qr/:caseId', async (req,res)=>{
+  const d=db();
+  const c=findCaseByAnyId(d.cases || [], req.params.caseId);
+  if (!c) return res.status(404).json({ok:false,error:'Case not found.'});
+  if (!authorizeCase(req,res,c,'read')) return;
+  const data=await QRCode.toDataURL(`${publicUrl()}/case/${encodeURIComponent(c.caseId || c.id)}`);
+  res.json({qr:data});
+});
+
+app.get('/api/db/health', requireAdminSession, async (_req,res)=>{
+  try {
+    if (USE_POSTGRES) {
+      await ensurePostgres();
+      const health = await getRelationalHealth(pool);
+      return res.status(health.integrity?.ok === false ? 503 : 200).json({ ok:health.integrity?.ok !== false, ...health });
+    }
+    const d = db();
+    return res.json({ok:true,database:'json-file',connected:true,file:DB_FILE,localSandbox:true,warning:'Local JSON sandbox is enabled. Production requires PostgreSQL.',stateVersion,counts:{users:(d.users||[]).length,cases:(d.cases||[]).length,chatMessages:(d.teamChat||[]).length,notifications:(d.notifications||[]).length,attendanceLogs:(d.attendanceLogs||[]).length,payments:(d.payments||[]).filter(Boolean).length}});
+  } catch (err) {
+    return res.status(500).json({ok:false,database:USE_POSTGRES?'postgresql-relational':'json-file',code:err.code || '',error:err.message});
+  }
+});
+
+app.get('/api/db/migrations', requireAdminSession, async (_req,res)=>{
+  if (!USE_POSTGRES) return res.json({ok:true,database:'json-file',migrations:[],warning:'Schema migrations run only with PostgreSQL.'});
+  try {
+    await ensurePostgres();
+    const result = await pool.query('SELECT version,name,checksum,execution_ms,applied_at FROM schema_migrations ORDER BY version');
+    res.json({ok:true,database:'postgresql-relational',migrations:result.rows});
+  } catch (error) {
+    res.status(500).json({ok:false,code:error.code || '',error:error.message});
+  }
+});
+
+app.get('/api/db/revisions', requireAdminSession, async (req,res)=>{
+  if (!USE_POSTGRES) return res.json({ok:true,database:'json-file',revisions:[],warning:'Revision history is available only with PostgreSQL.'});
+  try {
+    const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
+    const result = await pool.query(
+      `SELECT id,state_version,actor,reason,snapshot_hash,entity_counts,created_at
+       FROM state_revisions ORDER BY state_version DESC LIMIT $1`,
+      [limit]
+    );
+    res.json({ok:true,revisions:result.rows});
+  } catch (error) {
+    res.status(500).json({ok:false,code:error.code || '',error:error.message});
+  }
+});
+
+app.post('/api/db/revisions/:id/restore', requireAdminSession, async (req,res)=>{
+  if (!USE_POSTGRES) return res.status(409).json({ok:false,code:'POSTGRES_REQUIRED',error:'Revision restore requires PostgreSQL.'});
+  try {
+    const revisionId = Number(req.params.id);
+    const confirmation = String(req.body?.confirmation || '').trim();
+    if (!Number.isInteger(revisionId) || revisionId <= 0) return res.status(400).json({ok:false,code:'REVISION_ID_INVALID',error:'A valid revision id is required.'});
+    if (confirmation !== `RESTORE ${revisionId}`) return res.status(400).json({ok:false,code:'RESTORE_CONFIRMATION_REQUIRED',error:`Type RESTORE ${revisionId} to confirm this recovery operation.`});
+    await persistenceQueue.catch(() => {});
+    const actor = requestActor(req);
+    const result = await restoreRelationalRevision(pool, { revisionId, actor:actor.name, applyAuthOperationsWithClient, financeSnapshotHash });
+    await reloadCommittedState();
+    res.json({ok:true,restoredRevisionId:revisionId,...result});
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message});
+  }
+});
+
+
+app.use((err, req, res, _next) => {
+  const status = Number(err?.statusCode || err?.status || 500);
+  structuredLog(status >= 500 ? 'error' : 'warn','api_error',{requestId:req?.requestId || '',method:req?.method || '',path:req?.originalUrl || '',status,code:err?.code || '',error:err?.message || 'Unexpected server error.'});
+  if (status >= 500) operationalJobs.recordFailure('API_REQUEST',err,{requestId:req?.requestId || '',method:req?.method || '',path:req?.originalUrl || ''},{maxAttempts:1}).catch(()=>{});
+  if (res.headersSent) return;
+  res.status(status).json({ ok:false, requestId:req?.requestId || '', code:err?.code || '', error:err?.message || 'Unexpected server error.' });
+});
+
+const PORT=process.env.PORT||8080;
+const HOST=String(process.env.HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1')).trim();
+let httpServer = null;
+
+async function gracefulShutdown(signal, exitCode = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  structuredLog('warn','server_shutdown_started',{signal,exitCode});
+  const forceTimer = setTimeout(() => {
+    structuredLog('fatal','server_shutdown_forced',{signal});
+    process.exit(1);
+  }, Number(process.env.GRACEFUL_SHUTDOWN_TIMEOUT_MS || 15000));
+  forceTimer.unref();
+  try {
+    if (httpServer) await new Promise(resolve => httpServer.close(resolve));
+    await persistenceQueue.catch(() => {});
+    if (pool) await pool.end().catch(() => {});
+    structuredLog('info','server_shutdown_completed',{signal});
+    clearTimeout(forceTimer);
+    process.exit(exitCode);
+  } catch (error) {
+    structuredLog('fatal','server_shutdown_failed',{signal,error:error.message || String(error)});
+    clearTimeout(forceTimer);
+    process.exit(1);
+  }
+}
+
+async function startServer() {
+  try {
+    await initStore();
+    await migrateLegacyCredentials();
+    httpServer = await new Promise((resolve, reject) => {
+      const server = app.listen(PORT, HOST);
+      server.once('listening', () => resolve(server));
+      server.once('error', reject);
+    });
+    httpServer.ref();
+    structuredLog('info','server_started',{host:HOST,port:Number(PORT),storage:USE_POSTGRES ? 'postgresql-relational' : 'json-sandbox',startedAt:serverStartedAt});
+  } catch (err) {
+    structuredLog('fatal','server_startup_blocked',{error:err.message || String(err),code:err.code || ''});
+    if (pool) await pool.end().catch(() => {});
+    process.exit(1);
+  }
+}
+
+process.once('SIGTERM',()=>gracefulShutdown('SIGTERM',0));
+process.once('SIGINT',()=>gracefulShutdown('SIGINT',0));
+process.on('unhandledRejection',reason=>{
+  const error=reason instanceof Error ? reason : new Error(String(reason));
+  structuredLog('error','unhandled_rejection',{error:error.message,stack:error.stack || ''});
+  operationalJobs.recordFailure('UNHANDLED_REJECTION',error,{}, {maxAttempts:1}).catch(()=>{});
+});
+process.on('uncaughtException',error=>{
+  structuredLog('fatal','uncaught_exception',{error:error.message,stack:error.stack || ''});
+  gracefulShutdown('UNCAUGHT_EXCEPTION',1);
+});
+
+startServer();
 

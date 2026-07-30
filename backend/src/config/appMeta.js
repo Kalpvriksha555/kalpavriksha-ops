@@ -54,15 +54,7 @@ export const finalDocTypes = [
 ];
 
 export const seed = {
-  users:[
-    { id: 1, name: 'Ashutosh Rai', username: 'ashutosh', password: '123', role: 'Admin', status: 'APPROVED' },
-    { id: 2, name: 'Vaibhav Singh', username: 'vaibhav', password: '123', role: 'Admin', status: 'APPROVED' },
-    { id: 3, name: 'Shubham Upadhyay', username: 'shubham', password: '123', role: 'Admin', status: 'APPROVED' },
-    { id: 4, name: 'Amit Kushwaha', username: 'amit', password: '123', role: 'Manager', status: 'APPROVED' },
-    { id: 5, name: 'Waqar', username: 'waqar', password: '123', role: 'Designer', status: 'APPROVED' },
-    { id: 6, name: 'Nilu Gupta', username: 'nilu', password: '123', role: 'Designer', status: 'APPROVED' },
-    { id: 7, name: 'Khushbu Pandey', username: 'khushbu', password: '123', role: 'Designer', status: 'APPROVED' }
-  ],
+  users:[],
   cases:[],
   deletedProjectIds:[],
   payments:[],
@@ -71,5 +63,6 @@ export const seed = {
   whatsappInbox:[],
   audit:[],
   attendanceLogs:[],
+  files:[],
   chatReads:{ADMIN:[],MANAGER:[],DESIGNER:[]}
 };

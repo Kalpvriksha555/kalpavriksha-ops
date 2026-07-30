@@ -1,20 +1,35 @@
 {
   "name": "kalpvriksha-designs-backend",
-  "version": "2.0.0",
+  "version": "2.9.2-local-runtime-stability",
   "type": "module",
   "scripts": {
-    "dev": "node --watch src/server.js",
+    "dev": "node scripts/start-json-dev.mjs",
     "start": "node src/server.js",
-    "db:health": "node scripts/db-health.mjs"
+    "db:health": "node scripts/db-health.mjs",
+    "db:migrate": "node scripts/db-migrate.mjs",
+    "db:integrity": "node scripts/db-integrity.mjs",
+    "backup:create": "node scripts/backup-create.mjs",
+    "backup:verify": "node scripts/backup-verify.mjs",
+    "backup:status": "node scripts/backup-status.mjs",
+    "restore:drill": "node scripts/restore-drill.mjs",
+    "finance-recovery:plan": "node scripts/finance-recovery-plan.mjs",
+    "finance-recovery:apply": "node scripts/finance-recovery-apply.mjs",
+    "release:record": "node scripts/release-record.mjs",
+    "dev:watch": "node --watch scripts/start-json-dev.mjs",
+    "dev:probe": "node scripts/local-runtime-probe.mjs"
   },
   "dependencies": {
-    "cors": "latest",
-    "dotenv": "latest",
-    "express": "latest",
-    "multer": "latest",
-    "nanoid": "latest",
-    "nodemailer": "^9.0.1",
-    "pg": "^8.13.1",
-    "qrcode": "latest"
+    "cors": "2.8.6",
+    "dotenv": "17.4.2",
+    "express": "5.2.1",
+    "multer": "2.2.0",
+    "nanoid": "5.1.16",
+    "nodemailer": "9.0.3",
+    "pg": "8.22.0",
+    "qrcode": "1.5.4"
+  },
+  "engines": {
+    "node": ">=20.19.0",
+    "npm": ">=10.0.0"
   }
 }

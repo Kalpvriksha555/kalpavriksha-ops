@@ -30,7 +30,7 @@ if (forbidden.length) errors.push(`Build/cache folders must not be committed: ${
 const envFiles = ['.env', 'frontend/.env', 'backend/.env'].filter(exists);
 if (envFiles.length) errors.push(`Raw .env files found in distributable ZIP: ${envFiles.join(', ')}. Use .env.example only.`);
 
-const backupFiles = walk('.').filter(p => !p.startsWith('docs/') && /\.(bak|old|orig|tmp)$|backup|copy/i.test(path.basename(p)));
+const backupFiles = walk('.').filter(p => !p.startsWith('docs/') && !p.startsWith('backend/scripts/backup-') && p !== 'PHASE_7_RELIABILITY_BACKUP_RECOVERY.md' && /\.(bak|old|orig|tmp)$|backup|copy/i.test(path.basename(p)));
 if (backupFiles.length) warnings.push(`Backup/stale files found: ${backupFiles.slice(0, 12).join(', ')}`);
 
 const srcAppFiles = walk('.').filter(p => /(^|\/)src\/App\.jsx$/.test(p));

@@ -1,6 +1,6 @@
 {
   "name": "kalpavriksha-designs-ops",
-  "version": "1.0.0-production-candidate",
+  "version": "1.9.2-local-runtime-stability",
   "type": "module",
   "scripts": {
     "dev": "node scripts/start-all.mjs",
@@ -16,36 +16,56 @@
     "serve": "node scripts/start-all.mjs --production",
     "prod": "npm run build && npm run serve",
     "preflight": "node scripts/preflight.mjs",
-    "db:health": "node backend/scripts/db-health.mjs",
-    "go-live:check": "npm run build && npm run smoke && npm run db:health",
+    "db:health": "npm run db:integrity --prefix backend",
+    "go-live:check": "npm run release:gate",
     "desktop:dev": "KV_DESKTOP_DEV_URL=http://localhost:5173 electron desktop/main.cjs",
     "desktop:build": "npm run build && electron-builder --dir",
     "desktop:pack": "npm run build && electron-builder",
     "doctor": "node scripts/doctor.mjs",
     "clean:cache": "node -e \"console.log('Use scripts/clean-local-cache.ps1 on Windows or scripts/clean-local-cache.sh on Linux/macOS.')\"",
-    "verify": "npm run doctor && npm run guard && npm run audit:production && npm run build",
+    "verify": "npm run security:package-audit && npm run doctor && npm run guard && npm run audit:production && npm run test:frontend && npm run test:backend && npm run verify:finance && npm run verify:auth && npm run verify:authorization && npm run verify:database && npm run verify:files && npm run verify:reliability && npm run verify:release && npm run verify:frontend-ux && npm run build",
     "guard": "node scripts/regression-guard.mjs",
-    "audit:production": "node scripts/production-regression-audit.mjs"
+    "audit:production": "node scripts/production-regression-audit.mjs",
+    "security:package-audit": "node scripts/security-package-audit.mjs",
+    "verify:finance": "node scripts/phase-2-finance-durability-check.mjs",
+    "verify:auth": "node scripts/phase-3-authentication-check.mjs",
+    "verify:authorization": "node scripts/phase-4-authorization-check.mjs",
+    "verify:database": "node scripts/phase-5-database-integrity-check.mjs",
+    "db:migrate": "npm run db:migrate --prefix backend",
+    "verify:files": "node scripts/phase-6-file-storage-check.mjs",
+    "verify:reliability": "node scripts/phase-7-reliability-check.mjs",
+    "backup:create": "npm run backup:create --prefix backend",
+    "backup:verify": "npm run backup:verify --prefix backend",
+    "backup:status": "npm run backup:status --prefix backend",
+    "restore:drill": "npm run restore:drill --prefix backend",
+    "test:frontend": "node --test tests/frontend/*.test.mjs",
+    "verify:release": "node scripts/phase-8-release-certification-check.mjs",
+    "release:clean-install": "node scripts/clean-install-verify.mjs",
+    "release:certify": "node scripts/release-certify.mjs",
+    "release:gate": "node scripts/release-gate.mjs",
+    "finance-recovery:plan": "npm run finance-recovery:plan --prefix backend",
+    "finance-recovery:apply": "npm run finance-recovery:apply --prefix backend",
+    "verify:frontend-ux": "node scripts/phase-9-frontend-ux-check.mjs",
+    "test:backend": "node --test tests/backend/*.test.mjs"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
-    "firebase": "^11.10.0",
-    "lucide-react": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "vite": "latest"
+    "@vitejs/plugin-react": "6.0.3",
+    "lucide-react": "1.23.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "vite": "8.1.4"
   },
   "devDependencies": {
-    "@eslint/js": "^10.0.1",
-    "autoprefixer": "^10.4.21",
-    "eslint": "^10.5.0",
-    "eslint-plugin-react-hooks": "^7.1.1",
-    "eslint-plugin-react-refresh": "^0.5.3",
-    "globals": "^17.7.0",
-    "postcss": "^8.5.15",
-    "tailwindcss": "^3.4.17",
-    "electron": "^31.7.7",
-    "electron-builder": "^24.13.3"
+    "@eslint/js": "10.0.1",
+    "autoprefixer": "10.5.2",
+    "eslint": "10.6.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.3",
+    "globals": "17.7.0",
+    "postcss": "8.5.16",
+    "tailwindcss": "3.4.19",
+    "electron": "31.7.7",
+    "electron-builder": "24.13.3"
   },
   "main": "desktop/main.cjs",
   "build": {
@@ -69,5 +89,9 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     }
+  },
+  "engines": {
+    "node": ">=20.19.0",
+    "npm": ">=10.0.0"
   }
 }

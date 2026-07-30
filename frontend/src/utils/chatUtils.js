@@ -54,12 +54,10 @@ export const ROLES = { ADMIN: 'Admin', MANAGER: 'Manager', DESIGNER: 'Designer' 
 export const normalizeChatUser = (u = {}) => {
   const rawName = String(u.name || '').trim();
   const rawUsername = String(u.username || '').trim();
-  const isKhushbu = /khus+h?bu|khushboo|khushbu/i.test(rawName) || /khus+h?bu|khushboo|khushbu/i.test(rawUsername);
-  const isWaqar = /ali\s*waqar|^ali$|^waqar$/i.test(rawName) || /ali|waqar/i.test(rawUsername);
   return {
     ...u,
-    name: isKhushbu ? 'Khushbu Pandey' : (isWaqar ? 'Waqar' : (rawName || u.name)),
-    username: isKhushbu ? 'khushbu' : (isWaqar ? 'waqar' : rawUsername),
+    name: rawName || u.name,
+    username: rawUsername,
     role: normalizeRole(u.role),
     status: normalizeStatus(u.status),
     lastSeenAt: u.lastSeenAt || u.lastLogoutAt || null
