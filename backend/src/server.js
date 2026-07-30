@@ -550,6 +550,25 @@ async function applyAuthOperationsWithClient(client, operations = []) {
   }
 }
 
+async function applyStandaloneAuthOperations(operations = []) {
+  if (!operations.length) return;
+  if (!USE_POSTGRES) {
+    applyLocalAuthOperations(operations);
+    return;
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await applyAuthOperationsWithClient(client, operations);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function findCredentialByUsername(username = '') {
   const normalized = normalizeUsername(username);
   if (!normalized) return null;
@@ -821,6 +840,7 @@ async function migrateLegacyCredentials() {
   const d = db();
   const operations = [];
   let stateChanged = false;
+  let bootstrapCreated = false;
   for (let index = 0; index < (d.users || []).length; index += 1) {
     const original = d.users[index] || {};
     const username = normalizeUsername(original.username);
@@ -844,17 +864,19 @@ async function migrateLegacyCredentials() {
       });
       operations.push({ type: 'upsertCredential', credential });
     } else if (credential) {
-      operations.push({
-        type: 'upsertCredential',
-        credential: {
-          ...credential,
-          user_id: userId,
-          username,
-          role: original.role,
-          status: original.status,
-          must_change_password: Boolean(credential.must_change_password)
-        }
+      const synchronized = authCredentialRecord({
+        ...credential,
+        user_id: credential.user_id || userId,
+        username,
+        role: original.role,
+        status: original.status,
+        must_change_password: Boolean(credential.must_change_password)
       });
+      const changed = [
+        'user_id', 'username', 'role', 'status', 'must_change_password', 'password_version'
+      ].some(field => String(credential[field] ?? '') !== String(synchronized[field] ?? ''));
+      credential = synchronized;
+      if (changed) operations.push({ type: 'upsertCredential', credential });
     }
     const safe = stripCredentialFields(original);
     if (JSON.stringify(safe) !== JSON.stringify(original)) stateChanged = true;
@@ -876,10 +898,22 @@ async function migrateLegacyCredentials() {
         credential: authCredentialRecord({ user_id: userId, username: bootstrapUsername, password_hash: await hashPassword(bootstrapPassword), role: 'ADMIN', status: 'APPROVED', must_change_password: false, password_version: 1, password_changed_at: now() })
       });
       stateChanged = true;
+      bootstrapCreated = true;
     }
   }
 
-  if (operations.length || stateChanged) await save(d, { authOperations: operations });
+  if (USE_POSTGRES) {
+    // Credential cutover is independent of the operational-state snapshot.
+    // Do not rewrite cases, finance, files, or legacy orphan rows merely to
+    // create password hashes.
+    if (bootstrapCreated) await save(d, { authOperations: operations });
+    else {
+      await applyStandaloneAuthOperations(operations);
+      if (stateChanged) memoryState = norm(d);
+    }
+  } else if (operations.length || stateChanged) {
+    await save(d, { authOperations: operations });
+  }
   if ((await countCredentials()) === 0) {
     throw new Error('No secure login credential exists. Set BOOTSTRAP_ADMIN_USERNAME and BOOTSTRAP_ADMIN_PASSWORD for the one-time secure bootstrap, or restore the existing user records before startup.');
   }

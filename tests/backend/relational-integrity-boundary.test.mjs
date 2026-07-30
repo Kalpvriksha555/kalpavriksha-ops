@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   decomposeState,
+  RELATIONAL_MIGRATIONS,
   stateSnapshotHash,
   verifyPersistedRelationalSnapshot
 } from '../../backend/src/repositories/postgresStateRepository.js';
@@ -66,4 +67,13 @@ test('persisted integrity still rejects a real relational row mismatch', () => {
     () => verifyPersistedRelationalSnapshot(parts, metadata),
     error => error?.code === 'RELATIONAL_STATE_INTEGRITY_FAILURE'
   );
+});
+
+test('legacy orphan guard permits only an unchanged existing reference', () => {
+  const migration = RELATIONAL_MIGRATIONS.find(item => item.version === '009.001');
+  assert.ok(migration);
+  assert.match(migration.sql, /TG_OP = 'UPDATE'/);
+  assert.match(migration.sql, /OLD\.case_id IS NOT DISTINCT FROM NEW\.case_id/);
+  assert.match(migration.sql, /kalpa\.allow_legacy_orphans/);
+  assert.match(migration.sql, /RAISE EXCEPTION 'Unknown case reference/);
 });

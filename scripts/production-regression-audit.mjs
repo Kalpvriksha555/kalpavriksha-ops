@@ -149,6 +149,9 @@ requireInFile('backend/scripts/july30-recovery.mjs', /attendancePreserved/, 'Jul
 requireInFile('backend/scripts/july30-finalize.mjs', /activeFinancePreserved/, 'Final merge must preserve active finance fields.');
 requireInFile(serverPath, /process\.env\.BIND_HOST/, 'Production server must use a dedicated bind-host variable.');
 requireInFile('backend/src/repositories/postgresStateRepository.js', /rowsRequiringRelationalWrite/, 'Relational persistence must skip unchanged legacy orphan rows.');
+requireInFile('backend/src/repositories/postgresStateRepository.js', /kalpa\.allow_legacy_orphans/, 'Final cutover must preserve audited legacy orphan references without weakening normal writes.');
+requireInFile('backend/src/server.js', /applyStandaloneAuthOperations/, 'Credential migration must not rewrite the complete operational state.');
+requireInFile('backend/scripts/july30-finalize.mjs', /allowLegacyOrphans:\s*true/, 'The audited final merge must explicitly enable legacy-orphan preservation.');
 requireInFile('scripts/deploy-july30-safe-vps.sh', /read-only recovery preflight/, 'Deployment must preflight live recovery before downtime.');
 requireInFile('scripts/deploy-july30-safe-vps.sh', /recovery-applied-commit/, 'Deployment must checkpoint an already verified recovery transaction.');
 requireInFile('scripts/deploy-july30-safe-vps.sh', /frontend\/dist\.next/, 'Deployment must atomically publish the verified frontend build.');

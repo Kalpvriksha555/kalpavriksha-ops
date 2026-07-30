@@ -525,6 +525,29 @@ export const RELATIONAL_MIGRATIONS = [
       completed_at timestamptz
     );
     CREATE INDEX IF NOT EXISTS finance_recovery_runs_status_created_idx ON finance_recovery_runs(status, created_at DESC);
+  `),
+  migration('009.001', 'grandfather_legacy_orphan_references', `
+    CREATE OR REPLACE FUNCTION enforce_known_ops_case_reference() RETURNS trigger AS $$
+    BEGIN
+      IF NEW.case_id IS NULL OR btrim(NEW.case_id) = '' THEN RETURN NEW; END IF;
+      IF NOT EXISTS (SELECT 1 FROM app_state_metadata WHERE key='main') THEN RETURN NEW; END IF;
+      IF EXISTS (
+        SELECT 1 FROM ops_cases WHERE id=NEW.case_id OR case_no=NEW.case_id
+      ) THEN
+        RETURN NEW;
+      END IF;
+      IF current_setting('kalpa.allow_legacy_orphans', true) = 'on' THEN
+        RETURN NEW;
+      END IF;
+      -- Historical imports can contain child rows whose original parent case
+      -- is no longer present. Permit updates only when that legacy reference
+      -- itself is unchanged; new or altered orphan references remain blocked.
+      IF TG_OP = 'UPDATE' AND OLD.case_id IS NOT DISTINCT FROM NEW.case_id THEN
+        RETURN NEW;
+      END IF;
+      RAISE EXCEPTION 'Unknown case reference: %', NEW.case_id USING ERRCODE='23503';
+    END;
+    $$ LANGUAGE plpgsql;
   `)
 ];
 
@@ -884,6 +907,9 @@ export async function persistRelationalState(pool, {
   try {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1)', [ADVISORY_LOCK_ID]);
+    if (metadata.allowLegacyOrphans === true) {
+      await client.query("SELECT set_config('kalpa.allow_legacy_orphans','on',true)");
+    }
     const current = await client.query('SELECT state_version FROM app_state_metadata WHERE key=$1 FOR UPDATE', ['main']);
     const currentVersion = Number(current.rows[0]?.state_version || 0);
     if (currentVersion !== Number(expectedVersion)) {

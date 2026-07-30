@@ -5,7 +5,8 @@ import pg from 'pg';
 import {
   FINANCE_FIELDS,
   mergeActiveLegacyIntoRecoveredState,
-  sha256
+  sha256,
+  summarizeOrphanCaseReferences
 } from './july30-recovery-lib.mjs';
 import {
   persistRelationalState,
@@ -89,6 +90,7 @@ try {
   }
 
   const merged = mergeActiveLegacyIntoRecoveredState(originalRelational, activeLegacy);
+  const orphanReferences = summarizeOrphanCaseReferences(merged.state);
   const activeIds = new Set(activeCases.map(recordId).filter(Boolean));
   const deletedIds = new Set((merged.state.deletedProjectIds || []).map(String));
   const finalIds = new Set(records(merged.state, 'cases').map(recordId));
@@ -126,7 +128,8 @@ try {
       cases: records(merged.state, 'cases').length,
       attendance: records(merged.state, 'attendanceLogs').length,
       files: records(merged.state, 'files').length,
-      activeFinanceHash: mergedActiveFinanceHash
+      activeFinanceHash: mergedActiveFinanceHash,
+      legacyOrphanReferences: orphanReferences
     },
     changes: merged.summary,
     verification: {
@@ -146,7 +149,11 @@ try {
       state: merged.state,
       expectedVersion: Number(relational.stateVersion || 0),
       targetVersion: Number(relational.stateVersion || 0) + 1,
-      metadata: { actor: 'july30-final-merge', reason: 'merge_active_legacy_with_recovered_relational_state' },
+      metadata: {
+        actor: 'july30-final-merge',
+        reason: 'merge_active_legacy_with_recovered_relational_state',
+        allowLegacyOrphans: true
+      },
       applyAuthOperationsWithClient: async () => {},
       financeSnapshotHash: sha256,
       revisionRetention: Number(process.env.STATE_REVISION_RETENTION || 500)
@@ -181,7 +188,7 @@ try {
         state: originalRelational,
         expectedVersion: Number(current.stateVersion || 0),
         targetVersion: Number(current.stateVersion || 0) + 1,
-        metadata: { actor: 'july30-final-merge', reason: 'automatic_rollback' },
+        metadata: { actor: 'july30-final-merge', reason: 'automatic_rollback', allowLegacyOrphans: true },
         applyAuthOperationsWithClient: async () => {},
         financeSnapshotHash: sha256,
         revisionRetention: Number(process.env.STATE_REVISION_RETENTION || 500)

@@ -6,6 +6,7 @@ import {
   mergeActiveLegacyIntoRecoveredState,
   mergeRecoveryIntoState,
   recoveryTimestamp,
+  summarizeOrphanCaseReferences,
   validateRecoveryExport
 } from '../../backend/scripts/july30-recovery-lib.mjs';
 import { loadStateForJuly30Recovery } from '../../backend/scripts/july30-recovery-state.mjs';
@@ -235,4 +236,19 @@ test('final merge keeps separate attendance dates when legacy rows have no expli
   const final = mergeActiveLegacyIntoRecoveredState(recovered, active).state;
   assert.equal(final.attendanceLogs.length, 2);
   assert.deepEqual(final.attendanceLogs.map(item => item.date), ['2026-07-30', '2026-07-31']);
+});
+
+test('cutover audit reports all legacy orphan reference collections together', () => {
+  const report = summarizeOrphanCaseReferences({
+    cases: [{ id: 'KNOWN', caseId: 'KNOWN-NO' }],
+    payments: [
+      { id: 'pay-known', caseId: 'KNOWN' },
+      { id: 'pay-orphan', caseId: 'MISSING-1' }
+    ],
+    files: [{ id: 'file-orphan', caseId: 'MISSING-2' }],
+    whatsappInbox: [{ id: 'wa-orphan', caseId: 'MISSING-1' }]
+  });
+  assert.equal(report.total, 3);
+  assert.deepEqual(report.byCollection, { payments: 1, files: 1, whatsappInbox: 1 });
+  assert.deepEqual(report.references, ['MISSING-1', 'MISSING-2']);
 });

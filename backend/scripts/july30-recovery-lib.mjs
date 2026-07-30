@@ -419,3 +419,43 @@ export function mergeActiveLegacyIntoRecoveredState(recoveredState = {}, activeS
   summary.finalFiles = state.files.length;
   return { state, summary };
 }
+
+export function summarizeOrphanCaseReferences(state = {}) {
+  const cases = Array.isArray(state.cases)
+    ? state.cases
+    : (Array.isArray(state.projects) ? state.projects : []);
+  const known = new Set();
+  for (const record of cases) {
+    for (const value of [record?.id, record?.caseId, record?.caseNo]) {
+      const key = String(value || '').trim();
+      if (key) known.add(key);
+    }
+  }
+  const configurations = [
+    ['payments', record => record?.caseId || record?.projectId || record?.caseNo],
+    ['files', record => record?.caseId],
+    ['whatsappInbox', record => record?.caseId]
+  ];
+  const details = [];
+  for (const [collection, referenceFor] of configurations) {
+    const records = Array.isArray(state?.[collection]) ? state[collection] : [];
+    records.forEach((record, index) => {
+      const caseReference = String(referenceFor(record) || '').trim();
+      if (!caseReference || known.has(caseReference)) return;
+      details.push({
+        collection,
+        recordId: String(record?.id || record?.paymentId || record?.fileId || index),
+        caseReference
+      });
+    });
+  }
+  return {
+    total: details.length,
+    byCollection: Object.fromEntries(configurations.map(([collection]) => [
+      collection,
+      details.filter(item => item.collection === collection).length
+    ])),
+    references: [...new Set(details.map(item => item.caseReference))].sort(),
+    details
+  };
+}
