@@ -251,8 +251,37 @@ align_main() {
   echo "VERIFIED GITHUB MAIN AND VPS ARE ALIGNED"
 }
 
+restore_stable_live() {
+  require_common
+  load_env
+  local stable_script="$LIVE/backend/src/server.js"
+  local stable_cwd="$LIVE/backend"
+  test -f "$stable_script" || fail "Stable backend entrypoint is missing: $stable_script"
+
+  log "Restoring the known stable live backend without changing recovery data"
+  pm2 delete "$PM2_NAME" 2>/dev/null || true
+  pm2 start "$stable_script" --name "$PM2_NAME" --cwd "$stable_cwd" --time --update-env
+  if ! wait_for_health "/api/health" "$WORK/stable-live-health.json"; then
+    pm2 logs "$PM2_NAME" --lines 120 --nostream || true
+    fail "Stable backend health check failed"
+  fi
+  pm2 save
+
+  log "Preserving the dormant recovered database in a verified backup"
+  if [ -d "$STAGE/backend/node_modules" ] && create_backup_bundle "deferred-recovery" "$STAGE"; then
+    echo "Recovered relational state was backed up for a later maintenance window."
+  else
+    echo "WARNING: Deferred recovery backup could not be refreshed; earlier verified server and local backups remain available." >&2
+  fi
+
+  date -u +%Y-%m-%dT%H:%M:%SZ >"$WORK/recovery-deferred-at"
+  echo "STABLE LIVE BACKEND RESTORED; JULY 30 RECOVERY IS DEFERRED"
+  cat "$WORK/stable-live-health.json"
+}
+
 case "$MODE" in
   recover-deploy) recover_and_deploy ;;
   align-main) align_main ;;
+  restore-stable) restore_stable_live ;;
   *) fail "Unknown mode: $MODE" ;;
 esac
