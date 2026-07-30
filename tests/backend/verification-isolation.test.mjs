@@ -24,3 +24,11 @@ test('finance durability verifier uses isolated runtime storage', () => {
   assert.match(source, /KALPA_FILE_STORAGE_ROOT:\s*path\.join\(tempDir, ['"]private-files['"]\)/u);
   assert.match(source, /KALPA_BACKUP_ROOT:\s*path\.join\(tempDir, ['"]backups['"]\)/u);
 });
+
+test('reliability verifier disables inherited production release-certificate gating', () => {
+  const source = fs.readFileSync('scripts/phase-7-reliability-check.mjs', 'utf8');
+  assert.match(source, /RELEASE_CERTIFICATE_REQUIRED:\s*['"]false['"]/u);
+  assert.match(source, /RELEASE_VALIDATE_PRODUCTION_ENV:\s*['"]false['"]/u);
+  assert.match(source, /RELEASE_REQUIRE_BACKUP:\s*['"]false['"]/u);
+  assert.match(source, /RELEASE_CERTIFICATE_PATH:\s*path\.join\(temp,\s*['"]release-certification\.json['"]\)/u);
+});
