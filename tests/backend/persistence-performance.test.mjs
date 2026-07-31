@@ -23,7 +23,9 @@ test('presence persistence is delayed, coalesced and excluded from full revision
   assert.match(server, /skipRevisionSnapshot:true/);
   assert.match(server, /collections:\['users','attendanceLogs'\]/);
   assert.match(repository, /const skipRevisionSnapshot = metadata\.skipRevisionSnapshot === true/);
-  assert.match(repository, /if \(!skipRevisionSnapshot\) \{\s*await client\.query\(\s*`INSERT INTO state_revisions/s);
+  assert.match(repository, /let shouldWriteRevisionSnapshot = !skipRevisionSnapshot/);
+  assert.match(repository, /metadata\.periodicRevisionSnapshot === true/);
+  assert.match(repository, /if \(shouldWriteRevisionSnapshot\) \{\s*await client\.query\(\s*`INSERT INTO state_revisions/s);
 });
 
 test('hot task and file paths sync only their changed relational collections', () => {

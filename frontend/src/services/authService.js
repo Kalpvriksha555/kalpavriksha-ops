@@ -4,14 +4,13 @@ import { createRequestDeadline } from './requestControlService.js';
 const CSRF_STORAGE_KEY = 'kalpa_csrf_token';
 let csrfToken = '';
 
-try { csrfToken = window.localStorage.getItem(CSRF_STORAGE_KEY) || ''; } catch {}
+// CSRF credentials are page-instance secrets. Remove the legacy persisted copy
+// so a browser refresh never silently resurrects the previous workspace session.
+try { window.localStorage.removeItem(CSRF_STORAGE_KEY); } catch {}
 
 export const setCsrfToken = (value = '') => {
   csrfToken = String(value || '');
-  try {
-    if (csrfToken) window.localStorage.setItem(CSRF_STORAGE_KEY, csrfToken);
-    else window.localStorage.removeItem(CSRF_STORAGE_KEY);
-  } catch {}
+  try { window.localStorage.removeItem(CSRF_STORAGE_KEY); } catch {}
 };
 
 export const getCsrfToken = () => csrfToken;
@@ -168,6 +167,17 @@ export const loginApi = async ({ username, password }) => {
   const payload = await parsePayload(response);
   setCsrfToken(payload.csrfToken || '');
   return payload;
+};
+
+export const clearBrowserSessionApi = async () => {
+  setCsrfToken('');
+  const response = await authFetch(`${API_BASE}/api/auth/clear-browser-session`, {
+    method: 'POST',
+    cache: 'no-store',
+    timeoutMs: 8_000
+  });
+  if (!response.ok) return throwAuthError(response, 'Previous browser session could not be cleared.');
+  return parsePayload(response);
 };
 
 export const getSessionApi = async () => {

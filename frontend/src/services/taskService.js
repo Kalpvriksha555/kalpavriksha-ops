@@ -165,8 +165,16 @@ const throwApiError = async (response, fallback) => {
 };
 
 
-export const fetchBackendState = async ({ apiBase, headers = {} }) => {
-  const res = await authFetch(`${apiBase}/api/state`, { cache: 'no-store', headers, timeoutMs:60_000 });
+export const fetchBackendState = async ({ apiBase, headers = {}, includePerformance = true, compact = true, sinceDataRevision = null, sinceVersion = null, sincePresence = null, sinceCollections = null }) => {
+  const query = new URLSearchParams({
+    compact: compact ? '1' : '0',
+    performance: includePerformance ? '1' : '0'
+  });
+  if (Number.isFinite(Number(sinceDataRevision)) && Number(sinceDataRevision) >= 0) query.set('sinceDataRevision', String(Number(sinceDataRevision)));
+  if (Number.isFinite(Number(sinceVersion)) && Number(sinceVersion) >= 0) query.set('sinceVersion', String(Number(sinceVersion)));
+  if (Number.isFinite(Number(sincePresence)) && Number(sincePresence) >= 0) query.set('sincePresence', String(Number(sincePresence)));
+  if (sinceCollections && typeof sinceCollections === 'object') query.set('sinceCollections', JSON.stringify(sinceCollections));
+  const res = await authFetch(`${apiBase}/api/state?${query.toString()}`, { cache: 'no-store', headers, timeoutMs:60_000 });
   if (!res.ok) return throwApiError(res, 'Backend state failed');
   return parseJsonSafe(res);
 };

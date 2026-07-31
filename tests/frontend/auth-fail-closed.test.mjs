@@ -5,9 +5,10 @@ import fs from 'node:fs';
 const app = fs.readFileSync(new URL('../../frontend/src/App.jsx', import.meta.url), 'utf8');
 const layout = fs.readFileSync(new URL('../../frontend/src/components/layout.jsx', import.meta.url), 'utf8');
 
-test('session bootstrap clears stale workspace when unauthenticated', () => {
-  assert.match(app, /else \{\s*clearAuthenticatedWorkspace\(\{ clearCache: true \}\);\s*\}/s);
-  assert.match(app, /catch\(\(\) => \{\s*if \(!cancelled\) clearAuthenticatedWorkspace\(\{ clearCache: true \}\);/s);
+test('every browser page instance revokes the previous session before hydration', () => {
+  assert.match(app, /clearBrowserSessionApi\(\)/);
+  assert.match(app, /clearAuthenticatedWorkspace\(\{ clearCache: true \}\)/);
+  assert.doesNotMatch(app, /getSessionApi\(\)/);
 });
 
 test('workspace clear removes stale operational state and banner', () => {
@@ -21,9 +22,9 @@ test('local banner accurately describes isolated sandbox', () => {
   assert.doesNotMatch(layout, /bundled offline snapshot/);
 });
 
-test('temporary-password sessions return to password change instead of an empty workspace', () => {
-  assert.match(app, /session\.user\.mustChangePassword[\s\S]*setPasswordChangeSessionUser\(session\.user\)[\s\S]*setCurrentUser\(null\)/);
+test('temporary-password API responses still open password change instead of an empty workspace', () => {
   assert.match(app, /err\?\.code === 'PASSWORD_CHANGE_REQUIRED'[\s\S]*setPasswordChangeSessionUser/);
+  assert.match(app, /response\?\.user\?\.mustChangePassword/);
   assert.match(app, /passwordChangeSessionUser=\{passwordChangeSessionUser\}/);
   assert.match(app, /Current Password/);
 });

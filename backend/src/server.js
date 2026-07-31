@@ -92,6 +92,7 @@ let shuttingDown = false;
 let lastPersistenceFailure = null;
 let lastPersistenceSuccess = null;
 let memoryState = null;
+let relationalShadowState = null;
 let postgresReady = false;
 let stateVersion = 0;
 let legacyCredentialCandidates = [];
@@ -100,6 +101,12 @@ let persistenceQueueDepth = 0;
 let persistenceInFlight = 0;
 let lastPersistenceDurationMs = 0;
 let lastPersistenceReason = '';
+let performanceDataRevision = 0;
+let workspaceDataRevision = 0;
+const WORKSPACE_SYNC_COLLECTIONS = Object.freeze(['users','cases','deletedProjectIds','teamChat','notifications','attendanceLogs']);
+let workspaceCollectionRevisions = Object.fromEntries(WORKSPACE_SYNC_COLLECTIONS.map(collection => [collection, 0]));
+let performanceBundleCache = { revision:-1, records:[], summary:null, diagnostics:null };
+let leaderboardAggregateCache = new Map();
 let activeForegroundWriteRequests = 0;
 let presenceMutationGeneration = 0;
 let persistedPresenceGeneration = 0;
@@ -342,6 +349,7 @@ async function initStore(){
     if (loaded.legacyState) captureLegacyCredentialCandidates(loaded.legacyState);
     else captureLegacyCredentialCandidates(loaded.state);
     memoryState = norm(loaded.state);
+    relationalShadowState = structuredClone(loaded.persistedState || loaded.state);
     stateVersion = Number(loaded.stateVersion || 0);
   } else {
     const rawState = readJsonFallback();
@@ -349,7 +357,15 @@ async function initStore(){
     stateVersion = Number(rawState.__stateVersion || 0);
     delete rawState.__stateVersion;
     memoryState = norm(rawState);
+    relationalShadowState = null;
   }
+  workspaceDataRevision = Number(stateVersion || 0);
+  workspaceCollectionRevisions = Object.fromEntries(WORKSPACE_SYNC_COLLECTIONS.map(collection => [collection, Number(stateVersion || 0)]));
+}
+
+function readDb(){
+  if (!memoryState) throw new Error('Application state is not initialized.');
+  return memoryState;
 }
 
 function db(){
@@ -368,6 +384,7 @@ async function reloadCommittedState(){
   if (!USE_POSTGRES) return;
   const liveStateBeforeReload = memoryState;
   const loaded = await reloadRelationalState(pool, { normalizeState: norm });
+  relationalShadowState = structuredClone(loaded.persistedState || loaded.state);
   memoryState = norm(preserveDirtyPresenceAfterReload({
     committedState:loaded.state,
     liveState:liveStateBeforeReload,
@@ -375,6 +392,48 @@ async function reloadCommittedState(){
     persistedGeneration:persistedPresenceGeneration
   }));
   stateVersion = Number(loaded.stateVersion || 0);
+  workspaceDataRevision = Math.max(workspaceDataRevision + 1, stateVersion);
+  workspaceCollectionRevisions = Object.fromEntries(WORKSPACE_SYNC_COLLECTIONS.map(collection => [
+    collection,
+    Math.max(Number(workspaceCollectionRevisions[collection] || 0) + 1, stateVersion)
+  ]));
+  performanceDataRevision += 1;
+  leaderboardAggregateCache.clear();
+}
+
+function metadataAffectsPerformance(metadata = {}) {
+  const sourceCollections = Array.isArray(metadata.requestedCollections) ? metadata.requestedCollections : metadata.collections;
+  const collections = Array.isArray(sourceCollections) ? sourceCollections.map(value => String(value || '').trim()) : null;
+  if (!collections) return true;
+  if (collections.includes('cases') || collections.includes('performanceRecords')) return true;
+  if (collections.includes('users')) {
+    const reason = String(metadata.reason || '').trim().toLowerCase();
+    // Heartbeats change only live presence and must not rebuild historical
+    // productivity aggregates. Every other user write can change membership,
+    // names, roles, limits or approval state and therefore must invalidate the
+    // team comparison cache.
+    return !reason.startsWith('presence_');
+  }
+  return false;
+}
+
+function workspaceCollectionsFromMetadata(metadata = {}) {
+  const reason = String(metadata.reason || '').trim().toLowerCase();
+  if (reason.startsWith('presence_')) return [];
+  const sourceCollections = Array.isArray(metadata.requestedCollections) ? metadata.requestedCollections : metadata.collections;
+  const collections = Array.isArray(sourceCollections)
+    ? sourceCollections.map(value => String(value || '').trim()).filter(Boolean)
+    : null;
+  if (!collections) return [...WORKSPACE_SYNC_COLLECTIONS];
+  return WORKSPACE_SYNC_COLLECTIONS.filter(collection => collections.includes(collection));
+}
+
+function markWorkspaceCollectionsChanged(metadata = {}) {
+  const changed = workspaceCollectionsFromMetadata(metadata);
+  if (!changed.length) return false;
+  workspaceDataRevision += 1;
+  for (const collection of changed) workspaceCollectionRevisions[collection] = workspaceDataRevision;
+  return true;
 }
 
 function save(d, metadata = {}){
@@ -385,7 +444,6 @@ function save(d, metadata = {}){
     snapshotGeneration:snapshotPresenceGeneration,
     liveGeneration:presenceMutationGeneration
   });
-  const normalized = norm(latestPresence.state);
   const expectedVersion = Number(snapshotVersions.get(d) ?? stateVersion);
   if (expectedVersion !== stateVersion) {
     const error = new Error(`This update was created from stale application state. Expected local version ${expectedVersion}, current version ${stateVersion}. Refresh and retry.`);
@@ -401,8 +459,16 @@ function save(d, metadata = {}){
     if (!effectiveCollections.includes('users')) effectiveCollections.push('users');
     if (!effectiveCollections.includes('attendanceLogs')) effectiveCollections.push('attendanceLogs');
   }
-  const effectiveMetadata = effectiveCollections ? { ...metadata, collections:effectiveCollections } : metadata;
+  const effectiveMetadata = effectiveCollections
+    ? { ...metadata, collections:effectiveCollections, requestedCollections:requestedCollections ? [...requestedCollections] : null }
+    : metadata;
+  const normalized = normalizeStateForSelectiveSave(latestPresence.state, effectiveMetadata);
   const persistenceReason = String(effectiveMetadata.reason || (effectiveMetadata.financeEvent ? 'finance_update' : effectiveMetadata.authOperations?.length ? 'authentication_update' : 'state_update'));
+  if (metadataAffectsPerformance(effectiveMetadata)) {
+    performanceDataRevision += 1;
+    leaderboardAggregateCache.clear();
+  }
+  markWorkspaceCollectionsChanged(effectiveMetadata);
   // Make queued changes visible to later requests in this process. The queued
   // PostgreSQL transaction still has to succeed before the API returns success.
   memoryState = structuredClone(normalized);
@@ -436,8 +502,10 @@ function save(d, metadata = {}){
           metadata: { ...effectiveMetadata, actor: inferredActor, reason:persistenceReason },
           applyAuthOperationsWithClient,
           financeSnapshotHash,
-          revisionRetention: STATE_REVISION_RETENTION
+          revisionRetention: STATE_REVISION_RETENTION,
+          persistedBaseState: relationalShadowState
         });
+        if (result?.committedState) relationalShadowState = structuredClone(result.committedState);
         if (process.env.WRITE_JSON_BACKUP === 'true') fs.writeFileSync(DB_FILE, JSON.stringify(normalized,null,2));
         return result;
       } catch (error) {
@@ -916,8 +984,7 @@ function setSessionCookie(res, rawToken = '') {
     httpOnly: true,
     secure: IS_PRODUCTION,
     sameSite: 'lax',
-    path: '/',
-    maxAge: SESSION_TTL_MS
+    path: '/'
   };
   if (process.env.SESSION_COOKIE_DOMAIN) options.domain = String(process.env.SESSION_COOKIE_DOMAIN).trim();
   res.cookie(SESSION_COOKIE_NAME, rawToken, options);
@@ -959,7 +1026,7 @@ async function resolveRequestAuthentication(req = {}) {
 
 function isPublicApiPath(req = {}) {
   const routePath = String(req.path || '');
-  return routePath === '/health' || routePath === '/health/live' || routePath === '/health/ready' || routePath === '/meta' || routePath === '/auth/login' || routePath === '/auth/session' || routePath === '/auth/recovery/request' || routePath === '/auth/recovery/reset';
+  return routePath === '/health' || routePath === '/health/live' || routePath === '/health/ready' || routePath === '/meta' || routePath === '/auth/login' || routePath === '/auth/session' || routePath === '/auth/clear-browser-session' || routePath === '/auth/recovery/request' || routePath === '/auth/recovery/reset';
 }
 
 function isSafeMethod(method = '') {
@@ -1107,6 +1174,63 @@ function norm(d){
   d.cases.forEach(c=>{ c.documents ||= []; c.completedFiles ||= c.completedFiles || []; c.history ||= []; c.comments ||= []; c.revisions ||= []; c.timeline = normalizeCaseTimeline(c); c.creatorName ||= c.createdBy || 'Admin'; c.createdAt ||= new Date().toISOString(); });
   d.performanceRecords = mergePerformanceRecords(d.performanceRecords, buildPerformanceRecordsFromCases(d.cases));
   normalizePersistedFileLinks(d);
+  return d;
+}
+
+function normalizeStateForSelectiveSave(d, metadata = {}) {
+  const collections = Array.isArray(metadata.collections)
+    ? new Set(metadata.collections.map(value => String(value || '').trim()).filter(Boolean))
+    : null;
+  if (!collections) return norm(d);
+
+  d ||= structuredClone(seed);
+  d.users ||= seed.users;
+  d.cases ||= d.projects || [];
+  d.deletedProjectIds ||= [];
+  d.payments = Array.isArray(d.payments) ? d.payments : [];
+  d.notifications ||= [];
+  d.teamChat ||= d.chatMessages || [];
+  d.whatsappInbox ||= [];
+  d.audit ||= [];
+  d.attendanceLogs ||= [];
+  d.chatReads ||= {ADMIN:[],MANAGER:[],DESIGNER:[]};
+  d.performanceRecords = Array.isArray(d.performanceRecords) ? d.performanceRecords : [];
+  d.files ||= [];
+
+  const explicitlyChangesUsers = !Array.isArray(metadata.requestedCollections) || metadata.requestedCollections.includes('users');
+  if (collections.has('users') && explicitlyChangesUsers) d.users = cleanTeamUsers(d.users);
+  if (collections.has('payments')) d.payments = d.payments.filter(Boolean);
+
+  if (collections.has('deletedProjectIds')) {
+    d.deletedProjectIds = [...new Set((d.deletedProjectIds || []).map(value => String(value)).filter(Boolean))];
+  }
+
+  if (collections.has('cases') || collections.has('deletedProjectIds')) {
+    const deletedSet = new Set(d.deletedProjectIds || []);
+    d.cases = (d.cases || []).filter(caseRecord => caseRecord
+      && !deletedSet.has(String(caseRecord.id || ''))
+      && !deletedSet.has(String(caseRecord.caseId || '')));
+    const changedIds = new Set((metadata.collectionRowIds?.cases || []).map(value => String(value || '')).filter(Boolean));
+    for (const caseRecord of d.cases) {
+      if (changedIds.size && !changedIds.has(String(caseRecord.id || '')) && !changedIds.has(String(caseRecord.caseId || ''))) continue;
+      caseRecord.documents ||= [];
+      caseRecord.completedFiles ||= [];
+      caseRecord.history ||= [];
+      caseRecord.comments ||= [];
+      caseRecord.revisions ||= [];
+      caseRecord.timeline = normalizeCaseTimeline(caseRecord);
+      caseRecord.creatorName ||= caseRecord.createdBy || 'Admin';
+      caseRecord.createdAt ||= new Date().toISOString();
+    }
+  }
+
+  // Performance records are derived from cases at read time by
+  // getPerformanceBundle(). Avoid rebuilding the full historical set on every
+  // task mutation; an explicit performance rebuild still persists the complete
+  // canonical collection.
+  if (collections.has('performanceRecords')) {
+    d.performanceRecords = mergePerformanceRecords(d.performanceRecords, buildPerformanceRecordsFromCases(d.cases));
+  }
   return d;
 }
 
@@ -2591,17 +2715,39 @@ function resolveStoredUploadFile(doc={}){
   return fileStorage.resolve(doc);
 }
 function resolveFileById(d, id){
-  const docs = allKnownFileDocs(d);
   const requested = String(id || '');
   const normalized = normalizeFileName(requested);
-  const doc = docs.find(x => String(x.id || x.fileId || '') === requested)
-    || docs.find(x => [x.storageKey, x.storedName, x.stored_name].filter(Boolean).some(value => String(value) === requested || normalizeFileName(value) === normalized));
+  const matches = x => x && (
+    String(x.id || x.fileId || '') === requested
+    || [x.storageKey, x.storedName, x.stored_name, x.name, x.fileName]
+      .filter(Boolean)
+      .some(value => String(value) === requested || normalizeFileName(value) === normalized)
+  );
+  // The relational file registry is authoritative and indexed conceptually by id.
+  // Search it first so a normal preview/download does not materialize every nested
+  // task and chat attachment into one large temporary array.
+  let doc = (d.files || []).find(matches) || null;
+  if (!doc) {
+    for (const c of d.cases || []) {
+      doc = [
+        ...(c.documents || []), ...(c.completedFiles || []), ...(c.sourceFiles || []),
+        ...(c.workFiles || []), ...(c.files || [])
+      ].find(matches) || null;
+      if (doc) break;
+    }
+  }
+  if (!doc) {
+    for (const message of d.teamChat || []) {
+      doc = [...(message.files || []), ...(message.attachments || []), ...(message.file ? [message.file] : [])].find(matches) || null;
+      if (doc) break;
+    }
+  }
   if (!doc) return { doc:null, resolved:null };
   return { doc, resolved: resolveStoredUploadFile(doc) };
 }
 
 function resolveAuthorizedFile(req, res, id) {
-  const d = db();
+  const d = readDb();
   const result = resolveFileById(d, id);
   if (result.doc && String(result.doc.storageStatus || '').toUpperCase() === 'DELETED') {
     res.status(410).json({ok:false,code:'FILE_DELETED',error:'This file was deleted and retained only as an audit record.'});
@@ -2646,6 +2792,185 @@ function sanitize(d, role){
   if(normalizedRole==='DESIGNER') out.audit=[];
   return out;
 }
+
+function sanitizeCasesForRole(cases = [], role = '') {
+  const normalizedRole = normalizeAuthRole(role);
+  return (cases || []).filter(Boolean).map(caseRecord => {
+    const safe = structuredClone(caseRecord);
+    if (normalizedRole !== 'ADMIN') {
+      for (const field of FINANCE_FIELDS) delete safe[field];
+      delete safe.estimateAmount;
+      delete safe.amountReceived;
+      delete safe.receivedAmount;
+    }
+    return safe;
+  });
+}
+
+function queryFlag(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  return !['0','false','no','off'].includes(String(value).trim().toLowerCase());
+}
+
+function stateSyncDescriptor() {
+  return {
+    stateVersion:Number(stateVersion || 0),
+    dataRevision:Number(workspaceDataRevision || 0),
+    presenceGeneration:Number(presenceMutationGeneration || 0),
+    collectionRevisions:{ ...workspaceCollectionRevisions },
+    syncToken:`${Number(workspaceDataRevision || 0)}.${Number(presenceMutationGeneration || 0)}`
+  };
+}
+
+function parseClientCollectionRevisions(value = '') {
+  if (!value) return null;
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const normalized = {};
+    for (const collection of WORKSPACE_SYNC_COLLECTIONS) {
+      const revision = Number(parsed[collection]);
+      if (!Number.isFinite(revision) || revision < 0) return null;
+      normalized[collection] = revision;
+    }
+    return normalized;
+  } catch {
+    return null;
+  }
+}
+
+function getPerformanceBundle(d = readDb()) {
+  if (performanceBundleCache.revision === performanceDataRevision) return performanceBundleCache;
+  const records = mergePerformanceRecords(d.performanceRecords || [], buildPerformanceRecordsFromCases(d.cases || []));
+  performanceBundleCache = {
+    revision:performanceDataRevision,
+    records,
+    summary:buildPerformanceSummary(records, d.users || []),
+    diagnostics:buildPerformanceDiagnostics(d.cases || [], records)
+  };
+  return performanceBundleCache;
+}
+
+function performanceRangeMs(value = 'month') {
+  const key = String(value || 'month').trim().toLowerCase();
+  if (key === 'week') return 7 * 86400000;
+  if (key === 'quarter') return 90 * 86400000;
+  return 30 * 86400000;
+}
+
+function leaderboardAggregateStats(d = readDb(), range = 'month') {
+  const rangeKey = ['week','month','quarter'].includes(String(range || '').toLowerCase()) ? String(range).toLowerCase() : 'month';
+  const nowMs = Date.now();
+  const todayKey = serverTodayKey(nowMs);
+  const cacheKey = `${performanceDataRevision}:${rangeKey}:${todayKey}`;
+  const cached = leaderboardAggregateCache.get(cacheKey);
+  if (cached) return cached;
+
+  const cutoff = nowMs - performanceRangeMs(rangeKey);
+  const performance = getPerformanceBundle(d);
+  const summaryByName = new Map((performance.summary?.users || []).map(row => [String(row.userName || '').trim().toLowerCase(), row]));
+  const approvedMembers = (d.users || [])
+    .filter(user => normalizeStatus(user.status) === 'APPROVED' && normalizeRole(user.role) !== 'Admin');
+  const userKeyById = new Map();
+  const userKeyByName = new Map();
+  approvedMembers.forEach(user => {
+    const canonical = String(user.id || user.name || '').trim().toLowerCase();
+    if (!canonical) return;
+    [user.id, user.userId].filter(Boolean).forEach(value => userKeyById.set(String(value).trim().toLowerCase(), canonical));
+    [user.name, user.username].filter(Boolean).forEach(value => userKeyByName.set(String(value).trim().toLowerCase(), canonical));
+  });
+  const caseStats = new Map();
+  const ensure = (keyValue = '') => {
+    const key = String(keyValue || '').trim().toLowerCase();
+    if (!key) return null;
+    if (!caseStats.has(key)) caseStats.set(key, { assignedCount:0, completedCount:0, activeCount:0, revisionCases:0, completedToday:0 });
+    return caseStats.get(key);
+  };
+  for (const c of filterDeletedCases(d.cases || [], d.deletedProjectIds || [])) {
+    const ownerId = [c.assigneeId, c.assignedUserId, c.ownerId, c.userId]
+      .map(value => String(value || '').trim().toLowerCase()).find(value => value && userKeyById.has(value));
+    const ownerName = String(perfOwner(c) || '').trim().toLowerCase();
+    const canonicalOwner = (ownerId && userKeyById.get(ownerId)) || userKeyByName.get(ownerName) || ownerName;
+    const row = ensure(canonicalOwner);
+    if (!row) continue;
+    const createdMs = parseDateMs(c.createdAt || c.assignedAt || c.updatedAt);
+    const completedMs = parseDateMs(c.completedAt || c.finalApprovedAt || c.approvedAt || c.updatedAt);
+    const inRange = createdMs >= cutoff || completedMs >= cutoff;
+    const completed = isCompletedCaseForPerf(c);
+    if (inRange) {
+      row.assignedCount += 1;
+      if (completed) row.completedCount += 1;
+      else row.activeCount += 1;
+      if (perfRevisionCount(c) > 0) row.revisionCases += 1;
+    }
+    if (completed && completedMs && serverTodayKey(completedMs) === todayKey) row.completedToday += 1;
+  }
+  const aggregates = approvedMembers
+    .map(user => {
+      const nameKey = String(user.name || '').trim().toLowerCase();
+      const canonical = String(user.id || user.name || '').trim().toLowerCase();
+      const summary = summaryByName.get(nameKey) || {};
+      const counts = caseStats.get(canonical) || caseStats.get(nameKey) || { assignedCount:0, completedCount:0, activeCount:0, revisionCases:0, completedToday:0 };
+      return {
+        id:user.id,
+        name:user.name,
+        role:user.role,
+        status:user.status,
+        dailyLimit:Number(user.dailyLimit || user.taskLimit || user.workloadProfile?.dailyLimit || 15) || 15,
+        ...counts,
+        completedHistoryCount:Number(summary.completedCount || 0) || 0,
+        avgCompletionMinutes:Number(summary.avgCompletionMinutes || 0) || 0,
+        avgReviewMinutes:Number(summary.avgReviewMinutes || 0) || 0,
+        rolling10CompletionMinutes:Number(summary.rolling10CompletionMinutes || 0) || 0,
+        rolling30CompletionMinutes:Number(summary.rolling30CompletionMinutes || 0) || 0,
+        trend:summary.trend || { pct:0, label:'Stable' },
+        revisionCount:Number(summary.revisionCount || 0) || 0,
+        revisionRate:Number(summary.revisionRate || 0) || 0,
+        slaPct:Number(summary.slaPct || 0) || 0,
+        productivityScore:Number(summary.productivityScore || 0) || 0,
+        scoreBreakdown:summary.scoreBreakdown || {},
+        caseTypeStats:Array.isArray(summary.caseTypeStats) ? summary.caseTypeStats : [],
+        timingSource:summary.timingSource || 'No history yet'
+      };
+    })
+    .sort((a,b) => b.productivityScore - a.productivityScore || b.completedHistoryCount - a.completedHistoryCount || String(a.name).localeCompare(String(b.name)))
+    .map((member, index) => ({ ...member, rank:index + 1 }));
+
+  const aggregate = {
+    generatedAt:performance.summary?.generatedAt || now(),
+    range:rangeKey,
+    recordCount:Number(performance.summary?.recordCount || performance.records.length || 0),
+    avgCompletionMinutes:Number(performance.summary?.avgCompletionMinutes || 0) || 0,
+    avgReviewMinutes:Number(performance.summary?.avgReviewMinutes || 0) || 0,
+    rolling10CompletionMinutes:Number(performance.summary?.rolling10CompletionMinutes || 0) || 0,
+    rolling30CompletionMinutes:Number(performance.summary?.rolling30CompletionMinutes || 0) || 0,
+    trend:performance.summary?.trend || { pct:0, label:'Stable' },
+    members:aggregates
+  };
+  leaderboardAggregateCache.set(cacheKey, aggregate);
+  // Keep this bounded even during long-running production use.
+  if (leaderboardAggregateCache.size > 9) {
+    const oldestKey = leaderboardAggregateCache.keys().next().value;
+    if (oldestKey) leaderboardAggregateCache.delete(oldestKey);
+  }
+  return aggregate;
+}
+
+function buildTeamLeaderboard(d = readDb(), range = 'month') {
+  const aggregate = leaderboardAggregateStats(d, range);
+  const presenceById = new Map(sanitizePresenceUsers(d.users || []).map(user => [String(user.id || '').trim().toLowerCase(), user]));
+  const members = aggregate.members.map(member => {
+    const presence = presenceById.get(String(member.id || '').trim().toLowerCase()) || {};
+    return {
+      ...member,
+      availability:presence.availability || 'Unavailable',
+      isOnline:!!presence.isOnline,
+      lastSeenAt:presence.lastSeenAt || null,
+      lastHeartbeatAt:presence.lastHeartbeatAt || null
+    };
+  });
+  return { ...aggregate, members };
+}
 function chatReadKey(req = {}) {
   const actor = requestActor(req);
   return actor.id || actor.username || actor.role || 'UNKNOWN';
@@ -2684,27 +3009,52 @@ function scopedAttendance(d = {}, req = {}) {
   });
 }
 
-function scopedState(d = {}, req = {}) {
+function scopedState(d = {}, req = {}, options = {}) {
   const actor = req.auth?.user || {};
   const role = normalizePermissionRole(actor.role);
+  const compact = options.compact === true;
+  const includePerformance = options.includePerformance !== false;
   const visibleCases = filterCasesForUser(filterDeletedCases(d.cases || [], d.deletedProjectIds || []), actor);
-  const safeCases = sanitize({ ...d, cases:visibleCases }, role).cases || [];
+  const safeCases = sanitizeCasesForRole(visibleCases, role);
+  const chatMessages = scopedTeamChat(d, req);
   const payload = {
     users:sanitizePresenceUsers(d.users || []),
-    cases:safeCases,
     projects:safeCases,
-    deletedProjectIds:d.deletedProjectIds || [],
-    teamChat:scopedTeamChat(d, req),
-    chatMessages:scopedTeamChat(d, req),
+    deletedProjectIds:[...(d.deletedProjectIds || [])],
+    chatMessages,
     notifications:scopedNotifications(d, req),
-    attendanceLogs:scopedAttendance(d, req),
-    performanceRecords:mergePerformanceRecords(d.performanceRecords || [], buildPerformanceRecordsFromCases(d.cases || []))
+    attendanceLogs:scopedAttendance(d, req)
   };
-  payload.performanceSummary = buildPerformanceSummary(payload.performanceRecords, d.users || []);
-  if (role === 'ADMIN') {
+  if (!compact) {
+    payload.cases = safeCases;
+    payload.teamChat = chatMessages;
+  }
+  if (includePerformance) {
+    const performance = getPerformanceBundle(d);
+    payload.performanceRecords = performance.records;
+    payload.performanceSummary = performance.summary;
+  }
+  if (role === 'ADMIN' && !compact) {
     payload.payments = (d.payments || []).filter(Boolean);
     payload.audit = d.audit || [];
   }
+  return payload;
+}
+
+function scopedStateCollections(d = {}, req = {}, collections = []) {
+  const requested = new Set(Array.isArray(collections) ? collections : []);
+  const actor = req.auth?.user || {};
+  const role = normalizePermissionRole(actor.role);
+  const payload = {};
+  if (requested.has('users')) payload.users = sanitizePresenceUsers(d.users || []);
+  if (requested.has('cases')) {
+    const visibleCases = filterCasesForUser(filterDeletedCases(d.cases || [], d.deletedProjectIds || []), actor);
+    payload.projects = sanitizeCasesForRole(visibleCases, role);
+  }
+  if (requested.has('deletedProjectIds')) payload.deletedProjectIds = [...(d.deletedProjectIds || [])];
+  if (requested.has('teamChat')) payload.chatMessages = scopedTeamChat(d, req);
+  if (requested.has('notifications')) payload.notifications = scopedNotifications(d, req);
+  if (requested.has('attendanceLogs')) payload.attendanceLogs = scopedAttendance(d, req);
   return payload;
 }
 
@@ -2795,6 +3145,16 @@ app.get('/uploads/:filename', authenticationGate, (req,res)=>{
 });
 
 
+// The workspace intentionally requires a fresh sign-in after every browser reload.
+// This public, idempotent boot endpoint revokes any cookie left by a previous page
+// instance before React renders protected operational data.
+app.post('/api/auth/clear-browser-session', async (req, res) => {
+  const rawToken = parseRequestCookies(req)[SESSION_COOKIE_NAME] || '';
+  if (rawToken) await revokeAuthSession(tokenHash(rawToken)).catch(() => {});
+  clearSessionCookie(res);
+  res.json({ ok:true, authenticated:false });
+});
+
 app.post('/api/auth/login', loginRateLimiter, async (req, res) => {
   const username = normalizeUsername(req.body?.username || '');
   const password = String(req.body?.password || '');
@@ -2802,15 +3162,21 @@ app.post('/api/auth/login', loginRateLimiter, async (req, res) => {
     if (!username || !password) return res.status(400).json({ ok: false, code: 'LOGIN_FIELDS_REQUIRED', error: 'Username and password are required.' });
     const credential = await findCredentialByUsername(username);
     const lockedUntil = credential?.locked_until ? new Date(credential.locked_until).getTime() : 0;
-    if (lockedUntil > Date.now()) {
-      await recordAuthEvent({ userId: credential.user_id, username, eventType: 'LOGIN_BLOCKED_LOCK', req });
-      return res.status(423).json({ ok: false, code: 'LOGIN_LOCKED', error: `Too many failed attempts. Try again after ${new Date(lockedUntil).toLocaleTimeString()}.` });
-    }
     const valid = credential ? await verifyPassword(password, credential.password_hash) : false;
     if (!credential || !valid) {
+      if (credential && lockedUntil > Date.now()) {
+        await recordAuthEvent({ userId: credential.user_id, username, eventType: 'LOGIN_BLOCKED_LOCK', req });
+        return res.status(423).json({ ok: false, code: 'LOGIN_LOCKED', error: `Too many failed attempts. Use the correct password or try again after ${new Date(lockedUntil).toLocaleTimeString()}.` });
+      }
       if (credential) await updateLoginFailure(credential, req);
       else await recordAuthEvent({ username, eventType: 'LOGIN_FAILED_UNKNOWN_USER', req });
       return res.status(401).json({ ok: false, code: 'LOGIN_FAILED', error: 'Invalid username or password.' });
+    }
+    if (lockedUntil > Date.now()) {
+      // A correct credential proves account ownership. Clear only the automatic
+      // failed-attempt lock; intentionally RESTRICTED accounts are still denied below.
+      await clearLoginFailures(credential);
+      await recordAuthEvent({ userId: credential.user_id, username, eventType: 'LOGIN_UNLOCKED_WITH_VALID_PASSWORD', req });
     }
     const stateUser = findStateUserByIdOrUsername(credential.user_id, credential.username);
     const approved = stateUser && normalizeAuthStatus(stateUser.status || credential.status) === 'APPROVED' && normalizeAuthStatus(credential.status) === 'APPROVED';
@@ -3061,7 +3427,7 @@ function sendProfilePhotoPlaceholder(res) {
 
 function resolveProfilePhotoPath(requestedName = '') {
   const requested = String(requestedName || '').trim();
-  const d = db();
+  const d = readDb();
   const user = (d.users || []).find(item => [item.id, item.username, item.name, fileBaseName(item.profilePhoto || ''), fileBaseName(item.profilePhotoFile || '')]
     .filter(Boolean).some(value => String(value) === requested || safeName(String(value)) === safeName(requested)));
   if (!user) return '';
@@ -3088,7 +3454,7 @@ app.get('/api/profile/photo/:filename', async (req, res) => {
 app.get('/api/uploads/:filename', async (req, res) => {
   const filename = safeName(req.params.filename || '');
   if (!filename) return res.status(404).send('File not found');
-  const d = db();
+  const d = readDb();
   const doc = allKnownFileDocs(d).find(item => {
     const stored = item.storageKey || item.storedName || item.stored_name || fileBaseName(item.url || item.fileUrl || '');
     return fileBaseName(String(stored || '')) === filename || String(stored || '') === filename;
@@ -3191,8 +3557,8 @@ app.post('/api/otp/verify', otpRateLimiter, async (req,res)=>{
 app.get('/',async (_req,res)=>res.json({ok:true,app:'Kalpvriksha Designs ERP'}));
 app.get('/api/meta',async (_req,res)=>res.json({roles,serviceTypes,statuses,sourceDocTypes,finalDocTypes}));
 app.get('/api/bootstrap', requireCapability('state:read'), async (req,res)=>{
-  const d = db();
-  const scoped = scopedState(d, req);
+  const d = readDb();
+  const scoped = scopedState(d, req, { compact:queryFlag(req.query.compact, false), includePerformance:queryFlag(req.query.performance, true) });
   const readIds = d.chatReads?.[chatReadKey(req)] || [];
   const unreadChat = (d.teamChat || []).filter(message => !readIds.includes(message.id)).length;
   const actor = requestActor(req);
@@ -3206,30 +3572,74 @@ app.get('/api/bootstrap', requireCapability('state:read'), async (req,res)=>{
 });
 
 app.get('/api/state', requireCapability('state:read'), async (req,res)=>{
-  const d = db();
-  const scoped = scopedState(d, req);
+  const sync = stateSyncDescriptor();
+  const sinceDataRevision = Number(req.query.sinceDataRevision);
+  const sinceVersion = Number(req.query.sinceVersion);
+  const sincePresence = Number(req.query.sincePresence);
+  const sinceCollections = parseClientCollectionRevisions(req.query.sinceCollections);
+  const hasDataRevision = Number.isFinite(sinceDataRevision) && sinceDataRevision >= 0;
+  const hasLegacyVersion = Number.isFinite(sinceVersion) && sinceVersion >= 0;
+  const hasPresence = Number.isFinite(sincePresence) && sincePresence >= 0;
+  const sameWorkspaceData = hasDataRevision ? sinceDataRevision === sync.dataRevision : (hasLegacyVersion && sinceVersion === sync.stateVersion);
+  if (sameWorkspaceData && hasPresence) {
+    if (sincePresence === sync.presenceGeneration) {
+      return res.json({ ok:true, unchanged:true, database:USE_POSTGRES ? 'postgresql' : 'json-file', savedAt:now(), ...sync });
+    }
+    const d = readDb();
+    return res.json({
+      ok:true,
+      partial:'presence',
+      database:USE_POSTGRES ? 'postgresql' : 'json-file',
+      users:sanitizePresenceUsers(d.users || []),
+      attendanceLogs:scopedAttendance(d, req),
+      savedAt:now(),
+      ...sync
+    });
+  }
+  if (!sameWorkspaceData && sinceCollections) {
+    const changedCollections = WORKSPACE_SYNC_COLLECTIONS.filter(collection => Number(sinceCollections[collection]) !== Number(sync.collectionRevisions[collection]));
+    const presenceChanged = hasPresence && sincePresence !== sync.presenceGeneration;
+    if (presenceChanged) {
+      if (!changedCollections.includes('users')) changedCollections.push('users');
+      if (!changedCollections.includes('attendanceLogs')) changedCollections.push('attendanceLogs');
+    }
+    if (changedCollections.length && changedCollections.length < WORKSPACE_SYNC_COLLECTIONS.length) {
+      const d = readDb();
+      return res.json({
+        ok:true,
+        partial:'workspace',
+        changedCollections,
+        database:USE_POSTGRES ? 'postgresql' : 'json-file',
+        ...scopedStateCollections(d, req, changedCollections),
+        savedAt:now(),
+        ...sync
+      });
+    }
+  }
+  const d = readDb();
+  const scoped = scopedState(d, req, { compact:queryFlag(req.query.compact, false), includePerformance:queryFlag(req.query.performance, true) });
   res.json({
     ok:true,
     database:USE_POSTGRES ? 'postgresql' : 'json-file',
     ...scoped,
     savedAt:now(),
-    stateVersion
+    ...sync
   });
 });
 
-app.get('/api/performance-records', requireCapability('performance:read'), async (req, res) => {
-  const d = db();
-  const generated = buildPerformanceRecordsFromCases(d.cases || []);
-  const records = mergePerformanceRecords(d.performanceRecords || [], generated);
-  const summary = buildPerformanceSummary(records, d.users || []);
-  res.json({ ok: true, records, summary, diagnostics: buildPerformanceDiagnostics(d.cases || [], records) });
+app.get('/api/performance-records', requireCapability('performance:read'), async (_req, res) => {
+  const performance = getPerformanceBundle(readDb());
+  res.json({ ok: true, records:performance.records, summary:performance.summary, diagnostics:performance.diagnostics });
 });
 
-app.get('/api/performance/diagnostics', requireCapability('performance:read'), async (req, res) => {
-  const d = db();
-  const generated = buildPerformanceRecordsFromCases(d.cases || []);
-  const records = mergePerformanceRecords(d.performanceRecords || [], generated);
-  res.json({ ok: true, diagnostics: buildPerformanceDiagnostics(d.cases || [], records), summary: buildPerformanceSummary(records, d.users || []) });
+app.get('/api/performance/diagnostics', requireCapability('performance:read'), async (_req, res) => {
+  const performance = getPerformanceBundle(readDb());
+  res.json({ ok: true, diagnostics:performance.diagnostics, summary:performance.summary });
+});
+
+app.get('/api/performance/leaderboard', requireCapability('performance:read'), async (req, res) => {
+  const range = ['week','month','quarter'].includes(String(req.query.range || '').toLowerCase()) ? String(req.query.range).toLowerCase() : 'month';
+  res.json({ ok:true, leaderboard:buildTeamLeaderboard(readDb(), range) });
 });
 
 app.post('/api/performance/rebuild', requireCapability('performance:rebuild'), async (req, res) => {
@@ -3369,15 +3779,16 @@ app.post('/api/state/projects', async (req, res) => {
     const persistence = await save(d, {
       actor:actor.name,
       reason:existing ? 'task_update' : 'task_create',
+      skipRevisionSnapshot:true,
+      periodicRevisionSnapshot:true,
       collections:['cases','audit'],
       collectionRowIds:{
         cases:[String(saved.id || saved.caseId)],
         audit:auditEntry?.id ? [String(auditEntry.id)] : []
       }
     });
-    const performanceRecords = mergePerformanceRecords(d.performanceRecords || [], buildPerformanceRecordsFromCases(d.cases || []));
-    const visible = sanitize({ ...d, cases:[saved] }, actor.role).cases?.[0] || saved;
-    res.json({ ok:true, project:visible, case:visible, deletedProjectIds:d.deletedProjectIds || [], counts:{ cases:(d.cases || []).length, performanceRecords:performanceRecords.length }, persistence });
+    const visible = sanitizeCasesForRole([saved], actor.role)[0] || saved;
+    res.json({ ok:true, project:visible, case:visible, deletedProjectIds:d.deletedProjectIds || [], counts:{ cases:(d.cases || []).length }, persistence });
   } catch (e) {
     res.status(e.statusCode || 500).json({ ok:false, code:e.code || '', error:e.message || 'Project save failed.', requestId:req.requestId || '' });
   }
@@ -3503,7 +3914,7 @@ app.post('/api/state', async (req,res)=>{
       .map(item=>String(item.id || item.caseId))
       .filter(Boolean);
     const persistence = hasProjects && changedCaseIds.length
-      ? await save(d,{actor:actor.name,reason:'legacy_state_project_update',collections:['cases'],collectionRowIds:{cases:[...new Set(changedCaseIds)]}})
+      ? await save(d,{actor:actor.name,reason:'legacy_state_project_update',skipRevisionSnapshot:true,periodicRevisionSnapshot:true,collections:['cases'],collectionRowIds:{cases:[...new Set(changedCaseIds)]}})
       : { mode:'no-op', persisted:false, reason:'No project changes were supplied.' };
     const performanceRecords = mergePerformanceRecords(d.performanceRecords || [], buildPerformanceRecordsFromCases(d.cases || []));
     res.json({ok:true, database:USE_POSTGRES ? 'postgresql' : 'json-file', savedAt:now(), ignoredFields, deletedProjectIds:d.deletedProjectIds || [], performanceRecords, counts:{users:d.users.length, cases:d.cases.length, performanceRecords:performanceRecords.length, chatMessages:d.teamChat.length, notifications:d.notifications.length, attendanceLogs:d.attendanceLogs.length}, persistence});
@@ -3811,7 +4222,7 @@ app.post('/api/cases/:id/payment', async (req,res)=>{
 app.get('/api/finance/history/:id', async (req, res) => {
   if (!isFinanceAdminRequest(req)) return denyFinanceAccess(res);
   try {
-    const d = db();
+    const d = readDb();
     const c = findCaseByAnyId(d.cases || [], req.params.id);
     const caseId = String(c?.id || req.params.id || '');
     const caseNo = String(c?.caseId || req.params.id || '');
@@ -3836,7 +4247,7 @@ app.get('/api/finance/history/:id', async (req, res) => {
 app.get('/api/finance/health', async (req, res) => {
   if (!isFinanceAdminRequest(req)) return denyFinanceAccess(res);
   try {
-    const d = db();
+    const d = readDb();
     const financeCases = (d.cases || []).filter(c => financeFreshness(c) > 0);
     const latestFinanceAt = Math.max(0, ...financeCases.map(financeFreshness));
     let historyCount = 0;
@@ -3945,6 +4356,7 @@ app.post('/api/files/upload', uploadAny, async (req, res) => {
       actor:actor.name,
       reason:'file_upload',
       skipRevisionSnapshot:true,
+      periodicRevisionSnapshot:true,
       collections:['files'],
       collectionRowIds:{ files:[String(file.id)] }
     });
@@ -4188,7 +4600,7 @@ app.get('/api/system/files/storage-health', requireAdminSession, async (_req,res
 });
 
 app.get('/api/system/files/reconciliation', requireAdminSession, async (_req,res)=>{
-  const d=db();
+  const d=readDb();
   const report=buildFileReconciliationReport(d,fileStorage,{docs:d.files || []});
   const legacyAvailable=report.available.filter(item=>item.provider==='legacy-local').length;
   res.json({ok:true,...report,legacyAvailable,storage:fileStorage.health()});
@@ -4580,7 +4992,7 @@ app.post('/whatsapp/mock/incoming', authenticationGate, apiWriteRateLimiter, req
 });
 
 app.get('/api/qr/:caseId', async (req,res)=>{
-  const d=db();
+  const d=readDb();
   const c=findCaseByAnyId(d.cases || [], req.params.caseId);
   if (!c) return res.status(404).json({ok:false,error:'Case not found.'});
   if (!authorizeCase(req,res,c,'read')) return;
@@ -4595,7 +5007,7 @@ app.get('/api/db/health', requireAdminSession, async (_req,res)=>{
       const health = await getRelationalHealth(pool);
       return res.status(health.integrity?.ok === false ? 503 : 200).json({ ok:health.integrity?.ok !== false, ...health });
     }
-    const d = db();
+    const d = readDb();
     return res.json({ok:true,database:'json-file',connected:true,file:DB_FILE,localSandbox:true,warning:'Local JSON sandbox is enabled. Production requires PostgreSQL.',stateVersion,counts:{users:(d.users||[]).length,cases:(d.cases||[]).length,chatMessages:(d.teamChat||[]).length,notifications:(d.notifications||[]).length,attendanceLogs:(d.attendanceLogs||[]).length,payments:(d.payments||[]).filter(Boolean).length}});
   } catch (err) {
     return res.status(500).json({ok:false,database:USE_POSTGRES?'postgresql-relational':'json-file',code:err.code || '',error:err.message});

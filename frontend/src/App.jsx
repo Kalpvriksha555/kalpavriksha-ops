@@ -18,7 +18,7 @@ import { API_BASE, USE_BACKEND_STATE, ONLINE_STALE_MS, MAX_INLINE_DATA_URL_CHARS
 import { fileToBase64, cleanFileName } from './utils/fileUtils';
 import { absoluteApiUrl, getProjectFileDownloadUrl, getProjectFilePreviewUrl, getProjectFileActionState, isProjectFilePdf, isProjectFileImage, getProjectFileKind, canPreviewProjectFile, fetchProjectFilePreview, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile, getProjectFileCacheKey, listCachedProjectFiles, openCachedProjectFile, clearCachedProjectFile, pruneExpiredProjectFileCache } from './services/fileService';
 import { sendRealOtp, verifyRealOtp } from './services/otpService';
-import { authFetch, loginApi, getSessionApi, logoutApi, changePasswordApi, requestPasswordRecoveryApi, resetPasswordRecoveryApi, createAuthUserApi, updateAuthUserApi, resetAuthUserPasswordApi } from './services/authService';
+import { authFetch, loginApi, clearBrowserSessionApi, logoutApi, changePasswordApi, requestPasswordRecoveryApi, resetPasswordRecoveryApi, createAuthUserApi, updateAuthUserApi, resetAuthUserPasswordApi } from './services/authService';
 import { sendChatMessageApi, updateChatMessageApi, deleteChatMessageApi, markChatReadApi, markNotificationReadApi, markAllNotificationsReadApi, createNotificationApi } from './services/chatService';
 import { buildNotification, getVisibleNotifications, NOTIFICATION_CATEGORIES, getNotificationCategory, getNotificationPriority, buildActivityTimeline, isNotificationForUser } from './services/notificationService';
 import { 
@@ -400,7 +400,7 @@ const broadcastProjectsSync = (projects) => {
   lastProjectsBroadcastAt = now;
   const compactProjects = sanitizeProjectsForCache(filterDeletedProjects(applyAssignmentLedgerToProjects(projects)));
   const deletedProjectIds = getDeletedProjectIds();
-  try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(compactProjects)); } catch(e) {}
+  if (!USE_BACKEND_STATE) { try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(compactProjects)); } catch(e) {} }
   try { opsBroadcast?.postMessage({ type: 'projects-updated', projects: compactProjects, deletedProjectIds, source: OPS_TAB_ID }); } catch(e) {}
   try { localStorage.setItem('kalpa_projects_sync_ping', JSON.stringify({ ts: now, source: OPS_TAB_ID })); } catch(e) {}
 };
@@ -831,6 +831,10 @@ const mergeProjectsByFreshness = (current = [], incoming = []) => {
 const persistAndBroadcastProjects = (projects) => {
   const normalized = filterDeletedProjects(applyAssignmentLedgerToProjects(normalizeProjectRecords(mergeTaskLists([], projects))));
   normalized.forEach(recordAssignmentLedger);
+  if (USE_BACKEND_STATE) {
+    broadcastProjectsSync(normalized);
+    return normalized;
+  }
   return persistTasksToLocalCache(normalized, {
     sanitize: sanitizeProjectsForCache,
     filterDeleted: filterDeletedProjects,
@@ -4000,6 +4004,10 @@ function AppShell() {
   const heartbeatRequestInFlightRef = useRef(false);
   const workspaceRefreshInFlightRef = useRef(false);
   const pendingCreateFlushInFlightRef = useRef(false);
+  const workspaceStateVersionRef = useRef(-1);
+  const workspaceDataRevisionRef = useRef(-1);
+  const workspacePresenceGenerationRef = useRef(-1);
+  const workspaceCollectionRevisionsRef = useRef(null);
   useEffect(() => { currentUserRef.current = currentUser; }, [currentUser]);
   const [firebaseUser, setFirebaseUser] = useState(null);
   const [isDbReady, setIsDbReady] = useState(false);
@@ -4065,11 +4073,13 @@ function AppShell() {
   // Keep this interval modest so multi-tab usage stays low CPU, but timers
   // still update while a designer/manager is on break.
   useEffect(() => {
+    const nonLiveTabs = new Set(['command','productivity','closing','reports','settings','qa','ledger','archive','team','attendance','profile','calculator','meeting']);
+    if (selectedProject || nonLiveTabs.has(activeTab)) return undefined;
     const tick = () => setNowTick(Date.now());
     tick();
     const timer = setInterval(tick, 30000);
     return () => clearInterval(timer);
-  }, []);
+  }, [activeTab, selectedProject]);
   const [showNotifs, setShowNotifs] = useState(false);
   const [showProfilePanel, setShowProfilePanel] = useState(false);
   const [showNewLead, setShowNewLead] = useState(false);
@@ -4187,6 +4197,10 @@ function AppShell() {
     setAttendanceLogs([]);
     setPerformanceRecords([]);
     setPerformanceSummary(null);
+    workspaceStateVersionRef.current = -1;
+    workspaceDataRevisionRef.current = -1;
+    workspacePresenceGenerationRef.current = -1;
+    workspaceCollectionRevisionsRef.current = null;
     setShowLocalBanner(false);
     setDbError(null);
     if (clearCache) {
@@ -4261,7 +4275,7 @@ function AppShell() {
 
   const applyProjectSnapshot = useCallback((incomingProjects = [], options = {}) => {
     if (!Array.isArray(incomingProjects)) return;
-    const { persistCache = true, updateSelected = true, source = 'unknown' } = options;
+    const { persistCache = !USE_BACKEND_STATE, updateSelected = true, source = 'unknown' } = options;
     const incoming = filterDeletedProjects(sanitizeProjectsForCache(incomingProjects));
     confirmPendingCreatedProjectsAgainstServer(incoming);
     setProjects(prev => {
@@ -4291,7 +4305,7 @@ function AppShell() {
     setIsDbReady(false);
     const hydrate = async () => {
       try {
-        const data = await fetchBackendState({ apiBase: API_BASE, headers: financeSafeHeaders });
+        const data = await fetchBackendState({ apiBase: API_BASE, headers: financeSafeHeaders, includePerformance:false, compact:true });
         if (cancelled) return;
         if (Array.isArray(data.users)) setUsers(normalizeTeamUsers(data.users));
         if (Array.isArray(data.deletedProjectIds)) replaceConfirmedDeletedProjects(data.deletedProjectIds);
@@ -4299,12 +4313,16 @@ function AppShell() {
         if (Array.isArray(data.chatMessages)) {
           const incomingChats = sanitizeChatsForCache(data.chatMessages);
           setChatMessages(incomingChats);
-          try { localStorage.setItem('kalpa_chats', JSON.stringify(incomingChats)); } catch(e) {}
+          if (!USE_BACKEND_STATE) { try { localStorage.setItem('kalpa_chats', JSON.stringify(incomingChats)); } catch(e) {} }
         }
         if (Array.isArray(data.notifications)) setNotifications(data.notifications);
         if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, data.attendanceLogs));
         if (Array.isArray(data.performanceRecords)) setPerformanceRecords(data.performanceRecords);
         if (data.performanceSummary && typeof data.performanceSummary === 'object') setPerformanceSummary(data.performanceSummary);
+        if (Number.isFinite(Number(data.stateVersion))) workspaceStateVersionRef.current = Number(data.stateVersion);
+        if (Number.isFinite(Number(data.dataRevision))) workspaceDataRevisionRef.current = Number(data.dataRevision);
+        if (Number.isFinite(Number(data.presenceGeneration))) workspacePresenceGenerationRef.current = Number(data.presenceGeneration);
+        if (data.collectionRevisions && typeof data.collectionRevisions === 'object') workspaceCollectionRevisionsRef.current = data.collectionRevisions;
         setBackendStateReady(true);
         setIsDbReady(true);
         setDbError(null);
@@ -4350,14 +4368,28 @@ function AppShell() {
     if (!USE_BACKEND_STATE || !backendStateReady || !currentUserRef.current || workspaceRefreshInFlightRef.current) return;
     workspaceRefreshInFlightRef.current = true;
     try {
-      const data = await fetchBackendState({ apiBase: API_BASE, headers: financeSafeHeaders });
+      const data = await fetchBackendState({
+        apiBase: API_BASE,
+        headers: financeSafeHeaders,
+        includePerformance:false,
+        compact:true,
+        sinceDataRevision:workspaceDataRevisionRef.current,
+        sinceVersion:workspaceStateVersionRef.current,
+        sincePresence:workspacePresenceGenerationRef.current,
+        sinceCollections:workspaceCollectionRevisionsRef.current
+      });
+      if (Number.isFinite(Number(data.stateVersion))) workspaceStateVersionRef.current = Number(data.stateVersion);
+      if (Number.isFinite(Number(data.dataRevision))) workspaceDataRevisionRef.current = Number(data.dataRevision);
+      if (Number.isFinite(Number(data.presenceGeneration))) workspacePresenceGenerationRef.current = Number(data.presenceGeneration);
+      if (data.collectionRevisions && typeof data.collectionRevisions === 'object') workspaceCollectionRevisionsRef.current = data.collectionRevisions;
+      if (data.unchanged) return;
       if (Array.isArray(data.users)) setUsers(prev => normalizeTeamUsers([...(prev || []), ...data.users]));
       if (Array.isArray(data.deletedProjectIds)) replaceConfirmedDeletedProjects(data.deletedProjectIds);
       if (Array.isArray(data.projects)) applyProjectSnapshot(data.projects, { source: 'adaptive-sync' });
       if (Array.isArray(data.chatMessages)) {
         setChatMessages(prev => {
           const merged = mergeChatMessagesByFreshness(prev, data.chatMessages);
-          try { localStorage.setItem('kalpa_chats', JSON.stringify(sanitizeChatsForCache(merged))); } catch(e) {}
+          if (!USE_BACKEND_STATE) { try { localStorage.setItem('kalpa_chats', JSON.stringify(sanitizeChatsForCache(merged))); } catch(e) {} }
           return merged;
         });
       }
@@ -4369,6 +4401,10 @@ function AppShell() {
         });
       }
       if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, data.attendanceLogs));
+      if (data.partial === 'presence') {
+        setShowLocalBanner(data.database === 'json-file');
+        return;
+      }
       if (Array.isArray(data.performanceRecords)) setPerformanceRecords(data.performanceRecords);
       if (data.performanceSummary && typeof data.performanceSummary === 'object') setPerformanceSummary(data.performanceSummary);
       setShowLocalBanner(data.database === 'json-file');
@@ -4545,30 +4581,19 @@ function AppShell() {
     if (USE_BACKEND_STATE) {
       let cancelled = false;
       setFirebaseUser({ uid: 'backend-state-user' });
-      getSessionApi()
-        .then((session) => {
+      // Security policy: every page instance begins signed out. Refreshing or
+      // reopening the website revokes the previous browser session before any
+      // operational data can be hydrated.
+      clearBrowserSessionApi()
+        .catch((error) => {
+          console.warn('Previous browser session could not be cleared cleanly:', error?.message || error);
+        })
+        .finally(() => {
           if (cancelled) return;
-          if (session?.authenticated && session?.user) {
-            clearRoleScopedOperationalCaches(session.user);
-            if (session.user.mustChangePassword) {
-              setPasswordChangeSessionUser(session.user);
-              setCurrentUser(null);
-              currentUserRef.current = null;
-              setBackendStateReady(false);
-              setIsDbReady(false);
-            } else {
-              setPasswordChangeSessionUser(null);
-              setCurrentUser(session.user);
-              currentUserRef.current = session.user;
-            }
-          } else {
-            clearAuthenticatedWorkspace({ clearCache: true });
-          }
-        })
-        .catch(() => {
-          if (!cancelled) clearAuthenticatedWorkspace({ clearCache: true });
-        })
-        .finally(() => { if (!cancelled) setIsAuthReady(true); });
+          clearAuthenticatedWorkspace({ clearCache: true });
+          setPasswordChangeSessionUser(null);
+          setIsAuthReady(true);
+        });
       return () => { cancelled = true; };
     }
 
@@ -5987,7 +6012,7 @@ function AppShell() {
                setProjects(() => nextProjects);
                setSelectedBoardDate(formatDateKey(newP.createdAt));
                setActiveTab('board');
-               try { window.localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(filterDeletedProjects(nextProjects)))); } catch(e) {}
+               if (!USE_BACKEND_STATE) { try { window.localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(filterDeletedProjects(nextProjects)))); } catch(e) {} }
                let confirmedProject = newP;
                let projectConfirmedByBackend = !USE_BACKEND_STATE;
                if (USE_BACKEND_STATE && backendStateReady && isDbReady) {

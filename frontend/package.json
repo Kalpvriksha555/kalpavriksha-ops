@@ -1,6 +1,6 @@
 {
   "name": "kalpvriksha-designs-frontend",
-  "version": "2.9.12-deep-runtime-integrity",
+  "version": "2.9.14-team-transparency-speed",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",

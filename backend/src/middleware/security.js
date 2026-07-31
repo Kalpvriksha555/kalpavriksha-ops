@@ -1,6 +1,15 @@
 import crypto from 'crypto';
 
 const stores = new Map();
+let limiterSweepCounter = 0;
+
+const sweepExpiredRateLimits = (now = Date.now()) => {
+  limiterSweepCounter += 1;
+  if (limiterSweepCounter % 256 !== 0 && stores.size < 5000) return;
+  for (const [key, record] of stores.entries()) {
+    if (!record || Number(record.resetAt || 0) <= now) stores.delete(key);
+  }
+};
 
 const clientKey = (req = {}, prefix = 'default') => {
   const forwarded = String(req.headers?.['x-forwarded-for'] || '').split(',')[0].trim();
@@ -13,6 +22,7 @@ export const createRateLimiter = ({ windowMs = 60_000, max = 60, prefix = 'api',
   const safeMax = Math.max(1, Number(max) || 60);
   return (req, res, next) => {
     const now = Date.now();
+    sweepExpiredRateLimits(now);
     const storeKey = typeof key === 'function' ? String(key(req) || clientKey(req, prefix)) : clientKey(req, prefix);
     const record = stores.get(storeKey);
     const active = record && record.resetAt > now ? record : { count: 0, resetAt: now + safeWindow };

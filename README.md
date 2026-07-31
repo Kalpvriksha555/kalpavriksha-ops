@@ -1,4 +1,4 @@
-# Kalpvriksha Designs Ops — Phase 9 Hardened Release Candidate
+# Kalpvriksha Designs Ops — Team Transparency & Speed Release
 
 This source-only package contains all nine completed hardening phases:
 
@@ -23,7 +23,7 @@ npm run dev
 
 The frontend runs at `http://localhost:5173` and uses `http://localhost:8080`. Copy `backend/.env.example` to `backend/.env` for an isolated local sandbox or PostgreSQL configuration. Never place production secrets, databases or client documents in the repository or distributable ZIP.
 
-A new empty sandbox needs the one-time bootstrap Admin documented in `backend/.env.example`. Existing live users are migrated from legacy credentials and must replace weak or temporary passwords at first login.
+A new empty sandbox needs the one-time bootstrap Admin documented in `backend/.env.example`. Established approved users keep their existing secure passwords. Only an administrator-created or administrator-reset temporary password requires a one-time replacement. Every browser refresh or reopened page starts signed out and requires a fresh login.
 
 ## Production requirements
 
@@ -73,6 +73,10 @@ Read before deployment:
 - `PHASE_9_VERIFICATION_RESULTS.md`
 - `HARDENING_ROADMAP.md`
 - `RELEASE_CHECKLIST.md`
+- `SESSION_PERFORMANCE_STABILITY_FIX.md`
+- `SESSION_PERFORMANCE_STABILITY_VERIFICATION.md`
+- `TEAM_TRANSPARENCY_SPEED_FIX.md`
+- `TEAM_TRANSPARENCY_SPEED_VERIFICATION.md`
 
 All development phases are complete. Do not deploy over the live system until the current PostgreSQL database and private files are backed up, the missing finance values are recovered selectively from an isolated verified source, and this exact source tree passes the release-certificate gate on the deployment machine.
 

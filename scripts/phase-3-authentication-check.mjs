@@ -20,7 +20,8 @@ requireText('backend/src/server.js', /auth_sessions/, 'Session store is missing.
 requireText('backend/src/server.js', /auth_events/, 'Authentication audit store is missing.');
 requireText('backend/src/server.js', /migrateLegacyCredentials/, 'Legacy credential migration is missing.');
 requireText('frontend/src/services/authService.js', /credentials:\s*'include'/, 'Frontend cookie transport is missing.');
-requireText('frontend/src/App.jsx', /getSessionApi\(\)/, 'Frontend session restoration is missing.');
+requireText('frontend/src/App.jsx', /clearBrowserSessionApi\(\)/, 'Fresh-login browser bootstrap is missing.');
+requireText('backend/src/server.js', /app\.post\('\/api\/auth\/clear-browser-session'/, 'Browser-session revocation endpoint is missing.');
 requireText('frontend/src/App.jsx', /kalpa-auth-expired/, 'Frontend session-expiry cleanup is missing.');
 if (/X-User-Role|X-User-Name/.test(read('frontend/src/App.jsx'))) throw new Error('Client-supplied role/name trust headers remain in App.jsx.');
 

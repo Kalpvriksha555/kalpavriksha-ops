@@ -917,8 +917,9 @@ export async function loadRelationalState(pool, { normalizeState, seedState }) {
         if (concurrentMetadata.rows.length) {
           await client.query('COMMIT');
           const currentParts = await readRelationalParts(client);
-          const currentState = normalizeState(recomposeState(currentParts));
-          return { state:currentState, stateVersion:Number(concurrentMetadata.rows[0].state_version || 0), source:'relational', legacyState:rawState };
+          const currentPersistedState = recomposeState(currentParts);
+          const currentState = normalizeState(currentPersistedState);
+          return { state:currentState, persistedState:currentPersistedState, stateVersion:Number(concurrentMetadata.rows[0].state_version || 0), source:'relational', legacyState:rawState };
         }
         await syncRelationalParts(client, parts);
         await client.query(
@@ -936,7 +937,7 @@ export async function loadRelationalState(pool, { normalizeState, seedState }) {
         await client.query('ROLLBACK').catch(() => {});
         throw error;
       }
-      return { state: normalized, stateVersion: version, source: legacy.rows.length ? 'legacy_app_state_import' : 'empty_seed', legacyState: rawState };
+      return { state: normalized, persistedState:structuredClone(normalized), stateVersion: version, source: legacy.rows.length ? 'legacy_app_state_import' : 'empty_seed', legacyState: rawState };
     }
 
     const parts = await readRelationalParts(client);
@@ -949,6 +950,7 @@ export async function loadRelationalState(pool, { normalizeState, seedState }) {
     const legacy = await client.query('SELECT value FROM app_state WHERE key=$1', ['main']);
     return {
       state,
+      persistedState,
       stateVersion: Number(metadata.rows[0].state_version || 0),
       source: 'relational',
       legacyState: legacy.rows[0]?.value || null
@@ -964,8 +966,9 @@ export async function reloadRelationalState(pool, { normalizeState }) {
     const metadata = await client.query('SELECT * FROM app_state_metadata WHERE key=$1', ['main']);
     if (!metadata.rows.length) throw new Error('Relational state metadata is missing.');
     const parts = await readRelationalParts(client);
-    const state = normalizeState(recomposeState(parts));
-    return { state, stateVersion: Number(metadata.rows[0].state_version || 0) };
+    const persistedState = recomposeState(parts);
+    const state = normalizeState(persistedState);
+    return { state, persistedState, stateVersion: Number(metadata.rows[0].state_version || 0) };
   } finally {
     client.release();
   }
@@ -978,7 +981,8 @@ export async function persistRelationalState(pool, {
   metadata = {},
   applyAuthOperationsWithClient,
   financeSnapshotHash,
-  revisionRetention = 200
+  revisionRetention = 200,
+  persistedBaseState = null
 }) {
   const normalized = state;
   const incomingParts = decomposeState(normalized);
@@ -1005,7 +1009,9 @@ export async function persistRelationalState(pool, {
     // and file records that have not yet been durably materialized. Updating the
     // metadata hash from that in-memory view during a users-only heartbeat would
     // otherwise make the next restart fail its integrity check.
-    const existingParts = selectedCollections ? await readRelationalParts(client) : null;
+    const existingParts = selectedCollections
+      ? (persistedBaseState ? decomposeState(persistedBaseState) : await readRelationalParts(client))
+      : null;
     const preparedWrite = selectedCollections
       ? prepareRelationalWrite(existingParts, incomingParts, [...selectedCollections], metadata.collectionRowIds)
       : { committedParts:incomingParts, writeParts:incomingParts, rowSelections:new Map() };
@@ -1041,7 +1047,19 @@ export async function persistRelationalState(pool, {
     const actor = safeText(metadata.actor || metadata.financeEvent?.actor || metadata.authOperations?.[0]?.actor || 'system');
     const reason = safeText(metadata.reason || (metadata.financeEvent ? 'finance_update' : metadata.authOperations?.length ? 'authentication_update' : 'state_update'));
     const skipRevisionSnapshot = metadata.skipRevisionSnapshot === true;
-    if (!skipRevisionSnapshot) {
+    let shouldWriteRevisionSnapshot = !skipRevisionSnapshot || metadata.forceRevisionSnapshot === true;
+    if (!shouldWriteRevisionSnapshot && metadata.periodicRevisionSnapshot === true) {
+      const revisionInterval = Math.max(5, Math.min(500, Number(metadata.revisionSnapshotInterval || 25)));
+      const revisionMaxAgeMinutes = Math.max(5, Math.min(24 * 60, Number(metadata.revisionSnapshotMaxAgeMinutes || 30)));
+      const latestRevision = await client.query('SELECT state_version,created_at FROM state_revisions ORDER BY state_version DESC LIMIT 1');
+      const latestVersion = Number(latestRevision.rows[0]?.state_version || 0);
+      const latestAt = latestRevision.rows[0]?.created_at ? new Date(latestRevision.rows[0].created_at).getTime() : 0;
+      shouldWriteRevisionSnapshot = !latestRevision.rows.length
+        || Number(targetVersion) - latestVersion >= revisionInterval
+        || !latestAt
+        || Date.now() - latestAt >= revisionMaxAgeMinutes * 60_000;
+    }
+    if (shouldWriteRevisionSnapshot) {
       await client.query(
         `INSERT INTO state_revisions(state_version,actor,reason,snapshot_hash,entity_counts,snapshot)
          VALUES($1,$2,$3,$4,$5::jsonb,$6::jsonb)`,
@@ -1053,7 +1071,7 @@ export async function persistRelationalState(pool, {
       ['main', targetVersion, hash, JSON.stringify(counts)]
     );
 
-    if (!skipRevisionSnapshot) {
+    if (shouldWriteRevisionSnapshot) {
       const keep = Math.max(25, Math.min(5000, Number(revisionRetention || 200)));
       await client.query(
         `DELETE FROM state_revisions WHERE id IN (
@@ -1064,7 +1082,7 @@ export async function persistRelationalState(pool, {
     }
 
     await client.query('COMMIT');
-    return { stateVersion: targetVersion, persistedAt: new Date().toISOString(), database: 'postgresql-relational', snapshotHash: hash, counts };
+    return { stateVersion: targetVersion, persistedAt: new Date().toISOString(), database: 'postgresql-relational', snapshotHash: hash, counts, committedState, revisionSnapshotWritten:shouldWriteRevisionSnapshot };
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     throw error;

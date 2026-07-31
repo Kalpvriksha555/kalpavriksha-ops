@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, BarChart3, Bell, CheckCircle, Clock, Coffee, Download, FileText, ShieldCheck, Star, User, Users, XCircle } from 'lucide-react';
 import { Badge, MiniEmptyState } from '../shared';
 import { ONLINE_STALE_MS } from '../../config/appConfig';
@@ -1199,34 +1199,77 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
 export const ProductivityDashboard = ({ users = [], projects = [], performanceRecords: externalPerformanceRecords = [], performanceSummary = null }) => {
   const [range, setRange] = useState('month');
   const [selectedMember, setSelectedMember] = useState('all');
-  const [engineDiagnostics, setEngineDiagnostics] = useState(null);
   const [engineSummary, setEngineSummary] = useState(null);
   const [engineBusy, setEngineBusy] = useState(false);
+  const [leaderboard, setLeaderboard] = useState(null);
+  const [leaderboardError, setLeaderboardError] = useState('');
+  const [leaderboardRefreshKey, setLeaderboardRefreshKey] = useState(0);
   const now = Date.now();
   const todayKey = formatDateKey();
   const rangeMs = range === 'week' ? 7 * 86400000 : range === 'quarter' ? 90 * 86400000 : 30 * 86400000;
   const allProjects = Array.isArray(projects) ? projects : [];
-  const scopedProjects = allProjects.filter(p => (toMs(p.createdAt) || now) >= now - rangeMs || (toMs(p.completedAt) || 0) >= now - rangeMs);
-  const team = getOperationalUsers(users, { includeAdmins: false });
+  const scopedProjects = useMemo(() => allProjects.filter(p => (toMs(p.createdAt) || now) >= now - rangeMs || (toMs(p.completedAt) || 0) >= now - rangeMs), [projects, range]);
+  const leaderboardMembers = Array.isArray(leaderboard?.members) ? leaderboard.members : [];
+  const team = useMemo(() => {
+    const byName = new Map();
+    getOperationalUsers(users, { includeAdmins: false }).forEach(user => byName.set(normalizePersonName(user.name), user));
+    leaderboardMembers.forEach(member => {
+      const key = normalizePersonName(member.name);
+      byName.set(key, { ...(byName.get(key) || {}), ...member, name:member.name, role:normalizeRole(member.role), status:member.status || 'APPROVED' });
+    });
+    return Array.from(byName.values()).sort((a,b) => String(a.name).localeCompare(String(b.name)));
+  }, [users, leaderboard]);
   const activeTeam = selectedMember === 'all' ? team : team.filter(u => normalizePersonName(u.name) === normalizePersonName(selectedMember));
-  const generatedPerformanceRecords = buildPerformanceRecords(allProjects);
-  const performanceRecords = mergePerformanceRecordSets(externalPerformanceRecords, generatedPerformanceRecords);
-  const effectivePerformanceSummary = engineSummary || performanceSummary || null;
+  const generatedPerformanceRecords = useMemo(() => buildPerformanceRecords(allProjects), [projects]);
+  const performanceRecords = useMemo(() => mergePerformanceRecordSets(externalPerformanceRecords, generatedPerformanceRecords), [externalPerformanceRecords, generatedPerformanceRecords]);
+  const effectivePerformanceSummary = engineSummary || (leaderboard ? { ...leaderboard, users:leaderboardMembers.map(member => ({ ...member, userName:member.name, completedCount:member.completedHistoryCount })) } : performanceSummary) || null;
   const summaryUsers = Array.isArray(effectivePerformanceSummary?.users) ? effectivePerformanceSummary.users : [];
-  const summaryByName = new Map(summaryUsers.map(row => [normalizePersonName(row.userName || row.name), row]));
+  const summaryByName = useMemo(() => new Map(summaryUsers.map(row => [normalizePersonName(row.userName || row.name), row])), [summaryUsers]);
+  const leaderboardByName = useMemo(() => new Map(leaderboardMembers.map(row => [normalizePersonName(row.name), row])), [leaderboardMembers]);
+  const scopedProjectsByOwner = useMemo(() => {
+    const map = new Map();
+    scopedProjects.forEach(project => {
+      const key = normalizePersonName(getPerformanceOwnerName(project));
+      if (!key) return;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(project);
+    });
+    return map;
+  }, [scopedProjects]);
+  const allProjectsByOwner = useMemo(() => {
+    const map = new Map();
+    allProjects.forEach(project => {
+      const key = normalizePersonName(getPerformanceOwnerName(project));
+      if (!key) return;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(project);
+    });
+    return map;
+  }, [projects]);
+  const performanceRecordsByOwner = useMemo(() => {
+    const map = new Map();
+    performanceRecords.forEach(record => {
+      const key = normalizePersonName(record.userName);
+      if (!key) return;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(record);
+    });
+    return map;
+  }, [performanceRecords]);
 
   useEffect(() => {
     let active = true;
-    authFetch(absoluteApiUrl('/api/performance/diagnostics'))
-      .then(res => res.ok ? res.json() : null)
+    setLeaderboardError('');
+    authFetch(absoluteApiUrl(`/api/performance/leaderboard?range=${encodeURIComponent(range)}`), { cache:'no-store', timeoutMs:30_000 })
+      .then(res => res.ok ? res.json() : Promise.reject(new Error(`Leaderboard failed: ${res.status}`)))
       .then(data => {
         if (!active || !data?.ok) return;
-        setEngineDiagnostics(data.diagnostics || null);
-        setEngineSummary(data.summary || null);
+        setLeaderboard(data.leaderboard || null);
       })
-      .catch(() => {});
+      .catch(error => { if (active) setLeaderboardError(error?.message || 'Team comparison could not be loaded.'); });
     return () => { active = false; };
-  }, []);
+  }, [range, leaderboardRefreshKey]);
+
 
   const rebuildPerformanceEngine = async () => {
     setEngineBusy(true);
@@ -1234,8 +1277,8 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
       const res = await authFetch(absoluteApiUrl('/api/performance/rebuild'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'performance-dashboard' }) });
       const data = await res.json().catch(() => null);
       if (data?.ok) {
-        setEngineDiagnostics(data.diagnostics || null);
         setEngineSummary(data.summary || null);
+        setLeaderboardRefreshKey(value => value + 1);
       } else {
         notifyUser(data?.error || 'Performance rebuild failed.');
       }
@@ -1245,16 +1288,17 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
       setEngineBusy(false);
     }
   };
-  const getMemberProjects = (name) => scopedProjects.filter(p => normalizePersonName(getPerformanceOwnerName(p)) === normalizePersonName(name));
-  const getMemberRecords = (name) => performanceRecords.filter(r => normalizePersonName(r.userName) === normalizePersonName(name));
+  const getMemberProjects = (name) => scopedProjectsByOwner.get(normalizePersonName(name)) || [];
+  const getMemberRecords = (name) => performanceRecordsByOwner.get(normalizePersonName(name)) || [];
   const memberRows = activeTeam.map(u => {
     const summaryRow = summaryByName.get(normalizePersonName(u.name)) || {};
+    const leaderboardRow = leaderboardByName.get(normalizePersonName(u.name)) || {};
     const assigned = getMemberProjects(u.name);
     const completed = assigned.filter(isProjectCompleted);
-    const allAssigned = allProjects.filter(p => normalizePersonName(getPerformanceOwnerName(p)) === normalizePersonName(u.name));
+    const allAssigned = allProjectsByOwner.get(normalizePersonName(u.name)) || [];
     const analyticsCompleted = allAssigned.filter(isAnalyticsCompletedProject);
     const completedRecords = getMemberRecords(u.name);
-    const completedToday = completed.filter(p => formatDateKey(p.completedAt || p.updatedAt || p.createdAt) === todayKey).length;
+    const completedToday = Number(leaderboardRow.completedToday ?? completed.filter(p => formatDateKey(p.completedAt || p.updatedAt || p.createdAt) === todayKey).length) || 0;
     const active = assigned.filter(isIncompleteProject);
     const revisions = assigned.filter(p => getProjectRevisionTotal(p) > 0);
     const profileAverage = Number(u.performanceProfile?.averageCompletionMinutes || u.averageCompletionMinutes || 0) || 0;
@@ -1262,9 +1306,11 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
     const summaryAvgReview = Number(summaryRow.avgReviewMinutes || summaryRow.averageReviewMinutes || 0) || 0;
     const avgMins = summaryAvgCompletion || averageMinutes(completedRecords, r => r.totalCompletionMinutes) || averageMinutes(analyticsCompleted, p => getActiveCompletionMinutes(p)) || averageMinutes(completed, p => getActiveCompletionMinutes(p)) || profileAverage;
     const avgReviewMins = summaryAvgReview || averageMinutes(completedRecords, r => r.reviewMinutes) || averageMinutes(analyticsCompleted, p => getReviewDurationMinutes(p)) || averageMinutes(completed, p => getReviewDurationMinutes(p));
-    const live = getLiveStatus(u, active);
+    const liveTasks = active.length ? active : (Number(leaderboardRow.activeCount || 0) > 0 ? [{ id:'Active task' }] : []);
+    const live = getLiveStatus(u, liveTasks);
     const breakMinutes = getTodayBreakMinutes(u);
-    const slaPct = Number(summaryRow.slaPct || summaryRow.slaPercentage || 0) || getSlaCompliancePct(assigned);
+    const summarySla = summaryRow.slaPct ?? summaryRow.slaPercentage;
+    const slaPct = summarySla !== undefined && summarySla !== null ? Number(summarySla) || 0 : getSlaCompliancePct(assigned);
     const revisionTotal = Number(summaryRow.revisionCount || 0) || assigned.reduce((sum, p) => sum + getProjectRevisionTotal(p), 0);
     const revisionRate = Number(summaryRow.revisionRate || 0) || (analyticsCompleted.length ? Number((revisionTotal / analyticsCompleted.length).toFixed(1)) : (completed.length ? Number((revisionTotal / completed.length).toFixed(1)) : 0));
     const revisionPct = assigned.length ? Math.round((revisions.length / assigned.length) * 100) : 0;
@@ -1273,7 +1319,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
     const speedScore = avgMins ? Math.max(10, Math.min(100, Math.round(100 - Math.max(0, avgMins - 90) / 6))) : (completed.length ? 70 : 0);
     const revisionScore = Math.max(0, Math.round(100 - revisionRate * 25));
     const qualityScore = Math.max(0, Math.min(100, Number(summaryRow.scoreBreakdown?.qualityScore || 0) || revisionScore));
-    const productivityScore = Number(summaryRow.productivityScore || 0) || Math.round((speedScore * 0.3) + (slaPct * 0.3) + (qualityScore * 0.2) + (revisionScore * 0.15) + (completedToday > 0 ? 5 : 0));
+    const productivityScore = summaryRow.productivityScore !== undefined && summaryRow.productivityScore !== null ? Number(summaryRow.productivityScore) || 0 : Math.round((speedScore * 0.3) + (slaPct * 0.3) + (qualityScore * 0.2) + (revisionScore * 0.15) + (completedToday > 0 ? 5 : 0));
     const rolling10CompletionMinutes = Number(summaryRow.rolling10CompletionMinutes || 0) || avgMins;
     const rolling30CompletionMinutes = Number(summaryRow.rolling30CompletionMinutes || 0) || avgMins;
     const rawScoreBreakdown = summaryRow.scoreBreakdown || {};
@@ -1298,13 +1344,17 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
     const trendRaw = summaryRow.trend?.pct !== undefined ? summaryTrendRaw : computedTrendRaw;
     const trend = Math.max(-99, Math.min(99, trendRaw));
     const trendLabel = Math.abs(trend) < 6 ? 'Stable' : trend > 0 ? 'Improving' : 'Declining';
-    return { user: u, assigned, completed, active, revisions, completedToday, avgMins, avgReviewMins, rolling10CompletionMinutes, rolling30CompletionMinutes, scoreBreakdown, live, breakMinutes, slaPct, revisionPct, revisionRate, productivityScore, caseTypeStats, trend, trendLabel, timingSource: summaryRow.timingSource || (summaryRow.completedCount ? 'Backend History' : completedRecords.length ? 'Performance Records' : analyticsCompleted.length ? 'Task History' : 'No history yet'), historyCompletedCount: Number(summaryRow.completedCount || completedRecords.length || analyticsCompleted.length || completed.length || 0) };
-  }).sort((a, b) => b.productivityScore - a.productivityScore || b.completed.length - a.completed.length || b.assigned.length - a.assigned.length);
+    const assignedCount = Number(leaderboardRow.assignedCount ?? assigned.length) || 0;
+    const completedCount = Number(leaderboardRow.completedCount ?? completed.length) || 0;
+    const activeCount = Number(leaderboardRow.activeCount ?? active.length) || 0;
+    const revisionsCount = Number(leaderboardRow.revisionCases ?? revisions.length) || 0;
+    return { user: u, assigned, completed, active, revisions, assignedCount, completedCount, activeCount, revisionsCount, completedToday, avgMins, avgReviewMins, rolling10CompletionMinutes, rolling30CompletionMinutes, scoreBreakdown, live, breakMinutes, slaPct, revisionPct, revisionRate, productivityScore, caseTypeStats, trend, trendLabel, timingSource: summaryRow.timingSource || (summaryRow.completedCount ? 'Backend History' : completedRecords.length ? 'Performance Records' : analyticsCompleted.length ? 'Task History' : 'No history yet'), historyCompletedCount: Number(summaryRow.completedCount || leaderboardRow.completedHistoryCount || completedRecords.length || analyticsCompleted.length || completed.length || 0) };
+  }).sort((a, b) => b.productivityScore - a.productivityScore || b.completedCount - a.completedCount || b.assignedCount - a.assignedCount);
   const totals = memberRows.reduce((acc, row) => {
-    acc.assigned += row.assigned.length;
-    acc.completed += row.completed.length;
-    acc.active += row.active.length;
-    acc.revisions += row.revisions.length;
+    acc.assigned += row.assignedCount;
+    acc.completed += row.completedCount;
+    acc.active += row.activeCount;
+    acc.revisions += row.revisionsCount;
     acc.today += row.completedToday;
     if (row.avgMins) { acc.avgTotal += row.avgMins; acc.avgCount += 1; }
     return acc;
@@ -1317,7 +1367,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
   const avgSla = memberRows.length ? Math.round(memberRows.reduce((sum, row) => sum + row.slaPct, 0) / memberRows.length) : 100;
   const exportPerformance = () => exportToCSV(
     ['Member', 'Role', 'Status', 'Break Today', 'Assigned', 'Completed', 'Active', 'Revisions', 'Completed Today', 'Avg Completion', 'Avg Review', 'Revision Rate', 'SLA %', 'Productivity Score', 'Quality'],
-    memberRows.map(row => [row.user.name, row.user.role, row.live.label, formatMinutes(row.breakMinutes), row.assigned.length, row.completed.length, row.active.length, row.revisions.length, row.completedToday, displayMinutes(row.avgMins, '0m'), displayMinutes(row.avgReviewMins, '0m'), row.revisionRate, `${row.slaPct}%`, row.productivityScore, getQualityLabel(row.productivityScore)]),
+    memberRows.map(row => [row.user.name, row.user.role, row.live.label, formatMinutes(row.breakMinutes), row.assignedCount, row.completedCount, row.activeCount, row.revisionsCount, row.completedToday, displayMinutes(row.avgMins, '0m'), displayMinutes(row.avgReviewMins, '0m'), row.revisionRate, `${row.slaPct}%`, row.productivityScore, getQualityLabel(row.productivityScore)]),
     `Performance_Analytics_${range}.csv`
   );
   const StatCard = ({ label, value, hint }) => (
@@ -1384,7 +1434,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
   };
   const getBestArea = (row) => {
     const score = row.scoreBreakdown || {};
-    const completedCount = Array.isArray(row.completed) ? row.completed.length : 0;
+    const completedCount = Array.isArray(row.completed) ? row.completedCount : 0;
     const revisionRate = Number(row.revisionRate || 0);
     const fastestCaseType = (Array.isArray(row.caseTypeStats) ? row.caseTypeStats : [])
       .filter(stat => Number(stat.count || 0) > 0 && Number(stat.avg || 0) > 0)
@@ -1405,7 +1455,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
     const score = row.scoreBreakdown || {};
     const avg = Number(row.avgMins || 0);
     const review = Number(row.avgReviewMins || 0);
-    const activeCount = Array.isArray(row.active) ? row.active.length : 0;
+    const activeCount = Array.isArray(row.active) ? row.activeCount : 0;
     const revisionRate = Number(row.revisionRate || 0);
     const slowCaseType = (Array.isArray(row.caseTypeStats) ? row.caseTypeStats : [])
       .filter(stat => Number(stat.count || 0) > 0 && Number(stat.avg || 0) > 0)
@@ -1449,10 +1499,11 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
         <StatCard label="Last 10 Avg" value={displayMinutes(teamRolling10)} hint={teamTrend?.label || 'trend'} />
         <StatCard label="SLA" value={`${avgSla}%`} hint="average compliance" />
       </div>
+      {leaderboardError && <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-800">Team comparison is temporarily using the local workspace snapshot. {leaderboardError}</div>}
       <div className="rounded-3xl border border-indigo-100 bg-gradient-to-r from-indigo-50 to-white px-4 py-3 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 shadow-sm">
         <div>
           <p className="text-xs font-black uppercase tracking-widest text-indigo-700">Performance data is ready</p>
-          <p className="text-xs font-bold text-indigo-600 mt-1">Using {effectivePerformanceSummary?.recordCount ? `${effectivePerformanceSummary.recordCount} saved completion records` : `${performanceRecords.length} task records`} for average time, trend, SLA, quality, and revisions.</p>
+          <p className="text-xs font-bold text-indigo-600 mt-1">Using {effectivePerformanceSummary?.recordCount ? `${effectivePerformanceSummary.recordCount} saved completion records` : `${performanceRecords.length} task records`} across the approved team for transparent comparison. Designers see aggregate team metrics without access to other members’ case details.</p>
         </div>
         <button type="button" onClick={rebuildPerformanceEngine} disabled={engineBusy} className="px-4 py-2.5 rounded-xl bg-indigo-600 text-white font-black text-sm disabled:opacity-60 disabled:cursor-not-allowed shadow-sm">{engineBusy ? 'Refreshing...' : 'Refresh averages'}</button>
       </div>
@@ -1465,7 +1516,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
           <div className="p-4 grid grid-cols-1 lg:grid-cols-2 gap-4 max-h-[520px] overflow-y-auto custom-scrollbar">
             {memberRows.map(row => {
               const loadLimit = Number(row.user.dailyLimit || row.user.taskLimit || 10) || 10;
-              const loadPct = Math.min(100, Math.round((row.active.length / loadLimit) * 100));
+              const loadPct = Math.min(100, Math.round((row.activeCount / loadLimit) * 100));
               const currentTask = row.active[0];
               const live = row.live || getLiveStatus(row.user, row.active);
               const historyCount = Number(row.historyCompletedCount || 0);
@@ -1518,9 +1569,9 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
                   </div>
 
                   <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
-                    <SimpleMetric label="Assigned" value={row.assigned.length} helper="total given" />
-                    <SimpleMetric label="Completed" value={row.completed.length} tone="text-emerald-600" helper="finished" />
-                    <SimpleMetric label="Active" value={row.active.length} tone="text-orange-600" helper="pending now" />
+                    <SimpleMetric label="Assigned" value={row.assignedCount} helper="total given" />
+                    <SimpleMetric label="Completed" value={row.completedCount} tone="text-emerald-600" helper="finished" />
+                    <SimpleMetric label="Active" value={row.activeCount} tone="text-orange-600" helper="pending now" />
                     <SimpleMetric label="On time" value={`${row.slaPct}%`} tone="text-indigo-600" helper="SLA" />
                   </div>
 
@@ -1561,7 +1612,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
                         <WeightedScoreRow label="Completion speed" score={row.scoreBreakdown?.speedScore} weight={35} detail={`${avgTime} avg finish${teamAvgMins ? ` • Team ${displayMinutes(teamAvgMins)}` : ''}`} helper="Faster completion improves this part." />
                         <WeightedScoreRow label="Work quality" score={row.scoreBreakdown?.qualityScore} weight={30} detail={`${row.revisionRate}/task revision rate`} helper="Fewer corrections improve this part." />
                         <WeightedScoreRow label="On-time SLA" score={row.scoreBreakdown?.slaScore} weight={20} detail={`${row.slaPct}% completed within expected time`} helper="Keep delivery within SLA." />
-                        <WeightedScoreRow label="Revision control" score={row.scoreBreakdown?.revisionScore} weight={15} detail={`${row.revisions.length} revision case${row.revisions.length === 1 ? '' : 's'}`} helper="Self-check before upload protects this score." />
+                        <WeightedScoreRow label="Revision control" score={row.scoreBreakdown?.revisionScore} weight={15} detail={`${row.revisionsCount} revision case${row.revisionsCount === 1 ? '' : 's'}`} helper="Self-check before upload protects this score." />
                       </div>
                     </div>
                   ) : (
@@ -1610,7 +1661,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
       <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
         <div className="p-5 border-b-2 border-slate-100"><h2 className="font-black text-slate-800 text-lg">Team Leaderboard & Individual Analytics</h2></div>
         <div className="overflow-x-auto"><table className="w-full text-left text-sm whitespace-nowrap"><thead className="bg-slate-50 text-slate-500"><tr>{['Member','Role','Status','Assigned','Completed','Active','Today','Avg Completion','Avg Review','Revision Rate','SLA','Productivity','Quality'].map(c => <th key={c} className="px-4 py-3 text-[10px] font-black uppercase tracking-widest">{c}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">
-          {memberRows.map(row => <tr key={row.user.id} className="hover:bg-slate-50"><td className="px-5 py-4 font-black text-slate-800">{row.user.name}</td><td className="px-5 py-4 font-bold text-slate-500">{row.user.role}</td><td className="px-5 py-4"><Badge colorClass={row.live.badgeClass}>{row.live.label}</Badge></td><td className="px-5 py-4 font-black text-slate-700">{row.assigned.length}</td><td className="px-5 py-4 font-black text-emerald-600">{row.completed.length}</td><td className="px-5 py-4 font-black text-orange-600">{row.active.length}</td><td className="px-5 py-4 font-black text-indigo-600">{row.completedToday}</td><td className="px-5 py-4 font-bold text-slate-600">{displayMinutes(row.avgMins)}</td><td className="px-5 py-4 font-bold text-blue-600">{displayMinutes(row.avgReviewMins)}</td><td className="px-5 py-4 font-bold text-purple-600">{row.revisionRate}/task</td><td className="px-4 py-3 font-bold text-slate-700">{row.slaPct}%</td><td className="px-5 py-4 font-black text-indigo-600">{row.productivityScore}</td><td className="px-5 py-4"><Badge colorClass={getQualityBadgeClass(row.productivityScore)}>{getQualityLabel(row.productivityScore)}</Badge></td></tr>)}
+          {memberRows.map(row => <tr key={row.user.id} className="hover:bg-slate-50"><td className="px-5 py-4 font-black text-slate-800">{row.user.name}</td><td className="px-5 py-4 font-bold text-slate-500">{row.user.role}</td><td className="px-5 py-4"><Badge colorClass={row.live.badgeClass}>{row.live.label}</Badge></td><td className="px-5 py-4 font-black text-slate-700">{row.assignedCount}</td><td className="px-5 py-4 font-black text-emerald-600">{row.completedCount}</td><td className="px-5 py-4 font-black text-orange-600">{row.activeCount}</td><td className="px-5 py-4 font-black text-indigo-600">{row.completedToday}</td><td className="px-5 py-4 font-bold text-slate-600">{displayMinutes(row.avgMins)}</td><td className="px-5 py-4 font-bold text-blue-600">{displayMinutes(row.avgReviewMins)}</td><td className="px-5 py-4 font-bold text-purple-600">{row.revisionRate}/task</td><td className="px-4 py-3 font-bold text-slate-700">{row.slaPct}%</td><td className="px-5 py-4 font-black text-indigo-600">{row.productivityScore}</td><td className="px-5 py-4"><Badge colorClass={getQualityBadgeClass(row.productivityScore)}>{getQualityLabel(row.productivityScore)}</Badge></td></tr>)}
           {memberRows.length === 0 && <tr><td colSpan="13" className="px-4 py-8 text-center text-slate-400 font-bold">No performance data for this filter.</td></tr>}
         </tbody></table></div>
       </div>
