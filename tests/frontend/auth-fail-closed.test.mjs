@@ -20,3 +20,10 @@ test('local banner accurately describes isolated sandbox', () => {
   assert.match(layout, /Local sandbox mode/);
   assert.doesNotMatch(layout, /bundled offline snapshot/);
 });
+
+test('temporary-password sessions return to password change instead of an empty workspace', () => {
+  assert.match(app, /session\.user\.mustChangePassword[\s\S]*setPasswordChangeSessionUser\(session\.user\)[\s\S]*setCurrentUser\(null\)/);
+  assert.match(app, /err\?\.code === 'PASSWORD_CHANGE_REQUIRED'[\s\S]*setPasswordChangeSessionUser/);
+  assert.match(app, /passwordChangeSessionUser=\{passwordChangeSessionUser\}/);
+  assert.match(app, /Current Password/);
+});

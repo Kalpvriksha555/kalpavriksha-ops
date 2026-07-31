@@ -164,7 +164,7 @@ const throwApiError = async (response, fallback) => {
 
 export const fetchBackendState = async ({ apiBase, headers = {} }) => {
   const res = await authFetch(`${apiBase}/api/state`, { cache: 'no-store', headers });
-  if (!res.ok) throw new Error(`Backend state failed: ${res.status}`);
+  if (!res.ok) return throwApiError(res, 'Backend state failed');
   return parseJsonSafe(res);
 };
 

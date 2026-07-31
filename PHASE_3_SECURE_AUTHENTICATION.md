@@ -6,7 +6,8 @@ Phase 3 replaces browser-side password comparison with server-verified credentia
 
 - Passwords are hashed using Node.js `scrypt` with a random salt and a versioned `scrypt-v1` format.
 - Plaintext password fields are removed from operational user records during migration.
-- Existing legacy users are migrated once and required to replace their old password at first login.
+- Existing legacy users are migrated once without changing their established login password or blocking operational access.
+- Only administrator-issued temporary passwords require replacement at first login.
 - Login uses an opaque random session token stored only as a SHA-256 hash on the server.
 - The browser receives the session only through a Secure/HTTP-only cookie in production.
 - Every unsafe authenticated request requires a per-session CSRF token.
@@ -21,7 +22,7 @@ Phase 3 replaces browser-side password comparison with server-verified credentia
 
 ## One-time production migration
 
-Before deployment, back up PostgreSQL. On startup, existing user records with legacy passwords are converted into `auth_credentials`, and credential fields are removed from `app_state`.
+Before deployment, back up PostgreSQL. On startup, existing user records with legacy passwords are converted into `auth_credentials`, and credential fields are removed from `app_state`. The password is hashed without forcing an unexpected password change. A compatibility reconciliation also clears the obsolete July 30 migration flag and stale login lock only for approved legacy accounts that have never subsequently had their password reset.
 
 If the live database has no usable legacy credentials, configure a one-time bootstrap Admin through server secrets:
 

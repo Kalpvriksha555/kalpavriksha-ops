@@ -1,6 +1,6 @@
 {
   "name": "kalpvriksha-designs-backend",
-  "version": "2.9.8-july30-safe-recovery",
+  "version": "2.9.9-auth-access-compatibility",
   "type": "module",
   "scripts": {
     "dev": "node scripts/start-json-dev.mjs",

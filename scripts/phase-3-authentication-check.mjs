@@ -111,16 +111,9 @@ try {
     method: 'POST', body: { username: 'phase3admin', password: '123' }
   });
   assert(legacyLogin.response.ok && legacyLogin.payload.user?.role === 'Admin', 'Legacy Admin credential migration failed.');
-  assert(legacyLogin.payload.user?.mustChangePassword === true, 'Legacy password was not forced to change.');
-  const legacyBlocked = await jsonRequest('/api/state', { cookie: legacyLogin.cookie });
-  assert(legacyBlocked.response.status === 428 && legacyBlocked.payload.code === 'PASSWORD_CHANGE_REQUIRED', 'Legacy password session accessed operational state.');
-  const adminPasswordChange = await jsonRequest('/api/auth/change-password', {
-    method: 'POST', cookie: legacyLogin.cookie, csrf: legacyLogin.payload.csrfToken,
-    body: { currentPassword: '123', newPassword: 'StrongAdmin123' }
-  });
-  assert(adminPasswordChange.response.ok && adminPasswordChange.payload.user?.mustChangePassword === false, 'Legacy Admin password replacement failed.');
-  const adminCookie = adminPasswordChange.cookie;
-  const adminCsrf = adminPasswordChange.payload.csrfToken;
+  assert(legacyLogin.payload.user?.mustChangePassword === false, 'Established legacy password was incorrectly treated as temporary.');
+  const adminCookie = legacyLogin.cookie;
+  const adminCsrf = legacyLogin.payload.csrfToken;
 
   const adminState = await jsonRequest('/api/state', { cookie: adminCookie });
   assert(adminState.response.ok, 'Authenticated state access failed.');
@@ -172,7 +165,7 @@ try {
   assert(persistedLogin.response.ok && persistedLogin.payload.user?.mustChangePassword === false, 'Changed password did not survive restart.');
 
   const adminAgain = await jsonRequest('/api/auth/login', {
-    method: 'POST', body: { username: 'phase3admin', password: 'StrongAdmin123' }
+    method: 'POST', body: { username: 'phase3admin', password: '123' }
   });
   const restricted = await jsonRequest(`/api/auth/users/${encodeURIComponent(userId)}`, {
     method: 'PATCH', cookie: adminAgain.cookie, csrf: adminAgain.payload.csrfToken,
@@ -185,14 +178,14 @@ try {
 
   const storedDb = fs.readFileSync(dbFile, 'utf8');
   const storedAuth = fs.readFileSync(authFile, 'utf8');
-  for (const secret of ['\"password\":\"123\"', 'StrongAdmin123', 'TempSecure123', 'Permanent456']) {
+  for (const secret of ['\"password\":\"123\"', 'TempSecure123', 'Permanent456']) {
     assert(!storedDb.includes(secret) && !storedAuth.includes(secret), 'A plaintext password was written to persistent storage.');
   }
   const authStore = JSON.parse(storedAuth);
   assert((authStore.credentials || []).every(item => String(item.password_hash || '').startsWith('scrypt-v1$')), 'Stored password hashes are not scrypt-v1.');
 
   console.log('Phase 3 authentication verification passed.');
-  console.log('Verified: legacy credential migration, HTTP-only sessions, CSRF, forced password change, restart persistence, role-safe payloads, restriction revocation and no plaintext credential storage.');
+  console.log('Verified: legacy credential compatibility, temporary-password enforcement, HTTP-only sessions, CSRF, restart persistence, role-safe payloads, restriction revocation and no plaintext credential storage.');
 } finally {
   await stop();
   fs.rmSync(tempDir, { recursive: true, force: true });

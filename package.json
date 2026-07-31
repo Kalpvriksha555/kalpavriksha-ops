@@ -1,6 +1,6 @@
 {
   "name": "kalpavriksha-designs-ops",
-  "version": "1.9.8-july30-safe-recovery",
+  "version": "1.9.9-auth-access-compatibility",
   "type": "module",
   "scripts": {
     "dev": "node scripts/start-all.mjs",

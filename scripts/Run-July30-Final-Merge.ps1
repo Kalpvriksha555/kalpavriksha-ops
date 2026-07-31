@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$BackupRoot = 'D:\Kalpavriksha-Recovery-Backups\20260731-023830'
+    [string]$BackupRoot = 'D:\Kalpavriksha-Recovery-Backups\20260731-023830',
+    [switch]$PublishOnly
 )
 
 Set-StrictMode -Version Latest
@@ -56,35 +57,53 @@ try {
     Pop-Location
 }
 
-Write-Host 'Uploading the final merge controller...' -ForegroundColor Cyan
-Invoke-Native -FilePath scp -ArgumentList @(
-    $Controller,
-    "${Remote}:$RemoteWork/deploy-july30-safe-vps.sh"
-)
-Invoke-Native -FilePath ssh -ArgumentList @(
-    $Remote,
-    "chmod 700 '$RemoteWork/deploy-july30-safe-vps.sh' && EXPECTED_COMMIT='$releaseCommit' bash '$RemoteWork/deploy-july30-safe-vps.sh' final-merge-deploy"
-)
+if ($PublishOnly) {
+    $certificatePath = Join-Path $BackupRoot 'final-release-certification.json'
+    $reportPath = Join-Path $BackupRoot 'july30-final-report.json'
+    if (-not (Test-Path -LiteralPath $certificatePath) -or -not (Test-Path -LiteralPath $reportPath)) {
+        throw "Publish-only mode requires the downloaded final certificate and merge report in $BackupRoot"
+    }
+    $certificate = Get-Content -Raw -LiteralPath $certificatePath | ConvertFrom-Json
+    $report = Get-Content -Raw -LiteralPath $reportPath | ConvertFrom-Json
+    if ($certificate.status -ne 'CERTIFIED' -or -not $report.ok -or $report.mode -ne 'apply' -or -not $report.verification.postWriteVerified) {
+        throw 'Downloaded evidence does not certify a completed and post-write-verified final merge.'
+    }
+    $certifiedCommit = [string]$certificate.gitCommit
+    if (-not $certifiedCommit -or $certifiedCommit -ne $releaseCommit) {
+        throw "Certified commit $certifiedCommit does not match the published release commit $releaseCommit"
+    }
+    Write-Host "Resuming publication of certified commit $certifiedCommit without repeating the database merge..." -ForegroundColor Cyan
+} else {
+    Write-Host 'Uploading the final merge controller...' -ForegroundColor Cyan
+    Invoke-Native -FilePath scp -ArgumentList @(
+        $Controller,
+        "${Remote}:$RemoteWork/deploy-july30-safe-vps.sh"
+    )
+    Invoke-Native -FilePath ssh -ArgumentList @(
+        $Remote,
+        "chmod 700 '$RemoteWork/deploy-july30-safe-vps.sh' && EXPECTED_COMMIT='$releaseCommit' bash '$RemoteWork/deploy-july30-safe-vps.sh' final-merge-deploy"
+    )
 
-Write-Host 'Downloading final merge evidence and verified backups...' -ForegroundColor Cyan
-Invoke-Native -FilePath scp -ArgumentList @(
-    "${Remote}:$RemoteWork/pre-final-merge-backup.tar",
-    "${Remote}:$RemoteWork/post-final-merge-backup.tar",
-    "${Remote}:$RemoteWork/july30-final-preflight.json",
-    "${Remote}:$RemoteWork/july30-final-plan.json",
-    "${Remote}:$RemoteWork/july30-final-report.json",
-    "${Remote}:$RemoteWork/final-release-certification.json",
-    "${Remote}:$RemoteWork/live-health.json",
-    "${Remote}:$RemoteWork/ready-health.json",
-    $BackupRoot
-)
+    Write-Host 'Downloading final merge evidence and verified backups...' -ForegroundColor Cyan
+    Invoke-Native -FilePath scp -ArgumentList @(
+        "${Remote}:$RemoteWork/pre-final-merge-backup.tar",
+        "${Remote}:$RemoteWork/post-final-merge-backup.tar",
+        "${Remote}:$RemoteWork/july30-final-preflight.json",
+        "${Remote}:$RemoteWork/july30-final-plan.json",
+        "${Remote}:$RemoteWork/july30-final-report.json",
+        "${Remote}:$RemoteWork/final-release-certification.json",
+        "${Remote}:$RemoteWork/live-health.json",
+        "${Remote}:$RemoteWork/ready-health.json",
+        $BackupRoot
+    )
+}
 
 Write-Host 'Fast-forwarding the verified final release into GitHub main...' -ForegroundColor Cyan
 Push-Location $GitAudit
 try {
-    Invoke-Native -FilePath git -ArgumentList @('fetch', 'origin')
+    Invoke-Native -FilePath git -ArgumentList @('fetch', 'origin', '+refs/heads/main:refs/remotes/origin/main')
     Invoke-Native -FilePath git -ArgumentList @('switch', '-C', 'main', 'origin/main')
-    Invoke-Native -FilePath git -ArgumentList @('merge', '--ff-only', "origin/$ReleaseBranch")
+    Invoke-Native -FilePath git -ArgumentList @('merge', '--ff-only', $releaseCommit)
     $mainCommit = (& git rev-parse HEAD).Trim()
     if ($mainCommit -ne $releaseCommit) { throw 'Verified final release is not the main candidate.' }
     Invoke-Native -FilePath git -ArgumentList @('push', 'origin', 'main')

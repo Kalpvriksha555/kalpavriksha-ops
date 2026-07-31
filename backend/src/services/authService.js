@@ -97,3 +97,40 @@ export const publicSessionUser = (user = {}, credential = {}) => {
     passwordChangedAt: credential.password_changed_at || credential.passwordChangedAt || null
   };
 };
+
+// The July 30 secure-auth cutover hashes the passwords that already existed in
+// the legacy operational snapshot. Those are established employee passwords,
+// not temporary passwords created by an administrator. Treating every migrated
+// password as temporary locked otherwise-valid users behind an unexpected
+// password-change screen and caused authenticated state requests to return 428.
+//
+// This helper deliberately repairs only credentials that can still be proven to
+// come from the read-only legacy snapshot and that have never subsequently had
+// their password changed/reset. A later admin password reset has a
+// password_changed_at timestamp and therefore remains subject to the normal
+// mandatory-change flow.
+export const reconcileLegacyCredential = ({ credential = {}, user = {}, legacyCandidate = null } = {}) => {
+  const next = {
+    ...credential,
+    user_id: String(credential.user_id || credential.userId || user.id || '').trim(),
+    username: normalizeUsername(user.username || credential.username || ''),
+    role: normalizeAuthRole(user.role || credential.role || ''),
+    status: normalizeAuthStatus(user.status || credential.status || '')
+  };
+
+  const isApprovedLegacyAccount = Boolean(
+    legacyCandidate?.password
+    && next.status === 'APPROVED'
+    && !credential.password_changed_at
+    && !credential.passwordChangedAt
+  );
+
+  const repairedLegacyMigration = Boolean(isApprovedLegacyAccount && credential.must_change_password);
+  if (repairedLegacyMigration) {
+    next.must_change_password = false;
+    next.failed_attempts = 0;
+    next.locked_until = null;
+  }
+
+  return { credential: next, repairedLegacyMigration };
+};

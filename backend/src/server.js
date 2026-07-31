@@ -12,7 +12,7 @@ import pg from 'pg';
 import nodemailer from 'nodemailer';
 import { addCaseTimelineEvent, mergeTimelineEvents, normalizeCaseTimeline, normalizeTimelineEvent } from './services/timelineService.js';
 import { FINANCE_FIELDS, applyFreshestFinance, buildFinanceSnapshot, financeFreshness, financeSnapshotHash, mergePaymentRecords } from './services/financeIntegrityService.js';
-import { hashPassword, verifyPassword, passwordPolicyErrors, isWeakLegacyPassword, randomOpaqueToken, tokenHash, randomOtp, normalizeUsername, normalizeAuthRole, normalizeAuthStatus, stripCredentialFields, publicSessionUser } from './services/authService.js';
+import { hashPassword, verifyPassword, passwordPolicyErrors, randomOpaqueToken, tokenHash, randomOtp, normalizeUsername, normalizeAuthRole, normalizeAuthStatus, stripCredentialFields, publicSessionUser, reconcileLegacyCredential } from './services/authService.js';
 import { ROLE_CAPABILITIES, authorizationActor, canAccessCase, canMutateCase, canAccessFileDocument, canDeleteFileDocument, filterCasesForUser, hasCapability, isCaseAssignedToUser, normalizePermissionRole, notificationBelongsToUser } from './services/authorizationService.js';
 import { attachRequestId, createRateLimiter, rejectDangerousJson, requireJsonForBody, secureResponseHeaders } from './middleware/security.js';
 import { getRelationalHealth, loadRelationalState, normalizeEpochMilliseconds, persistRelationalState, reloadRelationalState, restoreRelationalRevision, runRelationalMigrations } from './repositories/postgresStateRepository.js';
@@ -816,7 +816,7 @@ async function authenticationGate(req, res, next) {
     }
     req.auth = auth;
     if (auth.user.mustChangePassword && !['/auth/change-password', '/auth/logout', '/auth/session'].includes(String(req.path || ''))) {
-      return res.status(428).json({ ok: false, code: 'PASSWORD_CHANGE_REQUIRED', error: 'Change the temporary or legacy password before continuing.', user: auth.user });
+      return res.status(428).json({ ok: false, code: 'PASSWORD_CHANGE_REQUIRED', error: 'Change the administrator-issued temporary password before continuing.', user: auth.user });
     }
     if (!isSafeMethod(req.method)) {
       const supplied = String(req.get?.('x-csrf-token') || '');
@@ -841,6 +841,7 @@ async function migrateLegacyCredentials() {
   const operations = [];
   let stateChanged = false;
   let bootstrapCreated = false;
+  let repairedLegacyCredentials = 0;
   for (let index = 0; index < (d.users || []).length; index += 1) {
     const original = d.users[index] || {};
     const username = normalizeUsername(original.username);
@@ -859,21 +860,18 @@ async function migrateLegacyCredentials() {
         password_hash: await hashPassword(legacyPassword),
         role: original.role,
         status: original.status,
-        must_change_password: true,
+        // This is the employee's existing password being moved into the secure
+        // credential table, not an administrator-issued temporary password.
+        must_change_password: false,
         password_version: 1
       });
       operations.push({ type: 'upsertCredential', credential });
     } else if (credential) {
-      const synchronized = authCredentialRecord({
-        ...credential,
-        user_id: credential.user_id || userId,
-        username,
-        role: original.role,
-        status: original.status,
-        must_change_password: Boolean(credential.must_change_password)
-      });
+      const reconciliation = reconcileLegacyCredential({ credential, user: original, legacyCandidate });
+      if (reconciliation.repairedLegacyMigration) repairedLegacyCredentials += 1;
+      const synchronized = authCredentialRecord(reconciliation.credential);
       const changed = [
-        'user_id', 'username', 'role', 'status', 'must_change_password', 'password_version'
+        'user_id', 'username', 'role', 'status', 'must_change_password', 'password_version', 'failed_attempts', 'locked_until'
       ].some(field => String(credential[field] ?? '') !== String(synchronized[field] ?? ''));
       credential = synchronized;
       if (changed) operations.push({ type: 'upsertCredential', credential });
@@ -916,6 +914,14 @@ async function migrateLegacyCredentials() {
   }
   if ((await countCredentials()) === 0) {
     throw new Error('No secure login credential exists. Set BOOTSTRAP_ADMIN_USERNAME and BOOTSTRAP_ADMIN_PASSWORD for the one-time secure bootstrap, or restore the existing user records before startup.');
+  }
+  if (repairedLegacyCredentials > 0) {
+    console.info(JSON.stringify({
+      timestamp: now(),
+      level: 'info',
+      event: 'legacy_auth_compatibility_repaired',
+      repairedCredentials: repairedLegacyCredentials
+    }));
   }
   legacyCredentialCandidates = [];
 }
@@ -2594,12 +2600,16 @@ app.post('/api/auth/login', loginRateLimiter, async (req, res) => {
       return res.status(423).json({ ok: false, code: 'LOGIN_LOCKED', error: `Too many failed attempts. Try again after ${new Date(lockedUntil).toLocaleTimeString()}.` });
     }
     const valid = credential ? await verifyPassword(password, credential.password_hash) : false;
-    const stateUser = credential ? findStateUserByIdOrUsername(credential.user_id, credential.username) : null;
-    const approved = stateUser && normalizeAuthStatus(stateUser.status || credential?.status) === 'APPROVED' && normalizeAuthStatus(credential?.status) === 'APPROVED';
-    if (!credential || !valid || !approved) {
+    if (!credential || !valid) {
       if (credential) await updateLoginFailure(credential, req);
       else await recordAuthEvent({ username, eventType: 'LOGIN_FAILED_UNKNOWN_USER', req });
-      return res.status(401).json({ ok: false, code: 'LOGIN_FAILED', error: 'Invalid username or password, or this account is restricted.' });
+      return res.status(401).json({ ok: false, code: 'LOGIN_FAILED', error: 'Invalid username or password.' });
+    }
+    const stateUser = findStateUserByIdOrUsername(credential.user_id, credential.username);
+    const approved = stateUser && normalizeAuthStatus(stateUser.status || credential.status) === 'APPROVED' && normalizeAuthStatus(credential.status) === 'APPROVED';
+    if (!approved) {
+      await recordAuthEvent({ userId: credential.user_id, username, eventType: 'LOGIN_BLOCKED_RESTRICTED', req });
+      return res.status(403).json({ ok: false, code: 'ACCOUNT_RESTRICTED', error: 'This account is restricted. Ask the administrator to allow login.' });
     }
     await clearLoginFailures(credential);
     const refreshedCredential = await findCredentialByUserId(credential.user_id) || credential;
@@ -2787,7 +2797,15 @@ app.patch('/api/auth/users/:id', requireAdminSession, async (req, res) => {
     const status = req.body?.status !== undefined ? normalizeAuthStatus(req.body.status) : normalizeAuthStatus(existingUser.status);
     const nextUser = stripCredentialFields(employeeLifecycleProfile({ ...existingUser, name: req.body?.name !== undefined ? String(req.body.name).trim() : existingUser.name, username, role: role === 'ADMIN' ? 'Admin' : role === 'MANAGER' ? 'Manager' : 'Designer', status }, existingUser));
     d.users[index] = nextUser;
-    const nextCredential = { ...existingCredential, username, role, status };
+    const nextCredential = {
+      ...existingCredential,
+      username,
+      role,
+      status,
+      // Allow Login must also remove a stale failed-attempt lock. Previously an
+      // Admin could approve the account while the credential remained locked.
+      ...(status === 'APPROVED' ? { failed_attempts: 0, locked_until: null } : {})
+    };
     const authOperations = [{ type: 'upsertCredential', credential: nextCredential }];
     if (status !== 'APPROVED') authOperations.push({ type: 'revokeSessions', userId: existingUser.id });
     const persistence = await save(d, { authOperations });

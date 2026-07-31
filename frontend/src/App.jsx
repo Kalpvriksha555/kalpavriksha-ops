@@ -1201,13 +1201,13 @@ const getDocumentReadiness = (project = {}) => {
   return { score, items };
 };
 
-const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetRecovery }) => {
-  const [username, setUsername] = useState('');
+const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetRecovery, passwordChangeSessionUser = null }) => {
+  const [username, setUsername] = useState(passwordChangeSessionUser?.username || '');
   const [password, setPassword] = useState('');
   const [showPass, setShowPass] = useState(false);
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [mustChangePassword, setMustChangePassword] = useState(false);
+  const [mustChangePassword, setMustChangePassword] = useState(Boolean(passwordChangeSessionUser?.mustChangePassword));
   const [currentPassword, setCurrentPassword] = useState('');
   const [forcedNewPassword, setForcedNewPassword] = useState('');
   const [forcedConfirmPassword, setForcedConfirmPassword] = useState('');
@@ -1223,6 +1223,15 @@ const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetReco
   const [recoveryMessage, setRecoveryMessage] = useState('');
   const [otpSent, setOtpSent] = useState(false);
 
+  useEffect(() => {
+    if (!passwordChangeSessionUser?.mustChangePassword) return;
+    setUsername(passwordChangeSessionUser.username || '');
+    setMustChangePassword(true);
+    setCurrentPassword('');
+    setPassword('');
+    setError('Enter the current password once, then create the replacement password.');
+  }, [passwordChangeSessionUser?.id, passwordChangeSessionUser?.mustChangePassword, passwordChangeSessionUser?.username]);
+
   const passwordPolicyMessage = 'Use at least 10 characters with uppercase, lowercase and a number.';
 
   const handleLogin = async (event) => {
@@ -1235,7 +1244,7 @@ const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetReco
         setCurrentPassword(password);
         setMustChangePassword(true);
         setPassword('');
-        setError('For security, replace the temporary or legacy password before entering the portal.');
+        setError('Replace the administrator-issued temporary password before entering the portal.');
       }
     } catch (loginError) {
       setError(loginError?.message || 'Invalid username or password, or this account is restricted.');
@@ -1330,7 +1339,11 @@ const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetReco
         {mustChangePassword ? (
           <form onSubmit={handleForcedPasswordChange} className="space-y-4">
             <div className="rounded-2xl border border-indigo-100 bg-indigo-50 p-4 text-sm font-semibold text-indigo-800">
-              Your current password was accepted, but it is temporary or legacy. Create a strong replacement now.
+              Your current password was accepted, but it is an administrator-issued temporary password. Create a replacement now.
+            </div>
+            <div>
+              <label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Current Password</label>
+              <input required type="password" autoComplete="current-password" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} className="w-full border-2 border-slate-100 px-4 py-3.5 rounded-xl focus:border-indigo-500 outline-none font-bold text-slate-800" />
             </div>
             <div>
               <label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">New Password</label>
@@ -3977,6 +3990,7 @@ class AppErrorBoundary extends React.Component {
 
 function AppShell() {
   const [currentUser, setCurrentUser] = useState(null);
+  const [passwordChangeSessionUser, setPasswordChangeSessionUser] = useState(null);
   const currentUserRef = useRef(null);
   useEffect(() => { currentUserRef.current = currentUser; }, [currentUser]);
   const [firebaseUser, setFirebaseUser] = useState(null);
@@ -4153,6 +4167,7 @@ function AppShell() {
 
   const clearAuthenticatedWorkspace = useCallback(({ clearCache = true } = {}) => {
     setCurrentUser(null);
+    setPasswordChangeSessionUser(null);
     currentUserRef.current = null;
     setSelectedProject(null);
     setBackendStateReady(false);
@@ -4283,6 +4298,23 @@ function AppShell() {
       } catch (err) {
         if (cancelled) return;
         console.error('Authenticated backend state could not be loaded:', err);
+        if (err?.code === 'PASSWORD_CHANGE_REQUIRED') {
+          const pendingUser = err?.payload?.user || currentUserRef.current || currentUser;
+          setPasswordChangeSessionUser(pendingUser ? { ...pendingUser, mustChangePassword: true } : null);
+          setCurrentUser(null);
+          currentUserRef.current = null;
+          setProjects(() => []);
+          setUsers([]);
+          setChatMessages([]);
+          setNotifications([]);
+          setAttendanceLogs([]);
+          setPerformanceRecords([]);
+          setPerformanceSummary(null);
+          setBackendStateReady(false);
+          setIsDbReady(false);
+          setDbError(null);
+          return;
+        }
         setDbError(err?.message || 'The secure workspace could not be loaded.');
         setProjects(() => []);
         setUsers([]);
@@ -4495,8 +4527,17 @@ function AppShell() {
           if (cancelled) return;
           if (session?.authenticated && session?.user) {
             clearRoleScopedOperationalCaches(session.user);
-            setCurrentUser(session.user);
-            currentUserRef.current = session.user;
+            if (session.user.mustChangePassword) {
+              setPasswordChangeSessionUser(session.user);
+              setCurrentUser(null);
+              currentUserRef.current = null;
+              setBackendStateReady(false);
+              setIsDbReady(false);
+            } else {
+              setPasswordChangeSessionUser(null);
+              setCurrentUser(session.user);
+              currentUserRef.current = session.user;
+            }
           } else {
             clearAuthenticatedWorkspace({ clearCache: true });
           }
@@ -5332,6 +5373,7 @@ function AppShell() {
     if (!user) return;
     clearRoleScopedOperationalCaches(user);
     const authenticatedUser = { ...user, isOnline: true };
+    setPasswordChangeSessionUser(null);
     setCurrentUser(authenticatedUser);
     currentUserRef.current = authenticatedUser;
     setBackendStateReady(false);
@@ -5460,6 +5502,7 @@ function AppShell() {
       onChangePassword={handleChangePassword}
       onRequestRecovery={handleRequestPasswordRecovery}
       onResetRecovery={handleResetPasswordRecovery}
+      passwordChangeSessionUser={passwordChangeSessionUser}
     />;
   }
 

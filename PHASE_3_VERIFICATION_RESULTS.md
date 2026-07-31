@@ -6,6 +6,7 @@ Verified behaviours:
 
 - Unauthenticated `/api/state` requests return `401 AUTH_REQUIRED`.
 - Correct credentials create an HTTP-only session and per-session CSRF token.
+- Established legacy credentials remain usable after secure hashing and are not treated as temporary passwords.
 - Mutations without the CSRF token return `403 CSRF_TOKEN_INVALID`.
 - Admin-created temporary passwords force a password change before operational access.
 - The old temporary password stops working after replacement.
