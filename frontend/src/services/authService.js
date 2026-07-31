@@ -1,4 +1,5 @@
 import { API_BASE } from '../config/appConfig';
+import { createRequestDeadline } from './requestControlService.js';
 
 const CSRF_STORAGE_KEY = 'kalpa_csrf_token';
 let csrfToken = '';
@@ -16,19 +17,136 @@ export const setCsrfToken = (value = '') => {
 export const getCsrfToken = () => csrfToken;
 
 const safeMethod = (method = 'GET') => ['GET', 'HEAD', 'OPTIONS'].includes(String(method || 'GET').toUpperCase());
+export const DEFAULT_AUTH_FETCH_TIMEOUT_MS = 90_000;
+const RESPONSE_BODY_METHODS = new Set(['arrayBuffer', 'blob', 'bytes', 'formData', 'json', 'text']);
+
+const requestAbortReason = (signal) => {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const error = new Error('Request was aborted.');
+  error.name = 'AbortError';
+  return error;
+};
+
+const consumeWithDeadline = async (response, methodName, args, deadline, finish) => {
+  const operation = Promise.resolve().then(() => response[methodName](...args));
+  if (!deadline.signal) {
+    try { return await operation; } finally { finish(); }
+  }
+
+  let abortHandler = null;
+  const aborted = new Promise((_, reject) => {
+    abortHandler = () => {
+      const reason = requestAbortReason(deadline.signal);
+      try { response.body?.cancel?.(reason)?.catch?.(() => {}); } catch {}
+      reject(reason);
+    };
+    if (deadline.signal.aborted) abortHandler();
+    else deadline.signal.addEventListener('abort', abortHandler, { once:true });
+  });
+
+  try {
+    return await Promise.race([operation, aborted]);
+  } finally {
+    if (abortHandler) deadline.signal.removeEventListener('abort', abortHandler);
+    finish();
+  }
+};
+
+const streamWithDeadline = (body, deadline, finish) => {
+  if (!body || typeof ReadableStream === 'undefined') return body;
+  const reader = body.getReader();
+  let settled = false;
+  let abortHandler = null;
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+    if (abortHandler && deadline.signal) deadline.signal.removeEventListener('abort', abortHandler);
+    finish();
+  };
+
+  return new ReadableStream({
+    start(controller) {
+      if (!deadline.signal) return;
+      abortHandler = () => {
+        if (settled) return;
+        const reason = requestAbortReason(deadline.signal);
+        try { reader.cancel(reason).catch(() => {}); } catch {}
+        settle();
+        try { controller.error(reason); } catch {}
+      };
+      if (deadline.signal.aborted) abortHandler();
+      else deadline.signal.addEventListener('abort', abortHandler, { once:true });
+    },
+    async pull(controller) {
+      if (settled) return;
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          settle();
+          controller.close();
+          return;
+        }
+        controller.enqueue(value);
+      } catch (error) {
+        settle();
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      settle();
+      try { await reader.cancel(reason); } catch {}
+    }
+  });
+};
+
+const wrapResponseWithDeadline = (response, deadline, requestMethod = 'GET') => {
+  let finished = false;
+  let wrappedBody;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    deadline.cleanup();
+  };
+
+  if (!response.body || requestMethod === 'HEAD' || [204, 205, 304].includes(response.status)) finish();
+
+  return new Proxy(response, {
+    get(target, property) {
+      if (property === 'body') {
+        if (finished) return target.body;
+        wrappedBody ||= streamWithDeadline(target.body, deadline, finish);
+        return wrappedBody;
+      }
+      if (RESPONSE_BODY_METHODS.has(property) && typeof target[property] === 'function') {
+        return (...args) => consumeWithDeadline(target, property, args, deadline, finish);
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    }
+  });
+};
 
 const parsePayload = async (response) => response.json().catch(() => ({}));
 
 export const authFetch = async (input, init = {}) => {
-  const method = String(init.method || 'GET').toUpperCase();
-  const headers = new Headers(init.headers || {});
+  const { timeoutMs = DEFAULT_AUTH_FETCH_TIMEOUT_MS, signal: externalSignal, ...fetchInit } = init || {};
+  const method = String(fetchInit.method || 'GET').toUpperCase();
+  const headers = new Headers(fetchInit.headers || {});
   if (!safeMethod(method) && csrfToken && !headers.has('X-CSRF-Token')) headers.set('X-CSRF-Token', csrfToken);
-  const response = await fetch(input, { ...init, method, headers, credentials: 'include' });
-  if (response.status === 401) {
-    setCsrfToken('');
-    try { window.dispatchEvent(new CustomEvent('kalpa-auth-expired')); } catch {}
+
+  const deadline = createRequestDeadline({ timeoutMs, externalSignal });
+
+  try {
+    const response = await fetch(input, { ...fetchInit, method, headers, signal:deadline.signal, credentials: 'include' });
+    if (response.status === 401) {
+      setCsrfToken('');
+      try { window.dispatchEvent(new CustomEvent('kalpa-auth-expired')); } catch {}
+    }
+    return wrapResponseWithDeadline(response, deadline, method);
+  } catch (error) {
+    deadline.cleanup();
+    throw error;
   }
-  return response;
 };
 
 const throwAuthError = async (response, fallback) => {

@@ -7,7 +7,7 @@ export const uploadProfilePhoto = async ({ file, user }) => {
   form.append('userId', String(user?.id || ''));
   form.append('username', String(user?.username || ''));
 
-  const res = await authFetch(`${API_BASE}/api/profile/photo`, { method: 'POST', body: form });
+  const res = await authFetch(`${API_BASE}/api/profile/photo`, { method: 'POST', body: form, timeoutMs:5 * 60 * 1000 });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.ok) throw new Error(data.error || 'Profile photo upload failed.');
   return data;

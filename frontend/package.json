@@ -1,6 +1,6 @@
 {
   "name": "kalpvriksha-designs-frontend",
-  "version": "2.9.7-auth-access-compatibility",
+  "version": "2.9.12-deep-runtime-integrity",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",

@@ -113,7 +113,7 @@ export const fetchProjectFilePreview = async (doc = {}) => {
   const fetchPreviewBlobFallback = async () => {
     // Last-resort inline preview fetch. Never expose this URL directly to iframe/window.open,
     // because download managers can intercept /preview. We fetch it as a blob and render a blob URL.
-    const fallbackRes = await authFetch(sourceUrl, { method: 'GET', cache: 'no-store', headers: { Accept: kind === 'pdf' ? 'application/pdf,*/*' : 'image/*,*/*' } });
+    const fallbackRes = await authFetch(sourceUrl, { method: 'GET', cache: 'no-store', timeoutMs:FILE_PREVIEW_TIMEOUT_MS, headers: { Accept: kind === 'pdf' ? 'application/pdf,*/*' : 'image/*,*/*' } });
     if (!fallbackRes.ok) {
       const text = await fallbackRes.text().catch(() => '');
       throw new Error(text || `Preview failed (${fallbackRes.status})`);
@@ -125,7 +125,7 @@ export const fetchProjectFilePreview = async (doc = {}) => {
 
   let res;
   try {
-    res = await authFetch(dataUrl, { method: 'GET', cache: 'no-store', headers: { Accept: 'application/json' } });
+    res = await authFetch(dataUrl, { method: 'GET', cache: 'no-store', timeoutMs:FILE_PREVIEW_TIMEOUT_MS, headers: { Accept: 'application/json' } });
   } catch (error) {
     return fetchPreviewBlobFallback();
   }
@@ -224,8 +224,21 @@ const readServerMessage = async (res) => {
   }
 };
 
+const UPLOAD_RESPONSE_TIMEOUT_MS = 5 * 60 * 1000;
+const FILE_PREVIEW_TIMEOUT_MS = 5 * 60 * 1000;
+const FILE_DOWNLOAD_TIMEOUT_MS = 35 * 60 * 1000;
+
 const uploadWithXhr = (url, form, onProgress) => new Promise((resolve, reject) => {
   const xhr = new XMLHttpRequest();
+  let settled = false;
+  let responseTimer = null;
+  const finish = (handler, value) => {
+    if (settled) return;
+    settled = true;
+    if (responseTimer) clearTimeout(responseTimer);
+    handler(value);
+  };
+
   xhr.open('POST', url, true);
   xhr.withCredentials = true;
   const csrfToken = getCsrfToken();
@@ -245,16 +258,24 @@ const uploadWithXhr = (url, form, onProgress) => new Promise((resolve, reject) =
       onProgress({ percent, loaded, total, speedBps, etaSeconds });
     }
   };
+  xhr.upload.onload = () => {
+    if (typeof onProgress === 'function') onProgress({ percent:100, speedBps:0, etaSeconds:0, processing:true });
+    responseTimer = setTimeout(() => {
+      finish(reject, new Error('The file reached the server, but processing took too long. Please refresh before trying again.'));
+      try { xhr.abort(); } catch {}
+    }, UPLOAD_RESPONSE_TIMEOUT_MS);
+  };
 
   xhr.onload = () => {
     const raw = xhr.responseText || '';
     let payload = null;
     try { payload = raw ? JSON.parse(raw) : null; } catch { payload = null; }
-    if (xhr.status >= 200 && xhr.status < 300) return resolve(payload || {});
-    reject(new Error(payload?.error || payload?.message || raw || `Upload failed (${xhr.status})`));
+    if (xhr.status >= 200 && xhr.status < 300) return finish(resolve, payload || {});
+    finish(reject, new Error(payload?.error || payload?.message || raw || `Upload failed (${xhr.status})`));
   };
-  xhr.onerror = () => reject(new Error('Upload failed. Please check internet connection and try again.'));
-  xhr.ontimeout = () => reject(new Error('Upload timed out. Please try again on a stable connection.'));
+  xhr.onerror = () => finish(reject, new Error('Upload failed. Please check internet connection and try again.'));
+  xhr.ontimeout = () => finish(reject, new Error('Upload timed out. Please try again on a stable connection.'));
+  xhr.onabort = () => finish(reject, new Error('Upload was cancelled before the server confirmed it.'));
   xhr.send(form);
 });
 
@@ -530,7 +551,7 @@ export const downloadProjectFile = async (doc = {}, onProgress) => {
   }
 
   try {
-    const res = await authFetch(url, { cache: 'no-store' });
+    const res = await authFetch(url, { cache: 'no-store', timeoutMs:FILE_DOWNLOAD_TIMEOUT_MS });
     if (!res.ok) {
       const msg = await readServerMessage(res).catch(() => `Download failed (${res.status})`);
       throw new Error(msg);
@@ -590,12 +611,17 @@ export const downloadProjectFile = async (doc = {}, onProgress) => {
 };
 
 export const deleteProjectFileFromServer = async (doc = {}) => {
-  if (!doc?.id) return;
-  try {
-    await authFetch(`${API_BASE}/api/files/${encodeURIComponent(doc.id)}`, { method: 'DELETE' });
-  } catch (error) {
-    console.warn('Server file delete failed:', error);
+  if (!doc?.id) throw new Error('This file has no server record and cannot be deleted safely.');
+  const response = await authFetch(`${API_BASE}/api/files/${encodeURIComponent(doc.id)}`, { method: 'DELETE' });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.error || `File deletion failed: ${response.status}`);
+    error.status = response.status;
+    error.code = payload.code || '';
+    error.payload = payload;
+    throw error;
   }
+  return payload;
 };
 
 export const canDeleteProjectFile = (doc = {}, user = {}) => {

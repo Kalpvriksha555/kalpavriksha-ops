@@ -13,7 +13,7 @@ import { LocalModeBanner, DatabasePermissionBanner, TopNavigation, MobileSearchB
 import { PortalLayer } from './components/ui/LayerPortal';
 import { Button, IconButton, InlineAlert } from './components/ui/designSystem.jsx';
 import { ActiveToasts } from './features/notifications';
-import { getStatusColor, getPriorityColor, fetchBackendState, createTaskApi, saveBackendStateApi, saveFinanceStatusApi, deleteTaskApi, mergeTaskLists, persistTasksToLocalCache } from './services/taskService';
+import { getStatusColor, getPriorityColor, fetchBackendState, createTaskApi, saveFinanceStatusApi, deleteTaskApi, isProjectDeletedError, mergeTaskLists, persistTasksToLocalCache } from './services/taskService';
 import { API_BASE, USE_BACKEND_STATE, ONLINE_STALE_MS, MAX_INLINE_DATA_URL_CHARS } from './config/appConfig';
 import { fileToBase64, cleanFileName } from './utils/fileUtils';
 import { absoluteApiUrl, getProjectFileDownloadUrl, getProjectFilePreviewUrl, getProjectFileActionState, isProjectFilePdf, isProjectFileImage, getProjectFileKind, canPreviewProjectFile, fetchProjectFilePreview, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile, getProjectFileCacheKey, listCachedProjectFiles, openCachedProjectFile, clearCachedProjectFile, pruneExpiredProjectFileCache } from './services/fileService';
@@ -2938,7 +2938,12 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     const fileName = docToDelete.name || 'this file';
     if (!(await requestConfirmation(`Delete ${fileName}? This will remove it from this task.`, { title: 'Delete file', tone: 'danger', confirmLabel: 'Delete file' }))) return;
 
-    await deleteProjectFileFromServer(docToDelete);
+    try {
+      await deleteProjectFileFromServer(docToDelete);
+    } catch (error) {
+      notifyUser(error?.message || 'The file could not be deleted. Nothing was removed from this task.');
+      return;
+    }
 
     const sameFile = (doc) => {
       if (!doc) return false;
@@ -3992,6 +3997,9 @@ function AppShell() {
   const [currentUser, setCurrentUser] = useState(null);
   const [passwordChangeSessionUser, setPasswordChangeSessionUser] = useState(null);
   const currentUserRef = useRef(null);
+  const heartbeatRequestInFlightRef = useRef(false);
+  const workspaceRefreshInFlightRef = useRef(false);
+  const pendingCreateFlushInFlightRef = useRef(false);
   useEffect(() => { currentUserRef.current = currentUser; }, [currentUser]);
   const [firebaseUser, setFirebaseUser] = useState(null);
   const [isDbReady, setIsDbReady] = useState(false);
@@ -4211,6 +4219,7 @@ function AppShell() {
 
   const postPresenceUpdate = useCallback((action = 'heartbeat', userPatch = currentUser) => {
     if (!USE_BACKEND_STATE || !backendStateReady || !userPatch) return;
+    if (action === 'heartbeat' && heartbeatRequestInFlightRef.current) return;
     const identity = {
       id: userPatch.id,
       name: userPatch.name,
@@ -4221,9 +4230,11 @@ function AppShell() {
       isOnline: action === 'logout' ? false : true,
       breakStartedAt: userPatch.breakStartedAt || null
     };
+    if (action === 'heartbeat') heartbeatRequestInFlightRef.current = true;
     authFetch(`${API_BASE}/api/presence`, {
       method: 'POST',
       headers: jsonFinanceSafeHeaders,
+      timeoutMs:30_000,
       body: JSON.stringify({ action, user: identity })
     }).then(async res => {
       if (!res.ok) return;
@@ -4242,8 +4253,11 @@ function AppShell() {
       }
       if (Array.isArray(data?.users)) setUsers(prev => normalizeTeamUsers([...(prev || []), ...data.users]));
       if (Array.isArray(data?.attendanceLogs)) setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, data.attendanceLogs));
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => {
+      if (action === 'heartbeat') heartbeatRequestInFlightRef.current = false;
+    });
   }, [USE_BACKEND_STATE, backendStateReady, jsonFinanceSafeHeaders]);
+
 
   const applyProjectSnapshot = useCallback((incomingProjects = [], options = {}) => {
     if (!Array.isArray(incomingProjects)) return;
@@ -4333,7 +4347,8 @@ function AppShell() {
 
   // Visibility-aware workspace synchronisation replaces the old ten-second full-state poll.
   const refreshWorkspaceSnapshot = useCallback(async () => {
-    if (!USE_BACKEND_STATE || !backendStateReady || !currentUserRef.current) return;
+    if (!USE_BACKEND_STATE || !backendStateReady || !currentUserRef.current || workspaceRefreshInFlightRef.current) return;
+    workspaceRefreshInFlightRef.current = true;
     try {
       const data = await fetchBackendState({ apiBase: API_BASE, headers: financeSafeHeaders });
       if (Array.isArray(data.users)) setUsers(prev => normalizeTeamUsers([...(prev || []), ...data.users]));
@@ -4360,6 +4375,8 @@ function AppShell() {
       setDbError(null);
     } catch (error) {
       console.warn('Adaptive workspace sync failed', error);
+    } finally {
+      workspaceRefreshInFlightRef.current = false;
     }
   }, [backendStateReady, financeSafeHeaders, applyProjectSnapshot]);
 
@@ -4382,30 +4399,36 @@ function AppShell() {
     if (!USE_BACKEND_STATE || !backendStateReady || !isDbReady) return;
     let cancelled = false;
     const flushPendingCreatedProjects = async () => {
+      if (pendingCreateFlushInFlightRef.current) return;
       const pending = getPendingCreatedProjects();
       if (!pending.length) return;
-      for (const project of pending) {
-        if (cancelled || !project?.id) continue;
-        try {
-          markPendingCreatedAttempt(project.id);
-          const data = await createTaskApi({
-            apiBase: API_BASE,
-            headers: jsonFinanceSafeHeaders,
-            task: sanitizeProjectForCache(project)
-          });
-          const savedProject = data.project || data.case || project;
-          forgetPendingCreatedProjects(project.id, project.caseId);
-          rememberRecentCreatedProject(savedProject);
-          applyProjectSnapshot([savedProject], { source: 'pending-create-confirmed' });
-        } catch(e) {
-          if (e?.status === 409 || e?.code === 'PROJECT_DELETED') {
+      pendingCreateFlushInFlightRef.current = true;
+      try {
+        for (const project of pending) {
+          if (cancelled || !project?.id) continue;
+          try {
+            markPendingCreatedAttempt(project.id);
+            const data = await createTaskApi({
+              apiBase: API_BASE,
+              headers: jsonFinanceSafeHeaders,
+              task: sanitizeProjectForCache(project)
+            });
+            const savedProject = data.project || data.case || project;
             forgetPendingCreatedProjects(project.id, project.caseId);
-            rememberDeletedProjectsForce(e?.payload?.deletedProjectIds || [project.id, project.caseId]);
-            setProjects(prev => filterDeletedProjects(prev || []));
-            continue;
+            rememberRecentCreatedProject(savedProject);
+            applyProjectSnapshot([savedProject], { source: 'pending-create-confirmed' });
+          } catch(e) {
+            if (isProjectDeletedError(e)) {
+              forgetPendingCreatedProjects(project.id, project.caseId);
+              rememberDeletedProjectsForce(e?.payload?.deletedProjectIds || [project.id, project.caseId]);
+              setProjects(prev => filterDeletedProjects(prev || []));
+              continue;
+            }
+            console.warn('Pending task save retry failed:', e.message);
           }
-          console.warn('Pending task save retry failed:', e.message);
         }
+      } finally {
+        pendingCreateFlushInFlightRef.current = false;
       }
     };
     flushPendingCreatedProjects();
@@ -4713,7 +4736,8 @@ function AppShell() {
       // race conditions between /api/state and /api/presence and made rows jump
       // between old/new values.
       postPresenceUpdate('login', currentUser);
-      const heartbeatTimer = setInterval(() => {
+      const sendHeartbeat = () => {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
         const liveUser = currentUserRef.current || currentUser;
         if (!liveUser?.id) return;
         const beatNow = Date.now();
@@ -4723,8 +4747,16 @@ function AppShell() {
         // only reader that paints Attendance V3; this prevents alternating
         // local/server snapshots from flickering the table.
         postPresenceUpdate('heartbeat', refreshed);
-      }, 25000);
-      return () => clearInterval(heartbeatTimer);
+      };
+      const heartbeatTimer = setInterval(sendHeartbeat, 60_000);
+      const handleVisibility = () => {
+        if (document.visibilityState === 'visible') sendHeartbeat();
+      };
+      document.addEventListener('visibilitychange', handleVisibility);
+      return () => {
+        clearInterval(heartbeatTimer);
+        document.removeEventListener('visibilitychange', handleVisibility);
+      };
     }
 
     const ensureLocalAttendanceRow = () => {
@@ -4972,7 +5004,7 @@ function AppShell() {
           forgetPendingCreatedProjects(projectToSave.id, projectToSave.caseId);
           if (data?.project || data?.case) applyProjectSnapshot([data.project || data.case], { source: 'task-update-confirmed' });
         } catch (e) {
-          if (e?.status === 409 || e?.code === 'PROJECT_DELETED') {
+          if (isProjectDeletedError(e)) {
             rememberDeletedProjectsForce(e?.payload?.deletedProjectIds || [projectToSave.id, projectToSave.caseId]);
             setProjects(prev => filterDeletedProjects(prev || []));
           } else {
@@ -5912,15 +5944,12 @@ function AppShell() {
                const taskType = newTaskCategory === 'Other' ? fd.get('otherType') : newTaskCategory;
                const taskId = generateTraceableTaskId({ location, client, bankerName, customerName, projects });
                forgetDeletedProjects(taskId);
+               // A source file cannot be registered against a task that does not
+               // exist yet. Persist the task first, then upload and attach files.
+               // This also prevents the create modal from waiting behind a file
+               // request that the backend must reject with CASE_NOT_FOUND.
+               const filesToAttach = [...leadFiles];
                const docs = [];
-               for (const file of leadFiles) {
-                  try {
-                    docs.push(await uploadProjectFile(file, taskId, 'source', currentUser.name));
-                  } catch (fileErr) {
-                    console.warn('Source file attach failed; creating task without this file:', fileErr);
-                    docs.push({ id: Date.now() + Math.random(), name: file.name, type: 'source', date: new Date().toLocaleDateString(), uploadedBy: currentUser.name, size: file.size || 0, mimeType: file.type || 'application/octet-stream', uploadFailed: true });
-                  }
-               }
 
                const assignedTo = fd.get('assignedTo');
                const createdStamp = Date.now();
@@ -5959,34 +5988,90 @@ function AppShell() {
                setSelectedBoardDate(formatDateKey(newP.createdAt));
                setActiveTab('board');
                try { window.localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(filterDeletedProjects(nextProjects)))); } catch(e) {}
+               let confirmedProject = newP;
+               let projectConfirmedByBackend = !USE_BACKEND_STATE;
                if (USE_BACKEND_STATE && backendStateReady && isDbReady) {
                  try {
                    const saveData = await createTaskApi({
                      apiBase: API_BASE,
                      headers: jsonFinanceSafeHeaders,
-                              task: sanitizeProjectForCache(newP)
+                     task: sanitizeProjectForCache(newP)
                    });
                    if (saveData?.project || saveData?.case) {
-                     const savedProject = saveData.project || saveData.case;
+                     confirmedProject = saveData.project || saveData.case;
+                     projectConfirmedByBackend = true;
                      forgetPendingCreatedProjects(newP.id, newP.caseId);
-                     rememberRecentCreatedProject(savedProject);
-                     applyProjectSnapshot([savedProject], { source: 'create-confirmed' });
+                     rememberRecentCreatedProject(confirmedProject);
+                     applyProjectSnapshot([confirmedProject], { source: 'create-confirmed' });
                    }
                  } catch (saveErr) {
                    console.warn('Immediate task save failed; local task is kept and background sync will retry:', saveErr.message);
                  }
                }
+
+               // The task itself is now visible immediately. Source attachments
+               // continue only after the backend confirms that the task exists.
+               setShowNewLead(false);
+               setLeadFiles([]);
+               setNewTaskCategory(TASK_CATEGORIES[0]);
+
+               if (filesToAttach.length && projectConfirmedByBackend && USE_BACKEND_STATE) {
+                 const uploadedDocs = [];
+                 const failedFiles = [];
+                 for (const file of filesToAttach) {
+                   try {
+                     uploadedDocs.push(await uploadProjectFile(file, taskId, 'source', currentUser.name));
+                   } catch (fileErr) {
+                     console.warn('Source file attach failed after task creation:', fileErr);
+                     failedFiles.push(file.name);
+                   }
+                 }
+                 if (uploadedDocs.length) {
+                   const attachmentStamp = Date.now();
+                   const projectWithFiles = {
+                     ...confirmedProject,
+                     documents: [...(confirmedProject.documents || []), ...uploadedDocs],
+                     timeline: [
+                       ...(confirmedProject.timeline || []),
+                       { id: attachmentStamp, text: `${uploadedDocs.length} Source File(s) Attached`, time: new Date(attachmentStamp).toLocaleString() }
+                     ],
+                     updatedAt: attachmentStamp,
+                     syncVersion: attachmentStamp
+                   };
+                   try {
+                     const attachedData = await createTaskApi({
+                       apiBase: API_BASE,
+                       headers: jsonFinanceSafeHeaders,
+                       task: sanitizeProjectForCache(projectWithFiles)
+                     });
+                     const attachedProject = attachedData?.project || attachedData?.case || projectWithFiles;
+                     rememberRecentCreatedProject(attachedProject);
+                     applyProjectSnapshot([attachedProject], { source: 'create-files-confirmed' });
+                     confirmedProject = attachedProject;
+                   } catch (attachSaveErr) {
+                     console.warn('Task was created and files were stored; attachment linking was queued for retry:', attachSaveErr);
+                     confirmedProject = projectWithFiles;
+                     rememberPendingCreatedProject(projectWithFiles);
+                     rememberRecentCreatedProject(projectWithFiles);
+                     applyProjectSnapshot([projectWithFiles], { source: 'create-files-pending-confirmation' });
+                     notifyUser(`Task ${taskId} and its uploaded files are safe. Final attachment linking will retry automatically.`);
+                   }
+                 }
+                 if (failedFiles.length) {
+                   notifyUser(`Task ${taskId} was created, but these files did not upload and need to be tried again: ${failedFiles.join(', ')}`);
+                 }
+               } else if (filesToAttach.length && USE_BACKEND_STATE && !projectConfirmedByBackend) {
+                 notifyUser(`Task ${taskId} is saved locally and waiting for server sync. Its source files were not uploaded; attach them after the task appears online.`);
+               }
+
                if (firebaseUser && !isLocalMock) {
-                   try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', newP.id), stripLargeLocalFilesForCloud(newP)); } catch(e){}
+                   try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', confirmedProject.id), stripLargeLocalFilesForCloud(confirmedProject)); } catch(e){}
                }
 
                if (newP.assignedTo !== 'Unassigned') {
                    const targetRole = activeUsers.find(u => u.name === newP.assignedTo)?.role || ROLES.DESIGNER;
                    addNotification(targetRole, newP.assignedTo, `New Task Assigned: ${newP.id}`, 'info');
                }
-               setShowNewLead(false);
-               setLeadFiles([]);
-               setNewTaskCategory(TASK_CATEGORIES[0]);
                } catch (err) {
                  console.error('Create task failed:', err);
                  setCreateTaskError(err?.message || 'Task could not be created. Please check required fields and try again.');

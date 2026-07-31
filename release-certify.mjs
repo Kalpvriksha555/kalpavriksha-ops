@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { createReleaseCertificate, sourceTreeHash, validateProductionEnvironment } from '../backend/src/services/releaseCertificationService.js';
-import { inspectBackupManifests } from '../backend/src/services/operationalReliabilityService.js';
+import { createReleaseCertificate, sourceTreeHash, validateProductionEnvironment } from './backend/src/services/releaseCertificationService.js';
+import { inspectBackupManifests } from './backend/src/services/operationalReliabilityService.js';
 
 const root = process.cwd();
 const rootPackage = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));

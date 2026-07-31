@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { sourceTreeHash } from '../backend/src/services/releaseCertificationService.js';
+import { sourceTreeHash } from './backend/src/services/releaseCertificationService.js';
 
 const root = process.cwd();
 const output = path.resolve(process.env.CLEAN_INSTALL_REPORT || '.release/clean-install-report.json');

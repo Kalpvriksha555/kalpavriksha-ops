@@ -20,9 +20,23 @@ import { buildFileReconciliationReport, createFileStorage, FileValidationError }
 import { createOperationalJobStore, filesystemUsage, inspectBackupManifests, recordOperationalEvent, requestLogMiddleware, structuredLog } from './services/operationalReliabilityService.js';
 import { readAndVerifyReleaseCertificate } from './services/releaseCertificationService.js';
 import { createCorsOriginPolicy, parseCorsOrigins } from './config/corsPolicy.js';
+import { mergeLatestPresenceIntoSnapshot, preserveDirtyPresenceAfterReload } from './services/persistenceBackpressureService.js';
+import { getRequestStateSnapshot } from './services/requestStateService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+function boundedNumber(value, fallback, minimum = Number.NEGATIVE_INFINITY, maximum = Number.POSITIVE_INFINITY) {
+  const parsed = Number(value);
+  const safeValue = Number.isFinite(parsed) ? parsed : Number(fallback);
+  return Math.max(minimum, Math.min(maximum, safeValue));
+}
+
+function boundedEnvNumber(name, fallback, minimum = Number.NEGATIVE_INFINITY, maximum = Number.POSITIVE_INFINITY) {
+  const raw = String(process.env[name] ?? '').trim();
+  return boundedNumber(raw === '' ? fallback : raw, fallback, minimum, maximum);
+}
+
 const DATA_DIR = process.env.KALPA_DATA_DIR ? path.resolve(process.env.KALPA_DATA_DIR) : path.join(__dirname, 'data');
 const LEGACY_UPLOAD_DIR = process.env.KALPA_LEGACY_UPLOAD_DIR
   ? path.resolve(process.env.KALPA_LEGACY_UPLOAD_DIR)
@@ -32,23 +46,23 @@ const FILE_STORAGE_ROOT = process.env.KALPA_FILE_STORAGE_ROOT
   : path.join(DATA_DIR, 'private-files');
 const BACKUP_ROOT = process.env.KALPA_BACKUP_ROOT ? path.resolve(process.env.KALPA_BACKUP_ROOT) : path.join(DATA_DIR, 'backups');
 const RELEASE_CERTIFICATE_PATH = process.env.RELEASE_CERTIFICATE_PATH ? path.resolve(process.env.RELEASE_CERTIFICATE_PATH) : path.join(DATA_DIR, 'release-certification.json');
-const RELEASE_CERTIFICATE_MAX_AGE_HOURS = Math.max(1, Math.min(168, Number(process.env.RELEASE_CERTIFICATE_MAX_AGE_HOURS || 24)));
-const BACKUP_MAX_AGE_HOURS = Math.max(1, Math.min(720, Number(process.env.BACKUP_MAX_AGE_HOURS || 26)));
-const DISK_WARNING_PERCENT = Math.max(50, Math.min(98, Number(process.env.DISK_WARNING_PERCENT || 80)));
-const DISK_CRITICAL_PERCENT = Math.max(DISK_WARNING_PERCENT + 1, Math.min(100, Number(process.env.DISK_CRITICAL_PERCENT || 90)));
+const RELEASE_CERTIFICATE_MAX_AGE_HOURS = boundedEnvNumber('RELEASE_CERTIFICATE_MAX_AGE_HOURS', 24, 1, 168);
+const BACKUP_MAX_AGE_HOURS = boundedEnvNumber('BACKUP_MAX_AGE_HOURS', 26, 1, 720);
+const DISK_WARNING_PERCENT = boundedEnvNumber('DISK_WARNING_PERCENT', 80, 50, 98);
+const DISK_CRITICAL_PERCENT = boundedEnvNumber('DISK_CRITICAL_PERCENT', 90, DISK_WARNING_PERCENT + 1, 100);
 const DB_FILE = process.env.KALPA_DB_FILE ? path.resolve(process.env.KALPA_DB_FILE) : path.join(DATA_DIR, 'db.json');
 const AUTH_FILE = process.env.KALPA_AUTH_FILE ? path.resolve(process.env.KALPA_AUTH_FILE) : path.join(DATA_DIR, 'auth.json');
 const SESSION_COOKIE_NAME = String(process.env.SESSION_COOKIE_NAME || 'kv_session').trim();
-const SESSION_TTL_HOURS = Math.max(1, Math.min(168, Number(process.env.SESSION_TTL_HOURS || 12)));
+const SESSION_TTL_HOURS = boundedEnvNumber('SESSION_TTL_HOURS', 12, 1, 168);
 const SESSION_TTL_MS = SESSION_TTL_HOURS * 60 * 60 * 1000;
-const LOGIN_LOCK_MINUTES = Math.max(1, Math.min(120, Number(process.env.LOGIN_LOCK_MINUTES || 15)));
-const LOGIN_MAX_ATTEMPTS = Math.max(3, Math.min(20, Number(process.env.LOGIN_MAX_ATTEMPTS || 5)));
+const LOGIN_LOCK_MINUTES = boundedEnvNumber('LOGIN_LOCK_MINUTES', 15, 1, 120);
+const LOGIN_MAX_ATTEMPTS = boundedEnvNumber('LOGIN_MAX_ATTEMPTS', 5, 3, 20);
 const JSON_BODY_LIMIT = String(process.env.JSON_BODY_LIMIT || '8mb');
-const MAX_STATE_PROJECTS_PER_WRITE = Math.max(1, Math.min(5000, Number(process.env.MAX_STATE_PROJECTS_PER_WRITE || 1500)));
-const MAX_CHAT_TEXT_LENGTH = Math.max(100, Math.min(50000, Number(process.env.MAX_CHAT_TEXT_LENGTH || 10000)));
-const MAX_TIMELINE_TEXT_LENGTH = Math.max(100, Math.min(10000, Number(process.env.MAX_TIMELINE_TEXT_LENGTH || 2000)));
-const MAX_CASE_TEXT_LENGTH = Math.max(100, Math.min(20000, Number(process.env.MAX_CASE_TEXT_LENGTH || 5000)));
-const STATE_REVISION_RETENTION = Math.max(25, Math.min(5000, Number(process.env.STATE_REVISION_RETENTION || 200)));
+const MAX_STATE_PROJECTS_PER_WRITE = boundedEnvNumber('MAX_STATE_PROJECTS_PER_WRITE', 1500, 1, 5000);
+const MAX_CHAT_TEXT_LENGTH = boundedEnvNumber('MAX_CHAT_TEXT_LENGTH', 10000, 100, 50000);
+const MAX_TIMELINE_TEXT_LENGTH = boundedEnvNumber('MAX_TIMELINE_TEXT_LENGTH', 2000, 100, 10000);
+const MAX_CASE_TEXT_LENGTH = boundedEnvNumber('MAX_CASE_TEXT_LENGTH', 5000, 100, 20000);
+const STATE_REVISION_RETENTION = boundedEnvNumber('STATE_REVISION_RETENTION', 200, 25, 5000);
 const WHATSAPP_WEBHOOK_SECRET = String(process.env.WHATSAPP_WEBHOOK_SECRET || '').trim();
 const RUNTIME_MODE = String(process.env.NODE_ENV || 'development').trim().toLowerCase();
 const IS_PRODUCTION = RUNTIME_MODE === 'production';
@@ -70,7 +84,7 @@ const USE_POSTGRES = /^postgres(ql)?:\/\//i.test(DATABASE_URL);
 const pool = USE_POSTGRES ? new Pool({
   connectionString: DATABASE_URL,
   ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
-  connectionTimeoutMillis: Number(process.env.DB_CONNECT_TIMEOUT_MS || 10000)
+  connectionTimeoutMillis: boundedEnvNumber('DB_CONNECT_TIMEOUT_MS', 10000, 1000, 120000)
 }) : null;
 const operationalJobs = createOperationalJobStore({ pool, dataDir:DATA_DIR, usePostgres:USE_POSTGRES });
 const serverStartedAt = new Date().toISOString();
@@ -82,12 +96,24 @@ let postgresReady = false;
 let stateVersion = 0;
 let legacyCredentialCandidates = [];
 let persistenceQueue = Promise.resolve();
+let persistenceQueueDepth = 0;
+let persistenceInFlight = 0;
+let lastPersistenceDurationMs = 0;
+let lastPersistenceReason = '';
+let activeForegroundWriteRequests = 0;
+let presenceMutationGeneration = 0;
+let persistedPresenceGeneration = 0;
+let presenceFlushTimer = null;
+let presenceFlushPromise = null;
+const PRESENCE_HEARTBEAT_FLUSH_MS = boundedEnvNumber('PRESENCE_HEARTBEAT_FLUSH_MS', 180_000, 60_000, 15 * 60_000);
+const PRESENCE_FLUSH_RETRY_MS = boundedEnvNumber('PRESENCE_FLUSH_RETRY_MS', 15_000, 5_000, 60_000);
 const snapshotVersions = new WeakMap();
+const snapshotPresenceGenerations = new WeakMap();
 
 const safeName = (name='file') => String(name).replace(/[^a-zA-Z0-9.\-_]/g, '_');
-const MAX_UPLOAD_SIZE_MB = Math.max(1, Math.min(500, Number(process.env.MAX_UPLOAD_SIZE_MB || 100)));
-const MAX_UPLOAD_FILES = Math.max(1, Math.min(100, Number(process.env.MAX_UPLOAD_FILES || 20)));
-const MAX_INLINE_PREVIEW_MB = Math.max(1, Math.min(50, Number(process.env.MAX_INLINE_PREVIEW_MB || 15)));
+const MAX_UPLOAD_SIZE_MB = boundedEnvNumber('MAX_UPLOAD_SIZE_MB', 100, 1, 500);
+const MAX_UPLOAD_FILES = boundedEnvNumber('MAX_UPLOAD_FILES', 20, 1, 100);
+const MAX_INLINE_PREVIEW_MB = boundedEnvNumber('MAX_INLINE_PREVIEW_MB', 15, 1, 50);
 const MAX_INLINE_PREVIEW_BYTES = MAX_INLINE_PREVIEW_MB * 1024 * 1024;
 const fileStorage = createFileStorage({
   root: FILE_STORAGE_ROOT,
@@ -134,6 +160,30 @@ function cleanupIncomingUploads(files = []) {
   }
 }
 
+function cleanupRequestTempUploads(req = {}) {
+  cleanupIncomingUploads(Array.isArray(req.files) ? req.files : (req.file ? [req.file] : []));
+}
+
+function rollbackPreparedUploads(files = [], details = {}) {
+  // The database reference is rolled back, but content-addressed objects must
+  // not be moved immediately. A concurrent request may already have
+  // deduplicated to the same hash and be waiting to commit its own row. Keep
+  // the private object as a garbage-collection candidate and record the event.
+  for (const file of Array.isArray(files) ? files : []) {
+    const storageKey = String(file?.storageKey || file?.storedName || '').trim();
+    if (!storageKey || file?.deduplicated || !storageKey.startsWith('objects/')) continue;
+    void recordFileStorageEvent({
+      fileId:details.fileId || file?.id || '',
+      caseId:details.caseId || '',
+      action:'UPLOAD_ORPHAN_CANDIDATE',
+      actor:details.actor || 'system',
+      storageKey,
+      sha256:file?.sha256 || '',
+      details:{ reason:details.reason || 'PERSISTENCE_FAILED_AFTER_UPLOAD', physicalAction:'retained-for-safe-gc' }
+    });
+  }
+}
+
 async function prepareSecureUploads(req, purpose = 'FILE', options = {}) {
   const files = Array.isArray(req.files) ? req.files : (req.file ? [req.file] : []);
   const prepared = [];
@@ -141,7 +191,7 @@ async function prepareSecureUploads(req, purpose = 'FILE', options = {}) {
     for (const file of files) {
       const secured = await fileStorage.validateAndStore(file, { purpose });
       if (options.imagesOnly && !String(secured.detectedMime || '').startsWith('image/')) {
-        if (!secured.deduplicated) fileStorage.softDelete(secured.storageKey, { reason: 'PROFILE_PHOTO_NON_IMAGE' });
+        rollbackPreparedUploads([secured], { reason:'PROFILE_PHOTO_NON_IMAGE', actor:'system' });
         throw new FileValidationError('PROFILE_PHOTO_INVALID', 'Profile photos must contain a valid supported image.', 400);
       }
       Object.assign(file, {
@@ -169,9 +219,7 @@ async function prepareSecureUploads(req, purpose = 'FILE', options = {}) {
     return prepared;
   } catch (error) {
     cleanupIncomingUploads(files);
-    for (const file of prepared) {
-      if (file?.storageKey && !file?.deduplicated) fileStorage.softDelete(file.storageKey,{reason:'UPLOAD_BATCH_ROLLED_BACK'});
-    }
+    rollbackPreparedUploads(prepared,{reason:'UPLOAD_BATCH_ROLLED_BACK',actor:'system'});
     throw error;
   }
 }
@@ -188,11 +236,15 @@ function isResolvedStoragePathAllowed(fp = '') {
 function uploadAny(req, res, next) {
   upload.any()(req, res, (err) => {
     if (err) {
+      cleanupRequestTempUploads(req);
       const payload = uploadErrorPayload(err);
       return res.status(payload.status).json({ ok:false, error:payload.error, code:err.code || 'UPLOAD_ERROR' });
     }
     req.files = Array.isArray(req.files) ? req.files : [];
-    res.once('finish', () => cleanupIncomingUploads(req.files));
+    let cleaned=false;
+    const cleanup=()=>{ if (cleaned) return; cleaned=true; cleanupRequestTempUploads(req); };
+    res.once('finish', cleanup);
+    res.once('close', cleanup);
     next();
   });
 }
@@ -200,10 +252,14 @@ function uploadSingle(fieldName) {
   return (req, res, next) => {
     upload.single(fieldName)(req, res, (err) => {
       if (err) {
+        cleanupRequestTempUploads(req);
         const payload = uploadErrorPayload(err);
         return res.status(payload.status).json({ ok:false, error:payload.error, code:err.code || 'UPLOAD_ERROR' });
       }
-      if (req.file) res.once('finish', () => cleanupIncomingUploads([req.file]));
+      let cleaned=false;
+      const cleanup=()=>{ if (cleaned) return; cleaned=true; cleanupRequestTempUploads(req); };
+      res.once('finish', cleanup);
+      res.once('close', cleanup);
       next();
     });
   };
@@ -300,18 +356,36 @@ function db(){
   if (!memoryState) throw new Error('Application state is not initialized.');
   const snapshot = structuredClone(memoryState);
   snapshotVersions.set(snapshot, stateVersion);
+  snapshotPresenceGenerations.set(snapshot, presenceMutationGeneration);
   return snapshot;
+}
+
+function requestDb(req = {}) {
+  return getRequestStateSnapshot(req, db);
 }
 
 async function reloadCommittedState(){
   if (!USE_POSTGRES) return;
+  const liveStateBeforeReload = memoryState;
   const loaded = await reloadRelationalState(pool, { normalizeState: norm });
-  memoryState = norm(loaded.state);
+  memoryState = norm(preserveDirtyPresenceAfterReload({
+    committedState:loaded.state,
+    liveState:liveStateBeforeReload,
+    mutationGeneration:presenceMutationGeneration,
+    persistedGeneration:persistedPresenceGeneration
+  }));
   stateVersion = Number(loaded.stateVersion || 0);
 }
 
 function save(d, metadata = {}){
-  const normalized = norm(d);
+  const snapshotPresenceGeneration = Number(snapshotPresenceGenerations.get(d) ?? presenceMutationGeneration);
+  const latestPresence = mergeLatestPresenceIntoSnapshot({
+    snapshot:d,
+    liveState:memoryState,
+    snapshotGeneration:snapshotPresenceGeneration,
+    liveGeneration:presenceMutationGeneration
+  });
+  const normalized = norm(latestPresence.state);
   const expectedVersion = Number(snapshotVersions.get(d) ?? stateVersion);
   if (expectedVersion !== stateVersion) {
     const error = new Error(`This update was created from stale application state. Expected local version ${expectedVersion}, current version ${stateVersion}. Refresh and retry.`);
@@ -320,57 +394,132 @@ function save(d, metadata = {}){
     return Promise.reject(error);
   }
   const targetVersion = expectedVersion + 1;
+  const includedPresenceGeneration = latestPresence.includedPresenceGeneration;
+  const requestedCollections = Array.isArray(metadata.collections) ? metadata.collections.map(value => String(value || '').trim()).filter(Boolean) : null;
+  const effectiveCollections = requestedCollections ? [...new Set(requestedCollections)] : null;
+  if (effectiveCollections && includedPresenceGeneration > persistedPresenceGeneration) {
+    if (!effectiveCollections.includes('users')) effectiveCollections.push('users');
+    if (!effectiveCollections.includes('attendanceLogs')) effectiveCollections.push('attendanceLogs');
+  }
+  const effectiveMetadata = effectiveCollections ? { ...metadata, collections:effectiveCollections } : metadata;
+  const persistenceReason = String(effectiveMetadata.reason || (effectiveMetadata.financeEvent ? 'finance_update' : effectiveMetadata.authOperations?.length ? 'authentication_update' : 'state_update'));
   // Make queued changes visible to later requests in this process. The queued
   // PostgreSQL transaction still has to succeed before the API returns success.
   memoryState = structuredClone(normalized);
   stateVersion = targetVersion;
+  persistenceQueueDepth += 1;
 
   const persist = async () => {
-    if (!USE_POSTGRES) {
-      normalized.__stateVersion = targetVersion;
-      fs.writeFileSync(DB_FILE, JSON.stringify(normalized,null,2));
-      delete normalized.__stateVersion;
-      if (Array.isArray(metadata.authOperations) && metadata.authOperations.length) applyLocalAuthOperations(metadata.authOperations);
-      return { stateVersion:targetVersion, persistedAt: now(), database: 'json-file' };
-    }
-
-    await ensurePostgres();
+    const startedAt = Date.now();
+    persistenceInFlight += 1;
     try {
-      const inferredActor = metadata.actor
-        || metadata.financeEvent?.actor
-        || normalized.audit?.[0]?.actor
-        || normalized.audit?.[0]?.by
-        || normalized.audit?.[0]?.user
-        || 'system';
-      const result = await persistRelationalState(pool, {
-        state: normalized,
-        expectedVersion,
-        targetVersion,
-        metadata: { ...metadata, actor: inferredActor },
-        applyAuthOperationsWithClient,
-        financeSnapshotHash,
-        revisionRetention: STATE_REVISION_RETENTION
-      });
-      if (process.env.WRITE_JSON_BACKUP === 'true') fs.writeFileSync(DB_FILE, JSON.stringify(normalized,null,2));
-      return result;
-    } catch (error) {
-      await reloadCommittedState().catch(() => {});
-      throw error;
+      if (!USE_POSTGRES) {
+        normalized.__stateVersion = targetVersion;
+        fs.writeFileSync(DB_FILE, JSON.stringify(normalized,null,2));
+        delete normalized.__stateVersion;
+        if (Array.isArray(effectiveMetadata.authOperations) && effectiveMetadata.authOperations.length) applyLocalAuthOperations(effectiveMetadata.authOperations);
+        return { stateVersion:targetVersion, persistedAt: now(), database: 'json-file' };
+      }
+
+      await ensurePostgres();
+      try {
+        const inferredActor = effectiveMetadata.actor
+          || effectiveMetadata.financeEvent?.actor
+          || normalized.audit?.[0]?.actor
+          || normalized.audit?.[0]?.by
+          || normalized.audit?.[0]?.user
+          || 'system';
+        const result = await persistRelationalState(pool, {
+          state: normalized,
+          expectedVersion,
+          targetVersion,
+          metadata: { ...effectiveMetadata, actor: inferredActor, reason:persistenceReason },
+          applyAuthOperationsWithClient,
+          financeSnapshotHash,
+          revisionRetention: STATE_REVISION_RETENTION
+        });
+        if (process.env.WRITE_JSON_BACKUP === 'true') fs.writeFileSync(DB_FILE, JSON.stringify(normalized,null,2));
+        return result;
+      } catch (error) {
+        await reloadCommittedState().catch(() => {});
+        throw error;
+      }
+    } finally {
+      persistenceInFlight = Math.max(0, persistenceInFlight - 1);
+      lastPersistenceDurationMs = Math.max(0, Date.now() - startedAt);
+      lastPersistenceReason = persistenceReason;
     }
   };
 
   const queued = persistenceQueue.then(persist, persist).then(async result => {
-    lastPersistenceSuccess = { at:now(), stateVersion:targetVersion, database:result?.database || (USE_POSTGRES ? 'postgresql-relational' : 'json-file') };
+    persistedPresenceGeneration = Math.max(persistedPresenceGeneration, includedPresenceGeneration);
+    lastPersistenceSuccess = {
+      at:now(),
+      stateVersion:targetVersion,
+      database:result?.database || (USE_POSTGRES ? 'postgresql-relational' : 'json-file'),
+      durationMs:lastPersistenceDurationMs,
+      reason:persistenceReason
+    };
     lastPersistenceFailure = null;
     return result;
   }, async error => {
-    lastPersistenceFailure = { at:now(), code:error?.code || 'PERSISTENCE_FAILED', message:error?.message || String(error), expectedVersion, targetVersion };
-    await operationalJobs.recordFailure('STATE_PERSISTENCE', error, { expectedVersion, targetVersion, reason:metadata.reason || (metadata.financeEvent ? 'finance_update' : 'state_update') }, { maxAttempts:5 }).catch(() => {});
-    await recordOperationalEvent(pool, USE_POSTGRES, { eventType:'STATE_PERSISTENCE_FAILED', severity:'ERROR', actor:metadata.actor || metadata.financeEvent?.actor || 'system', details:lastPersistenceFailure }).catch(() => {});
+    lastPersistenceFailure = { at:now(), code:error?.code || 'PERSISTENCE_FAILED', message:error?.message || String(error), expectedVersion, targetVersion, reason:persistenceReason, durationMs:lastPersistenceDurationMs };
+    await operationalJobs.recordFailure('STATE_PERSISTENCE', error, { expectedVersion, targetVersion, reason:persistenceReason }, { maxAttempts:5 }).catch(() => {});
+    await recordOperationalEvent(pool, USE_POSTGRES, { eventType:'STATE_PERSISTENCE_FAILED', severity:'ERROR', actor:effectiveMetadata.actor || effectiveMetadata.financeEvent?.actor || 'system', details:lastPersistenceFailure }).catch(() => {});
     throw error;
+  }).finally(() => {
+    persistenceQueueDepth = Math.max(0, persistenceQueueDepth - 1);
   });
   persistenceQueue = queued.catch(() => {});
   return queued;
+}
+
+function replacePresenceSliceInMemory(d = {}) {
+  if (!memoryState) throw new Error('Application state is not initialized.');
+  memoryState = {
+    ...memoryState,
+    users: structuredClone(d.users || []),
+    attendanceLogs: structuredClone(d.attendanceLogs || [])
+  };
+  presenceMutationGeneration += 1;
+}
+
+function clearPresenceFlushTimer() {
+  if (!presenceFlushTimer) return;
+  clearTimeout(presenceFlushTimer);
+  presenceFlushTimer = null;
+}
+
+function schedulePresenceFlush(delayMs = PRESENCE_HEARTBEAT_FLUSH_MS) {
+  if (shuttingDown || presenceFlushTimer || presenceFlushPromise || presenceMutationGeneration <= persistedPresenceGeneration) return;
+  presenceFlushTimer = setTimeout(() => {
+    presenceFlushTimer = null;
+    flushPresenceHeartbeatBatch().catch(error => {
+      structuredLog('error','presence_flush_failed',{code:error?.code || '',error:error?.message || String(error)});
+    });
+  }, boundedNumber(delayMs, PRESENCE_HEARTBEAT_FLUSH_MS, 1_000, 15 * 60_000));
+  presenceFlushTimer.unref?.();
+}
+
+async function flushPresenceHeartbeatBatch({ force = false, reason = 'presence_heartbeat_batch' } = {}) {
+  if (presenceFlushPromise) return presenceFlushPromise;
+  if (presenceMutationGeneration <= persistedPresenceGeneration) return null;
+  if (!force && (activeForegroundWriteRequests > 0 || persistenceQueueDepth > 0 || persistenceInFlight > 0)) {
+    schedulePresenceFlush(PRESENCE_FLUSH_RETRY_MS);
+    return null;
+  }
+  const snapshot = db();
+  presenceFlushPromise = save(snapshot, {
+    actor:'system',
+    reason,
+    skipRevisionSnapshot:true,
+    background:true,
+    collections:['users','attendanceLogs']
+  }).finally(() => {
+    presenceFlushPromise = null;
+    if (presenceMutationGeneration > persistedPresenceGeneration) schedulePresenceFlush(PRESENCE_FLUSH_RETRY_MS);
+  });
+  return presenceFlushPromise;
 }
 
 async function loadDb(){
@@ -391,7 +540,7 @@ async function databaseReadinessProbe() {
   try {
     await Promise.race([
       pool.query('SELECT 1 AS ok'),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Database readiness probe timed out.')), Number(process.env.READINESS_DB_TIMEOUT_MS || 5000)))
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Database readiness probe timed out.')), boundedEnvNumber('READINESS_DB_TIMEOUT_MS', 5000, 1000, 60000)))
     ]);
     return { ok:true, database:'postgresql-relational', latencyMs:Date.now()-started };
   } catch (error) {
@@ -445,7 +594,18 @@ async function buildReliabilityStatus({ detailed = false } = {}) {
     disk:{storage:storageDisk,backups:backupDisk,warningPercent:DISK_WARNING_PERCENT,criticalPercent:DISK_CRITICAL_PERCENT},
     backups,
     releaseCertificate:{ required:RELEASE_CERTIFICATE_REQUIRED, path:RELEASE_CERTIFICATE_PATH, ...releaseCertificate },
-    persistence:{lastSuccess:lastPersistenceSuccess,lastFailure:lastPersistenceFailure,stateVersion},
+    persistence:{
+      lastSuccess:lastPersistenceSuccess,
+      lastFailure:lastPersistenceFailure,
+      stateVersion,
+      queueDepth:persistenceQueueDepth,
+      inFlight:persistenceInFlight,
+      activeForegroundWrites:activeForegroundWriteRequests,
+      lastDurationMs:lastPersistenceDurationMs,
+      lastReason:lastPersistenceReason,
+      presenceDirty:presenceMutationGeneration > persistedPresenceGeneration,
+      presenceFlushMs:PRESENCE_HEARTBEAT_FLUSH_MS
+    },
     failedJobs
   };
 }
@@ -769,8 +929,8 @@ function clearSessionCookie(res) {
   res.clearCookie(SESSION_COOKIE_NAME, options);
 }
 
-function findStateUserByIdOrUsername(userId = '', username = '') {
-  const d = memoryState || seed;
+function findStateUserByIdOrUsername(userId = '', username = '', state = memoryState || seed) {
+  const d = state || memoryState || seed;
   return (d.users || []).find(user => String(user.id || '') === String(userId || '') || normalizeUsername(user.username) === normalizeUsername(username)) || null;
 }
 
@@ -841,6 +1001,7 @@ async function migrateLegacyCredentials() {
   const operations = [];
   let stateChanged = false;
   let bootstrapCreated = false;
+  let bootstrapUserId = '';
   let repairedLegacyCredentials = 0;
   for (let index = 0; index < (d.users || []).length; index += 1) {
     const original = d.users[index] || {};
@@ -889,6 +1050,7 @@ async function migrateLegacyCredentials() {
       const errors = passwordPolicyErrors(bootstrapPassword);
       if (!bootstrapUsername || errors.length) throw new Error(`Bootstrap Admin configuration is invalid. ${errors.join(' ') || 'BOOTSTRAP_ADMIN_USERNAME is required.'}`);
       const userId = `admin-${nanoid(10)}`;
+      bootstrapUserId = userId;
       const user = employeeLifecycleProfile({ id: userId, name: bootstrapName, username: bootstrapUsername, role: 'Admin', status: 'APPROVED', createdAt: Date.now(), createdBy: 'Secure bootstrap' }, {});
       d.users.push(stripCredentialFields(user));
       operations.push({
@@ -904,13 +1066,19 @@ async function migrateLegacyCredentials() {
     // Credential cutover is independent of the operational-state snapshot.
     // Do not rewrite cases, finance, files, or legacy orphan rows merely to
     // create password hashes.
-    if (bootstrapCreated) await save(d, { authOperations: operations });
+    if (bootstrapCreated) await save(d, {
+      actor:'secure-bootstrap',
+      reason:'bootstrap_admin_create',
+      authOperations: operations,
+      collections:['users'],
+      collectionRowIds:{users:[bootstrapUserId]}
+    });
     else {
       await applyStandaloneAuthOperations(operations);
       if (stateChanged) memoryState = norm(d);
     }
   } else if (operations.length || stateChanged) {
-    await save(d, { authOperations: operations });
+    await save(d, { authOperations: operations, collections:['users'] });
   }
   if ((await countCredentials()) === 0) {
     throw new Error('No secure login credential exists. Set BOOTSTRAP_ADMIN_USERNAME and BOOTSTRAP_ADMIN_PASSWORD for the one-time secure bootstrap, or restore the existing user records before startup.');
@@ -1528,11 +1696,30 @@ function authorizeCase(req, res, caseRecord, action = 'read') {
 
 function requireCaseAction(action = 'read') {
   return (req, res, next) => {
-    const d = db();
+    const d = requestDb(req);
     const caseRecord = findCaseByAnyId(d.cases || [], req.params.id || req.body?.caseId || req.body?.projectId || '');
+    if (!caseRecord) {
+      cleanupIncomingUploads(req.files || (req.file ? [req.file] : []));
+      return res.status(404).json({ ok:false, code:'CASE_NOT_FOUND', error:'Case not found.' });
+    }
+    if (!authorizeCase(req, res, caseRecord, action)) {
+      cleanupIncomingUploads(req.files || (req.file ? [req.file] : []));
+      return;
+    }
+    req.caseRecord = caseRecord;
+    next();
+  };
+}
+
+// Check access before accepting a potentially large multipart body, but do not
+// pin that snapshot for the duration of the upload. The normal middleware runs
+// again after multer and attaches a fresh snapshot for mutation/persistence.
+function preauthorizeCaseAction(action = 'read') {
+  return (req, res, next) => {
+    const transientState = db();
+    const caseRecord = findCaseByAnyId(transientState.cases || [], req.params.id || '');
     if (!caseRecord) return res.status(404).json({ ok:false, code:'CASE_NOT_FOUND', error:'Case not found.' });
     if (!authorizeCase(req, res, caseRecord, action)) return;
-    req.caseRecord = caseRecord;
     next();
   };
 }
@@ -1752,7 +1939,7 @@ function upsertInlinePaymentLedger(d, c, status, body = {}) {
   return c;
 }
 
-const PRESENCE_STALE_MS = Number(process.env.PRESENCE_STALE_MS || 90000);
+const PRESENCE_STALE_MS = boundedEnvNumber('PRESENCE_STALE_MS', 90000, 30000, 30 * 60 * 1000);
 const toMs = (value) => {
   if (!value) return 0;
   if (typeof value === 'number') return value;
@@ -2185,7 +2372,7 @@ async function sendEmail({ to, subject, text, html }) {
     return makeLocalEmailResult('Local OTP mode is enabled.');
   }
   if (provider === 'smtp' || provider === 'gmail') {
-    const port = Number(process.env.SMTP_PORT || (provider === 'gmail' ? 465 : 587));
+    const port = boundedEnvNumber('SMTP_PORT', provider === 'gmail' ? 465 : 587, 1, 65535);
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST || 'smtp.gmail.com',
       port,
@@ -2246,7 +2433,11 @@ async function sendOtpEmail(email, otp) {
   return sendEmail({ to, subject, text, html });
 }
 
-function addAudit(d, by, action, entity){ d.audit.unshift({id:nanoid(8),at:now(),by,action,entity}); }
+function addAudit(d, by, action, entity){
+  const entry={id:nanoid(8),at:now(),by,action,entity};
+  d.audit.unshift(entry);
+  return entry;
+}
 async function recordFileStorageEvent({fileId='',caseId='',action='FILE_EVENT',actor='',storageKey='',sha256='',details={}}={}) {
   if (!USE_POSTGRES) return;
   try {
@@ -2261,10 +2452,12 @@ async function recordFileStorageEvent({fileId='',caseId='',action='FILE_EVENT',a
   }
 }
 function notify(d, to, text, category='normal', target=''){
-  d.notifications.unshift({id:nanoid(8),to,text,category,target,status:'UNREAD',createdAt:now()});
+  const notification={id:nanoid(8),to,text,category,target,status:'UNREAD',createdAt:now()};
+  d.notifications.unshift(notification);
+  return notification;
 }
-function notifyRole(d, role, text, category='normal', target=''){ notify(d,role,text,category,target); }
-function notifyUser(d, userIdOrName, text, category='normal', target=''){ notify(d,userIdOrName,text,category,target); }
+function notifyRole(d, role, text, category='normal', target=''){ return notify(d,role,text,category,target); }
+function notifyUser(d, userIdOrName, text, category='normal', target=''){ return notify(d,userIdOrName,text,category,target); }
 function nextCaseNo(d, city='Lucknow'){ const code=String(city||'LKO').slice(0,3).toUpperCase(); return `KD-${code}-2026-${String(d.cases.length+1).padStart(2,'0')}`; }
 function leastBusy(d){ return sanitizePresenceUsers(d.users).filter(u=>normalizeRole(u.role)==='Designer').map(u=>({ ...u, active:d.cases.filter(c=>c.assigneeId===u.id && !['COMPLETED','CLOSED'].includes(c.status)).length })).sort((a,b)=>a.active-b.active)[0] || sanitizePresenceUsers(d.users).find(u=>normalizeRole(u.role)==='Manager'); }
 function publicUrl(){ return process.env.PUBLIC_APP_URL || 'http://localhost:5173'; }
@@ -2569,7 +2762,7 @@ const loginRateLimiter = createRateLimiter({ windowMs:15 * 60 * 1000, max:20, pr
 const recoveryRateLimiter = createRateLimiter({ windowMs:15 * 60 * 1000, max:8, prefix:'recovery' });
 const otpRateLimiter = createRateLimiter({ windowMs:10 * 60 * 1000, max:8, prefix:'otp' });
 const emailTestRateLimiter = createRateLimiter({ windowMs:60 * 60 * 1000, max:5, prefix:'email-test' });
-const apiWriteRateLimiter = createRateLimiter({ windowMs:60 * 1000, max:Number(process.env.API_WRITE_RATE_LIMIT || 300), prefix:'api-write', key:req => `api-write:${req.auth?.user?.id || req.ip || req.socket?.remoteAddress || 'unknown'}` });
+const apiWriteRateLimiter = createRateLimiter({ windowMs:60 * 1000, max:boundedEnvNumber('API_WRITE_RATE_LIMIT', 300, 10, 10000), prefix:'api-write', key:req => `api-write:${req.auth?.user?.id || req.ip || req.socket?.remoteAddress || 'unknown'}` });
 app.use(attachRequestId);
 app.use(requestLogMiddleware);
 app.use(secureResponseHeaders);
@@ -2579,6 +2772,20 @@ app.use(rejectDangerousJson);
 app.use('/api', requireJsonForBody);
 app.use('/api', authenticationGate);
 app.use('/api', (req,res,next) => isSafeMethod(req.method) ? next() : apiWriteRateLimiter(req,res,next));
+app.use('/api', (req, res, next) => {
+  const isForegroundWrite = !isSafeMethod(req.method) && req.path !== '/presence';
+  if (!isForegroundWrite) return next();
+  activeForegroundWriteRequests += 1;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    activeForegroundWriteRequests = Math.max(0, activeForegroundWriteRequests - 1);
+  };
+  res.once('finish', release);
+  res.once('close', release);
+  next();
+});
 app.get('/uploads/:filename', authenticationGate, (req,res)=>{
   const filename=safeName(path.basename(String(req.params.filename || '')));
   if (!filename) return res.status(404).send('File not found');
@@ -2773,7 +2980,13 @@ app.post('/api/auth/users', requireAdminSession, async (req, res) => {
     d.users.push(user);
     d.users = cleanTeamUsers(d.users);
     const credential = authCredentialRecord({ user_id: userId, username, password_hash: await hashPassword(password), role, status: 'APPROVED', must_change_password: true, password_version: 1 });
-    const persistence = await save(d, { authOperations: [{ type: 'upsertCredential', credential }] });
+    const persistence = await save(d, {
+      actor:req.auth.user.name,
+      reason:'auth_user_create',
+      authOperations: [{ type: 'upsertCredential', credential }],
+      collections:['users'],
+      collectionRowIds:{users:[userId]}
+    });
     await recordAuthEvent({ userId, username, eventType: 'USER_CREDENTIAL_CREATED', req, details: { role, createdBy: req.auth.user.name } });
     res.status(201).json({ ok: true, user: publicSessionUser(user, credential), persistence });
   } catch (error) {
@@ -2808,7 +3021,13 @@ app.patch('/api/auth/users/:id', requireAdminSession, async (req, res) => {
     };
     const authOperations = [{ type: 'upsertCredential', credential: nextCredential }];
     if (status !== 'APPROVED') authOperations.push({ type: 'revokeSessions', userId: existingUser.id });
-    const persistence = await save(d, { authOperations });
+    const persistence = await save(d, {
+      actor:req.auth.user.name,
+      reason:'auth_user_update',
+      authOperations,
+      collections:['users'],
+      collectionRowIds:{users:[String(nextUser.id)]}
+    });
     await recordAuthEvent({ userId: existingUser.id, username, eventType: 'USER_ACCESS_UPDATED', req, details: { role, status, updatedBy: req.auth.user.name } });
     res.json({ ok: true, user: publicSessionUser(nextUser, nextCredential), persistence });
   } catch (error) {
@@ -2894,7 +3113,7 @@ app.get('/api/health/ready', async (_req, res) => {
 function getEmailStatusPayload() {
   const provider = emailProvider();
   const host = process.env.SMTP_HOST || (provider === 'gmail' ? 'smtp.gmail.com' : '');
-  const port = Number(process.env.SMTP_PORT || (provider === 'gmail' ? 465 : 587));
+  const port = boundedEnvNumber('SMTP_PORT', provider === 'gmail' ? 465 : 587, 1, 65535);
   return {
     ok: true,
     provider,
@@ -3018,7 +3237,7 @@ app.post('/api/performance/rebuild', requireCapability('performance:rebuild'), a
   const generated = buildPerformanceRecordsFromCases(d.cases || []);
   const records = mergePerformanceRecords([], generated);
   d.performanceRecords = records;
-  await save(d);
+  await save(d,{actor:requestActor(req).name,reason:'performance_rebuild',collections:['performanceRecords']});
   const summary = buildPerformanceSummary(records, d.users || []);
   res.json({ ok: true, rebuilt: records.length, records, summary, diagnostics: buildPerformanceDiagnostics(d.cases || [], records) });
 });
@@ -3146,7 +3365,16 @@ app.post('/api/state/projects', async (req, res) => {
     d.cases = mergeCasesPreservingFreshest(d.cases || [], [safeIncoming], d.deletedProjectIds || []);
     const saved = findCaseByAnyId(d.cases || [], projectId) || findCaseByAnyId(d.cases || [], safeIncoming.caseId || projectId) || safeIncoming;
     addAudit(d, actor.name, existing ? 'Task updated' : 'Task created', saved.caseId || saved.id);
-    const persistence = await save(d);
+    const auditEntry = d.audit?.[0];
+    const persistence = await save(d, {
+      actor:actor.name,
+      reason:existing ? 'task_update' : 'task_create',
+      collections:['cases','audit'],
+      collectionRowIds:{
+        cases:[String(saved.id || saved.caseId)],
+        audit:auditEntry?.id ? [String(auditEntry.id)] : []
+      }
+    });
     const performanceRecords = mergePerformanceRecords(d.performanceRecords || [], buildPerformanceRecordsFromCases(d.cases || []));
     const visible = sanitize({ ...d, cases:[saved] }, actor.role).cases?.[0] || saved;
     res.json({ ok:true, project:visible, case:visible, deletedProjectIds:d.deletedProjectIds || [], counts:{ cases:(d.cases || []).length, performanceRecords:performanceRecords.length }, persistence });
@@ -3156,7 +3384,7 @@ app.post('/api/state/projects', async (req, res) => {
 });
 
 app.delete('/api/state/projects/:id', requireAnyRole('ADMIN','MANAGER'), requireCaseAction('delete'), async (req,res)=>{
-  const d = db();
+  const d = requestDb(req);
   const actor = requestActor(req);
   const id = textValue(req.params.id, 'Project id', 200, { required:true });
   const before = (d.cases || []).length;
@@ -3168,13 +3396,12 @@ app.delete('/api/state/projects/:id', requireAnyRole('ADMIN','MANAGER'), require
   rememberDeletedProject(d, id);
   d.cases = filterDeletedCases(d.cases || [], d.deletedProjectIds || []);
   d.notifications = (d.notifications || []).filter(n => String(n.caseId || n.projectId || n.targetId || '') !== id);
-  await save(d);
+  await save(d, { actor:actor.name, reason:'task_delete', collections:['cases','notifications','audit','deletedProjectIds'] });
   res.json({ok:true, deleted:before - d.cases.length, deletedProjectIds:d.deletedProjectIds || [], counts:{cases:d.cases.length}});
 });
 
 app.post('/api/presence', requireCapability('presence:self'), async (req, res) => {
   try {
-    const d = db();
     const actor = requestActor(req);
     const body = req.body || {};
     const action = String(body.action || 'heartbeat').toLowerCase();
@@ -3184,7 +3411,7 @@ app.post('/api/presence', requireCapability('presence:self'), async (req, res) =
     const requestedAvailability = ['Available','Busy','Break','Unavailable'].includes(String(body.availability || body.user?.availability || ''))
       ? String(body.availability || body.user?.availability)
       : stateUser.availability;
-    const user = applyPresenceUpdate(d, {
+    const userPatch = {
       ...stateUser,
       id:actor.id,
       username:actor.username,
@@ -3193,9 +3420,40 @@ app.post('/api/presence', requireCapability('presence:self'), async (req, res) =
       status:stateUser.status,
       availability:requestedAvailability,
       breakStartedAt:safeAction === 'break' ? Date.now() : stateUser.breakStartedAt
-    }, safeAction);
-    await save(d);
-    res.json({ ok:true, user, users:sanitizePresenceUsers(d.users || []), attendanceLogs:scopedAttendance(d, req) });
+    };
+
+    if (safeAction === 'heartbeat') {
+      // Heartbeats are high-frequency and must never rewrite the complete
+      // operational database or queue behind task/file writes. Only the small
+      // presence slice is updated in memory, then coalesced into one durable
+      // write every few minutes or included in the next normal business write.
+      const presenceState = {
+        users: structuredClone(memoryState?.users || []),
+        attendanceLogs: structuredClone(memoryState?.attendanceLogs || [])
+      };
+      const user = applyPresenceUpdate(presenceState, userPatch, safeAction);
+      replacePresenceSliceInMemory(presenceState);
+      schedulePresenceFlush();
+      return res.json({
+        ok:true,
+        user,
+        users:sanitizePresenceUsers(presenceState.users || []),
+        attendanceLogs:scopedAttendance({ users:presenceState.users || [], attendanceLogs:presenceState.attendanceLogs || [] }, req),
+        persistence:{ mode:'coalesced', queued:false, flushWithinMs:PRESENCE_HEARTBEAT_FLUSH_MS }
+      });
+    }
+
+    const d = db();
+    const user = applyPresenceUpdate(d, userPatch, safeAction);
+    presenceMutationGeneration += 1;
+    snapshotPresenceGenerations.set(d, presenceMutationGeneration);
+    const persistence = await save(d, {
+      actor:actor.name,
+      reason:`presence_${safeAction}`,
+      skipRevisionSnapshot:true,
+      collections:['users','attendanceLogs']
+    });
+    res.json({ ok:true, user, users:sanitizePresenceUsers(d.users || []), attendanceLogs:scopedAttendance(d, req), persistence });
   } catch (e) {
     res.status(e.statusCode || 500).json({ ok:false, code:e.code || '', error:e.message || 'Presence update failed.' });
   }
@@ -3239,7 +3497,14 @@ app.post('/api/state', async (req,res)=>{
     d.payments = (d.payments || []).filter(Boolean);
     const ignoredFields = ['users','deletedProjectIds','chatMessages','teamChat','notifications','attendanceLogs','payments','audit']
       .filter(field => Object.prototype.hasOwnProperty.call(body, field));
-    const persistence = await save(d);
+    const changedCaseIds=authorizedIncoming
+      .map(item=>findCaseByAnyId(d.cases || [], item.id || item.caseId))
+      .filter(Boolean)
+      .map(item=>String(item.id || item.caseId))
+      .filter(Boolean);
+    const persistence = hasProjects && changedCaseIds.length
+      ? await save(d,{actor:actor.name,reason:'legacy_state_project_update',collections:['cases'],collectionRowIds:{cases:[...new Set(changedCaseIds)]}})
+      : { mode:'no-op', persisted:false, reason:'No project changes were supplied.' };
     const performanceRecords = mergePerformanceRecords(d.performanceRecords || [], buildPerformanceRecordsFromCases(d.cases || []));
     res.json({ok:true, database:USE_POSTGRES ? 'postgresql' : 'json-file', savedAt:now(), ignoredFields, deletedProjectIds:d.deletedProjectIds || [], performanceRecords, counts:{users:d.users.length, cases:d.cases.length, performanceRecords:performanceRecords.length, chatMessages:d.teamChat.length, notifications:d.notifications.length, attendanceLogs:d.attendanceLogs.length}, persistence});
   } catch (e) {
@@ -3249,10 +3514,15 @@ app.post('/api/state', async (req,res)=>{
 
 
 app.post('/api/cases', requireAnyRole('ADMIN','MANAGER'), uploadAny, async (req,res)=>{
+  let preparedUploads=[];
+  let persistenceCommitted=false;
+  let rollbackActor='system';
+  let rollbackCaseId='';
   try {
     const d = db();
     const body = req.body || {};
     const actor = requestActor(req);
+    rollbackActor=actor.name;
     let assignee = (d.users || []).find(user => String(user.id || '') === String(body.assigneeId || ''));
     if (!assignee) assignee = leastBusy(d);
     const manager = sanitizePresenceUsers(d.users).find(user => normalizeRole(user.role) === 'Manager');
@@ -3300,25 +3570,41 @@ app.post('/api/cases', requireAnyRole('ADMIN','MANAGER'), uploadAny, async (req,
     };
     addCaseTimelineEvent(c, { type:'created', by:actor.name, at:createdAt, title:'Case Created', remarks:`${c.caseId} created for ${c.customerName}` });
     if (assignee) addCaseTimelineEvent(c, { type:'assigned', by:actor.name, at:createdAt, title:`Assigned to ${assignee.name}`, remarks:'Initial smart assignment' });
-    await prepareSecureUploads(req, 'SOURCE');
+    preparedUploads=await prepareSecureUploads(req, 'SOURCE');
     for (const file of req.files || []) c.documents.push(addFileRegistryEntry(d, docPayload(file, actor.name, actor.role, 'SOURCE', c.id)));
     if ((req.files || []).length) addCaseTimelineEvent(c, { type:'source_uploaded', by:actor.name, title:`${req.files.length} source file(s) uploaded` });
     d.cases.unshift(c);
-    notifyRole(d,'ADMIN',`New case ${c.caseId} created by ${actor.name}`,'task',c.id);
-    notifyRole(d,'MANAGER',`New case ${c.caseId} created by ${actor.name}`,'task',c.id);
-    if (assignee) notifyUser(d,assignee.name,`New task assigned: ${c.caseId}`,'task',c.id);
-    addAudit(d,actor.name,'Case created',c.caseId);
-    await save(d);
+    rollbackCaseId=c.id;
+    const notifications=[
+      notifyRole(d,'ADMIN',`New case ${c.caseId} created by ${actor.name}`,'task',c.id),
+      notifyRole(d,'MANAGER',`New case ${c.caseId} created by ${actor.name}`,'task',c.id),
+      assignee ? notifyUser(d,assignee.name,`New task assigned: ${c.caseId}`,'task',c.id) : null
+    ].filter(Boolean);
+    const auditEntry=addAudit(d,actor.name,'Case created',c.caseId);
+    await save(d, {
+      actor:actor.name,
+      reason:'case_create',
+      collections:['cases','files','notifications','audit'],
+      collectionRowIds:{
+        cases:[String(c.id)],
+        files:(c.documents || []).map(doc=>String(doc.id)).filter(Boolean),
+        notifications:notifications.map(item=>String(item.id)).filter(Boolean),
+        audit:[String(auditEntry.id)]
+      }
+    });
+    persistenceCommitted=true;
     await Promise.all((c.documents || []).map(doc=>recordFileStorageEvent({fileId:doc.id,caseId:c.id,action:'FILE_UPLOADED',actor:actor.name,storageKey:doc.storageKey,sha256:doc.sha256,details:{purpose:doc.purpose,name:doc.name}})));
     res.status(201).json(c);
   } catch (error) {
+    cleanupRequestTempUploads(req);
+    if (!persistenceCommitted) rollbackPreparedUploads(preparedUploads,{reason:'CASE_CREATE_PERSISTENCE_FAILED',actor:rollbackActor,caseId:rollbackCaseId});
     if (error instanceof FileValidationError) return fileUploadFailure(res, error, 'Case file upload failed.');
     res.status(error.statusCode || 500).json({ ok:false, code:error.code || '', error:error.message || 'Case creation failed.' });
   }
 });
 
 app.post('/api/cases/:id/assign', requireAnyRole('ADMIN','MANAGER'), requireCaseAction('update'), async (req,res)=>{
-  const d = db();
+  const d = requestDb(req);
   const c = req.caseRecord;
   const actor = requestActor(req);
   const assigneeId = textValue(req.body.assigneeId, 'Assignee', 200, { required:true });
@@ -3329,40 +3615,50 @@ app.post('/api/cases/:id/assign', requireAnyRole('ADMIN','MANAGER'), requireCase
   c.ownership={...(c.ownership || {}),assignedTo:user.name,assignedBy:actor.name};
   c.history ||= []; c.history.unshift({at:now(),by:actor.name,action:`Assigned to ${user.name}`});
   addCaseTimelineEvent(c,{type:'assigned',by:actor.name,title:`Assigned to ${user.name}`,remarks:textValue(req.body.remarks || '', 'Remarks', MAX_TIMELINE_TEXT_LENGTH)});
-  notifyUser(d,user.name,`Task assigned to you: ${c.caseId}`,'task',c.id); addAudit(d,actor.name,'Task assigned',c.caseId);
-  await save(d); res.json(c);
+  const notification=notifyUser(d,user.name,`Task assigned to you: ${c.caseId}`,'task',c.id);
+  const auditEntry=addAudit(d,actor.name,'Task assigned',c.caseId);
+  await save(d,{actor:actor.name,reason:'case_assign',collections:['cases','notifications','audit'],collectionRowIds:{cases:[String(c.id)],notifications:[String(notification.id)],audit:[String(auditEntry.id)]}}); res.json(c);
 });
 
 app.post('/api/cases/:id/start', requireCaseAction('start'), async (req,res)=>{
-  const d=db(); const c=req.caseRecord; const actor=requestActor(req);
+  const d=requestDb(req); const c=req.caseRecord; const actor=requestActor(req);
   c.status='IN_PROGRESS'; c.startedAt ||= now(); c.updatedAt=Date.now(); c.syncVersion=Date.now();
   c.history ||= []; c.history.unshift({at:now(),by:actor.name,action:'Work started'});
   addCaseTimelineEvent(c,{type:'started',by:actor.name,title:'Designer Started',remarks:textValue(req.body.remarks || '', 'Remarks', MAX_TIMELINE_TEXT_LENGTH)});
-  await save(d); res.json(c);
+  await save(d,{actor:actor.name,reason:'case_start',collections:['cases'],collectionRowIds:{cases:[String(c.id)]}}); res.json(c);
 });
 
-app.post('/api/cases/:id/upload-source', requireAnyRole('ADMIN','MANAGER'), requireCaseAction('update'), uploadAny, async (req,res)=>{
+app.post('/api/cases/:id/upload-source', requireAnyRole('ADMIN','MANAGER'), preauthorizeCaseAction('update'), uploadAny, requireCaseAction('update'), async (req,res)=>{
+  let preparedUploads=[];
+  let persistenceCommitted=false;
   try {
-    const d=db(); const c=req.caseRecord; const actor=requestActor(req);
-    await prepareSecureUploads(req, 'SOURCE');
+    const d=requestDb(req); const c=req.caseRecord; const actor=requestActor(req);
+    preparedUploads=await prepareSecureUploads(req, 'SOURCE');
     if (!(req.files || []).length) return res.status(400).json({ok:false,code:'FILE_REQUIRED',error:'Select at least one source file.'});
     for(const file of req.files || []) c.documents.push(addFileRegistryEntry(d, docPayload(file,actor.name,actor.role,'SOURCE',c.id)));
     c.history ||= []; c.history.unshift({at:now(),by:actor.name,action:`Uploaded ${req.files?.length || 0} source file(s)`});
     addCaseTimelineEvent(c,{type:'source_uploaded',by:actor.name,title:`${req.files?.length || 0} source file(s) uploaded`});
-    notifyUser(d,c.assigneeName,`New source files added for ${c.caseId}`,'task',c.id); await save(d);
+    const notification=notifyUser(d,c.assigneeName,`New source files added for ${c.caseId}`,'task',c.id);
+    const uploadedDocs=(req.files || []).map(file=>(c.documents || []).find(item=>item.storageKey===file.storageKey)).filter(Boolean);
+    await save(d,{actor:actor.name,reason:'case_source_upload',collections:['cases','files','notifications'],collectionRowIds:{cases:[String(c.id)],files:uploadedDocs.map(doc=>String(doc.id)),notifications:[String(notification.id)]}});
+    persistenceCommitted=true;
     await Promise.all((req.files || []).map(file=>{const doc=(c.documents || []).find(item=>item.storageKey===file.storageKey);return recordFileStorageEvent({fileId:doc?.id,caseId:c.id,action:'FILE_UPLOADED',actor:actor.name,storageKey:file.storageKey,sha256:file.sha256,details:{purpose:'SOURCE',name:file.originalname}});}));
     res.json(c);
   } catch (error) {
+    cleanupRequestTempUploads(req);
+    if (!persistenceCommitted) rollbackPreparedUploads(preparedUploads,{reason:'CASE_SOURCE_UPLOAD_PERSISTENCE_FAILED',actor:requestActor(req).name,caseId:req.caseRecord?.id || ''});
     if (error instanceof FileValidationError) return fileUploadFailure(res,error,'Source file upload failed.');
     res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'Source file upload failed.'});
   }
 });
 
-app.post('/api/cases/:id/upload-final', requireCaseAction('upload-final'), uploadAny, async (req,res)=>{
+app.post('/api/cases/:id/upload-final', preauthorizeCaseAction('upload-final'), uploadAny, requireCaseAction('upload-final'), async (req,res)=>{
+  let preparedUploads=[];
+  let persistenceCommitted=false;
   try {
-    const d=db(); const c=req.caseRecord; const actor=requestActor(req);
+    const d=requestDb(req); const c=req.caseRecord; const actor=requestActor(req);
     const isRevision=String(req.body.isRevision || 'false') === 'true' || c.status === 'REOPENED_FOR_REVISION';
-    await prepareSecureUploads(req, isRevision ? 'REVISION_FINAL' : 'FINAL');
+    preparedUploads=await prepareSecureUploads(req, isRevision ? 'REVISION_FINAL' : 'FINAL');
     if (!(req.files || []).length) return res.status(400).json({ok:false,code:'FILE_REQUIRED',error:'Select at least one completed file.'});
     for(const file of req.files || []) {
       const doc=addFileRegistryEntry(d, docPayload(file,actor.name,actor.role,isRevision?'REVISION_FINAL':'FINAL',c.id));
@@ -3372,35 +3668,48 @@ app.post('/api/cases/:id/upload-final', requireCaseAction('upload-final'), uploa
     c.history ||= []; c.history.unshift({at:now(),by:actor.name,action:isRevision?'Revised file uploaded':'Completed file uploaded for manager review'});
     addCaseTimelineEvent(c,{type:isRevision?'revision_uploaded':'completion_uploaded',by:actor.name,title:isRevision?'Revision Completion Uploaded':'Completion Uploaded',remarks:`${req.files?.length || 0} file(s) uploaded`});
     addCaseTimelineEvent(c,{type:'internal_review',by:'System',title:'Internal Review Pending',remarks:'Completion is awaiting manager review'});
-    notifyRole(d,'MANAGER',`${isRevision?'Revised':'Completed'} file uploaded: ${c.caseId}`,'completed',c.id);
-    notifyRole(d,'ADMIN',`${isRevision?'Revised':'Completed'} file uploaded: ${c.caseId}`,'completed',c.id);
-    addAudit(d,actor.name,'Final upload',c.caseId); await save(d);
+    const notifications=[
+      notifyRole(d,'MANAGER',`${isRevision?'Revised':'Completed'} file uploaded: ${c.caseId}`,'completed',c.id),
+      notifyRole(d,'ADMIN',`${isRevision?'Revised':'Completed'} file uploaded: ${c.caseId}`,'completed',c.id)
+    ];
+    const auditEntry=addAudit(d,actor.name,'Final upload',c.caseId);
+    const uploadedDocs=(req.files || []).map(file=>(c.documents || []).find(item=>item.storageKey===file.storageKey)).filter(Boolean);
+    await save(d,{actor:actor.name,reason:isRevision?'case_revision_final_upload':'case_final_upload',collections:['cases','files','notifications','audit'],collectionRowIds:{cases:[String(c.id)],files:uploadedDocs.map(doc=>String(doc.id)),notifications:notifications.map(item=>String(item.id)),audit:[String(auditEntry.id)]}});
+    persistenceCommitted=true;
     await Promise.all((req.files || []).map(file=>{const doc=(c.documents || []).find(item=>item.storageKey===file.storageKey);return recordFileStorageEvent({fileId:doc?.id,caseId:c.id,action:'FILE_UPLOADED',actor:actor.name,storageKey:file.storageKey,sha256:file.sha256,details:{purpose:isRevision?'REVISION_FINAL':'FINAL',name:file.originalname}});}));
     res.json(c);
   } catch (error) {
+    cleanupRequestTempUploads(req);
+    if (!persistenceCommitted) rollbackPreparedUploads(preparedUploads,{reason:'CASE_FINAL_UPLOAD_PERSISTENCE_FAILED',actor:requestActor(req).name,caseId:req.caseRecord?.id || ''});
     if (error instanceof FileValidationError) return fileUploadFailure(res,error,'Completed file upload failed.');
     res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'Completed file upload failed.'});
   }
 });
 
 app.post('/api/cases/:id/manager-complete', requireAnyRole('ADMIN','MANAGER'), requireCaseAction('review'), async (req,res)=>{
-  const d=db(); const c=req.caseRecord; const actor=requestActor(req);
+  const d=requestDb(req); const c=req.caseRecord; const actor=requestActor(req);
   c.status='COMPLETED'; c.completedAt=now(); c.updatedAt=Date.now(); c.syncVersion=Date.now();
   c.history ||= []; c.history.unshift({at:now(),by:actor.name,action:'Reviewed by manager and marked complete'});
   addCaseTimelineEvent(c,{type:'approved',by:actor.name,title:'Approved',remarks:'Reviewed by manager and marked complete'});
-  notifyRole(d,'ADMIN',`Case completed after manager review: ${c.caseId}`,'completed',c.id);
-  notifyUser(d,c.assigneeName,`Case marked complete: ${c.caseId}`,'completed',c.id);
-  addAudit(d,actor.name,'Case completed',c.caseId); await save(d); res.json(c);
+  const notifications=[
+    notifyRole(d,'ADMIN',`Case completed after manager review: ${c.caseId}`,'completed',c.id),
+    notifyUser(d,c.assigneeName,`Case marked complete: ${c.caseId}`,'completed',c.id)
+  ];
+  const auditEntry=addAudit(d,actor.name,'Case completed',c.caseId);
+  await save(d,{actor:actor.name,reason:'case_manager_complete',collections:['cases','notifications','audit'],collectionRowIds:{cases:[String(c.id)],notifications:notifications.map(item=>String(item.id)),audit:[String(auditEntry.id)]}}); res.json(c);
 });
 
 app.post('/api/cases/:id/revision', requireAnyRole('ADMIN','MANAGER'), requireCaseAction('revision'), async (req,res)=>{
-  const d=db(); const c=req.caseRecord; const actor=requestActor(req);
+  const d=requestDb(req); const c=req.caseRecord; const actor=requestActor(req);
   c.status='REOPENED_FOR_REVISION'; c.priority='Urgent'; c.updatedAt=Date.now(); c.syncVersion=Date.now();
   const rev={id:nanoid(8),note:textValue(req.body.note || 'Banker revision requested','Revision note',MAX_TIMELINE_TEXT_LENGTH,{required:true}),by:actor.name,createdAt:now()};
   c.revisions ||= []; c.revisions.unshift(rev); c.history ||= []; c.history.unshift({at:now(),by:actor.name,action:'Revision opened as urgent'});
   addCaseTimelineEvent(c,{type:'revision_created',by:actor.name,at:rev.createdAt,title:'Revision Created',remarks:rev.note});
-  notifyUser(d,c.assigneeName,`URGENT revision task: ${c.caseId} - ${rev.note}`,'task',c.id);
-  notifyRole(d,'MANAGER',`URGENT revision opened: ${c.caseId}`,'task',c.id); await save(d); res.json(c);
+  const notifications=[
+    notifyUser(d,c.assigneeName,`URGENT revision task: ${c.caseId} - ${rev.note}`,'task',c.id),
+    notifyRole(d,'MANAGER',`URGENT revision opened: ${c.caseId}`,'task',c.id)
+  ];
+  await save(d,{actor:actor.name,reason:'case_revision_open',collections:['cases','notifications'],collectionRowIds:{cases:[String(c.id)],notifications:notifications.map(item=>String(item.id))}}); res.json(c);
 });
 
 app.get('/api/cases/:id/timeline', requireCaseAction('read'), async (req,res)=>{
@@ -3409,7 +3718,7 @@ app.get('/api/cases/:id/timeline', requireCaseAction('read'), async (req,res)=>{
 });
 
 app.post('/api/cases/:id/timeline', requireCaseAction('timeline'), async (req,res)=>{
-  const d=db(); const c=req.caseRecord; const actor=requestActor(req);
+  const d=requestDb(req); const c=req.caseRecord; const actor=requestActor(req);
   const event=addCaseTimelineEvent(c,{
     type:textValue(req.body.type || 'manual','Event type',100),
     by:actor.name,
@@ -3417,7 +3726,8 @@ app.post('/api/cases/:id/timeline', requireCaseAction('timeline'), async (req,re
     remarks:textValue(req.body.remarks || req.body.note || '','Timeline remarks',MAX_TIMELINE_TEXT_LENGTH),
     meta:req.body.meta && typeof req.body.meta === 'object' ? req.body.meta : {}
   });
-  addAudit(d,actor.name,'Timeline event added',c.caseId); await save(d);
+  const auditEntry=addAudit(d,actor.name,'Timeline event added',c.caseId);
+  await save(d,{actor:actor.name,reason:'case_timeline_add',collections:['cases','audit'],collectionRowIds:{cases:[String(c.id)],audit:[String(auditEntry.id)]}});
   res.json({ok:true,event,timeline:c.timeline,case:c});
 });
 
@@ -3435,7 +3745,18 @@ app.post('/api/state/projects/:id/payment-status', async (req, res) => {
     updated.updatedAt = Date.now();
     updated.syncVersion = Date.now();
     const nextSnapshot = buildFinanceSnapshot(updated);
+    const auditEntry=d.audit?.[0];
+    const paymentIds=(d.payments || [])
+      .filter(item=>String(item.caseId || '')===String(updated.id || updated.caseId || req.params.id))
+      .map(item=>String(item.id || '')).filter(Boolean);
+    const collections=['cases','audit'];
+    const collectionRowIds={cases:[String(updated.id || updated.caseId)],audit:auditEntry?.id ? [String(auditEntry.id)] : []};
+    if (paymentIds.length) { collections.push('payments'); collectionRowIds.payments=paymentIds; }
     const persistence = await save(d, {
+      actor:actor.name,
+      reason:'finance_payment_status_update',
+      collections,
+      collectionRowIds,
       financeEvent: {
         caseId: String(updated.id || updated.caseId || req.params.id),
         caseNo: updated.caseId || updated.id || '',
@@ -3471,9 +3792,15 @@ app.post('/api/cases/:id/payment', async (req,res)=>{
     c.paymentAuditTrail.unshift({id:nanoid(8),at:nowIso,by:p.createdBy,action:'Payment ledger updated',newStatus:c.paymentTrackingStatus,newAmount:p.paymentAmountIn,refundAmount:p.refundAmount,note:p.note});
     c.history ||= [];
     c.history.unshift({at:nowIso,by:p.createdBy,action:`Payment ledger updated: ${received}`});
-    addAudit(d,p.createdBy,'Payment ledger updated',c.caseId);
+    const auditEntry=addAudit(d,p.createdBy,'Payment ledger updated',c.caseId);
     const nextSnapshot = buildFinanceSnapshot(c);
-    const persistence = await save(d, {financeEvent:{caseId:String(c.id || c.caseId),caseNo:c.caseId || c.id || '',action:`Payment ledger updated: ${received}`,actor:p.createdBy,previousSnapshot,nextSnapshot}});
+    const persistence = await save(d, {
+      actor:p.createdBy,
+      reason:'finance_payment_ledger_update',
+      collections:['cases','payments','audit'],
+      collectionRowIds:{cases:[String(c.id || c.caseId)],payments:[String(p.id)],audit:[String(auditEntry.id)]},
+      financeEvent:{caseId:String(c.id || c.caseId),caseNo:c.caseId || c.id || '',action:`Payment ledger updated: ${received}`,actor:p.createdBy,previousSnapshot,nextSnapshot}
+    });
     res.json({ok:true,payment:p,project:c,case:c,financeVersion:c.financeVersion,persistence});
   } catch (e) {
     res.status(e.statusCode || 500).json({ok:false,code:e.code || '',error:e.message || 'Payment ledger update failed'});
@@ -3528,15 +3855,19 @@ app.get('/api/finance/health', async (req, res) => {
 
 
 app.post('/api/profile/photo', uploadSingle('photo'), async (req, res) => {
+  let preparedUploads=[];
+  let persistenceCommitted=false;
+  let rollbackActor='system';
   try {
     if (!req.file) return res.status(400).json({ ok:false, code:'FILE_REQUIRED', error:'No photo uploaded.' });
-    if (Number(req.file.size || 0) > 5 * 1024 * 1024) return res.status(413).json({ok:false,code:'PROFILE_PHOTO_TOO_LARGE',error:'Profile photos must be no larger than 5 MB.'});
-    req.files=[req.file];
-    await prepareSecureUploads(req,'PROFILE',{imagesOnly:true});
+    if (Number(req.file.size || 0) > 5 * 1024 * 1024) { cleanupRequestTempUploads(req); return res.status(413).json({ok:false,code:'PROFILE_PHOTO_TOO_LARGE',error:'Profile photos must be no larger than 5 MB.'}); }
     const d = db();
     const actor = requestActor(req);
-    const user = findStateUserByIdOrUsername(actor.id, actor.username);
-    if (!user) return res.status(404).json({ ok:false, error:'Signed-in user record was not found.' });
+    rollbackActor=actor.name;
+    const user = findStateUserByIdOrUsername(actor.id, actor.username, d);
+    if (!user) { cleanupRequestTempUploads(req); return res.status(404).json({ ok:false, error:'Signed-in user record was not found.' }); }
+    req.files=[req.file];
+    preparedUploads=await prepareSecureUploads(req,'PROFILE',{imagesOnly:true});
     const previousKey = user.profilePhotoStorageKey || user.profilePhotoFile || '';
     const profilePhoto = `/api/profile/photo/${encodeURIComponent(user.id || user.username)}`;
     user.profilePhoto = profilePhoto;
@@ -3547,40 +3878,60 @@ app.post('/api/profile/photo', uploadSingle('photo'), async (req, res) => {
     user.profilePhotoOriginalName = req.file.originalname;
     user.profileUpdatedAt = Date.now();
     user.profilePhotoUpdatedAt = Date.now();
-    await save(d);
+    await save(d, { actor:actor.name, reason:'profile_photo_update', collections:['users'], collectionRowIds:{users:[String(user.id)]} });
+    persistenceCommitted=true;
     if (previousKey && previousKey !== req.file.storageKey) {
-      const stillUsed=(d.users || []).some(item=>String(item.id)!==String(user.id) && [item.profilePhotoStorageKey,item.profilePhotoFile].includes(previousKey));
-      if (!stillUsed && String(previousKey).startsWith('objects/')) fileStorage.softDelete(previousKey,{reason:'PROFILE_PHOTO_REPLACED',userId:user.id,actor:actor.name});
+      // Content-addressed objects can be shared by profile photos and task
+      // attachments. Immediate physical deletion has a race with another
+      // upload that has validated the same hash but has not committed its row
+      // yet. Keep the private object for a later grace-period garbage-collection
+      // pass; the old profile URL is already unreachable after the row commit.
+      await recordFileStorageEvent({
+        action:'PROFILE_PHOTO_REPLACED',
+        actor:actor.name,
+        storageKey:previousKey,
+        details:{ userId:user.id, physicalAction:'retained-for-safe-gc' }
+      });
     }
     res.json({ ok:true, profilePhoto, url:profilePhoto, storedName:path.basename(req.file.storageKey), storageKey:req.file.storageKey, sha256:req.file.sha256, updated:true });
   } catch (error) {
+    cleanupRequestTempUploads(req);
+    if (!persistenceCommitted) rollbackPreparedUploads(preparedUploads,{reason:'PROFILE_PHOTO_PERSISTENCE_FAILED',actor:rollbackActor});
     if (error instanceof FileValidationError) return fileUploadFailure(res,error,'Profile photo upload failed.');
     res.status(error.statusCode || 500).json({ ok:false, code:error.code || '', error:error.message || 'Profile photo upload failed' });
   }
 });
 
 app.post('/api/files/upload', uploadAny, async (req, res) => {
+  let preparedUploads=[];
+  let persistenceCommitted=false;
+  let rollbackActor='system';
+  let rollbackCaseId='';
   try {
     const incomingFiles = req.files || [];
     if (!incomingFiles.length) return res.status(400).json({ ok:false, code:'FILE_REQUIRED', error:'No file uploaded.' });
-    if (incomingFiles.length !== 1) return res.status(400).json({ok:false,code:'SINGLE_FILE_REQUIRED',error:'This endpoint accepts one file at a time.'});
+    if (incomingFiles.length !== 1) { cleanupRequestTempUploads(req); return res.status(400).json({ok:false,code:'SINGLE_FILE_REQUIRED',error:'This endpoint accepts one file at a time.'}); }
     const d = db();
     const actor = requestActor(req);
+    rollbackActor=actor.name;
     const type = String(req.body.type || 'source').toLowerCase();
     const allowedTypes = new Set(['source','working','completed','chat']);
-    if (!allowedTypes.has(type)) return res.status(400).json({ok:false,code:'FILE_PURPOSE_INVALID',error:'Invalid file purpose.'});
+    if (!allowedTypes.has(type)) { cleanupRequestTempUploads(req); return res.status(400).json({ok:false,code:'FILE_PURPOSE_INVALID',error:'Invalid file purpose.'}); }
     const projectId = textValue(req.body.projectId || req.body.caseId || '', 'Project id', 200);
+    rollbackCaseId=projectId;
     const caseRecord = projectId ? findCaseByAnyId(d.cases || [], projectId) : null;
-    if (projectId && !caseRecord) return res.status(404).json({ ok:false, code:'CASE_NOT_FOUND', error:'The target task was not found.' });
+    if (projectId && !caseRecord) { cleanupRequestTempUploads(req); return res.status(404).json({ ok:false, code:'CASE_NOT_FOUND', error:'The target task was not found.' }); }
     if (type === 'source') {
-      if (!['ADMIN','MANAGER'].includes(actor.role)) return authorizationDenied(req, res, 'SOURCE_UPLOAD_FORBIDDEN', 'Only Admins and Managers can upload source files.');
+      if (!['ADMIN','MANAGER'].includes(actor.role)) { cleanupRequestTempUploads(req); return authorizationDenied(req, res, 'SOURCE_UPLOAD_FORBIDDEN', 'Only Admins and Managers can upload source files.'); }
     } else if (projectId && !canMutateCase(req.auth?.user || {}, caseRecord, type === 'completed' ? 'upload-final' : 'upload-working')) {
+      cleanupRequestTempUploads(req);
       return authorizationDenied(req, res, 'FILE_UPLOAD_FORBIDDEN', 'You cannot upload files to this task.');
     } else if (!projectId && type !== 'chat' && !['ADMIN','MANAGER'].includes(actor.role)) {
+      cleanupRequestTempUploads(req);
       return authorizationDenied(req, res, 'UNSCOPED_UPLOAD_FORBIDDEN', 'A task reference is required for this upload.');
     }
     const purpose = type === 'completed' ? 'FINAL' : (type === 'working' ? 'WORKING' : (type === 'chat' ? 'CHAT' : 'SOURCE'));
-    await prepareSecureUploads(req,purpose);
+    preparedUploads=await prepareSecureUploads(req,purpose);
     const file = docPayload(req.file, actor.name, actor.role, purpose, projectId);
     file.type = type;
     file.folder = type;
@@ -3590,10 +3941,19 @@ app.post('/api/files/upload', uploadAny, async (req, res) => {
         .map(value=>String(value || '').trim().toLowerCase()).filter(Boolean);
     }
     addFileRegistryEntry(d, file);
-    await save(d);
+    await save(d, {
+      actor:actor.name,
+      reason:'file_upload',
+      skipRevisionSnapshot:true,
+      collections:['files'],
+      collectionRowIds:{ files:[String(file.id)] }
+    });
+    persistenceCommitted=true;
     await recordFileStorageEvent({fileId:file.id,caseId:projectId,action:'FILE_UPLOADED',actor:actor.name,storageKey:file.storageKey,sha256:file.sha256,details:{purpose,name:file.name}});
     res.status(201).json({ ok:true, file });
   } catch (error) {
+    cleanupRequestTempUploads(req);
+    if (!persistenceCommitted) rollbackPreparedUploads(preparedUploads,{reason:'FILE_REGISTRY_PERSISTENCE_FAILED',actor:rollbackActor,caseId:rollbackCaseId});
     if (error instanceof FileValidationError) return fileUploadFailure(res,error,'File upload failed.');
     res.status(error.statusCode || 500).json({ ok:false, code:error.code || '', error:error.message || 'File upload failed.' });
   }
@@ -3742,6 +4102,8 @@ app.delete('/api/files/:id',async (req,res)=>{
     const targetKey=String(target.storageKey || target.storedName || target.stored_name || '');
     const matches = doc => String(doc?.id || '') === targetId;
     let removed=false;
+    const changedCaseIds=[];
+    const changedMessageIds=[];
 
     for (const c of d.cases || []) {
       const fields=['documents','completedFiles','sourceFiles','workFiles','files'];
@@ -3752,6 +4114,7 @@ app.delete('/api/files/:id',async (req,res)=>{
         if (after.length!==before.length) { c[field]=after; changed=true; removed=true; }
       }
       if (changed) {
+        if (c.id || c.caseId) changedCaseIds.push(String(c.id || c.caseId));
         c.history ||= [];
         c.history.unshift({ at: now(), by: actor.name, action: `File deleted: ${target.name || targetId}` });
         addCaseTimelineEvent(c,{type:'file_deleted',by:actor.name,title:'File deleted',remarks:target.name || targetId});
@@ -3759,12 +4122,14 @@ app.delete('/api/files/:id',async (req,res)=>{
     }
 
     for (const message of d.teamChat || []) {
+      let messageChanged=false;
       for (const field of ['files','attachments']) {
         const before=Array.isArray(message[field]) ? message[field] : [];
         const after=before.filter(doc=>!matches(doc));
-        if (after.length!==before.length) { message[field]=after; removed=true; }
+        if (after.length!==before.length) { message[field]=after; removed=true; messageChanged=true; }
       }
-      if (message.file && matches(message.file)) { delete message.file; removed=true; }
+      if (message.file && matches(message.file)) { delete message.file; removed=true; messageChanged=true; }
+      if (messageChanged && message.id) changedMessageIds.push(String(message.id));
     }
 
     d.files ||= [];
@@ -3783,16 +4148,26 @@ app.delete('/api/files/:id',async (req,res)=>{
     const activeSameObject=targetKey && d.files.some(doc=>String(doc?.id || '')!==targetId
       && String(doc?.storageStatus || '').toUpperCase()!=='DELETED'
       && String(doc?.storageKey || doc?.storedName || '')===targetKey);
-    let physicalAction='retained';
-    if (targetKey && !activeSameObject && String(targetKey).startsWith('objects/')) {
-      const trashed=fileStorage.softDelete(targetKey,{fileId:targetId,originalName:target.name || '',actor:actor.name,reason:registry.deleteReason});
-      if (trashed) physicalAction='moved-to-trash';
+    const auditEntry=addAudit(d,actor.name,'File deleted',`${targetId}:${target.name || ''}`);
+    if (removed) {
+      const collections=['files','audit'];
+      const collectionRowIds={files:[targetId],audit:[String(auditEntry.id)]};
+      if (changedCaseIds.length) { collections.push('cases'); collectionRowIds.cases=[...new Set(changedCaseIds)]; }
+      if (changedMessageIds.length) { collections.push('teamChat'); collectionRowIds.teamChat=[...new Set(changedMessageIds)]; }
+      await save(d,{actor:actor.name,reason:'file_delete',collections,collectionRowIds});
     }
 
-    addAudit(d,actor.name,'File deleted',`${targetId}:${target.name || ''}`);
-    if (removed) await save(d);
+    // Commit the logical deletion first. Content-addressed objects are kept
+    // private for a later grace-period garbage-collection pass. Moving an
+    // object immediately is unsafe: another concurrent upload may have already
+    // deduplicated to the same hash but not yet committed its database row.
+    // Logical deletion removes every authorised route to this file immediately.
+    const physicalAction = targetKey
+      ? (activeSameObject ? 'retained-shared-object' : 'retained-for-safe-gc')
+      : 'no-storage-object';
+    const physicalError='';
     await recordFileStorageEvent({fileId:targetId,caseId:target.caseId || '',action:'FILE_DELETED',actor:actor.name,storageKey:targetKey,sha256:target.sha256 || '',details:{physicalAction,reason:registry.deleteReason}});
-    res.json({ ok:true, removed, fileId:targetId, storageStatus:'DELETED', physicalAction });
+    res.json({ ok:true, removed, fileId:targetId, storageStatus:'DELETED', physicalAction, physicalError:physicalError || undefined });
   } catch(error) {
     res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'File deletion failed.'});
   }
@@ -3820,6 +4195,9 @@ app.get('/api/system/files/reconciliation', requireAdminSession, async (_req,res
 });
 
 app.post('/api/system/files/reconciliation', requireAdminSession, async (req,res)=>{
+  let importedObjects=[];
+  let persistenceCommitted=false;
+  let rollbackActor='system';
   try {
     if (String(req.body?.confirm || '')!=='RECONCILE FILE STORAGE') {
       return res.status(400).json({ok:false,code:'CONFIRMATION_REQUIRED',error:'Type RECONCILE FILE STORAGE to run the safe reconciliation.'});
@@ -3829,6 +4207,7 @@ app.post('/api/system/files/reconciliation', requireAdminSession, async (req,res
     const before=buildFileReconciliationReport(d,fileStorage,{docs:d.files});
     let imported=0, markedMissing=0, refreshed=0;
     const actor=requestActor(req);
+    rollbackActor=actor.name;
     for (const registry of d.files) {
       if (!registry?.id || String(registry.storageStatus || '').toUpperCase()==='DELETED') continue;
       const resolved=fileStorage.resolve(registry);
@@ -3836,6 +4215,7 @@ app.post('/api/system/files/reconciliation', requireAdminSession, async (req,res
         try {
           const secured=await fileStorage.importLegacyFile(registry);
           if (secured) {
+            importedObjects.push(secured);
             const patch={
               storageKey:secured.storageKey,storedName:secured.storageKey,sha256:secured.sha256,
               size:secured.size,mime:secured.detectedMime,mimeType:secured.detectedMime,
@@ -3862,8 +4242,9 @@ app.post('/api/system/files/reconciliation', requireAdminSession, async (req,res
         markedMissing++;
       }
     }
-    addAudit(d,actor.name,'File storage reconciliation',`imported=${imported};missing=${markedMissing};refreshed=${refreshed}`);
-    await save(d);
+    const auditEntry=addAudit(d,actor.name,'File storage reconciliation',`imported=${imported};missing=${markedMissing};refreshed=${refreshed}`);
+    await save(d,{actor:actor.name,reason:'file_reconciliation',collections:['files','cases','teamChat','audit'],collectionRowIds:{audit:[String(auditEntry.id)]}});
+    persistenceCommitted=true;
     const after=buildFileReconciliationReport(d,fileStorage,{docs:d.files});
     if (USE_POSTGRES) {
       try {
@@ -3873,12 +4254,13 @@ app.post('/api/system/files/reconciliation', requireAdminSession, async (req,res
     await recordFileStorageEvent({action:'FILE_RECONCILIATION',actor:actor.name,details:{imported,markedMissing,refreshed,before:before.counts,after:after.counts}});
     res.json({ok:true,imported,markedMissing,refreshed,before:before.counts,after:after.counts,report:after});
   } catch(error) {
+    if (!persistenceCommitted) rollbackPreparedUploads(importedObjects,{reason:'FILE_RECONCILIATION_PERSISTENCE_FAILED',actor:rollbackActor});
     res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'File reconciliation failed.'});
   }
 });
 
 app.get('/api/cases/:id/share-whatsapp', requireAnyRole('ADMIN','MANAGER'), requireCaseAction('read'), async (req,res)=>{
-  const d=db();
+  const d=requestDb(req);
   const c=req.caseRecord;
   const finalDocs=[...(c.completedFiles || []), ...(c.documents||[])]
     .filter(doc => ['FINAL','REVISION_FINAL'].includes(String(doc.purpose || '').toUpperCase()) || ['completed file','revised file','completed'].includes(String(doc.type || '').toLowerCase()));
@@ -3979,6 +4361,7 @@ app.post('/api/chat', async (req,res)=>{
       files.push(structuredClone(resolved));
     }
     const createdAt=now();
+    const notificationIdsBefore=new Set((d.notifications || []).map(item=>String(item.id || '')));
     const msg={
       id:nanoid(10),
       by:actor.name,
@@ -4009,7 +4392,13 @@ app.post('/api/chat', async (req,res)=>{
       notifyRole(d,'MANAGER',`${actor.name} mentioned task ${taskRefs[0].id || taskRefs[0].caseId} in team chat`,'task','chat');
       notifyRole(d,'DESIGNER',`${actor.name} mentioned task ${taskRefs[0].id || taskRefs[0].caseId} in team chat`,'task','chat');
     } else ['ADMIN','MANAGER','DESIGNER'].forEach(role=>notifyRole(d,role,'New normal chat message','normal','chat'));
-    await save(d); res.status(201).json(msg);
+    const notificationIds=(d.notifications || []).filter(item=>!notificationIdsBefore.has(String(item.id || ''))).map(item=>String(item.id)).filter(Boolean);
+    const collections=['teamChat'];
+    const collectionRowIds={teamChat:[String(msg.id)]};
+    const fileIds=files.map(item=>String(item.id || '')).filter(Boolean);
+    if (fileIds.length) { collections.push('files'); collectionRowIds.files=fileIds; }
+    if (notificationIds.length) { collections.push('notifications'); collectionRowIds.notifications=notificationIds; }
+    await save(d,{actor:actor.name,reason:'chat_message_create',collections,collectionRowIds}); res.status(201).json(msg);
   } catch (error) {
     res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'Chat message could not be sent.'});
   }
@@ -4047,7 +4436,7 @@ app.patch('/api/chat/:id', async (req,res)=>{
       message.readBy=mergeAppendOnly(message.readBy || [], [{name:actor.name,userId:actor.id,time:now()}]);
     }
     message.updatedAt=now();
-    await save(d); res.json({ok:true,message});
+    await save(d,{actor:actor.name,reason:'chat_message_update',collections:['teamChat'],collectionRowIds:{teamChat:[String(message.id)]}}); res.json({ok:true,message});
   } catch(error) {
     res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'Message update failed.'});
   }
@@ -4063,7 +4452,7 @@ app.delete('/api/chat/:id', async (req,res)=>{
   if (!isAuthor && !['ADMIN','MANAGER'].includes(actor.role)) return authorizationDenied(req,res,'CHAT_DELETE_FORBIDDEN','Only the sender, Admin, or Manager can delete this message.');
   message.deleted=true; message.text='This message was deleted.'; message.deletedBy=actor.name; message.deletedAt=now();
   message.fileUrl=''; message.fileName=''; message.fileType=''; message.roomUrl=''; message.updatedAt=now();
-  await save(d); res.json({ok:true,message});
+  await save(d,{actor:actor.name,reason:'chat_message_delete',collections:['teamChat'],collectionRowIds:{teamChat:[String(message.id)]}}); res.json({ok:true,message});
 });
 
 app.post('/api/chat/read', async (req,res)=>{
@@ -4087,12 +4476,18 @@ app.post('/api/chat/read', async (req,res)=>{
     message.readBy=mergeAppendOnly(message.readBy || [],[{name:actor.name,userId:actor.id,time:now()}]);
   }
   d.chatReads[key]=[...new Set([...(d.chatReads[key] || []),...readable])];
+  const changedNotificationIds=[];
   (d.notifications || []).forEach(notification=>{
     if(notification.target==='chat' && notificationBelongsToUser(notification, req.auth?.user || {})) {
       notification.status='READ'; notification.readAt=now(); notification.readBy=actor.name;
+      if (notification.id) changedNotificationIds.push(String(notification.id));
     }
   });
-  await save(d); res.json({ok:true,readBy:actor.name,count:readable.length});
+  const collections=['chatReads'];
+  const collectionRowIds={};
+  if (readable.length) { collections.push('teamChat'); collectionRowIds.teamChat=[...new Set(readable.map(String))]; }
+  if (changedNotificationIds.length) { collections.push('notifications'); collectionRowIds.notifications=[...new Set(changedNotificationIds)]; }
+  await save(d,{actor:actor.name,reason:'chat_mark_read',collections,collectionRowIds}); res.json({ok:true,readBy:actor.name,count:readable.length});
 });
 
 app.post('/api/notifications', async (req,res)=>{
@@ -4114,8 +4509,8 @@ app.post('/api/notifications', async (req,res)=>{
     const to=targetUser || targetRole;
     const notification={id:nanoid(8),to,targetRole:targetRole || '',targetUser:targetUser || '',title,text:title,type,category,priority,target:textValue(req.body.target || '', 'Notification target', 200),caseId:textValue(req.body.caseId || req.body.projectId || '', 'Notification task', 200),status:'UNREAD',createdAt:now(),createdBy:actor.name,createdById:actor.id};
     d.notifications.unshift(notification);
-    addAudit(d, actor.name, 'Notification created', notification.id);
-    await save(d);
+    const auditEntry=addAudit(d, actor.name, 'Notification created', notification.id);
+    await save(d,{actor:actor.name,reason:'notification_create',collections:['notifications','audit'],collectionRowIds:{notifications:[String(notification.id)],audit:[String(auditEntry.id)]}});
     res.status(201).json({ok:true,notification});
   } catch(error) {
     res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'Notification could not be created.'});
@@ -4128,25 +4523,33 @@ app.post('/api/notifications/:id/read', async (req,res)=>{
   if (!notification) return res.status(404).json({ok:false,code:'NOTIFICATION_NOT_FOUND',error:'Notification not found.'});
   if (!notificationBelongsToUser(notification, req.auth?.user || {})) return authorizationDenied(req,res,'NOTIFICATION_ACCESS_DENIED','You cannot update this notification.');
   notification.status='READ'; notification.readAt=now(); notification.readBy=requestActor(req).name;
-  await save(d); res.json({ok:true});
+  await save(d,{actor:requestActor(req).name,reason:'notification_mark_read',collections:['notifications'],collectionRowIds:{notifications:[String(notification.id)]}}); res.json({ok:true});
 });
 
 app.post('/api/notifications/read-all', async (req,res)=>{
-  const d=db(); const actor=requestActor(req); let count=0;
+  const d=db(); const actor=requestActor(req); let count=0; const changedIds=[];
   for (const notification of d.notifications || []) {
     if (!notificationBelongsToUser(notification, req.auth?.user || {})) continue;
     if (notification.status !== 'READ') count += 1;
     notification.status='READ'; notification.readAt=now(); notification.readBy=actor.name;
+    if (notification.id) changedIds.push(String(notification.id));
   }
-  await save(d); res.json({ok:true,count});
+  const persistence=changedIds.length
+    ? await save(d,{actor:actor.name,reason:'notifications_mark_all_read',collections:['notifications'],collectionRowIds:{notifications:[...new Set(changedIds)]}})
+    : {mode:'no-op',persisted:false};
+  res.json({ok:true,count,persistence});
 });
 
 app.post('/whatsapp/mock/incoming', authenticationGate, apiWriteRateLimiter, requireAdminSession, uploadAny, async (req,res)=>{
+  let preparedUploads=[];
+  let persistenceCommitted=false;
+  let rollbackCaseId='';
   try {
     if (IS_PRODUCTION) {
-      if (!WHATSAPP_WEBHOOK_SECRET) return res.status(503).json({ok:false,code:'WEBHOOK_DISABLED',error:'The mock WhatsApp webhook is disabled in production.'});
+      if (!WHATSAPP_WEBHOOK_SECRET) { cleanupRequestTempUploads(req); return res.status(503).json({ok:false,code:'WEBHOOK_DISABLED',error:'The mock WhatsApp webhook is disabled in production.'}); }
       const supplied=String(req.get('x-webhook-secret') || '');
       if (!supplied || supplied.length !== WHATSAPP_WEBHOOK_SECRET.length || !crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(WHATSAPP_WEBHOOK_SECRET))) {
+        cleanupRequestTempUploads(req);
         return authorizationDenied(req,res,'WEBHOOK_SECRET_INVALID','Webhook secret is invalid.');
       }
     }
@@ -4155,12 +4558,22 @@ app.post('/whatsapp/mock/incoming', authenticationGate, apiWriteRateLimiter, req
     const assignee=leastBusy(d);
     const fromName=textValue(req.body.fromName || req.body.from || 'WhatsApp Banker','Sender name',200);
     const caseInternalId=nanoid(8);
-    await prepareSecureUploads(req,'SOURCE');
+    rollbackCaseId=caseInternalId;
+    preparedUploads=await prepareSecureUploads(req,'SOURCE');
     const c={id:caseInternalId,caseId:nextCaseNo(d,parsed.city),source:'WhatsApp',createdByRole:'BANKER',creatorName:fromName,createdBy:fromName,customerName:parsed.customerName,customerPhone:'',bankerName:fromName,bank:textValue(req.body.bank || '','Bank',200),branch:textValue(req.body.branch || '','Branch',200),serviceType:parsed.serviceType,city:parsed.city,propertyAddress:parsed.propertyAddress,estimateAmount:Number(parsed.estimateAmount || 0),priority:'Normal',status:'ASSIGNED',assigneeId:assignee?.id,assigneeName:assignee?.name,assigneeRole:assignee?.role,assignedTo:assignee?.name || 'Unassigned',createdAt:now(),completedAt:null,paymentStatus:'PENDING',documents:(req.files || []).map(file=>addFileRegistryEntry(d,docPayload(file,'WhatsApp','BANKER','SOURCE',caseInternalId))),comments:[],revisions:[],history:[{at:now(),by:'WhatsApp',action:'Lead created from WhatsApp'}]};
     d.cases.unshift(c); d.whatsappInbox.unshift({id:nanoid(8),from:textValue(req.body.from || '','Sender',100),fromName,text:req.body.text,createdAt:now(),caseId:c.caseId});
-    notifyRole(d,'ADMIN',`New WhatsApp case ${c.caseId} from ${c.creatorName}`,'task',c.id); notifyRole(d,'MANAGER',`New WhatsApp case ${c.caseId} from ${c.creatorName}`,'task',c.id); notifyUser(d,c.assigneeName,`New WhatsApp task assigned: ${c.caseId}`,'task',c.id);
-    await save(d); res.status(201).json(c);
+    const notifications=[
+      notifyRole(d,'ADMIN',`New WhatsApp case ${c.caseId} from ${c.creatorName}`,'task',c.id),
+      notifyRole(d,'MANAGER',`New WhatsApp case ${c.caseId} from ${c.creatorName}`,'task',c.id),
+      notifyUser(d,c.assigneeName,`New WhatsApp task assigned: ${c.caseId}`,'task',c.id)
+    ];
+    const inboxEntry=d.whatsappInbox[0];
+    await save(d,{actor:fromName,reason:'whatsapp_case_create',collections:['cases','files','whatsappInbox','notifications'],collectionRowIds:{cases:[String(c.id)],files:(c.documents || []).map(doc=>String(doc.id)),whatsappInbox:[String(inboxEntry.id)],notifications:notifications.map(item=>String(item.id))}});
+    persistenceCommitted=true;
+    res.status(201).json(c);
   } catch(error) {
+    cleanupRequestTempUploads(req);
+    if (!persistenceCommitted) rollbackPreparedUploads(preparedUploads,{reason:'WHATSAPP_CASE_PERSISTENCE_FAILED',actor:'WhatsApp',caseId:rollbackCaseId});
     if (error instanceof FileValidationError) return fileUploadFailure(res,error,'WhatsApp attachment upload failed.');
     res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'WhatsApp lead could not be created.'});
   }
@@ -4203,7 +4616,7 @@ app.get('/api/db/migrations', requireAdminSession, async (_req,res)=>{
 app.get('/api/db/revisions', requireAdminSession, async (req,res)=>{
   if (!USE_POSTGRES) return res.json({ok:true,database:'json-file',revisions:[],warning:'Revision history is available only with PostgreSQL.'});
   try {
-    const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
+    const limit = boundedNumber(req.query.limit, 50, 1, 200);
     const result = await pool.query(
       `SELECT id,state_version,actor,reason,snapshot_hash,entity_counts,created_at
        FROM state_revisions ORDER BY state_version DESC LIMIT $1`,
@@ -4241,7 +4654,7 @@ app.use((err, req, res, _next) => {
   res.status(status).json({ ok:false, requestId:req?.requestId || '', code:err?.code || '', error:err?.message || 'Unexpected server error.' });
 });
 
-const PORT=process.env.PORT||8080;
+const PORT=boundedEnvNumber('PORT',8080,1,65535);
 const HOST=String(process.env.BIND_HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1')).trim();
 let httpServer = null;
 
@@ -4252,10 +4665,16 @@ async function gracefulShutdown(signal, exitCode = 0) {
   const forceTimer = setTimeout(() => {
     structuredLog('fatal','server_shutdown_forced',{signal});
     process.exit(1);
-  }, Number(process.env.GRACEFUL_SHUTDOWN_TIMEOUT_MS || 15000));
+  }, boundedEnvNumber('GRACEFUL_SHUTDOWN_TIMEOUT_MS',15000,5000,120000));
   forceTimer.unref();
   try {
     if (httpServer) await new Promise(resolve => httpServer.close(resolve));
+    clearPresenceFlushTimer();
+    if (presenceMutationGeneration > persistedPresenceGeneration) {
+      await flushPresenceHeartbeatBatch({ force:true, reason:'presence_shutdown_flush' }).catch(error => {
+        structuredLog('error','presence_shutdown_flush_failed',{code:error?.code || '',error:error?.message || String(error)});
+      });
+    }
     await persistenceQueue.catch(() => {});
     if (pool) await pool.end().catch(() => {});
     structuredLog('info','server_shutdown_completed',{signal});
@@ -4277,8 +4696,13 @@ async function startServer() {
       server.once('listening', () => resolve(server));
       server.once('error', reject);
     });
+    const requestTimeoutMs = boundedEnvNumber('HTTP_REQUEST_TIMEOUT_MS',35 * 60 * 1000,5 * 60 * 1000,60 * 60 * 1000);
+    const headersTimeoutMs = boundedEnvNumber('HTTP_HEADERS_TIMEOUT_MS',65_000,10_000,requestTimeoutMs - 1_000);
+    httpServer.requestTimeout = requestTimeoutMs;
+    httpServer.headersTimeout = headersTimeoutMs;
+    httpServer.keepAliveTimeout = boundedEnvNumber('HTTP_KEEP_ALIVE_TIMEOUT_MS',5_000,1_000,120_000);
     httpServer.ref();
-    structuredLog('info','server_started',{host:HOST,port:Number(PORT),storage:USE_POSTGRES ? 'postgresql-relational' : 'json-sandbox',startedAt:serverStartedAt});
+    structuredLog('info','server_started',{host:HOST,port:Number(PORT),storage:USE_POSTGRES ? 'postgresql-relational' : 'json-sandbox',startedAt:serverStartedAt,requestTimeoutMs,headersTimeoutMs});
   } catch (err) {
     structuredLog('fatal','server_startup_blocked',{error:err.message || String(err),code:err.code || ''});
     if (pool) await pool.end().catch(() => {});

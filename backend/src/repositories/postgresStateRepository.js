@@ -689,7 +689,7 @@ export function rowsRequiringRelationalWrite(rows = [], existingRows = []) {
   });
 }
 
-async function upsertRows(client, config, rows = []) {
+async function upsertRows(client, config, rows = [], { deleteMissing = true } = {}) {
   const columns = config.columns;
   const updateColumns = columns.filter(column => column !== config.idColumn);
   const chunkSize = 150;
@@ -719,16 +719,92 @@ async function upsertRows(client, config, rows = []) {
       values
     );
   }
+  if (!deleteMissing) return;
   const ids = rows.map(row => row.id);
   if (ids.length) await client.query(`DELETE FROM ${config.table} WHERE NOT (${config.idColumn} = ANY($1::text[]))`, [ids]);
   else await client.query(`DELETE FROM ${config.table}`);
 }
 
-async function syncRelationalParts(client, parts = {}) {
-  for (const [key, config] of Object.entries(TABLE_CONFIG)) await upsertRows(client, config, parts[key] || []);
+const RELATIONAL_COLLECTION_KEYS = [...Object.keys(TABLE_CONFIG), 'deletedProjectIds', 'chatReads', 'misc'];
 
-  const deletedIds = parts.deletedProjectIds || [];
-  if (deletedIds.length) {
+function selectedCollectionSet(selectedCollections = null) {
+  const selected = Array.isArray(selectedCollections) && selectedCollections.length
+    ? new Set(selectedCollections.map(value => String(value || '').trim()).filter(Boolean))
+    : null;
+  if (!selected) return null;
+  const allowed = new Set(RELATIONAL_COLLECTION_KEYS);
+  const unknown = [...selected].filter(key => !allowed.has(key));
+  if (unknown.length) throw new Error(`Unknown relational collection selection: ${unknown.join(', ')}`);
+  return selected;
+}
+
+function selectedRowIdSets(collectionRowIds = null) {
+  if (!collectionRowIds || typeof collectionRowIds !== 'object' || Array.isArray(collectionRowIds)) return new Map();
+  const selected = new Map();
+  for (const [key, values] of Object.entries(collectionRowIds)) {
+    if (!Object.prototype.hasOwnProperty.call(TABLE_CONFIG, key)) throw new Error(`Row-level selection is not supported for relational collection: ${key}`);
+    const ids = new Set((Array.isArray(values) ? values : [values]).map(value => String(value || '').trim()).filter(Boolean));
+    if (ids.size) selected.set(key, ids);
+  }
+  return selected;
+}
+
+function prepareSelectedRows(existingRows = [], incomingRows = [], selectedIds = new Set()) {
+  const existingById = new Map((existingRows || []).map(row => [String(row.id), row]));
+  const incomingById = new Map((incomingRows || []).map(row => [String(row.id), row]));
+  let nextSortOrder = (existingRows || []).reduce((minimum, row) => Math.min(minimum, Number(row.sortOrder || 0)), 0) - 1;
+  const writeRows = [];
+  const committedById = new Map(existingById);
+  for (const id of selectedIds) {
+    const incoming = incomingById.get(String(id));
+    if (!incoming) throw new Error(`Selected relational row was not found in incoming state: ${id}`);
+    const existing = existingById.get(String(id));
+    const adjusted = {
+      ...incoming,
+      sortOrder:existing ? Number(existing.sortOrder || 0) : nextSortOrder--
+    };
+    writeRows.push(adjusted);
+    committedById.set(String(id), adjusted);
+  }
+  const committedRows = [...committedById.values()].sort((a,b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0) || String(a.id).localeCompare(String(b.id)));
+  return { committedRows, writeRows };
+}
+
+export function prepareRelationalWrite(existingParts = {}, incomingParts = {}, selectedCollections = null, collectionRowIds = null) {
+  const selected = selectedCollectionSet(selectedCollections);
+  if (!selected) return { committedParts:incomingParts, writeParts:incomingParts, rowSelections:new Map() };
+  const rowSelections = selectedRowIdSets(collectionRowIds);
+  const committedParts = { ...existingParts };
+  const writeParts = { ...incomingParts };
+  for (const key of selected) {
+    const selectedIds = rowSelections.get(key);
+    if (selectedIds) {
+      const prepared = prepareSelectedRows(existingParts[key] || [], incomingParts[key] || [], selectedIds);
+      committedParts[key] = prepared.committedRows;
+      writeParts[key] = prepared.writeRows;
+    } else {
+      committedParts[key] = incomingParts[key];
+    }
+  }
+  return { committedParts, writeParts, rowSelections };
+}
+
+export function mergeRelationalParts(existingParts = {}, incomingParts = {}, selectedCollections = null) {
+  return prepareRelationalWrite(existingParts, incomingParts, selectedCollections).committedParts;
+}
+
+async function syncRelationalParts(client, parts = {}, selectedCollections = null, rowSelections = new Map()) {
+  const selected = selectedCollectionSet(selectedCollections);
+  const shouldSync = key => !selected || selected.has(key);
+
+  for (const [key, config] of Object.entries(TABLE_CONFIG)) {
+    if (!shouldSync(key)) continue;
+    await upsertRows(client, config, parts[key] || [], { deleteMissing:!rowSelections.has(key) });
+  }
+
+  if (shouldSync('deletedProjectIds')) {
+    const deletedIds = parts.deletedProjectIds || [];
+    if (deletedIds.length) {
     for (let index = 0; index < deletedIds.length; index += 1) {
       await client.query(
         `INSERT INTO ops_deleted_projects(project_id,sort_order) VALUES($1,$2)
@@ -737,11 +813,13 @@ async function syncRelationalParts(client, parts = {}) {
         [deletedIds[index], index]
       );
     }
-    await client.query('DELETE FROM ops_deleted_projects WHERE NOT (project_id = ANY($1::text[]))', [deletedIds]);
-  } else await client.query('DELETE FROM ops_deleted_projects');
+      await client.query('DELETE FROM ops_deleted_projects WHERE NOT (project_id = ANY($1::text[]))', [deletedIds]);
+    } else await client.query('DELETE FROM ops_deleted_projects');
+  }
 
-  const readRows = parts.chatReads || [];
-  if (readRows.length) {
+  if (shouldSync('chatReads')) {
+    const readRows = parts.chatReads || [];
+    if (readRows.length) {
     for (const row of readRows) {
       await client.query(
         `INSERT INTO ops_chat_reads(reader_key,payload,updated_at) VALUES($1,$2::jsonb,now())
@@ -750,11 +828,13 @@ async function syncRelationalParts(client, parts = {}) {
         [row.id, JSON.stringify(row.payload)]
       );
     }
-    await client.query('DELETE FROM ops_chat_reads WHERE NOT (reader_key = ANY($1::text[]))', [readRows.map(row => row.id)]);
-  } else await client.query('DELETE FROM ops_chat_reads');
+      await client.query('DELETE FROM ops_chat_reads WHERE NOT (reader_key = ANY($1::text[]))', [readRows.map(row => row.id)]);
+    } else await client.query('DELETE FROM ops_chat_reads');
+  }
 
-  const miscEntries = Object.entries(parts.misc || {});
-  if (miscEntries.length) {
+  if (shouldSync('misc')) {
+    const miscEntries = Object.entries(parts.misc || {});
+    if (miscEntries.length) {
     for (const [key, payload] of miscEntries) {
       await client.query(
         `INSERT INTO ops_misc_state(key,payload,updated_at) VALUES($1,$2::jsonb,now())
@@ -763,8 +843,9 @@ async function syncRelationalParts(client, parts = {}) {
         [key, JSON.stringify(payload)]
       );
     }
-    await client.query('DELETE FROM ops_misc_state WHERE NOT (key = ANY($1::text[]))', [miscEntries.map(([key]) => key)]);
-  } else await client.query('DELETE FROM ops_misc_state');
+      await client.query('DELETE FROM ops_misc_state WHERE NOT (key = ANY($1::text[]))', [miscEntries.map(([key]) => key)]);
+    } else await client.query('DELETE FROM ops_misc_state');
+  }
 }
 
 async function readRows(client, table, orderBy = 'sort_order,id') {
@@ -900,9 +981,8 @@ export async function persistRelationalState(pool, {
   revisionRetention = 200
 }) {
   const normalized = state;
-  const parts = decomposeState(normalized);
-  const counts = entityCounts(parts);
-  const hash = stateSnapshotHash(normalized);
+  const incomingParts = decomposeState(normalized);
+  const selectedCollections = selectedCollectionSet(metadata.collections);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -919,7 +999,22 @@ export async function persistRelationalState(pool, {
       throw error;
     }
 
-    await syncRelationalParts(client, parts);
+    // A partial relational write must hash and revision the state that will
+    // actually exist in PostgreSQL, not the larger normalized in-memory state.
+    // This matters because startup normalization can expose derived performance
+    // and file records that have not yet been durably materialized. Updating the
+    // metadata hash from that in-memory view during a users-only heartbeat would
+    // otherwise make the next restart fail its integrity check.
+    const existingParts = selectedCollections ? await readRelationalParts(client) : null;
+    const preparedWrite = selectedCollections
+      ? prepareRelationalWrite(existingParts, incomingParts, [...selectedCollections], metadata.collectionRowIds)
+      : { committedParts:incomingParts, writeParts:incomingParts, rowSelections:new Map() };
+    const committedParts = preparedWrite.committedParts;
+    const committedState = selectedCollections ? recomposeState(committedParts) : normalized;
+    const counts = entityCounts(committedParts);
+    const hash = stateSnapshotHash(committedState);
+
+    await syncRelationalParts(client, preparedWrite.writeParts, metadata.collections, preparedWrite.rowSelections);
     const financeEvents = Array.isArray(metadata.financeEvents)
       ? metadata.financeEvents
       : (metadata.financeEvent ? [metadata.financeEvent] : []);
@@ -945,23 +1040,28 @@ export async function persistRelationalState(pool, {
 
     const actor = safeText(metadata.actor || metadata.financeEvent?.actor || metadata.authOperations?.[0]?.actor || 'system');
     const reason = safeText(metadata.reason || (metadata.financeEvent ? 'finance_update' : metadata.authOperations?.length ? 'authentication_update' : 'state_update'));
-    await client.query(
-      `INSERT INTO state_revisions(state_version,actor,reason,snapshot_hash,entity_counts,snapshot)
-       VALUES($1,$2,$3,$4,$5::jsonb,$6::jsonb)`,
-      [targetVersion, actor || 'system', reason, hash, JSON.stringify(counts), JSON.stringify(normalized)]
-    );
+    const skipRevisionSnapshot = metadata.skipRevisionSnapshot === true;
+    if (!skipRevisionSnapshot) {
+      await client.query(
+        `INSERT INTO state_revisions(state_version,actor,reason,snapshot_hash,entity_counts,snapshot)
+         VALUES($1,$2,$3,$4,$5::jsonb,$6::jsonb)`,
+        [targetVersion, actor || 'system', reason, hash, JSON.stringify(counts), JSON.stringify(committedState)]
+      );
+    }
     await client.query(
       `UPDATE app_state_metadata SET state_version=$2,snapshot_hash=$3,entity_counts=$4::jsonb,source='relational',updated_at=now() WHERE key=$1`,
       ['main', targetVersion, hash, JSON.stringify(counts)]
     );
 
-    const keep = Math.max(25, Math.min(5000, Number(revisionRetention || 200)));
-    await client.query(
-      `DELETE FROM state_revisions WHERE id IN (
-         SELECT id FROM state_revisions ORDER BY state_version DESC OFFSET $1
-       )`,
-      [keep]
-    );
+    if (!skipRevisionSnapshot) {
+      const keep = Math.max(25, Math.min(5000, Number(revisionRetention || 200)));
+      await client.query(
+        `DELETE FROM state_revisions WHERE id IN (
+           SELECT id FROM state_revisions ORDER BY state_version DESC OFFSET $1
+         )`,
+        [keep]
+      );
+    }
 
     await client.query('COMMIT');
     return { stateVersion: targetVersion, persistedAt: new Date().toISOString(), database: 'postgresql-relational', snapshotHash: hash, counts };

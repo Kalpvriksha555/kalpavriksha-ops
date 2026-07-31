@@ -1,4 +1,6 @@
 import { authFetch } from './authService';
+import { isProjectDeletedError } from './requestControlService.js';
+export { isProjectDeletedError } from './requestControlService.js';
 export const getStatusColor = (status) => {
   switch (status) {
     case 'Lead Received': return 'bg-slate-100 text-slate-700 border-slate-200';
@@ -162,18 +164,32 @@ const throwApiError = async (response, fallback) => {
   throw error;
 };
 
+
 export const fetchBackendState = async ({ apiBase, headers = {} }) => {
-  const res = await authFetch(`${apiBase}/api/state`, { cache: 'no-store', headers });
+  const res = await authFetch(`${apiBase}/api/state`, { cache: 'no-store', headers, timeoutMs:60_000 });
   if (!res.ok) return throwApiError(res, 'Backend state failed');
   return parseJsonSafe(res);
 };
 
+const TASK_WRITE_TIMEOUT_MS = 2 * 60 * 1000;
+
 export const createTaskApi = async ({ apiBase, headers = {}, task }) => {
-  const res = await authFetch(`${apiBase}/api/state/projects`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ project: normalizeTaskRecord(task) })
-  });
+  let res;
+  try {
+    res = await authFetch(`${apiBase}/api/state/projects`, {
+      method: 'POST',
+      headers,
+      timeoutMs:TASK_WRITE_TIMEOUT_MS,
+      body: JSON.stringify({ project: normalizeTaskRecord(task) })
+    });
+  } catch (error) {
+    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+      const timeoutError = new Error('Task save took too long. Refresh once before retrying so a successful save is not duplicated.');
+      timeoutError.code = 'TASK_SAVE_TIMEOUT';
+      throw timeoutError;
+    }
+    throw error;
+  }
   if (!res.ok) return throwApiError(res, 'Backend project save failed');
   return parseJsonSafe(res);
 };
@@ -182,6 +198,7 @@ export const saveTasksApi = async ({ apiBase, headers = {}, tasks = [] }) => {
   const res = await authFetch(`${apiBase}/api/state`, {
     method: 'POST',
     headers,
+    timeoutMs:TASK_WRITE_TIMEOUT_MS,
     body: JSON.stringify({ projects: normalizeTaskList(tasks) })
   });
   if (!res.ok) throw new Error(`Backend state save failed: ${res.status}`);
@@ -189,8 +206,8 @@ export const saveTasksApi = async ({ apiBase, headers = {}, tasks = [] }) => {
 };
 
 export const deleteTaskApi = async ({ apiBase, taskId, headers = {} }) => {
-  const res = await authFetch(`${apiBase}/api/state/projects/${encodeURIComponent(String(taskId))}`, { method: 'DELETE', headers });
-  if (!res.ok && res.status !== 404) throw new Error(`Backend task delete failed: ${res.status}`);
+  const res = await authFetch(`${apiBase}/api/state/projects/${encodeURIComponent(String(taskId))}`, { method: 'DELETE', headers, timeoutMs:TASK_WRITE_TIMEOUT_MS });
+  if (!res.ok && res.status !== 404) return throwApiError(res, 'Backend task delete failed');
   return parseJsonSafe(res);
 };
 
@@ -208,6 +225,7 @@ export const saveBackendStateApi = async ({ apiBase, headers = {}, payload = {} 
   const res = await authFetch(`${apiBase}/api/state`, {
     method: 'POST',
     headers,
+    timeoutMs:TASK_WRITE_TIMEOUT_MS,
     body: JSON.stringify(normalizedPayload)
   });
   if (!res.ok) throw new Error(`Backend state save failed: ${res.status}`);
@@ -219,6 +237,7 @@ export const saveFinanceStatusApi = async ({ apiBase, headers = {}, taskId, stat
   const res = await authFetch(`${apiBase}/api/state/projects/${encodeURIComponent(String(taskId))}/payment-status`, {
     method: 'POST',
     headers,
+    timeoutMs:TASK_WRITE_TIMEOUT_MS,
     body: JSON.stringify({
       paymentTrackingStatus: status,
       expectedFinanceVersion,

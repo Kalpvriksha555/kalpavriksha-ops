@@ -1,6 +1,6 @@
 {
   "name": "kalpavriksha-designs-ops",
-  "version": "1.9.9-auth-access-compatibility",
+  "version": "1.9.12-deep-runtime-integrity",
   "type": "module",
   "scripts": {
     "dev": "node scripts/start-all.mjs",

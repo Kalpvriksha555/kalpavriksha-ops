@@ -447,7 +447,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     const form = new FormData();
     form.append('file', file);
     form.append('type', type);
-    const res = await authFetch(`${CHAT_API_BASE}/api/files/upload`, { method: 'POST', body: form });
+    const res = await authFetch(`${CHAT_API_BASE}/api/files/upload`, { method: 'POST', body: form, timeoutMs:30 * 60 * 1000 });
     if (!res.ok) throw new Error(await res.text());
     const payload = await res.json();
     return payload.file || {};
