@@ -8,6 +8,7 @@ const reportPath = path.resolve(process.env.KALPA_VERIFY_MATRIX_REPORT || path.j
 const defaultTimeoutMs = Math.max(60_000, Number(process.env.KALPA_VERIFY_STEP_TIMEOUT_MS || 10 * 60 * 1000));
 const outputLimit = Math.max(100_000, Number(process.env.KALPA_VERIFY_OUTPUT_LIMIT || 2 * 1024 * 1024));
 const only = new Set(String(process.env.KALPA_VERIFY_MATRIX_ONLY || '').split(',').map(value => value.trim()).filter(Boolean));
+const includeDeploymentGates = String(process.env.KALPA_VERIFY_INCLUDE_DEPLOYMENT_GATES || '').trim().toLowerCase() === 'true';
 
 const testFiles = (directory) => fs.readdirSync(path.join(root, directory))
   .filter(name => name.endsWith('.test.mjs'))
@@ -30,7 +31,14 @@ const steps = [
   { id:'release', label:'Release certification', args:['scripts/phase-8-release-certification-check.mjs'] },
   { id:'frontend-ux', label:'Frontend UX', args:['scripts/phase-9-frontend-ux-check.mjs'] },
   { id:'integration', label:'Frontend/backend contract', args:['scripts/frontend-backend-contract-check.mjs'] },
-  { id:'build', label:'Production frontend build', args:['node_modules/vite/bin/vite.js', 'build', 'frontend'], timeoutMs:15 * 60 * 1000 }
+  { id:'build', label:'Production frontend build', args:['node_modules/vite/bin/vite.js', 'build', 'frontend'], timeoutMs:15 * 60 * 1000 },
+  ...(includeDeploymentGates ? [
+    { id:'clean-install', label:'Isolated clean install', args:['scripts/clean-install-verify.mjs'], timeoutMs:30 * 60 * 1000 },
+    { id:'production-environment', label:'Production environment', args:['scripts/production-environment-check.mjs'] },
+    { id:'backup-create', label:'Pre-deployment backup creation', args:['backend/scripts/backup-create.mjs'], timeoutMs:30 * 60 * 1000 },
+    { id:'backup-verify', label:'Pre-deployment backup verification', args:['backend/scripts/backup-verify.mjs'], timeoutMs:15 * 60 * 1000 },
+    { id:'backup-status', label:'Pre-deployment backup status', args:['backend/scripts/backup-status.mjs'], timeoutMs:10 * 60 * 1000 }
+  ] : [])
 ].filter(step => !only.size || only.has(step.id));
 
 if (!steps.length) {

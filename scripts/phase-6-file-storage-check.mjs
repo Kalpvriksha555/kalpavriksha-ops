@@ -12,10 +12,10 @@ const storageSource = fs.readFileSync(path.join(root, 'backend/src/services/file
 const repositorySource = fs.readFileSync(path.join(root, 'backend/src/repositories/postgresStateRepository.js'), 'utf8');
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 
-for (const token of ['FILE_SIGNATURE_MISMATCH','OFFICE_CONTAINER_INVALID','MALWARE_DETECTED','sha256','quarantine','softDelete','local-private','buildFileReconciliationReport']) {
+for (const token of ['FILE_SIGNATURE_MISMATCH','OFFICE_CONTAINER_INVALID','MALWARE_DETECTED','sha256','quarantine','softDelete','acquireLease','hasActiveLease','local-private','buildFileReconciliationReport']) {
   check(storageSource.includes(token), `File-storage service is missing ${token}.`);
 }
-for (const token of ['KALPA_FILE_STORAGE_ROOT','FILE_STORAGE_PERSISTENT','prepareSecureUploads','RECONCILE FILE STORAGE','FILE_DELETED']) {
+for (const token of ['KALPA_FILE_STORAGE_ROOT','FILE_STORAGE_PERSISTENT','prepareSecureUploads','RECONCILE FILE STORAGE','COLLECT FILE STORAGE GARBAGE','FILE_STORAGE_GC_GRACE_MS','FILE_DELETED']) {
   check(serverSource.includes(token), `Server file hardening is missing ${token}.`);
 }
 check(repositorySource.includes("migration('006.001'"), 'Phase 6 migration is missing.');
@@ -78,7 +78,7 @@ const port=24000+(process.pid%1000);
 const base=`http://127.0.0.1:${port}`;
 let child; let output='';
 const start=async()=>{
-  child=spawn(process.execPath,['backend/src/server.js'],{cwd:root,env:{...process.env,NODE_ENV:'development',DATABASE_URL:'',DB_SSL:'false',ALLOW_JSON_FALLBACK:'true',PORT:String(port),KALPA_DB_FILE:dbFile,KALPA_AUTH_FILE:authFile,KALPA_LEGACY_UPLOAD_DIR:legacyUpload,KALPA_FILE_STORAGE_ROOT:liveStorage,BOOTSTRAP_ADMIN_USERNAME:'phase6admin',BOOTSTRAP_ADMIN_PASSWORD:'StrongAdmin123',BOOTSTRAP_ADMIN_NAME:'Phase 6 Admin',API_WRITE_RATE_LIMIT:'1000'},stdio:['ignore','pipe','pipe']});
+  child=spawn(process.execPath,['backend/src/server.js'],{cwd:root,env:{...process.env,NODE_ENV:'development',DATABASE_URL:'',DB_SSL:'false',ALLOW_JSON_FALLBACK:'true',PORT:String(port),KALPA_DB_FILE:dbFile,KALPA_AUTH_FILE:authFile,KALPA_LEGACY_UPLOAD_DIR:legacyUpload,KALPA_FILE_STORAGE_ROOT:liveStorage,FILE_STORAGE_GC_GRACE_MS:'0',BOOTSTRAP_ADMIN_USERNAME:'phase6admin',BOOTSTRAP_ADMIN_PASSWORD:'StrongAdmin123',BOOTSTRAP_ADMIN_NAME:'Phase 6 Admin',API_WRITE_RATE_LIMIT:'1000'},stdio:['ignore','pipe','pipe']});
   child.stdout.on('data',chunk=>{output+=chunk.toString();}); child.stderr.on('data',chunk=>{output+=chunk.toString();});
   for(let i=0;i<120;i++){if(child.exitCode!==null)throw new Error(`Server exited early.\n${output}`);try{if((await fetch(`${base}/api/health/live`)).ok)return;}catch{}await delay(100);}throw new Error(`Server did not start.\n${output}`);
 };
@@ -123,13 +123,32 @@ try{
   assert.equal(fake.response.status,400);
   assert.equal(fake.payload.code,'FILE_SIGNATURE_MISMATCH');
 
-  const deletion=await request(`/api/files/${uploaded.payload.file.id}`,{method:'DELETE',session,body:{reason:'Phase 6 verification'}});
-  assert.equal(deletion.response.ok,true,JSON.stringify(deletion.payload));
-  assert.equal(deletion.payload.storageStatus,'DELETED');
-  const afterDelete=await request(`/api/files/${uploaded.payload.file.id}/download`,{session});
-  assert.equal(afterDelete.response.status,410,'Deleted file remained downloadable.');
-  const trashFiles=fs.readdirSync(path.join(liveStorage,'trash'),{recursive:true});
-  assert.equal(trashFiles.some(name=>String(name).endsWith('.pdf')),true,'Deleted object was not moved to recoverable trash.');
+  const duplicateForm=new FormData(); duplicateForm.append('file',new Blob([runtimePdfBytes],{type:'application/pdf'}),'runtime-report-copy.pdf'); duplicateForm.append('projectId','FILE-TASK-1'); duplicateForm.append('type','source');
+  const duplicateRuntime=await multipart('/api/files/upload',duplicateForm,session);
+  assert.equal(duplicateRuntime.response.status,201,JSON.stringify(duplicateRuntime.payload));
+  assert.equal(duplicateRuntime.payload.file.storageKey,uploaded.payload.file.storageKey,'Runtime deduplication did not reuse the content-addressed object.');
 
-  console.log(JSON.stringify({ok:true,phase:6,signatureValidation:true,contentAddressing:true,deduplication:true,legacyImported:repaired.payload.imported,softDelete:true,reconciliation:repaired.payload.after},null,2));
+  const firstDeletion=await request(`/api/files/${uploaded.payload.file.id}`,{method:'DELETE',session,body:{reason:'Phase 6 shared-object verification'}});
+  assert.equal(firstDeletion.response.ok,true,JSON.stringify(firstDeletion.payload));
+  assert.equal(firstDeletion.payload.storageStatus,'DELETED');
+  assert.equal(firstDeletion.payload.physicalAction,'retained-shared-object');
+  const firstGc=await request('/api/system/files/garbage-collect',{method:'POST',session,body:{confirm:'COLLECT FILE STORAGE GARBAGE'}});
+  assert.equal(firstGc.response.ok,true,JSON.stringify(firstGc.payload));
+  assert.equal(firstGc.payload.movedToTrash,0,'Garbage collection moved an object that still had an active deduplicated reference.');
+  const sharedDownload=await request(`/api/files/${duplicateRuntime.payload.file.id}/download`,{session});
+  assert.equal(sharedDownload.response.ok,true,'Deleting one deduplicated record broke the remaining file.');
+
+  const secondDeletion=await request(`/api/files/${duplicateRuntime.payload.file.id}`,{method:'DELETE',session,body:{reason:'Phase 6 final-reference verification'}});
+  assert.equal(secondDeletion.response.ok,true,JSON.stringify(secondDeletion.payload));
+  assert.equal(secondDeletion.payload.storageStatus,'DELETED');
+  assert.equal(secondDeletion.payload.physicalAction,'retained-for-safe-gc');
+  const afterDelete=await request(`/api/files/${duplicateRuntime.payload.file.id}/download`,{session});
+  assert.equal(afterDelete.response.status,410,'Deleted file remained downloadable.');
+  const finalGc=await request('/api/system/files/garbage-collect',{method:'POST',session,body:{confirm:'COLLECT FILE STORAGE GARBAGE'}});
+  assert.equal(finalGc.response.ok,true,JSON.stringify(finalGc.payload));
+  assert.equal(finalGc.payload.movedToTrash>=1,true,'Unreferenced object was not moved by the grace-period garbage collector.');
+  const trashFiles=fs.readdirSync(path.join(liveStorage,'trash'),{recursive:true});
+  assert.equal(trashFiles.some(name=>String(name).endsWith('.pdf')),true,'Garbage-collected object was not placed in recoverable trash.');
+
+  console.log(JSON.stringify({ok:true,phase:6,signatureValidation:true,contentAddressing:true,deduplication:true,legacyImported:repaired.payload.imported,softDelete:true,uploadLeases:true,gracePeriodGarbageCollection:true,reconciliation:repaired.payload.after},null,2));
 }finally{await stop();fs.rmSync(temp,{recursive:true,force:true});}

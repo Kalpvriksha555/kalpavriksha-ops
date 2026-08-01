@@ -96,6 +96,22 @@ test('multipart middleware cleans temporary files on parser errors and client di
   const end = server.indexOf("const roles =", start);
   const block = server.slice(start, end);
   assert.match(block, /if \(err\) \{[\s\S]*cleanupRequestTempUploads\(req\)/);
-  assert.match(block, /res\.once\('finish', cleanup\)/);
-  assert.match(block, /res\.once\('close', cleanup\)/);
+  assert.match(block, /res\.once\('finish',\(\)=>\{ cleanupTemps\(\); releaseRequestStorageLeases\(req\); \}\)/);
+  assert.match(block, /res\.once\('close',cleanupTemps\)/);
+});
+
+
+test('recoverable file garbage collection uses grace periods, active references, and cross-process upload leases', () => {
+  assert.match(server, /FILE_STORAGE_GC_GRACE_MS/);
+  assert.match(server, /COLLECT FILE STORAGE GARBAGE/);
+  assert.match(server, /activeFileStorageKeys\(readDb\(\)\)/);
+  assert.match(server, /fileStorage\.hasActiveLease\(key\)/);
+  assert.match(server, /fileStorage\.softDelete\(key/);
+  const prepareStart=server.indexOf('async function prepareSecureUploads');
+  const prepareEnd=server.indexOf('function fileUploadFailure',prepareStart);
+  assert.match(server.slice(prepareStart,prepareEnd), /acquireLease:true/);
+  assert.match(server, /releaseRequestStorageLeases\(req\)/);
+  const storage=fs.readFileSync(new URL('../../backend/src/services/fileStorageService.js',import.meta.url),'utf8');
+  assert.match(storage,/\.gc-lock/);
+  assert.match(storage,/FILE_STORAGE_BUSY/);
 });

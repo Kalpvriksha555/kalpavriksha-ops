@@ -152,6 +152,7 @@ const MAX_UPLOAD_SIZE_MB = boundedEnvNumber('MAX_UPLOAD_SIZE_MB', 100, 1, 500);
 const MAX_UPLOAD_FILES = boundedEnvNumber('MAX_UPLOAD_FILES', 20, 1, 100);
 const MAX_INLINE_PREVIEW_MB = boundedEnvNumber('MAX_INLINE_PREVIEW_MB', 15, 1, 50);
 const MAX_INLINE_PREVIEW_BYTES = MAX_INLINE_PREVIEW_MB * 1024 * 1024;
+const FILE_STORAGE_GC_GRACE_MS = boundedEnvNumber('FILE_STORAGE_GC_GRACE_MS', 24 * 60 * 60 * 1000, 0, 30 * 24 * 60 * 60 * 1000);
 const fileStorage = createFileStorage({
   root: FILE_STORAGE_ROOT,
   legacyRoots: [LEGACY_UPLOAD_DIR]
@@ -201,6 +202,13 @@ function cleanupRequestTempUploads(req = {}) {
   cleanupIncomingUploads(Array.isArray(req.files) ? req.files : (req.file ? [req.file] : []));
 }
 
+function releaseRequestStorageLeases(req = {}) {
+  const releases=Array.isArray(req.__fileStorageLeaseReleases) ? req.__fileStorageLeaseReleases.splice(0) : [];
+  for (const release of releases) {
+    try { release(); } catch {}
+  }
+}
+
 function rollbackPreparedUploads(files = [], details = {}) {
   // The database reference is rolled back, but content-addressed objects must
   // not be moved immediately. A concurrent request may already have
@@ -226,7 +234,11 @@ async function prepareSecureUploads(req, purpose = 'FILE', options = {}) {
   const prepared = [];
   try {
     for (const file of files) {
-      const secured = await fileStorage.validateAndStore(file, { purpose });
+      const secured = await fileStorage.validateAndStore(file, { purpose, acquireLease:true });
+      if (secured.releaseStorageLease) {
+        req.__fileStorageLeaseReleases ||= [];
+        req.__fileStorageLeaseReleases.push(secured.releaseStorageLease);
+      }
       if (options.imagesOnly && !String(secured.detectedMime || '').startsWith('image/')) {
         rollbackPreparedUploads([secured], { reason:'PROFILE_PHOTO_NON_IMAGE', actor:'system' });
         throw new FileValidationError('PROFILE_PHOTO_INVALID', 'Profile photos must contain a valid supported image.', 400);
@@ -278,10 +290,10 @@ function uploadAny(req, res, next) {
       return res.status(payload.status).json({ ok:false, error:payload.error, code:err.code || 'UPLOAD_ERROR' });
     }
     req.files = Array.isArray(req.files) ? req.files : [];
-    let cleaned=false;
-    const cleanup=()=>{ if (cleaned) return; cleaned=true; cleanupRequestTempUploads(req); };
-    res.once('finish', cleanup);
-    res.once('close', cleanup);
+    let tempsCleaned=false;
+    const cleanupTemps=()=>{ if (tempsCleaned) return; tempsCleaned=true; cleanupRequestTempUploads(req); };
+    res.once('finish',()=>{ cleanupTemps(); releaseRequestStorageLeases(req); });
+    res.once('close',cleanupTemps);
     next();
   });
 }
@@ -293,10 +305,10 @@ function uploadSingle(fieldName) {
         const payload = uploadErrorPayload(err);
         return res.status(payload.status).json({ ok:false, error:payload.error, code:err.code || 'UPLOAD_ERROR' });
       }
-      let cleaned=false;
-      const cleanup=()=>{ if (cleaned) return; cleaned=true; cleanupRequestTempUploads(req); };
-      res.once('finish', cleanup);
-      res.once('close', cleanup);
+      let tempsCleaned=false;
+      const cleanupTemps=()=>{ if (tempsCleaned) return; tempsCleaned=true; cleanupRequestTempUploads(req); };
+      res.once('finish',()=>{ cleanupTemps(); releaseRequestStorageLeases(req); });
+      res.once('close',cleanupTemps);
       next();
     });
   };
@@ -3446,6 +3458,66 @@ function allKnownFileDocs(d={}){
   ].filter(Boolean));
   return [...(d.files || []), ...caseDocs, ...chatDocs].filter(Boolean);
 }
+
+function fileStorageKey(doc={}) {
+  return String(doc.storageKey || doc.storedName || doc.stored_name || '').trim();
+}
+function activeFileStorageKeys(d={}) {
+  const keys=new Set();
+  for (const doc of allKnownFileDocs(d)) {
+    if (String(doc?.storageStatus || '').toUpperCase()==='DELETED') continue;
+    const key=fileStorageKey(doc);
+    if (key.startsWith('objects/')) keys.add(key);
+  }
+  return keys;
+}
+function deletedFileStorageCandidateTimes(d={}) {
+  const times=new Map();
+  for (const doc of d.files || []) {
+    if (String(doc?.storageStatus || '').toUpperCase()!=='DELETED') continue;
+    const key=fileStorageKey(doc);
+    if (!key.startsWith('objects/')) continue;
+    const deletedAt=parseDateMs(doc.deletedAt || doc.storageDeletedAt || 0);
+    times.set(key, Math.max(times.get(key) || 0, deletedAt || 0));
+  }
+  return times;
+}
+async function collectFileStorageGarbage({ actor='system', graceMs=FILE_STORAGE_GC_GRACE_MS }={}) {
+  const safeGraceMs=boundedNumber(graceMs, FILE_STORAGE_GC_GRACE_MS, 0, 30 * 24 * 60 * 60 * 1000);
+  const startedAt=Date.now();
+  const initial=readDb();
+  const active=activeFileStorageKeys(initial);
+  const deletedTimes=deletedFileStorageCandidateTimes(initial);
+  const result={ scanned:0, movedToTrash:0, retainedActive:0, retainedLeased:0, retainedGrace:0, missing:0, errors:[] };
+  for (const object of fileStorage.listObjects()) {
+    result.scanned += 1;
+    const key=String(object.storageKey || '');
+    if (active.has(key)) { result.retainedActive += 1; continue; }
+    let stat;
+    try { stat=fs.statSync(object.fp); } catch { result.missing += 1; continue; }
+    const candidateAt=Math.max(Number(stat.mtimeMs || 0), Number(deletedTimes.get(key) || 0));
+    if (startedAt - candidateAt < safeGraceMs) { result.retainedGrace += 1; continue; }
+    if (fileStorage.hasActiveLease(key)) { result.retainedLeased += 1; continue; }
+    // Re-read immediately before the physical move. This catches task/file rows
+    // committed after the initial scan, while the cross-process lease covers an
+    // upload that has stored/deduplicated the object but has not committed yet.
+    if (activeFileStorageKeys(readDb()).has(key)) { result.retainedActive += 1; continue; }
+    if (fileStorage.hasActiveLease(key)) { result.retainedLeased += 1; continue; }
+    try {
+      const target=fileStorage.softDelete(key,{actor,reason:'UNREFERENCED_AFTER_GRACE',graceMs:safeGraceMs});
+      if (!target) {
+        if (fileStorage.hasActiveLease(key)) result.retainedLeased += 1;
+        else result.missing += 1;
+        continue;
+      }
+      result.movedToTrash += 1;
+      await recordFileStorageEvent({action:'FILE_OBJECT_TRASHED',actor,storageKey:key,details:{trashPath:path.relative(fileStorage.root,target),graceMs:safeGraceMs}});
+    } catch(error) {
+      result.errors.push({storageKey:key,error:error.message || String(error)});
+    }
+  }
+  return { ...result, ok:result.errors.length===0, graceMs:safeGraceMs, completedAt:now() };
+}
 function resolveStoredUploadFile(doc={}){
   return fileStorage.resolve(doc);
 }
@@ -5754,6 +5826,21 @@ app.get('/api/system/files/reconciliation', requireAdminSession, async (_req,res
   const report=buildFileReconciliationReport(d,fileStorage,{docs:d.files || []});
   const legacyAvailable=report.available.filter(item=>item.provider==='legacy-local').length;
   res.json({ok:true,...report,legacyAvailable,storage:fileStorage.health()});
+});
+
+
+app.post('/api/system/files/garbage-collect', requireAdminSession, async (req,res)=>{
+  try {
+    if (String(req.body?.confirm || '')!=='COLLECT FILE STORAGE GARBAGE') {
+      return res.status(400).json({ok:false,code:'CONFIRMATION_REQUIRED',error:'Type COLLECT FILE STORAGE GARBAGE to run recoverable file cleanup.'});
+    }
+    const actor=requestActor(req);
+    const result=await collectFileStorageGarbage({actor:actor.name,graceMs:FILE_STORAGE_GC_GRACE_MS});
+    const status=result.errors.length ? 207 : 200;
+    res.status(status).json(result);
+  } catch(error) {
+    res.status(error.statusCode || 500).json({ok:false,code:error.code || 'FILE_GC_FAILED',error:error.message || 'File garbage collection failed.'});
+  }
 });
 
 app.post('/api/system/files/reconciliation', requireAdminSession, async (req,res)=>{

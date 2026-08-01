@@ -27,8 +27,10 @@
 - Legacy files are detected and safely imported by confirmed reconciliation.
 - Missing records are reported without destructive deletion.
 - Deleted records return HTTP 410.
-- Unreferenced deleted objects move to recoverable trash.
+- Deletion immediately creates a non-downloadable tombstone and a safe-GC candidate.
 - Deduplicated objects remain when another active record still needs them.
+- Cross-process upload leases prevent garbage collection from racing an upload that has stored content but has not committed its database row.
+- The grace-period garbage collector rechecks active references and leases before moving an unreferenced object to recoverable trash.
 - Production source requires explicit persistent storage configuration.
 - Migration `006.001` and file audit/reconciliation tables are present.
 

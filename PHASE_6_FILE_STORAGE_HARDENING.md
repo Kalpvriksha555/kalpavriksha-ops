@@ -66,7 +66,7 @@ It imports valid legacy files into private content-addressed storage, refreshes 
 
 ## Deletion and recovery
 
-Deleting a file removes it from active task/chat views but preserves a tombstone containing the actor, reason and time. An unreferenced private object is moved to a recoverable trash directory instead of being permanently erased. Deduplicated objects remain when another active file record still references them.
+Deleting a file immediately removes it from active task/chat views and preserves a tombstone containing the actor, reason and time. Physical content is not moved during the delete request: it first becomes a safe-GC candidate so a concurrent deduplicated upload cannot be broken. Upload requests hold cross-process storage leases until their response finishes. The confirmed Admin garbage-collection pass waits for `FILE_STORAGE_GC_GRACE_MS` (24 hours by default), rechecks active database references and leases, and only then moves an unreferenced object into recoverable trash. Deduplicated objects remain while any active file record still references them.
 
 ## Database migration
 

@@ -159,14 +159,88 @@ export function createFileStorage(options = {}) {
   const objectsRoot = path.resolve(options.objectsRoot || path.join(root, 'objects'));
   const quarantineRoot = path.resolve(options.quarantineRoot || path.join(root, 'quarantine'));
   const trashRoot = path.resolve(options.trashRoot || path.join(root, 'trash'));
+  const locksRoot = path.resolve(options.locksRoot || path.join(root, '.leases'));
+  const requestedLeaseMaxAgeMs = Number(options.leaseMaxAgeMs || process.env.FILE_STORAGE_LEASE_MAX_AGE_MS || 30 * 60 * 1000);
+  const leaseMaxAgeMs = Number.isFinite(requestedLeaseMaxAgeMs) ? Math.max(60_000, requestedLeaseMaxAgeMs) : 30 * 60 * 1000;
   const legacyRoots = [...new Set((options.legacyRoots || []).filter(Boolean).map(item => path.resolve(item)))];
   const allowedExtensions = new Set((options.allowedExtensions || DEFAULT_ALLOWED_EXTENSIONS).map(value => String(value).toLowerCase().startsWith('.') ? String(value).toLowerCase() : `.${String(value).toLowerCase()}`));
 
-  [root, tempRoot, objectsRoot, quarantineRoot, trashRoot].forEach(mkdirPrivate);
+  [root, tempRoot, objectsRoot, quarantineRoot, trashRoot, locksRoot].forEach(mkdirPrivate);
 
   function tempDestination() {
     mkdirPrivate(tempRoot);
     return tempRoot;
+  }
+
+
+  function leaseDirectory(storageKey = '') {
+    const digest = crypto.createHash('sha256').update(String(storageKey || '')).digest('hex');
+    return path.join(locksRoot, digest.slice(0, 2), digest);
+  }
+
+  function pruneStaleLeases(storageKey = '') {
+    const directory = leaseDirectory(storageKey);
+    if (!fs.existsSync(directory)) return 0;
+    let removed = 0;
+    const cutoff = Date.now() - leaseMaxAgeMs;
+    for (const name of fs.readdirSync(directory)) {
+      const fp = path.join(directory, name);
+      try {
+        const stat = fs.statSync(fp);
+        if (stat.isFile() && stat.mtimeMs < cutoff) {
+          fs.unlinkSync(fp);
+          removed += 1;
+        }
+      } catch {}
+    }
+    try { if (!fs.readdirSync(directory).length) fs.rmdirSync(directory); } catch {}
+    return removed;
+  }
+
+  async function acquireLease(storageKey = '', metadata = {}) {
+    const key = String(storageKey || '').trim();
+    if (!key.startsWith('objects/')) return () => {};
+    const directory = leaseDirectory(key);
+    const gcLockPath = path.join(directory, '.gc-lock');
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      pruneStaleLeases(key);
+      mkdirPrivate(directory);
+      if (fs.existsSync(gcLockPath)) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+        continue;
+      }
+      const leasePath = path.join(directory, `${process.pid}-${Date.now()}-${crypto.randomBytes(8).toString('hex')}.lease`);
+      try {
+        fs.writeFileSync(leasePath, JSON.stringify({ storageKey:key, pid:process.pid, createdAt:new Date().toISOString(), ...metadata }), { mode:0o600, flag:'wx' });
+      } catch {
+        await new Promise(resolve => setTimeout(resolve, 25));
+        continue;
+      }
+      // A collector may have acquired its exclusive marker between our first
+      // check and the lease-file creation. Relinquish and retry in that case.
+      if (fs.existsSync(gcLockPath)) {
+        try { fs.unlinkSync(leasePath); } catch {}
+        await new Promise(resolve => setTimeout(resolve, 25));
+        continue;
+      }
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        try { fs.unlinkSync(leasePath); } catch {}
+        try { if (fs.existsSync(directory) && !fs.readdirSync(directory).length) fs.rmdirSync(directory); } catch {}
+      };
+    }
+    throw new FileValidationError('FILE_STORAGE_BUSY', 'Private file storage is completing recoverable cleanup. Please retry the upload.', 503);
+  }
+
+  function hasActiveLease(storageKey = '') {
+    const key = String(storageKey || '').trim();
+    if (!key.startsWith('objects/')) return false;
+    pruneStaleLeases(key);
+    const directory = leaseDirectory(key);
+    try { return fs.existsSync(directory) && fs.readdirSync(directory).some(name => name.endsWith('.lease')); }
+    catch { return true; }
   }
 
   async function quarantine(file, reason, code = 'FILE_REJECTED') {
@@ -245,34 +319,44 @@ export function createFileStorage(options = {}) {
     }
     const sha256 = await sha256File(file.path);
     const storageKey = path.posix.join('objects', sha256.slice(0, 2), `${sha256}${extension}`);
-    const destination = safeStoragePath(root, storageKey);
-    if (!destination) throw new FileValidationError('INVALID_STORAGE_KEY', 'A secure storage key could not be generated.', 500);
-    mkdirPrivate(path.dirname(destination));
-    let deduplicated = false;
-    if (fs.existsSync(destination)) {
-      deduplicated = true;
-      fs.unlinkSync(file.path);
-    } else {
-      fs.renameSync(file.path, destination);
-      try { fs.chmodSync(destination, 0o600); } catch {}
+    const releaseStorageLease = context.acquireLease
+      ? await acquireLease(storageKey, { purpose:String(context.purpose || '').toUpperCase() })
+      : null;
+    try {
+      const destination = safeStoragePath(root, storageKey);
+      if (!destination) throw new FileValidationError('INVALID_STORAGE_KEY', 'A secure storage key could not be generated.', 500);
+      mkdirPrivate(path.dirname(destination));
+      let deduplicated = false;
+      if (fs.existsSync(destination)) {
+        deduplicated = true;
+        fs.unlinkSync(file.path);
+      } else {
+        fs.renameSync(file.path, destination);
+        try { fs.chmodSync(destination, 0o600); } catch {}
+      }
+      const result = {
+        originalName,
+        extension,
+        storageKey,
+        storedName: storageKey,
+        sha256,
+        size: stat.size,
+        detectedMime: signature.mime || MIME_BY_EXTENSION[extension] || 'application/octet-stream',
+        suppliedMime: String(file.mimetype || '').toLowerCase(),
+        securityStatus: 'VALIDATED',
+        antivirusStatus: antivirus.status,
+        antivirusEngine: antivirus.engine || '',
+        storageProvider: 'local-private',
+        deduplicated,
+        storedAt: new Date().toISOString(),
+        purpose: String(context.purpose || '').toUpperCase()
+      };
+      if (releaseStorageLease) Object.defineProperty(result, 'releaseStorageLease', { value:releaseStorageLease, enumerable:false });
+      return result;
+    } catch (error) {
+      try { releaseStorageLease?.(); } catch {}
+      throw error;
     }
-    return {
-      originalName,
-      extension,
-      storageKey,
-      storedName: storageKey,
-      sha256,
-      size: stat.size,
-      detectedMime: signature.mime || MIME_BY_EXTENSION[extension] || 'application/octet-stream',
-      suppliedMime: String(file.mimetype || '').toLowerCase(),
-      securityStatus: 'VALIDATED',
-      antivirusStatus: antivirus.status,
-      antivirusEngine: antivirus.engine || '',
-      storageProvider: 'local-private',
-      deduplicated,
-      storedAt: new Date().toISOString(),
-      purpose: String(context.purpose || '').toUpperCase()
-    };
   }
 
   function resolve(doc = {}) {
@@ -325,15 +409,36 @@ export function createFileStorage(options = {}) {
   }
 
   function softDelete(storageKey, metadata = {}) {
-    const source = safeStoragePath(root, storageKey);
-    if (!source || !fs.existsSync(source)) return null;
-    const date = new Date().toISOString().slice(0, 10);
-    const targetDirectory = path.join(trashRoot, date);
-    mkdirPrivate(targetDirectory);
-    const target = path.join(targetDirectory, `${Date.now()}-${path.basename(source)}`);
-    fs.renameSync(source, target);
-    fs.writeFileSync(`${target}.json`, JSON.stringify({ storageKey, deletedAt: new Date().toISOString(), ...metadata }, null, 2), { mode: 0o600 });
-    return target;
+    const key = String(storageKey || '').trim();
+    if (!key.startsWith('objects/')) return null;
+    pruneStaleLeases(key);
+    const directory = leaseDirectory(key);
+    mkdirPrivate(directory);
+    const gcLockPath = path.join(directory, '.gc-lock');
+    let lockFd;
+    try { lockFd = fs.openSync(gcLockPath, 'wx', 0o600); }
+    catch { return null; }
+    try {
+      if (hasActiveLease(key)) return null;
+      const source = safeStoragePath(root, key);
+      if (!source || !fs.existsSync(source)) return null;
+      const date = new Date().toISOString().slice(0, 10);
+      const targetDirectory = path.join(trashRoot, date);
+      mkdirPrivate(targetDirectory);
+      const target = path.join(targetDirectory, `${Date.now()}-${crypto.randomBytes(6).toString('hex')}-${path.basename(source)}`);
+      fs.renameSync(source, target);
+      try {
+        fs.writeFileSync(`${target}.json`, JSON.stringify({ storageKey:key, deletedAt: new Date().toISOString(), ...metadata }, null, 2), { mode: 0o600 });
+      } catch (error) {
+        try { fs.renameSync(target, source); } catch {}
+        throw error;
+      }
+      return target;
+    } finally {
+      try { if (lockFd !== undefined) fs.closeSync(lockFd); } catch {}
+      try { fs.unlinkSync(gcLockPath); } catch {}
+      try { if (fs.existsSync(directory) && !fs.readdirSync(directory).length) fs.rmdirSync(directory); } catch {}
+    }
   }
 
   function health() {
@@ -347,7 +452,7 @@ export function createFileStorage(options = {}) {
     }
   }
 
-  return { root, tempRoot, objectsRoot, quarantineRoot, trashRoot, allowedExtensions, antivirusMode, antivirusRequired, tempDestination, validateAndStore, resolve, importLegacyFile, listObjects, softDelete, health, quarantine };
+  return { root, tempRoot, objectsRoot, quarantineRoot, trashRoot, locksRoot, allowedExtensions, antivirusMode, antivirusRequired, tempDestination, validateAndStore, resolve, importLegacyFile, listObjects, acquireLease, hasActiveLease, softDelete, health, quarantine };
 }
 
 export function buildFileReconciliationReport(state = {}, storage, options = {}) {

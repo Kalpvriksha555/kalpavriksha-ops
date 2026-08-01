@@ -192,3 +192,21 @@ test('full release verifier matrix runs every gate and aggregates all failures',
   assert.match(matrix,/os\.tmpdir\(\)/);
   assert.equal(pkg.scripts['verify:matrix'],'node scripts/full-release-verifier-matrix.mjs');
 });
+
+
+test('phase 6 verifier exercises shared-object retention and grace-period trash collection',()=>{
+  const verifier=fs.readFileSync(new URL('../../scripts/phase-6-file-storage-check.mjs',import.meta.url),'utf8');
+  assert.match(verifier,/retained-shared-object/);
+  assert.match(verifier,/retained-for-safe-gc/);
+  assert.match(verifier,/COLLECT FILE STORAGE GARBAGE/);
+  assert.match(verifier,/movedToTrash>=1/);
+});
+
+
+test('deployment opts into clean-install, environment, and backup gates before downtime',()=>{
+  const deploy=fs.readFileSync(new URL('../../scripts/deploy-1.9.24-vps.sh',import.meta.url),'utf8');
+  const matrix=fs.readFileSync(new URL('../../scripts/full-release-verifier-matrix.mjs',import.meta.url),'utf8');
+  assert.match(deploy,/KALPA_VERIFY_INCLUDE_DEPLOYMENT_GATES=true/);
+  for (const id of ['clean-install','production-environment','backup-create','backup-verify','backup-status']) assert.match(matrix,new RegExp(`id:'${id}'`));
+  assert.ok(deploy.indexOf('npm run verify:matrix') < deploy.indexOf('Stopping application writes'));
+});

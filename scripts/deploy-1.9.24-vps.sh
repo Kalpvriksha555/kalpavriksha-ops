@@ -40,7 +40,7 @@ pre_deployment_failure() {
   echo
   echo "PRE-DEPLOYMENT VERIFICATION FAILED WITH CODE $rc"
   echo "The live backend was not stopped and production data was not modified."
-  echo "Review the first failing verification above before retrying."
+  echo "Review every failing gate reported above before retrying."
   exit "$rc"
 }
 trap pre_deployment_failure ERR INT TERM
@@ -139,6 +139,15 @@ grep -q "function assertProjectUpdateAuthorized" "$STAGE/backend/src/server.js" 
 grep -q "spoofedBroadStateUpdate.payload?.code === 'TASK_UPDATE_FORBIDDEN'" "$STAGE/scripts/phase-4-authorization-check.mjs" || \
   fail "GitHub main does not contain both authorization-precedence runtime probes"
 
+grep -q "COLLECT FILE STORAGE GARBAGE" "$STAGE/scripts/phase-6-file-storage-check.mjs" || \
+  fail "GitHub main does not contain the grace-period file garbage-collection verifier"
+
+grep -q "acquireLease:true" "$STAGE/backend/src/server.js" || \
+  fail "GitHub main does not hold upload leases through request persistence"
+
+grep -q "FILE_STORAGE_GC_GRACE_MS" "$STAGE/backend/src/server.js" || \
+  fail "GitHub main does not contain grace-period file garbage collection"
+
 log "Auditing release source ordering and syntax"
 
 bash -n "$STAGE/scripts/deploy-1.9.24-vps.sh"
@@ -153,6 +162,8 @@ const verifier = fs.readFileSync(path.join(root, 'scripts/phase-4-authorization-
 const taskService = fs.readFileSync(path.join(root, 'frontend/src/services/taskService.js'), 'utf8');
 const app = fs.readFileSync(path.join(root, 'frontend/src/App.jsx'), 'utf8');
 const matrix = fs.readFileSync(path.join(root, 'scripts/full-release-verifier-matrix.mjs'), 'utf8');
+const fileStorage = fs.readFileSync(path.join(root, 'backend/src/services/fileStorageService.js'), 'utf8');
+const fileVerifier = fs.readFileSync(path.join(root, 'scripts/phase-6-file-storage-check.mjs'), 'utf8');
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 
 const assertBefore = (block, first, second, label) => {
@@ -218,16 +229,35 @@ const requiredMatrixMarkers = [
   'security-package-audit', 'doctor', 'regression-guard', 'production-audit',
   'frontend-tests', 'backend-tests', 'finance', 'authentication',
   'authorization', 'database', 'files', 'reliability', 'release',
-  'frontend-ux', 'integration', 'build'
+  'frontend-ux', 'integration', 'build', 'clean-install',
+  'production-environment', 'backup-create', 'backup-verify', 'backup-status'
 ];
 for (const marker of requiredMatrixMarkers) {
   if (!matrix.includes(`id:'${marker}'`)) throw new Error(`Full verifier matrix is missing ${marker}.`);
 }
 if (!matrix.includes('for (const step of steps) results.push(await runStep(step))')) throw new Error('Full verifier matrix is not configured to continue through all gates.');
 if (!matrix.includes("const failures = results.filter(item => item.status !== 'PASS')")) throw new Error('Full verifier matrix does not aggregate failures.');
+if (!matrix.includes('KALPA_VERIFY_INCLUDE_DEPLOYMENT_GATES')) throw new Error('Full verifier matrix cannot include clean-install, environment, and backup gates.');
 if (pkg.scripts?.['verify:matrix'] !== 'node scripts/full-release-verifier-matrix.mjs') throw new Error('verify:matrix package command is missing or changed.');
 
-console.log('Release authorization, idempotency, mutation-ownership, and full-matrix source audit passed.');
+for (const marker of ['acquireLease', 'hasActiveLease', 'leaseMaxAgeMs']) {
+  if (!fileStorage.includes(marker)) throw new Error(`File-storage lease protection is missing ${marker}.`);
+}
+for (const marker of ['COLLECT FILE STORAGE GARBAGE', 'retained-shared-object', 'movedToTrash>=1']) {
+  if (!fileVerifier.includes(marker)) throw new Error(`Phase 6 verifier marker is missing: ${marker}`);
+}
+const gcStart = server.indexOf('async function collectFileStorageGarbage');
+const gcEnd = server.indexOf("app.post('/api/system/files/garbage-collect'", gcStart);
+if (gcStart < 0 || gcEnd < 0) throw new Error('Grace-period file garbage collector could not be located.');
+const gcBlock = server.slice(gcStart, gcEnd);
+if (gcBlock.indexOf('activeFileStorageKeys(readDb())') < 0 || gcBlock.indexOf('fileStorage.hasActiveLease(key)') < 0 || gcBlock.indexOf('fileStorage.softDelete(key') < 0) {
+  throw new Error('File garbage collection is missing its final reference/lease checks or recoverable trash move.');
+}
+if (gcBlock.indexOf('activeFileStorageKeys(readDb())') > gcBlock.indexOf('fileStorage.softDelete(key')) {
+  throw new Error('File garbage collection must recheck active references before moving an object.');
+}
+
+console.log('Release authorization, idempotency, file-GC safety, and full-matrix source audit passed.');
 NODE
 
 while IFS= read -r -d '' source_file; do
@@ -242,26 +272,9 @@ npm ci --include=dev --no-audit --no-fund
 npm ci --prefix frontend --include=dev --no-audit --no-fund
 
 log "Running the complete verification matrix (all failures are collected before aborting)"
-KALPA_VERIFY_MATRIX_REPORT="$WORK/full-verifier-matrix.json" npm run verify:matrix
+KALPA_VERIFY_INCLUDE_DEPLOYMENT_GATES=true KALPA_VERIFY_MATRIX_REPORT="$WORK/full-verifier-matrix.json" npm run verify:matrix
 
-log "Running isolated clean-install verification"
-npm run release:clean-install
-
-log "Validating the production environment before any downtime"
-node --input-type=module - <<'NODE'
-import { validateProductionEnvironment } from './backend/src/services/releaseCertificationService.js';
-const result = validateProductionEnvironment(process.env);
-if (!result.ok) {
-  for (const item of result.errors) console.error(`${item.id}: ${item.message}`);
-  process.exit(1);
-}
-console.log('Production environment validation passed.');
-NODE
-
-log "Creating and verifying the mandatory pre-deployment backup"
-npm run backup:create >"$WORK/pre-deployment-backup.json"
-npm run backup:verify >"$WORK/pre-deployment-backup-verification.json"
-npm run backup:status >"$WORK/pre-deployment-backup-status.json"
+log "All code, clean-install, environment, and backup gates passed before downtime"
 
 CERTIFICATE_BACKUP="$WORK/previous-release-certification.json"
 HAD_OLD_CERTIFICATE=0
