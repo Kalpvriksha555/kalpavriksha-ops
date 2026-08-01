@@ -138,5 +138,7 @@ test('reports use one selected month and contain no rolling 30-day scope', () =>
   assert.match(block, /getProjectCompletedMonthKey\(project\) === accountingMonth/);
   assert.match(block, /getAccountingMonthEndTimestamp\(accountingMonth\)/);
   assert.doesNotMatch(block, /30 \* 86400000/);
-  assert.match(block, /previous-month data is never mixed/);
+  assert.match(block, /zero new cases can never misleadingly show completed new workload/);
+  assert.match(block, /createdScoped\.filter\(project => isProjectCompleted\(project\)/);
+  assert.match(block, /carriedForwardCompleted/);
 });

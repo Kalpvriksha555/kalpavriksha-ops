@@ -35,7 +35,7 @@ const steps = [
   ...(includeDeploymentGates ? [
     { id:'clean-install', label:'Isolated clean install', args:['scripts/clean-install-verify.mjs'], timeoutMs:30 * 60 * 1000 },
     { id:'production-environment', label:'Production environment', args:['scripts/production-environment-check.mjs'] },
-    { id:'production-integrity-audit', label:'Production relational integrity classification', args:['backend/scripts/db-integrity-audit.mjs'], env:{ KALPA_ALLOW_LEGACY_SHADOW_REBASELINE:'true' }, timeoutMs:10 * 60 * 1000 },
+    { id:'production-integrity-audit', label:'Production relational integrity classification', args:['backend/scripts/db-integrity-audit.mjs'], env:{ KALPA_ALLOW_LEGACY_SHADOW_REBASELINE:'true', KALPA_ALLOW_OPERATIONAL_SAME_COUNT_REBASELINE:'true' }, timeoutMs:10 * 60 * 1000 },
     { id:'backup-create', label:'Pre-deployment backup creation', args:['backend/scripts/backup-create.mjs'], timeoutMs:30 * 60 * 1000 },
     { id:'backup-verify', label:'Pre-deployment backup verification', args:['backend/scripts/backup-verify.mjs'], timeoutMs:15 * 60 * 1000 },
     { id:'backup-status', label:'Pre-deployment backup status', args:['backend/scripts/backup-status.mjs'], timeoutMs:10 * 60 * 1000 }

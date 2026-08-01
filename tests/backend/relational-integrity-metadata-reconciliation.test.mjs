@@ -2,11 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
+  analyzeOperationalSameCountHashDrift,
   auditRelationalIntegrityMetadata,
   classifyLegacyShadowIntegrityDrift,
   mergeVerifiedPhysicalCounts,
   reconcileRelationalIntegrityMetadata,
   rebaselineLegacyShadowIntegrity,
+  rebaselineOperationalSameCountIntegrity,
   stateSnapshotHash
 } from '../../backend/src/repositories/postgresStateRepository.js';
 
@@ -174,3 +176,118 @@ test('legacy shadow rebaseline changes only metadata, revision evidence, and aud
   const event=queries.find(item=>item.text.includes('RELATIONAL_LEGACY_SHADOW_REBASELINED'));
   assert.ok(event);
 });
+
+test('same-count hash drift is repairable only when verified revision differences are presence, current-day attendance, and append-only audit',()=>{
+  const nowMs = new Date('2026-08-01T20:05:00.000Z').getTime();
+  const revisionState = {
+    ...emptyPersistedState,
+    users:[{ id:'u1', name:'Designer', role:'Designer', status:'APPROVED', isOnline:false, availability:'Unavailable', lastSeenAt:nowMs - 600000 }],
+    attendanceLogs:[{ id:'u1_2026-08-02', userId:'u1', name:'Designer', role:'Designer', date:'2026-08-02', loginAt:nowMs - 1800000, activeMinutes:10, lastTick:nowMs - 600000 }],
+    audit:[{ id:'a1', at:'2026-08-01T19:30:00.000Z', by:'system', action:'Existing event', entity:'u1' }]
+  };
+  const currentState = structuredClone(revisionState);
+  Object.assign(currentState.users[0], { isOnline:true, availability:'Available', lastSeenAt:nowMs, lastHeartbeatAt:nowMs, availabilityUpdatedAt:nowMs });
+  Object.assign(currentState.attendanceLogs[0], { activeMinutes:20, totalLoggedInMinutes:20, lastTick:nowMs, logoutAt:nowMs, status:'Online', isOnline:true });
+  currentState.audit.unshift({ id:'a2', at:'2026-08-01T20:02:29.840Z', by:'Admin', action:'Presence-safe event', entity:'u1' });
+  const counts = { ...emptyCounts, users:1, attendanceLogs:1, audit:2 };
+  const revisionCounts = { ...emptyCounts, users:1, attendanceLogs:1, audit:1 };
+  const safe = analyzeOperationalSameCountHashDrift({
+    expectedCounts:counts,
+    actualCounts:counts,
+    countMismatches:[],
+    expectedHash:'stale-metadata-hash',
+    actualHash:stateSnapshotHash(currentState),
+    source:'relational',
+    currentState,
+    currentVersion:441,
+    revisionState,
+    revisionVersion:438,
+    revisionHash:stateSnapshotHash(revisionState),
+    revisionCounts,
+    revisionCreatedAt:'2026-08-01T19:35:26.611Z',
+    nowMs
+  });
+  assert.equal(safe.safe,true);
+  assert.equal(safe.addedAuditRows,1);
+
+  const financeRevision = structuredClone(revisionState);
+  financeRevision.cases = [{ id:'case-1', caseId:'KV-1', status:'Completed', client:'Client', financeVersion:1, ledger:{ amountIn:0 }, history:[], timeline:[], paymentAuditTrail:[] }];
+  financeRevision.payments = [{ id:'pay-1', source:'INLINE_PAYMENT_STATUS', caseId:'case-1', paymentAmountIn:0 }];
+  const financeCurrent = structuredClone(financeRevision);
+  Object.assign(financeCurrent.cases[0], {
+    financeVersion:2,
+    paymentTrackingStatus:'Paid',
+    paymentAmountIn:5000,
+    paymentStatus:'YES',
+    paymentReceived:'YES',
+    ledger:{ amountIn:5000, financeLedgerId:'pay-1', status:'Paid' },
+    history:[{ id:'h2', action:'Finance updated for 2026-08: Paid' }],
+    timeline:[{ id:'t2', type:'payment_updated', title:'Payment Paid' }],
+    paymentAuditTrail:[{ id:'pa2', action:'Payment status updated', newAmount:5000 }]
+  });
+  Object.assign(financeCurrent.payments[0], { paymentAmountIn:5000, updatedAt:'2026-08-01T20:02:29.840Z' });
+  financeCurrent.audit = [...financeRevision.audit, { id:'a-fin', action:'Finance updated for 2026-08: Paid' }];
+  const financeCounts = { ...counts, cases:1, payments:1 };
+  const financeRevisionCounts = { ...revisionCounts, cases:1, payments:1 };
+  const financeSafe = analyzeOperationalSameCountHashDrift({
+    expectedCounts:financeCounts,
+    actualCounts:financeCounts,
+    countMismatches:[],
+    expectedHash:'stale-finance-hash',
+    actualHash:stateSnapshotHash(financeCurrent),
+    source:'relational',
+    currentState:financeCurrent,
+    currentVersion:441,
+    revisionState:financeRevision,
+    revisionVersion:438,
+    revisionHash:stateSnapshotHash(financeRevision),
+    revisionCounts:financeRevisionCounts,
+    revisionCreatedAt:'2026-08-01T19:35:26.611Z',
+    nowMs
+  });
+  assert.equal(financeSafe.safe,true);
+  assert.deepEqual(financeSafe.financeCaseRows,['case-1']);
+
+  const unsafeState = structuredClone(currentState);
+  unsafeState.cases.push({ id:'case-unsafe', status:'Completed' });
+  const unsafe = analyzeOperationalSameCountHashDrift({
+    expectedCounts:{...counts,cases:1},
+    actualCounts:{...counts,cases:1},
+    countMismatches:[],
+    expectedHash:'stale-metadata-hash',
+    actualHash:stateSnapshotHash(unsafeState),
+    source:'relational',
+    currentState:unsafeState,
+    currentVersion:441,
+    revisionState,
+    revisionVersion:438,
+    revisionHash:stateSnapshotHash(revisionState),
+    revisionCounts,
+    revisionCreatedAt:'2026-08-01T19:35:26.611Z',
+    nowMs
+  });
+  assert.equal(unsafe.safe,false);
+  assert.equal(unsafe.reason,'non-finance-case-data-changed');
+});
+
+test('deployment repair includes evidence-bounded same-count operational rebaseline',()=>{
+  const auditScript=fs.readFileSync(new URL('../../backend/scripts/db-integrity-audit.mjs',import.meta.url),'utf8');
+  const repairScript=fs.readFileSync(new URL('../../backend/scripts/db-integrity-repair.mjs',import.meta.url),'utf8');
+  const deploy=fs.readFileSync(new URL('../../scripts/deploy-1.9.24-vps.sh',import.meta.url),'utf8');
+  assert.match(auditScript,/OPERATIONAL_SAME_COUNT_REBASELINE_REQUIRED/);
+  assert.match(repairScript,/rebaselineOperationalSameCountIntegrity/);
+  assert.match(repairScript,/before\.operationalSameCountRebaselineSafe/);
+  assert.match(deploy,/operationalSameCountRebaselineSafe/);
+  assert.equal(typeof rebaselineOperationalSameCountIntegrity,'function');
+});
+
+test('selected relational writes verify exact physical payloads before integrity metadata is committed',()=>{
+  const repository=fs.readFileSync(new URL('../../backend/src/repositories/postgresStateRepository.js',import.meta.url),'utf8');
+  const syncIndex=repository.indexOf('await syncRelationalParts');
+  const verifyIndex=repository.indexOf('await verifySelectedRowsPhysicallyPersisted',syncIndex);
+  const metadataIndex=repository.indexOf('UPDATE app_state_metadata',verifyIndex);
+  assert.ok(syncIndex >= 0 && verifyIndex > syncIndex && metadataIndex > verifyIndex);
+  assert.match(repository,/RELATIONAL_SELECTED_ROW_MISMATCH/);
+  assert.match(repository,/JSON\.parse\(JSON\.stringify\(expected\.payload\)\)/);
+});
+

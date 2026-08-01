@@ -7,6 +7,7 @@ import {
   auditRelationalIntegrityMetadata,
   reconcileRelationalIntegrityMetadata,
   rebaselineLegacyShadowIntegrity,
+  rebaselineOperationalSameCountIntegrity,
   runRelationalMigrations
 } from '../src/repositories/postgresStateRepository.js';
 
@@ -46,8 +47,11 @@ try {
   else if (before.legacyShadowRebaselineSafe) action = await rebaselineLegacyShadowIntegrity(pool, {
     actor:'deployment-integrity-repair', backupManifest:manifestPath
   });
+  else if (before.operationalSameCountRebaselineSafe) action = await rebaselineOperationalSameCountIntegrity(pool, {
+    actor:'deployment-integrity-repair', backupManifest:manifestPath
+  });
   else {
-    const error = new Error('Integrity repair refused because the production drift is not a recognized metadata-only legacy condition.');
+    const error = new Error('Integrity repair refused because the production drift is not a recognized and evidence-bounded metadata condition.');
     error.code = 'UNSAFE_INTEGRITY_DRIFT';
     error.details = before;
     throw error;

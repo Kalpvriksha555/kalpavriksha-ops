@@ -1,33 +1,39 @@
 # Clean Release Verification Results
 
-Validated from a fresh extraction of the user-supplied baseline on 2 August 2026.
+Validated from the automatic-payment-ledger baseline on 2 August 2026.
 
 ## Passed
 
 - ZIP/source packaging audit
 - JSON parsing and package-lock consistency
 - JavaScript syntax across scripts, backend, tests and services
+- JSX parsing for the modified frontend entry point and Command Centre
 - Bash syntax across deployment scripts
 - Security package audit
 - Project doctor
 - Regression guard
 - Production regression audit
-- 73 frontend tests
-- 129 backend tests
-- 202 combined tests
+- 74 frontend tests
+- 134 backend tests
+- 208 combined tests
 - Phase 5 relational schema/integrity verification across 16 tables
 - Phase 9 frontend/UX verification
-- 72 frontend/backend contract checks across 82 backend routes
-- Missing environment template restored
-- Generated frontend build removed
-- Obsolete July 30/legacy rollback deployment launchers removed
+- 74 frontend/backend contract checks across 83 backend routes
+- Exact calendar-month Performance Analytics and leaderboard scope
+- Reversible Admin-only Manager/Designer score baselines
+- Corrected monthly report creation cohort and carried-forward completions
+- Selected-row physical PostgreSQL verification before integrity metadata commit
 
 ## Production integrity handling
 
-The guarded repair accepts only the documented legacy normalized-shadow condition where mismatches are limited to `files` and `performanceRecords`, stored counts are greater than physical counts, and the metadata source is relational. It requires a recent verified full PostgreSQL/private-files backup, runs while writes are stopped, changes no operational rows, creates a new canonical revision from physical PostgreSQL rows, updates integrity metadata, records an operational event, and then requires strict integrity to pass.
+The guarded repair accepts only three non-destructive evidence classes:
 
-Any other mismatch remains blocked.
+1. Canonical-hash-preserving count metadata drift limited to approved collections.
+2. The documented legacy normalized-shadow condition limited to `files` and `performanceRecords` where stored counts exceed physical counts.
+3. Equal-count operational hash drift proven against a recent independently valid revision and limited to live presence, current-day attendance, append-only audit, or narrowly verified finance-only case/payment edits.
+
+Every repair requires a recent verified full PostgreSQL/private-files backup, runs while writes are stopped, changes no operational rows, creates a new canonical revision, records an operational event, and then requires strict integrity to pass. Any unsupported difference remains blocked.
 
 ## Environment limitation
 
-A clean `npm ci` could not be completed in the packaging environment because its internal npm mirror returned HTTP 404 for the public package `zod-validation-error@4.0.2`. Package-lock consistency passed, and the VPS deployment performs its own isolated clean install before downtime.
+A clean `npm ci` could not be completed in the packaging environment because its internal npm mirror returned HTTP 404 for public packages. Package-lock consistency and all source-level checks passed. The VPS deployment performs an isolated clean installation and production build before downtime.

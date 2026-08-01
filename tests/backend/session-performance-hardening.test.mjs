@@ -75,7 +75,7 @@ test('adaptive state reads return unchanged or presence-only payloads without re
 test('leaderboard keeps historical aggregates cached while live presence stays fresh', () => {
   assert.match(server, /let leaderboardAggregateCache = new Map\(\)/);
   assert.match(server, /function leaderboardAggregateStats/);
-  assert.match(server, /const cacheKey = `\$\{performanceDataRevision\}:\$\{rangeKey\}:\$\{todayKey\}`/);
+  assert.match(server, /const cacheKey = `\$\{performanceDataRevision\}:\$\{config\.key\}:\$\{todayKey\}`/);
   assert.match(server, /function buildTeamLeaderboard[\s\S]*presenceById[\s\S]*availability:presence\.availability/);
   assert.match(server, /leaderboardAggregateCache\.clear\(\)/);
   assert.match(server, /return !reason\.startsWith\('presence_'\)/);
@@ -86,8 +86,29 @@ test('leaderboard case counts resolve assignee ids as well as display names', ()
   const end = server.indexOf('function buildTeamLeaderboard', start);
   const block = server.slice(start, end);
   assert.match(block, /userKeyById/);
-  assert.match(block, /c\.assigneeId/);
+  assert.match(block, /record\.assigneeId/);
   assert.match(block, /canonicalOwner/);
+});
+
+
+test('performance leaderboard supports exact calendar months, overall scope, and reversible admin baselines', () => {
+  assert.match(server, /function performanceScopeConfig/);
+  assert.match(server, /scope:'month'/);
+  assert.match(server, /scope:'overall'/);
+  assert.match(server, /serverMonthKey\(timestamp\) === config\.month/);
+  assert.match(server, /app\.patch\('\/api\/performance\/baseline\/:id', requireAdminSession/);
+  assert.match(server, /scoreBaselineMonth/);
+  assert.match(server, /Full performance score history restored/);
+  assert.match(server, /\['Manager','Designer'\]\.includes\(targetRole\)/);
+  assert.match(server, /PERFORMANCE_ROLE_NOT_ELIGIBLE/);
+  assert.match(server, /collections:\['users','audit'\]/);
+});
+
+test('monthly performance excludes ambiguous updatedAt-only completion dates', () => {
+  assert.match(server, /completionEventAt:completionEventAt\|\|0/);
+  assert.match(server, /if \(config\.scope === 'month'\) return explicit/);
+  assert.match(server, /performanceCaseCompletedAt/);
+  assert.doesNotMatch(server.slice(server.indexOf('function performanceCaseCompletedAt'), server.indexOf('function performanceCaseRevisionAt')), /updatedAt/);
 });
 
 test('collection-aware workspace sync does not resend cases for chat-only changes', () => {

@@ -19,8 +19,20 @@ try {
   await runRelationalMigrations(pool);
   const audit = await auditRelationalIntegrityMetadata(pool);
   const allowLegacy = String(process.env.KALPA_ALLOW_LEGACY_SHADOW_REBASELINE || '').trim().toLowerCase() === 'true';
-  const status = audit.healthy ? 'HEALTHY' : audit.safeCountMetadataDrift ? 'SAFE_COUNT_METADATA_DRIFT' : audit.legacyShadowRebaselineSafe ? 'LEGACY_SHADOW_REBASELINE_REQUIRED' : 'UNSAFE_INTEGRITY_DRIFT';
-  const ok = audit.healthy || audit.safeCountMetadataDrift || (allowLegacy && audit.legacyShadowRebaselineSafe);
+  const allowOperational = String(process.env.KALPA_ALLOW_OPERATIONAL_SAME_COUNT_REBASELINE || '').trim().toLowerCase() === 'true';
+  const status = audit.healthy
+    ? 'HEALTHY'
+    : audit.safeCountMetadataDrift
+      ? 'SAFE_COUNT_METADATA_DRIFT'
+      : audit.legacyShadowRebaselineSafe
+        ? 'LEGACY_SHADOW_REBASELINE_REQUIRED'
+        : audit.operationalSameCountRebaselineSafe
+          ? 'OPERATIONAL_SAME_COUNT_REBASELINE_REQUIRED'
+          : 'UNSAFE_INTEGRITY_DRIFT';
+  const ok = audit.healthy
+    || audit.safeCountMetadataDrift
+    || (allowLegacy && audit.legacyShadowRebaselineSafe)
+    || (allowOperational && audit.operationalSameCountRebaselineSafe);
   console.log(JSON.stringify({ ok, status, ...audit }, null, 2));
   if (!ok) process.exitCode = 1;
 } catch (error) {

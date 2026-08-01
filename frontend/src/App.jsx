@@ -6561,7 +6561,7 @@ function AppShell() {
         ) : activeTab === 'command' ? (
           <CommandCentreView projects={projects} users={activeUsers} attendanceLogs={attendanceLogs} currentUser={currentUser} onOpenPerformance={() => setActiveTab('productivity')} onSelectProject={(p) => openTaskDetail(p, 'command')} onNavigate={(target) => { if (target === 'newCase') { setShowNewLead(true); return; } if (target === 'notifications') { setShowNotifs(true); return; } setActiveTab(target); }} />
         ) : activeTab === 'productivity' ? (
-          <ProductivityDashboard users={activeUsers} projects={projects} performanceRecords={performanceRecords} performanceSummary={performanceSummary} />
+          <ProductivityDashboard users={activeUsers} projects={projects} performanceRecords={performanceRecords} performanceSummary={performanceSummary} currentUser={currentUser} />
         ) : activeTab === 'closing' && currentUser.role === ROLES.ADMIN ? (
           <DailyClosingReport projects={projects} currentUser={currentUser} />
         ) : activeTab === 'reports' && currentUser.role === ROLES.ADMIN ? (

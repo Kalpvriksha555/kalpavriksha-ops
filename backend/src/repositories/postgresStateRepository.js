@@ -687,6 +687,214 @@ export function classifyLegacyShadowIntegrityDrift({
   });
 }
 
+
+const OPERATIONAL_PRESENCE_USER_KEYS = new Set([
+  'isOnline', 'availability', 'lastSeenAt', 'lastHeartbeatAt', 'lastLoginAt',
+  'lastLogoutAt', 'availabilityUpdatedAt', 'breakStartedAt'
+]);
+
+function stateRowsById(rows = []) {
+  return new Map((rows || []).map(row => [String(row?.id || ''), row]).filter(([id]) => id));
+}
+
+function withoutTopLevelKeys(payload = {}, keys = new Set()) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
+  return Object.fromEntries(Object.entries(payload).filter(([key]) => !keys.has(key)));
+}
+
+function sameRowIdentityAndPayload(beforeRows = [], afterRows = []) {
+  return stableStringify(beforeRows || []) === stableStringify(afterRows || []);
+}
+
+function sameRowsExceptPayloadKeys(beforeRows = [], afterRows = [], allowedKeys = new Set()) {
+  const before = stateRowsById(beforeRows);
+  const after = stateRowsById(afterRows);
+  if (before.size !== after.size || [...before.keys()].some(id => !after.has(id))) return false;
+  for (const [id, previous] of before) {
+    const current = after.get(id);
+    if (Number(previous?.sortOrder || 0) !== Number(current?.sortOrder || 0)) return false;
+    if (stableStringify(withoutTopLevelKeys(previous?.payload || {}, allowedKeys))
+      !== stableStringify(withoutTopLevelKeys(current?.payload || {}, allowedKeys))) return false;
+  }
+  return true;
+}
+
+function indiaDateKey(value = Date.now()) {
+  try {
+    return new Date(value).toLocaleDateString('en-CA', { timeZone:'Asia/Kolkata' });
+  } catch {
+    return new Date(value).toISOString().slice(0, 10);
+  }
+}
+
+function attendanceRowsChangedOnlyForCurrentDay(beforeRows = [], afterRows = [], nowMs = Date.now()) {
+  const before = stateRowsById(beforeRows);
+  const after = stateRowsById(afterRows);
+  if (before.size !== after.size || [...before.keys()].some(id => !after.has(id))) return false;
+  const today = indiaDateKey(nowMs);
+  const immutableKeys = ['id', 'userId', 'name', 'role', 'date'];
+  for (const [id, previous] of before) {
+    const current = after.get(id);
+    if (Number(previous?.sortOrder || 0) !== Number(current?.sortOrder || 0)) return false;
+    if (stableStringify(previous?.payload || {}) === stableStringify(current?.payload || {})) continue;
+    const previousPayload = previous?.payload || {};
+    const currentPayload = current?.payload || {};
+    if (String(previousPayload.date || '') !== today || String(currentPayload.date || '') !== today) return false;
+    for (const key of immutableKeys) {
+      if (stableStringify(previousPayload[key]) !== stableStringify(currentPayload[key])) return false;
+    }
+  }
+  return true;
+}
+
+function auditRowsAreAppendOnly(beforeRows = [], afterRows = []) {
+  const after = stateRowsById(afterRows);
+  if ((afterRows || []).length < (beforeRows || []).length) return false;
+  return (beforeRows || []).every(previous => {
+    const current = after.get(String(previous?.id || ''));
+    return current && stableStringify(previous?.payload || {}) === stableStringify(current?.payload || {});
+  });
+}
+
+
+const FINANCE_CASE_KEYS = new Set([
+  'estimate', 'estimateAmount', 'financeVersion', 'financeAccountingPeriod',
+  'paymentTrackingStatus', 'paymentTrackingUpdatedAt', 'paymentTrackingUpdatedBy',
+  'paymentStatus', 'paymentReceived', 'paymentAmountIn', 'expenses', 'refundAmount',
+  'paymentDate', 'paymentTime', 'payerName', 'transactionId', 'ledger',
+  'paymentAuditTrail', 'history', 'timeline', 'updatedAt', 'syncVersion',
+  'lastFinanceMutationId', 'lastFinanceMutationAt'
+]);
+
+function appendOnlyArray(previous = [], current = [], newEntryPattern = null) {
+  const previousEncoded = new Map((previous || []).map(item => [String(item?.id || stableStringify(item)), stableStringify(item)]));
+  const currentEncoded = new Map((current || []).map(item => [String(item?.id || stableStringify(item)), stableStringify(item)]));
+  for (const [key, encoded] of previousEncoded) if (currentEncoded.get(key) !== encoded) return false;
+  if (!newEntryPattern) return true;
+  for (const item of current || []) {
+    const key = String(item?.id || stableStringify(item));
+    if (previousEncoded.has(key)) continue;
+    const text = String(item?.type || item?.action || item?.title || item?.text || item?.message || item?.remarks || '').toLowerCase();
+    if (!newEntryPattern.test(text)) return false;
+  }
+  return true;
+}
+
+function financeCaseRowsOnly(beforeRows = [], afterRows = []) {
+  const before = stateRowsById(beforeRows);
+  const after = stateRowsById(afterRows);
+  if (before.size !== after.size || [...before.keys()].some(id => !after.has(id))) return { safe:false, changedCaseIds:[] };
+  const changedCaseIds = [];
+  for (const [id, previous] of before) {
+    const current = after.get(id);
+    const previousPayload = previous?.payload || {};
+    const currentPayload = current?.payload || {};
+    if (stableStringify(previousPayload) === stableStringify(currentPayload)) continue;
+    if (stableStringify(withoutTopLevelKeys(previousPayload, FINANCE_CASE_KEYS))
+      !== stableStringify(withoutTopLevelKeys(currentPayload, FINANCE_CASE_KEYS))) return { safe:false, changedCaseIds };
+    if (!appendOnlyArray(previousPayload.paymentAuditTrail, currentPayload.paymentAuditTrail)) return { safe:false, changedCaseIds };
+    if (!appendOnlyArray(previousPayload.history, currentPayload.history, /finance|payment|receipt|refund|expense/)) return { safe:false, changedCaseIds };
+    if (!appendOnlyArray(previousPayload.timeline, currentPayload.timeline, /finance|payment|receipt|refund|expense/)) return { safe:false, changedCaseIds };
+    changedCaseIds.push(id);
+  }
+  return { safe:changedCaseIds.length <= 10, changedCaseIds };
+}
+
+function paymentRowsMatchFinanceCases(beforeRows = [], afterRows = [], changedCaseRows = []) {
+  const before = stateRowsById(beforeRows);
+  const after = stateRowsById(afterRows);
+  if (before.size !== after.size || [...before.keys()].some(id => !after.has(id))) return false;
+  const aliases = new Set();
+  for (const row of changedCaseRows || []) {
+    const payload = row?.payload || {};
+    [row?.id, payload.id, payload.caseId, payload.caseNo, payload.displayId, payload.originalTaskId, payload.ledger?.financeLedgerId]
+      .filter(Boolean).forEach(value => aliases.add(String(value)));
+  }
+  for (const [id, previous] of before) {
+    const current = after.get(id);
+    if (stableStringify(previous?.payload || {}) === stableStringify(current?.payload || {})) continue;
+    const payload = current?.payload || {};
+    const references = [id, payload.id, payload.caseId, payload.caseNo, payload.taskId, payload.projectId]
+      .filter(Boolean).map(String);
+    if (!references.some(value => aliases.has(value))) return false;
+  }
+  return true;
+}
+
+export function analyzeOperationalSameCountHashDrift({
+  expectedCounts = {},
+  actualCounts = {},
+  countMismatches = [],
+  expectedHash = '',
+  actualHash = '',
+  source = '',
+  currentState = {},
+  currentVersion = 0,
+  revisionState = null,
+  revisionVersion = 0,
+  revisionHash = '',
+  revisionCounts = {},
+  revisionCreatedAt = null,
+  nowMs = Date.now()
+} = {}) {
+  const refuse = (reason, details = {}) => ({ safe:false, reason, ...details });
+  if ((countMismatches || []).length) return refuse('entity-count-mismatch');
+  if (!expectedHash || !actualHash || expectedHash === actualHash) return refuse('not-a-same-count-hash-drift');
+  if (!String(source || '').startsWith('relational')) return refuse('non-relational-source');
+  if (!revisionState || typeof revisionState !== 'object') return refuse('verified-revision-missing');
+  const current = Number(currentVersion || 0);
+  const revision = Number(revisionVersion || 0);
+  if (!current || !revision || revision >= current || current - revision > 50) return refuse('revision-window-not-safe');
+  const revisionAt = new Date(revisionCreatedAt || 0).getTime();
+  if (!revisionAt || nowMs - revisionAt > 24 * 60 * 60 * 1000) return refuse('verified-revision-too-old');
+  const verifiedRevisionHash = stateSnapshotHash(revisionState);
+  if (!revisionHash || verifiedRevisionHash !== String(revisionHash)) return refuse('revision-hash-invalid');
+  const baselineParts = decomposeState(revisionState);
+  const currentParts = decomposeState(currentState);
+  if (compareCounts(revisionCounts || {}, entityCounts(baselineParts)).length) return refuse('revision-counts-invalid');
+  if (compareCounts(expectedCounts || {}, actualCounts || {}).length) return refuse('metadata-counts-do-not-match-physical');
+
+  const immutableCollections = [
+    'performanceRecords', 'notifications', 'teamChat', 'whatsappInbox',
+    'files', 'deletedProjectIds', 'chatReads', 'misc'
+  ];
+  const changedImmutable = immutableCollections.filter(key => !sameRowIdentityAndPayload(baselineParts[key], currentParts[key]));
+  if (changedImmutable.length) return refuse('business-collection-changed', { changedCollections:changedImmutable });
+  const financeCases = financeCaseRowsOnly(baselineParts.cases, currentParts.cases);
+  if (!financeCases.safe) return refuse('non-finance-case-data-changed');
+  const currentCasesById = stateRowsById(currentParts.cases);
+  const changedCaseRows = financeCases.changedCaseIds.map(id => currentCasesById.get(id)).filter(Boolean);
+  if (!paymentRowsMatchFinanceCases(baselineParts.payments, currentParts.payments, changedCaseRows)) {
+    return refuse('payment-data-not-linked-to-finance-case-change');
+  }
+  if (!sameRowsExceptPayloadKeys(baselineParts.users, currentParts.users, OPERATIONAL_PRESENCE_USER_KEYS)) {
+    return refuse('non-presence-user-data-changed');
+  }
+  if (!attendanceRowsChangedOnlyForCurrentDay(baselineParts.attendanceLogs, currentParts.attendanceLogs, nowMs)) {
+    return refuse('historical-or-identity-attendance-data-changed');
+  }
+  if (!auditRowsAreAppendOnly(baselineParts.audit, currentParts.audit)) return refuse('audit-history-not-append-only');
+
+  const addedAuditRows = Math.max(0, (currentParts.audit || []).length - (baselineParts.audit || []).length);
+  return {
+    safe:true,
+    reason:'presence-attendance-and-append-only-audit-only',
+    revisionVersion:revision,
+    currentVersion:current,
+    versionGap:current - revision,
+    addedAuditRows,
+    financeCaseRows:financeCases.changedCaseIds,
+    changedCollections:[
+      ...(financeCases.changedCaseIds.length ? ['cases', 'payments'] : []),
+      'users', 'attendanceLogs', ...(addedAuditRows ? ['audit'] : [])
+    ]
+  };
+}
+
+export function classifyOperationalSameCountHashDrift(input = {}) {
+  return analyzeOperationalSameCountHashDrift(input).safe === true;
+}
+
 function rowTimestamp(payload = {}) {
   return timestampValue(payload.updatedAt || payload.updated_at || payload.createdAt || payload.created_at) || new Date().toISOString();
 }
@@ -993,6 +1201,48 @@ export function prepareFastSelectedRelationalWrite({
 
 export function mergeRelationalParts(existingParts = {}, incomingParts = {}, selectedCollections = null) {
   return prepareRelationalWrite(existingParts, incomingParts, selectedCollections).committedParts;
+}
+
+
+async function verifySelectedRowsPhysicallyPersisted(client, preparedWrite = {}) {
+  const rowSelections = preparedWrite.rowSelections || new Map();
+  const rowDeletions = preparedWrite.rowDeletions || new Map();
+  for (const [key, selectedIds] of rowSelections.entries()) {
+    const config = TABLE_CONFIG[key];
+    if (!config || !selectedIds?.size) continue;
+    const expectedRows = new Map((preparedWrite.writeParts?.[key] || []).map(row => [String(row.id), row]));
+    const result = await client.query(
+      `SELECT ${config.idColumn} AS id,sort_order AS "sortOrder",payload
+         FROM ${config.table}
+        WHERE ${config.idColumn} = ANY($1::text[])`,
+      [[...selectedIds].map(String)]
+    );
+    const physicalRows = new Map(result.rows.map(row => [String(row.id), row]));
+    const deleted = new Set((rowDeletions.get(key) || []).map(String));
+    for (const id of selectedIds) {
+      const keyId = String(id);
+      if (deleted.has(keyId)) {
+        if (physicalRows.has(keyId)) {
+          const error = new Error(`Relational row deletion verification failed for ${key}:${keyId}.`);
+          error.code = 'RELATIONAL_SELECTED_ROW_DELETE_MISMATCH';
+          throw error;
+        }
+        continue;
+      }
+      const expected = expectedRows.get(keyId);
+      const physical = physicalRows.get(keyId);
+      const jsonSafeExpected = expected ? JSON.parse(JSON.stringify(expected.payload)) : null;
+      if (!expected || !physical
+        || Number(expected.sortOrder || 0) !== Number(physical.sortOrder || 0)
+        || stableStringify(jsonSafeExpected) !== stableStringify(physical.payload)) {
+        const error = new Error(`Relational selected-row verification failed for ${key}:${keyId}.`);
+        error.code = 'RELATIONAL_SELECTED_ROW_MISMATCH';
+        error.collection = key;
+        error.rowId = keyId;
+        throw error;
+      }
+    }
+  }
 }
 
 async function syncRelationalParts(client, parts = {}, selectedCollections = null, rowSelections = new Map(), rowDeletions = new Map()) {
@@ -1308,6 +1558,7 @@ export async function persistRelationalState(pool, {
     const hash = stateSnapshotHash(committedState, { cacheTopLevel:true });
 
     await syncRelationalParts(client, preparedWrite.writeParts, metadata.collections, preparedWrite.rowSelections, preparedWrite.rowDeletions || new Map());
+    await verifySelectedRowsPhysicallyPersisted(client, preparedWrite);
     // Entity counts are part of the integrity boundary and must describe the
     // rows that PostgreSQL actually committed. Older live processes could
     // calculate file/performance counts from a normalized shadow and silently
@@ -1403,6 +1654,18 @@ export async function persistRelationalState(pool, {
 }
 
 
+
+async function latestRelationalRevisionEvidence(client) {
+  const result = await client.query(
+    `SELECT state_version,snapshot_hash,entity_counts,snapshot,created_at
+       FROM state_revisions
+      ORDER BY state_version DESC
+      LIMIT 1`
+  );
+  return result.rows[0] || null;
+}
+
+
 export async function auditRelationalIntegrityMetadata(pool, { lock = false } = {}) {
   const client = await pool.connect();
   try {
@@ -1432,11 +1695,33 @@ export async function auditRelationalIntegrityMetadata(pool, { lock = false } = 
     const legacyShadowRebaselineSafe = classifyLegacyShadowIntegrityDrift({
       expectedCounts, actualCounts, countMismatches, expectedHash, actualHash, source:row.source || ''
     });
+    let operationalDrift = { safe:false, reason:'not-evaluated' };
+    if (!healthy && countMismatches.length === 0 && expectedHash && !hashMatches && String(row.source || '').startsWith('relational')) {
+      const revision = await latestRelationalRevisionEvidence(client);
+      operationalDrift = analyzeOperationalSameCountHashDrift({
+        expectedCounts,
+        actualCounts,
+        countMismatches,
+        expectedHash,
+        actualHash,
+        source:row.source || '',
+        currentState:persistedState,
+        currentVersion:Number(row.state_version || 0),
+        revisionState:revision?.snapshot || null,
+        revisionVersion:Number(revision?.state_version || 0),
+        revisionHash:String(revision?.snapshot_hash || ''),
+        revisionCounts:revision?.entity_counts || {},
+        revisionCreatedAt:revision?.created_at || null
+      });
+    }
+    const operationalSameCountRebaselineSafe = operationalDrift.safe === true;
     await client.query('COMMIT');
     return {
       healthy,
       safeCountMetadataDrift,
       legacyShadowRebaselineSafe,
+      operationalSameCountRebaselineSafe,
+      operationalDrift,
       stateVersion:Number(row.state_version || 0),
       expectedCounts,
       actualCounts,
@@ -1593,6 +1878,102 @@ export async function rebaselineLegacyShadowIntegrity(pool, { actor = 'deploymen
       ok:true, rebaselined:true, previousStateVersion:currentVersion, stateVersion:nextVersion,
       countMismatches, beforeCounts:expectedCounts, counts:actualCounts, previousSnapshotHash:expectedHash,
       snapshotHash:actualHash, backupManifest:String(backupManifest || '')
+    };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+
+export async function rebaselineOperationalSameCountIntegrity(pool, { actor = 'deployment-operational-integrity-rebaseliner', backupManifest = '' } = {}) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout = '15s'");
+    await client.query("SET LOCAL statement_timeout = '120s'");
+    await client.query('SELECT pg_advisory_xact_lock($1)', [ADVISORY_LOCK_ID]);
+    const metadata = await client.query('SELECT * FROM app_state_metadata WHERE key=$1 FOR UPDATE', ['main']);
+    if (!metadata.rows.length) {
+      const error = new Error('Relational state metadata is missing.');
+      error.code = 'RELATIONAL_METADATA_MISSING';
+      throw error;
+    }
+    const parts = await readRelationalParts(client);
+    const persistedState = recomposeState(parts);
+    const actualCounts = entityCounts(parts);
+    const actualHash = stateSnapshotHash(persistedState);
+    const row = metadata.rows[0];
+    const expectedCounts = row.entity_counts || {};
+    const expectedHash = String(row.snapshot_hash || '');
+    const countMismatches = compareCounts(expectedCounts, actualCounts);
+    if (!countMismatches.length && expectedHash === actualHash) {
+      await client.query('COMMIT');
+      return { ok:true, rebaselined:false, reason:'already-healthy', stateVersion:Number(row.state_version || 0), counts:actualCounts, snapshotHash:actualHash };
+    }
+    const revision = await latestRelationalRevisionEvidence(client);
+    const analysis = analyzeOperationalSameCountHashDrift({
+      expectedCounts,
+      actualCounts,
+      countMismatches,
+      expectedHash,
+      actualHash,
+      source:row.source || '',
+      currentState:persistedState,
+      currentVersion:Number(row.state_version || 0),
+      revisionState:revision?.snapshot || null,
+      revisionVersion:Number(revision?.state_version || 0),
+      revisionHash:String(revision?.snapshot_hash || ''),
+      revisionCounts:revision?.entity_counts || {},
+      revisionCreatedAt:revision?.created_at || null
+    });
+    if (!analysis.safe) {
+      const error = new Error(`Operational integrity rebaseline refused: ${analysis.reason}.`);
+      error.code = 'UNSAFE_OPERATIONAL_INTEGRITY_DRIFT';
+      error.details = { analysis, expectedCounts, actualCounts, countMismatches, expectedHash, actualHash, source:row.source || '' };
+      throw error;
+    }
+    const currentVersion = Number(row.state_version || 0);
+    const nextVersion = currentVersion + 1;
+    await client.query(
+      `INSERT INTO state_revisions(state_version,actor,reason,snapshot_hash,entity_counts,snapshot)
+       VALUES($1,$2,'operational_same_count_integrity_rebaseline',$3,$4::jsonb,$5::jsonb)`,
+      [nextVersion, String(actor || 'deployment-operational-integrity-rebaseliner'), actualHash, JSON.stringify(actualCounts), JSON.stringify(persistedState)]
+    );
+    await client.query(
+      `UPDATE app_state_metadata
+          SET state_version=$2,snapshot_hash=$3,entity_counts=$4::jsonb,source='relational_operational_integrity_rebaseline',updated_at=now()
+        WHERE key=$1`,
+      ['main', nextVersion, actualHash, JSON.stringify(actualCounts)]
+    );
+    await client.query(
+      `INSERT INTO operational_events(event_type,severity,actor,details)
+       VALUES('RELATIONAL_OPERATIONAL_INTEGRITY_REBASELINED','WARN',$1,$2::jsonb)`,
+      [String(actor || 'deployment-operational-integrity-rebaseliner'), JSON.stringify({
+        previousStateVersion:currentVersion,
+        stateVersion:nextVersion,
+        comparedRevisionVersion:Number(revision?.state_version || 0),
+        analysis,
+        expectedHash,
+        snapshotHash:actualHash,
+        counts:actualCounts,
+        backupManifest:String(backupManifest || '')
+      })]
+    );
+    await client.query('COMMIT');
+    return {
+      ok:true,
+      rebaselined:true,
+      previousStateVersion:currentVersion,
+      stateVersion:nextVersion,
+      comparedRevisionVersion:Number(revision?.state_version || 0),
+      analysis,
+      counts:actualCounts,
+      previousSnapshotHash:expectedHash,
+      snapshotHash:actualHash,
+      backupManifest:String(backupManifest || '')
     };
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});

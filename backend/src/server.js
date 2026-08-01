@@ -1700,7 +1700,8 @@ function buildPerformanceRecordsFromCases(cases=[]){
     const start=parseDateMs(c.startedAt||c.draftingStartedAt||c.workStartedAt) || parseDateMs(c.assignedAt) || (times.length?Math.min(...times):0);
     const latestDocTime = Array.isArray(c.documents) ? Math.max(0, ...c.documents.map(d => parseDateMs(d.uploadedAt || d.createdAt || d.date)).filter(Boolean)) : 0;
     const latestCompletedFileTime = Array.isArray(c.completedFiles) ? Math.max(0, ...c.completedFiles.map(f => parseDateMs(f.uploadedAt || f.createdAt || f.date || f.completedAt)).filter(Boolean)) : 0;
-    const end=parseDateMs(c.completedAt||c.finalApprovedAt||c.approvedAt||c.draftingCompletedAt||c.submittedAt||c.updatedAt) || latestCompletedFileTime || latestDocTime || (times.length?Math.max(...times):0);
+    const completionEventAt=parseDateMs(c.completedAt||c.finalApprovedAt||c.approvedAt||c.draftingCompletedAt||c.submittedAt||c.closedAt||c.deliveredAt) || latestCompletedFileTime || latestDocTime || 0;
+    const end=completionEventAt || parseDateMs(c.updatedAt) || (times.length?Math.max(...times):0);
     let mins=Number(c.completionMinutes||c.durationMinutes||c.completionDurationMinutes||0)||0;
     if(!mins && start && end && end>=start) mins=Math.max(1, Math.round((end-start)/60000));
     if(!mins) mins=perfBaselineMinutes(c);
@@ -1708,7 +1709,7 @@ function buildPerformanceRecordsFromCases(cases=[]){
     const submitted=parseDateMs(c.submittedAt||c.uploadedAt||c.draftingCompletedAt||c.completedAt);
     const reviewed=parseDateMs(c.reviewedAt||c.reviewApprovedAt||c.finalApprovedAt||c.approvedAt);
     const reviewMinutes=submitted && reviewed && reviewed>=submitted ? Math.max(1, Math.round((reviewed-submitted)/60000)) : (isCompletedCaseForPerf(c) ? (perfRevisionCount(c)>0?25:15) : 0);
-    records.push({ id:`${taskId}::${userName}`.toLowerCase(), taskId, userName, caseType:perfCaseType(c), location:c.location||c.city||'', bank:c.bank||c.bankName||'', assignedAt:parseDateMs(c.assignedAt)||0, startedAt:start||0, completedAt:end||0, totalCompletionMinutes:mins, reviewMinutes, revisionCount:perfRevisionCount(c), slaMet:true, createdFrom:'backend-lifecycle' });
+    records.push({ id:`${taskId}::${userName}`.toLowerCase(), taskId, userName, userId:String(c.assigneeId||c.assignedUserId||c.ownerId||c.userId||''), caseType:perfCaseType(c), location:c.location||c.city||'', bank:c.bank||c.bankName||'', assignedAt:parseDateMs(c.assignedAt)||0, startedAt:start||0, completedAt:end||0, completionEventAt:completionEventAt||0, completionMonthKey:completionEventAt ? serverMonthKey(completionEventAt) : '', completionDateSource:completionEventAt ? 'explicit-lifecycle' : 'legacy-derived', totalCompletionMinutes:mins, reviewMinutes, revisionCount:perfRevisionCount(c), slaMet:true, createdFrom:'backend-lifecycle' });
   }
   return records;
 }
@@ -1721,8 +1722,8 @@ function hasUsefulTiming(r = {}){
 function enrichPerformanceRecord(base = {}, incoming = {}){
   const merged = { ...(base || {}) };
   const directTimingFields = ['effectiveMinutes','totalCompletionMinutes','completionMinutes','activeMinutes','durationMinutes','reviewMinutes','reviewDurationMinutes'];
-  const dateFields = ['assignedAt','startedAt','draftStartedAt','createdAt','completedAt','finishedAt','approvedAt','updatedAt','reviewStartedAt','reviewCompletedAt','reviewApprovedAt','finalApprovedAt'];
-  const identityFields = ['id','taskId','userName','assigneeName','assignedTo','designerName','caseType','type','location','bank','createdFrom','timingSource'];
+  const dateFields = ['assignedAt','startedAt','draftStartedAt','createdAt','completedAt','completionEventAt','finishedAt','approvedAt','updatedAt','reviewStartedAt','reviewCompletedAt','reviewApprovedAt','finalApprovedAt'];
+  const identityFields = ['id','taskId','userId','userName','assigneeName','assignedTo','designerName','caseType','type','location','bank','createdFrom','timingSource','completionMonthKey','completionDateSource'];
   for (const key of [...identityFields, ...dateFields]) {
     if ((merged[key] === undefined || merged[key] === null || merged[key] === '') && incoming[key] !== undefined && incoming[key] !== null && incoming[key] !== '') merged[key] = incoming[key];
   }
@@ -1732,6 +1733,11 @@ function enrichPerformanceRecord(base = {}, incoming = {}){
     const current = Number(merged[key] || 0) || 0;
     const next = Number(incoming[key] || 0) || 0;
     if (current <= 0 && next > 0) merged[key] = Math.round(next);
+  }
+  if (parseDateMs(incoming.completionEventAt) > 0) {
+    merged.completionEventAt = incoming.completionEventAt;
+    merged.completionMonthKey = incoming.completionMonthKey || serverMonthKey(incoming.completionEventAt);
+    merged.completionDateSource = incoming.completionDateSource || 'explicit-lifecycle';
   }
   // Keep the latest completion timestamp, but never discard useful timing from the other row.
   const currentDone = parseDateMs(merged.completedAt || merged.finishedAt || merged.updatedAt);
@@ -1805,7 +1811,7 @@ function buildPerformanceDiagnostics(cases = [], records = []){
 }
 
 function getRecordCompletedMs(r = {}) {
-  return parseDateMs(r.completedAt || r.finishedAt || r.reviewCompletedAt || r.updatedAt || r.createdAt) || 0;
+  return parseDateMs(r.completionEventAt || r.finalApprovedAt || r.approvedAt || r.completedAt || r.finishedAt || r.reviewCompletedAt || r.updatedAt || r.createdAt) || 0;
 }
 function rollingAverageFromRecords(rows = [], size = 10) {
   return avgRounded((rows || []).slice(0, size).map(recordCompletionMinutes));
@@ -3675,6 +3681,16 @@ function getPerformanceBundle(d = readDb()) {
   return performanceBundleCache;
 }
 
+function serverMonthKey(ms = Date.now()) {
+  const dayKey = serverTodayKey(ms);
+  return /^\d{4}-\d{2}-\d{2}$/.test(dayKey) ? dayKey.slice(0, 7) : '';
+}
+
+function normalizePerformanceMonthKey(value = '', fallback = serverMonthKey(Date.now())) {
+  const raw = String(value || '').trim().slice(0, 7);
+  return /^\d{4}-(0[1-9]|1[0-2])$/.test(raw) ? raw : fallback;
+}
+
 function performanceRangeMs(value = 'month') {
   const key = String(value || 'month').trim().toLowerCase();
   if (key === 'week') return 7 * 86400000;
@@ -3682,59 +3698,166 @@ function performanceRangeMs(value = 'month') {
   return 30 * 86400000;
 }
 
-function leaderboardAggregateStats(d = readDb(), range = 'month') {
-  const rangeKey = ['week','month','quarter'].includes(String(range || '').toLowerCase()) ? String(range).toLowerCase() : 'month';
+function performanceScopeConfig(input = {}) {
+  const source = typeof input === 'string' ? { range:input } : (input || {});
+  const scope = String(source.scope || '').trim().toLowerCase();
+  if (scope === 'overall') return { scope:'overall', month:'', range:'', key:'overall' };
+  if (scope === 'month') {
+    const month = normalizePerformanceMonthKey(source.month);
+    return { scope:'month', month, range:'', key:`month:${month}` };
+  }
+  const legacyRange = ['week','month','quarter'].includes(String(source.range || '').toLowerCase()) ? String(source.range).toLowerCase() : '';
+  if (legacyRange) return { scope:'rolling', month:'', range:legacyRange, key:`rolling:${legacyRange}` };
+  const month = normalizePerformanceMonthKey(source.month);
+  return { scope:'month', month, range:'', key:`month:${month}` };
+}
+
+function performanceBaselineDetails(user = {}) {
+  const profile = user.performanceProfile || {};
+  const month = normalizePerformanceMonthKey(
+    profile.scoreBaselineMonth || profile.baselineMonth || user.performanceBaselineMonth,
+    ''
+  );
+  const at = parseDateMs(profile.scoreBaselineAt || profile.baselineAt || user.performanceBaselineAt);
+  return {
+    enabled:Boolean(month && at),
+    month,
+    at:month && at ? at : 0,
+    updatedAt:profile.scoreBaselineUpdatedAt || profile.baselineUpdatedAt || user.performanceBaselineUpdatedAt || null,
+    updatedBy:profile.scoreBaselineUpdatedBy || profile.baselineUpdatedBy || user.performanceBaselineUpdatedBy || ''
+  };
+}
+
+function performanceEventMatchesScope(eventAt = 0, config = performanceScopeConfig(), baselineAt = 0, nowMs = Date.now()) {
+  const timestamp = parseDateMs(eventAt);
+  if (!timestamp || (baselineAt && timestamp < baselineAt)) return false;
+  if (config.scope === 'overall') return true;
+  if (config.scope === 'month') return serverMonthKey(timestamp) === config.month;
+  return timestamp >= nowMs - performanceRangeMs(config.range);
+}
+
+function latestPerformanceDocumentTime(c = {}) {
+  const lists = [c.completedFiles, c.documents, c.files, c.uploads, c.attachments].filter(Array.isArray);
+  let latest = 0;
+  for (const list of lists) {
+    for (const item of list) {
+      if (!item || typeof item !== 'object') continue;
+      const marker = String(item.type || item.category || item.status || item.fileType || item.name || item.filename || '').toLowerCase();
+      if (marker && !/complete|final|approved|deliver|drawing|dwg|pdf/.test(marker)) continue;
+      latest = Math.max(latest, parseDateMs(item.uploadedAt || item.createdAt || item.updatedAt || item.completedAt || item.date || item.time));
+    }
+  }
+  return latest;
+}
+
+function performanceCaseCreatedAt(c = {}) {
+  return parseDateMs(c.assignedAt || c.createdAt || c.taskDate || c.receivedAt || c.addedAt || c.createdOn);
+}
+
+function performanceCaseCompletedAt(c = {}) {
+  return parseDateMs(c.completedAt || c.finalApprovedAt || c.approvedAt || c.draftingCompletedAt || c.submittedAt || c.closedAt || c.deliveredAt)
+    || latestPerformanceDocumentTime(c)
+    || 0;
+}
+
+function performanceCaseRevisionAt(c = {}) {
+  const explicit = parseDateMs(c.lastRevisionAt || c.revisionUpdatedAt || c.revisionRequestedAt || c.revertedAt || c.lastRevertedAt);
+  if (explicit) return explicit;
+  const events = [
+    ...(Array.isArray(c.timeline) ? c.timeline : []),
+    ...(Array.isArray(c.history) ? c.history : []),
+    ...(Array.isArray(c.activityLog) ? c.activityLog : []),
+    ...(Array.isArray(c.events) ? c.events : [])
+  ];
+  let latest = 0;
+  for (const event of events) {
+    const text = String(event?.text || event?.message || event?.title || event?.action || event?.type || event?.status || '').toLowerCase();
+    if (!/revision|revert|correction|changes requested/.test(text)) continue;
+    latest = Math.max(latest, parseDateMs(event.at || event.time || event.timestamp || event.date || event.createdAt || event.updatedAt));
+  }
+  return latest;
+}
+
+function recordScopeCompletionAt(record = {}, config = performanceScopeConfig()) {
+  const explicit = parseDateMs(record.completionEventAt || record.finalApprovedAt || record.approvedAt || record.finishedAt);
+  if (config.scope === 'month') return explicit;
+  return explicit || getRecordCompletedMs(record);
+}
+
+function leaderboardAggregateStats(d = readDb(), options = {}) {
+  const config = performanceScopeConfig(options);
   const nowMs = Date.now();
   const todayKey = serverTodayKey(nowMs);
-  const cacheKey = `${performanceDataRevision}:${rangeKey}:${todayKey}`;
+  const cacheKey = `${performanceDataRevision}:${config.key}:${todayKey}`;
   const cached = leaderboardAggregateCache.get(cacheKey);
   if (cached) return cached;
 
-  const cutoff = nowMs - performanceRangeMs(rangeKey);
   const performance = getPerformanceBundle(d);
-  const summaryByName = new Map((performance.summary?.users || []).map(row => [String(row.userName || '').trim().toLowerCase(), row]));
   const approvedMembers = (d.users || [])
     .filter(user => normalizeStatus(user.status) === 'APPROVED' && normalizeRole(user.role) !== 'Admin');
   const userKeyById = new Map();
   const userKeyByName = new Map();
+  const memberByCanonical = new Map();
   approvedMembers.forEach(user => {
     const canonical = String(user.id || user.name || '').trim().toLowerCase();
     if (!canonical) return;
+    memberByCanonical.set(canonical, user);
     [user.id, user.userId].filter(Boolean).forEach(value => userKeyById.set(String(value).trim().toLowerCase(), canonical));
     [user.name, user.username].filter(Boolean).forEach(value => userKeyByName.set(String(value).trim().toLowerCase(), canonical));
   });
+  const resolveCanonicalOwner = (record = {}) => {
+    const byId = [record.userId, record.assigneeId, record.assignedUserId, record.ownerId]
+      .map(value => String(value || '').trim().toLowerCase())
+      .find(value => value && userKeyById.has(value));
+    const ownerName = String(record.userName || record.assigneeName || record.assignedTo || record.designerName || record.completedBy || perfOwner(record) || '').trim().toLowerCase();
+    return (byId && userKeyById.get(byId)) || userKeyByName.get(ownerName) || ownerName;
+  };
+
+  const scopedRecords = (performance.records || []).filter(record => {
+    const canonical = resolveCanonicalOwner(record);
+    const member = memberByCanonical.get(canonical);
+    if (!member) return false;
+    const baseline = performanceBaselineDetails(member);
+    return performanceEventMatchesScope(recordScopeCompletionAt(record, config), config, baseline.at, nowMs);
+  });
+  const scopedSummary = buildPerformanceSummary(scopedRecords, d.users || []);
+  const summaryByName = new Map((scopedSummary.users || []).map(row => [String(row.userName || '').trim().toLowerCase(), row]));
+
   const caseStats = new Map();
-  const ensure = (keyValue = '') => {
-    const key = String(keyValue || '').trim().toLowerCase();
+  const ensure = (canonical = '') => {
+    const key = String(canonical || '').trim().toLowerCase();
     if (!key) return null;
     if (!caseStats.has(key)) caseStats.set(key, { assignedCount:0, completedCount:0, activeCount:0, revisionCases:0, completedToday:0 });
     return caseStats.get(key);
   };
   for (const c of filterDeletedCases(d.cases || [], d.deletedProjectIds || [])) {
-    const ownerId = [c.assigneeId, c.assignedUserId, c.ownerId, c.userId]
-      .map(value => String(value || '').trim().toLowerCase()).find(value => value && userKeyById.has(value));
-    const ownerName = String(perfOwner(c) || '').trim().toLowerCase();
-    const canonicalOwner = (ownerId && userKeyById.get(ownerId)) || userKeyByName.get(ownerName) || ownerName;
-    const row = ensure(canonicalOwner);
+    const canonicalOwner = resolveCanonicalOwner(c);
+    const member = memberByCanonical.get(canonicalOwner);
+    const row = member ? ensure(canonicalOwner) : null;
     if (!row) continue;
-    const createdMs = parseDateMs(c.createdAt || c.assignedAt || c.updatedAt);
-    const completedMs = parseDateMs(c.completedAt || c.finalApprovedAt || c.approvedAt || c.updatedAt);
-    const inRange = createdMs >= cutoff || completedMs >= cutoff;
+    const baseline = performanceBaselineDetails(member);
+    const createdAt = performanceCaseCreatedAt(c);
+    const completedAt = performanceCaseCompletedAt(c);
     const completed = isCompletedCaseForPerf(c);
-    if (inRange) {
+    if (performanceEventMatchesScope(createdAt, config, baseline.at, nowMs)) {
       row.assignedCount += 1;
-      if (completed) row.completedCount += 1;
-      else row.activeCount += 1;
-      if (perfRevisionCount(c) > 0) row.revisionCases += 1;
+      if (!completed) row.activeCount += 1;
     }
-    if (completed && completedMs && serverTodayKey(completedMs) === todayKey) row.completedToday += 1;
+    if (completed && performanceEventMatchesScope(completedAt, config, baseline.at, nowMs)) row.completedCount += 1;
+    if (perfRevisionCount(c) > 0) {
+      const revisionAt = performanceCaseRevisionAt(c) || (completed ? completedAt : 0);
+      if (performanceEventMatchesScope(revisionAt, config, baseline.at, nowMs)) row.revisionCases += 1;
+    }
+    if (completed && completedAt && (!baseline.at || completedAt >= baseline.at) && serverTodayKey(completedAt) === todayKey) row.completedToday += 1;
   }
+
   const aggregates = approvedMembers
     .map(user => {
       const nameKey = String(user.name || '').trim().toLowerCase();
       const canonical = String(user.id || user.name || '').trim().toLowerCase();
       const summary = summaryByName.get(nameKey) || {};
       const counts = caseStats.get(canonical) || caseStats.get(nameKey) || { assignedCount:0, completedCount:0, activeCount:0, revisionCases:0, completedToday:0 };
+      const baseline = performanceBaselineDetails(user);
       return {
         id:user.id,
         name:user.name,
@@ -3742,6 +3865,7 @@ function leaderboardAggregateStats(d = readDb(), range = 'month') {
         status:user.status,
         dailyLimit:Number(user.dailyLimit || user.taskLimit || user.workloadProfile?.dailyLimit || 15) || 15,
         ...counts,
+        completedRecordCount:Number(summary.completedCount || 0) || 0,
         completedHistoryCount:Number(summary.completedCount || 0) || 0,
         avgCompletionMinutes:Number(summary.avgCompletionMinutes || 0) || 0,
         avgReviewMinutes:Number(summary.avgReviewMinutes || 0) || 0,
@@ -3754,34 +3878,43 @@ function leaderboardAggregateStats(d = readDb(), range = 'month') {
         productivityScore:Number(summary.productivityScore || 0) || 0,
         scoreBreakdown:summary.scoreBreakdown || {},
         caseTypeStats:Array.isArray(summary.caseTypeStats) ? summary.caseTypeStats : [],
-        timingSource:summary.timingSource || 'No history yet'
+        timingSource:summary.timingSource || 'No history in scope',
+        performanceProfile:{
+          ...(user.performanceProfile || {}),
+          scoreBaselineEnabled:baseline.enabled,
+          scoreBaselineMonth:baseline.month,
+          scoreBaselineAt:baseline.at ? new Date(baseline.at).toISOString() : null,
+          scoreBaselineUpdatedAt:baseline.updatedAt,
+          scoreBaselineUpdatedBy:baseline.updatedBy
+        }
       };
     })
-    .sort((a,b) => b.productivityScore - a.productivityScore || b.completedHistoryCount - a.completedHistoryCount || String(a.name).localeCompare(String(b.name)))
+    .sort((a,b) => b.productivityScore - a.productivityScore || b.completedRecordCount - a.completedRecordCount || String(a.name).localeCompare(String(b.name)))
     .map((member, index) => ({ ...member, rank:index + 1 }));
 
   const aggregate = {
-    generatedAt:performance.summary?.generatedAt || now(),
-    range:rangeKey,
-    recordCount:Number(performance.summary?.recordCount || performance.records.length || 0),
-    avgCompletionMinutes:Number(performance.summary?.avgCompletionMinutes || 0) || 0,
-    avgReviewMinutes:Number(performance.summary?.avgReviewMinutes || 0) || 0,
-    rolling10CompletionMinutes:Number(performance.summary?.rolling10CompletionMinutes || 0) || 0,
-    rolling30CompletionMinutes:Number(performance.summary?.rolling30CompletionMinutes || 0) || 0,
-    trend:performance.summary?.trend || { pct:0, label:'Stable' },
+    generatedAt:scopedSummary.generatedAt || now(),
+    scope:config.scope,
+    month:config.month || '',
+    range:config.range || '',
+    recordCount:Number(scopedSummary.recordCount || scopedRecords.length || 0),
+    avgCompletionMinutes:Number(scopedSummary.avgCompletionMinutes || 0) || 0,
+    avgReviewMinutes:Number(scopedSummary.avgReviewMinutes || 0) || 0,
+    rolling10CompletionMinutes:Number(scopedSummary.rolling10CompletionMinutes || 0) || 0,
+    rolling30CompletionMinutes:Number(scopedSummary.rolling30CompletionMinutes || 0) || 0,
+    trend:scopedSummary.trend || { pct:0, label:'Stable' },
     members:aggregates
   };
   leaderboardAggregateCache.set(cacheKey, aggregate);
-  // Keep this bounded even during long-running production use.
-  if (leaderboardAggregateCache.size > 9) {
+  if (leaderboardAggregateCache.size > 24) {
     const oldestKey = leaderboardAggregateCache.keys().next().value;
     if (oldestKey) leaderboardAggregateCache.delete(oldestKey);
   }
   return aggregate;
 }
 
-function buildTeamLeaderboard(d = readDb(), range = 'month') {
-  const aggregate = leaderboardAggregateStats(d, range);
+function buildTeamLeaderboard(d = readDb(), options = {}) {
+  const aggregate = leaderboardAggregateStats(d, options);
   const presenceById = new Map(sanitizePresenceUsers(d.users || []).map(user => [String(user.id || '').trim().toLowerCase(), user]));
   const members = aggregate.members.map(member => {
     const presence = presenceById.get(String(member.id || '').trim().toLowerCase()) || {};
@@ -4501,8 +4634,65 @@ app.get('/api/performance/diagnostics', requireCapability('performance:read'), a
 });
 
 app.get('/api/performance/leaderboard', requireCapability('performance:read'), async (req, res) => {
-  const range = ['week','month','quarter'].includes(String(req.query.range || '').toLowerCase()) ? String(req.query.range).toLowerCase() : 'month';
-  res.json({ ok:true, leaderboard:buildTeamLeaderboard(readDb(), range) });
+  const scope = ['month','overall'].includes(String(req.query.scope || '').toLowerCase()) ? String(req.query.scope).toLowerCase() : '';
+  const range = ['week','month','quarter'].includes(String(req.query.range || '').toLowerCase()) ? String(req.query.range).toLowerCase() : '';
+  const month = normalizePerformanceMonthKey(req.query.month);
+  res.json({ ok:true, leaderboard:buildTeamLeaderboard(readDb(), { scope, month, range }) });
+});
+
+app.patch('/api/performance/baseline/:id', requireAdminSession, async (req, res) => {
+  try {
+    const targetId = String(req.params.id || '').trim();
+    const enabled = req.body?.enabled === true;
+    const currentMonth = serverMonthKey(Date.now());
+    const baselineMonth = normalizePerformanceMonthKey(req.body?.month, currentMonth);
+    if (enabled && baselineMonth > currentMonth) return res.status(400).json({ ok:false, code:'FUTURE_PERFORMANCE_BASELINE', error:'Performance scoring cannot start in a future month.' });
+    const d = selectiveDb({ collections:['users','audit'], collectionRowIds:{ users:[targetId] } });
+    const index = (d.users || []).findIndex(user => String(user.id || '') === targetId);
+    if (index < 0) return res.status(404).json({ ok:false, error:'Team member was not found.' });
+    const existing = d.users[index];
+    const targetRole = normalizeRole(existing.role);
+    if (!['Manager','Designer'].includes(targetRole)) return res.status(400).json({ ok:false, code:'PERFORMANCE_ROLE_NOT_ELIGIBLE', error:'Only Manager and Designer accounts can have a performance score baseline.' });
+    const actor = requestActor(req);
+    const profile = { ...(existing.performanceProfile || {}) };
+    let baselineAt = null;
+    if (enabled) {
+      baselineAt = new Date(`${baselineMonth}-01T00:00:00+05:30`).toISOString();
+      profile.scoreBaselineEnabled = true;
+      profile.scoreBaselineMonth = baselineMonth;
+      profile.scoreBaselineAt = baselineAt;
+      profile.scoreBaselineUpdatedAt = now();
+      profile.scoreBaselineUpdatedBy = actor.name;
+    } else {
+      delete profile.scoreBaselineEnabled;
+      delete profile.scoreBaselineMonth;
+      delete profile.scoreBaselineAt;
+      delete profile.scoreBaselineUpdatedAt;
+      delete profile.scoreBaselineUpdatedBy;
+      delete profile.baselineMonth;
+      delete profile.baselineAt;
+      delete profile.baselineUpdatedAt;
+      delete profile.baselineUpdatedBy;
+    }
+    const nextUser = { ...existing, performanceProfile:profile, profileUpdatedAt:Date.now() };
+    delete nextUser.performanceBaselineMonth;
+    delete nextUser.performanceBaselineAt;
+    delete nextUser.performanceBaselineUpdatedAt;
+    delete nextUser.performanceBaselineUpdatedBy;
+    d.users[index] = nextUser;
+    const auditEntry = addAudit(d, actor.name, enabled ? `Performance score baseline started from ${baselineMonth}` : 'Full performance score history restored', existing.name || targetId);
+    const persistence = await save(d, {
+      actor:actor.name,
+      reason:enabled ? 'performance_baseline_enable' : 'performance_baseline_disable',
+      collections:['users','audit'],
+      collectionRowIds:{ users:[targetId], audit:[String(auditEntry.id)] },
+      skipRevisionSnapshot:true,
+      periodicRevisionSnapshot:true
+    });
+    res.json({ ok:true, enabled, baselineMonth:enabled ? baselineMonth : '', baselineAt, user:stripCredentialFields(nextUser), persistence });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ ok:false, code:error.code || '', error:error.message || 'Performance baseline could not be updated.' });
+  }
 });
 
 app.post('/api/performance/rebuild', requireCapability('performance:rebuild'), async (req, res) => {

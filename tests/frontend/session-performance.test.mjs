@@ -20,7 +20,7 @@ test('workspace hydration stays lightweight and performance loads only on the an
   assert.match(tasks, /performance: includePerformance \? '1' : '0'/);
   assert.doesNotMatch(app, /includePerformance:true, compact:true/);
   assert.match(app, /includePerformance:false, compact:true/);
-  assert.match(dashboard, /\/api\/performance\/leaderboard\?range=/);
+  assert.match(dashboard, /\/api\/performance\/leaderboard\?\$\{params\.toString\(\)\}/);
 });
 
 test('adaptive sync uses data and presence revisions to avoid full unchanged workspace downloads', () => {
@@ -35,7 +35,7 @@ test('designer analytics merge aggregate leaderboard members for team comparison
   assert.match(dashboard, /leaderboardMembers/);
   assert.match(dashboard, /leaderboardByName/);
   assert.match(dashboard, /assignedCount/);
-  assert.match(dashboard, /approved team for transparent comparison/);
+  assert.match(dashboard, /Designers see aggregate team metrics/);
 });
 
 test('production backend mode avoids repeated full workspace localStorage serialization', () => {
@@ -49,10 +49,19 @@ test('global live clock pauses on non-operational screens', () => {
   assert.match(app, /if \(selectedProject \|\| nonLiveTabs\.has\(activeTab\)\) return undefined/);
 });
 
-test('manual performance rebuild refreshes the range-specific team leaderboard', () => {
+test('manual performance rebuild refreshes the selected monthly or overall leaderboard', () => {
   assert.match(dashboard, /leaderboardRefreshKey/);
-  assert.match(dashboard, /\[range, leaderboardRefreshKey\]/);
+  assert.match(dashboard, /\[scope, performanceMonth, leaderboardRefreshKey\]/);
   assert.match(dashboard, /setLeaderboardRefreshKey\(value => value \+ 1\)/);
+});
+
+test('performance analytics offers exact monthly and overall scopes with admin baselines', () => {
+  assert.match(dashboard, /setScope\('month'\)/);
+  assert.match(dashboard, /setScope\('overall'\)/);
+  assert.match(dashboard, /type="month" value=\{performanceMonth\}/);
+  assert.match(dashboard, /\/api\/performance\/baseline\/\$\{encodeURIComponent\(user\.id\)\}/);
+  assert.match(dashboard, /role="switch" aria-checked=\{baselineEnabled\}/);
+  assert.match(app, /currentUser=\{currentUser\}/);
 });
 
 test('adaptive sync carries collection revisions so chat-only changes avoid full project downloads', () => {
