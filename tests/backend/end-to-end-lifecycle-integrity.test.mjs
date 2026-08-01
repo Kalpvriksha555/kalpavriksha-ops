@@ -194,6 +194,19 @@ test('full release verifier matrix runs every gate and aggregates all failures',
 });
 
 
+
+test('release certification cannot confuse a verifier-generated frontend build with bundled source',()=>{
+  const deploy=fs.readFileSync(new URL('../../scripts/deploy-1.9.24-vps.sh',import.meta.url),'utf8');
+  const audit=fs.readFileSync(new URL('../../scripts/security-package-audit.mjs',import.meta.url),'utf8');
+  const certifyIndex=deploy.lastIndexOf('\nnpm run release:certify');
+  const cleanupIndex=deploy.lastIndexOf('rm -rf "$STAGE/frontend/dist"',certifyIndex);
+  assert.ok(cleanupIndex >= 0 && certifyIndex > cleanupIndex,
+    'Deployment must remove the matrix build before the source-package audit in release certification.');
+  assert.match(audit,/gitTrackedFiles/);
+  assert.match(audit,/git', \['ls-files', '-z'\]/);
+  assert.match(audit,/isBundledGeneratedArtifact\(file\)/);
+});
+
 test('phase 6 verifier exercises shared-object retention and grace-period trash collection',()=>{
   const verifier=fs.readFileSync(new URL('../../scripts/phase-6-file-storage-check.mjs',import.meta.url),'utf8');
   assert.match(verifier,/retained-shared-object/);

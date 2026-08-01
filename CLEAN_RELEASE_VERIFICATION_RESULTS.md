@@ -13,8 +13,8 @@ Validated from a fresh extraction of the user-supplied baseline on 2 August 2026
 - Regression guard
 - Production regression audit
 - 72 frontend tests
-- 127 backend tests
-- 199 combined tests
+- 128 backend tests
+- 200 combined tests
 - Phase 5 relational schema/integrity verification across 16 tables
 - Phase 9 frontend/UX verification
 - 72 frontend/backend contract checks across 82 backend routes

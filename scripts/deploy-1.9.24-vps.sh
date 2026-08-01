@@ -199,6 +199,7 @@ const fileVerifier = fs.readFileSync(path.join(root, 'scripts/phase-6-file-stora
 const repository = fs.readFileSync(path.join(root, 'backend/src/repositories/postgresStateRepository.js'), 'utf8');
 const integrityAudit = fs.readFileSync(path.join(root, 'backend/scripts/db-integrity-audit.mjs'), 'utf8');
 const integrityRepair = fs.readFileSync(path.join(root, 'backend/scripts/db-integrity-repair.mjs'), 'utf8');
+const securityAudit = fs.readFileSync(path.join(root, 'scripts/security-package-audit.mjs'), 'utf8');
 const deploy = fs.readFileSync(path.join(root, 'scripts/deploy-1.9.24-vps.sh'), 'utf8');
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 
@@ -306,8 +307,16 @@ if (migrateIndex < 0 || repairIndex < 0 || strictIntegrityIndex < 0 || !(migrate
   throw new Error('Deployment must migrate, perform guarded integrity repair, then run strict integrity.');
 }
 if (!deploy.includes('ROLLBACK_SCRIPT="$ROLLBACK_CWD/$OLD_RELATIVE_SCRIPT"')) throw new Error('Deployment does not snapshot an immutable rollback runtime.');
+const certificationIndex = deploy.lastIndexOf('\nnpm run release:certify');
+const generatedBuildCleanupIndex = deploy.lastIndexOf('rm -rf "$STAGE/frontend/dist"', certificationIndex);
+if (certificationIndex < 0 || generatedBuildCleanupIndex < 0 || generatedBuildCleanupIndex >= certificationIndex) {
+  throw new Error('Deployment must remove verifier-generated frontend output before release certification.');
+}
+for (const marker of ['gitTrackedFiles', "['ls-files', '-z']", 'isBundledGeneratedArtifact']) {
+  if (!securityAudit.includes(marker)) throw new Error(`Security package audit build-origin safeguard is missing: ${marker}`);
+}
 
-console.log('Release authorization, idempotency, file-GC, relational-integrity, rollback, and full-matrix source audit passed.');
+console.log('Release authorization, idempotency, file-GC, relational-integrity, certification-ordering, rollback, and full-matrix source audit passed.');
 NODE
 
 while IFS= read -r -d '' source_file; do
@@ -375,6 +384,10 @@ log "Checking strict relational database integrity after repair"
 npm run db:integrity --prefix backend | tee "$WORK/relational-integrity-after-reconciliation.json"
 
 log "Certifying the exact production release"
+# The pre-downtime matrix intentionally builds the frontend. Certification
+# begins with a source-package audit, so remove only that generated output;
+# release:certify rebuilds the exact frontend immediately afterward.
+rm -rf "$STAGE/frontend/dist"
 rm -f "$RELEASE_CERTIFICATE_PATH"
 npm run release:certify
 npm run release:gate

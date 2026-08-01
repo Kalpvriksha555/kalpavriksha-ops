@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 const root = process.cwd();
 const errors = [];
@@ -24,6 +25,24 @@ function walk(relative = '.') {
 }
 
 const files = walk();
+
+// In a Git worktree, generated output created by a legitimate local or VPS
+// build is not part of the release source unless Git actually tracks it.
+// In an extracted ZIP (where .git is intentionally absent), any generated
+// output present in the archive is treated as bundled and fails the audit.
+function gitTrackedFiles() {
+  const result = spawnSync('git', ['ls-files', '-z'], {
+    cwd: root,
+    encoding: 'utf8',
+    windowsHide: true
+  });
+  if (result.status !== 0) return null;
+  return new Set(String(result.stdout || '').split('\0').filter(Boolean).map((file) => file.replaceAll('\\', '/')));
+}
+
+const trackedFiles = gitTrackedFiles();
+const isBundledGeneratedArtifact = (file) => trackedFiles === null || trackedFiles.has(file);
+
 const forbiddenExact = new Set([
   '.env', 'frontend/.env', 'backend/.env',
   'backend/src/data/db.json',
@@ -32,12 +51,12 @@ const forbiddenExact = new Set([
 for (const file of files) {
   if (forbiddenExact.has(file)) errors.push(`Private/runtime file is bundled: ${file}`);
   if (/(^|\/)node_modules\//.test(file)) errors.push(`Dependency directory is bundled: ${file}`);
-  if (/(^|\/)dist\//.test(file)) errors.push(`Generated build output is bundled: ${file}`);
+  if (/(^|\/)dist\//.test(file) && isBundledGeneratedArtifact(file)) errors.push(`Generated build output is bundled: ${file}`);
   if (/\.log$/i.test(file)) errors.push(`Runtime log is bundled: ${file}`);
   if (/^backend\/(?:src\/)?uploads\//.test(file) && !file.endsWith('/.gitkeep')) errors.push(`Uploaded document is bundled: ${file}`);
-  if (/(^|\/)\.release\//.test(file)) errors.push(`Generated release evidence is bundled: ${file}`);
-  if (/(^|\/)release-certification\.json$/i.test(file)) errors.push(`Generated release certificate is bundled: ${file}`);
-  if (/(^|\/)finance-recovery-plan.*\.json$/i.test(file) || /\.applied\.json$/i.test(file) || /\.recovery-receipt\.json$/i.test(file)) errors.push(`Sensitive finance recovery evidence is bundled: ${file}`);
+  if (/(^|\/)\.release\//.test(file) && isBundledGeneratedArtifact(file)) errors.push(`Generated release evidence is bundled: ${file}`);
+  if (/(^|\/)release-certification\.json$/i.test(file) && isBundledGeneratedArtifact(file)) errors.push(`Generated release certificate is bundled: ${file}`);
+  if ((/(^|\/)finance-recovery-plan.*\.json$/i.test(file) || /\.applied\.json$/i.test(file) || /\.recovery-receipt\.json$/i.test(file)) && isBundledGeneratedArtifact(file)) errors.push(`Sensitive finance recovery evidence is bundled: ${file}`);
 }
 
 const lockPairs = [
