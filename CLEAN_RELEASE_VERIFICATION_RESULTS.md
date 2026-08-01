@@ -12,9 +12,9 @@ Validated from a fresh extraction of the user-supplied baseline on 2 August 2026
 - Project doctor
 - Regression guard
 - Production regression audit
-- 72 frontend tests
-- 128 backend tests
-- 200 combined tests
+- 73 frontend tests
+- 129 backend tests
+- 202 combined tests
 - Phase 5 relational schema/integrity verification across 16 tables
 - Phase 9 frontend/UX verification
 - 72 frontend/backend contract checks across 82 backend routes

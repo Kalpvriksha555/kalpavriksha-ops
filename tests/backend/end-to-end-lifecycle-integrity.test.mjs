@@ -223,3 +223,13 @@ test('deployment opts into clean-install, environment, and backup gates before d
   for (const id of ['clean-install','production-environment','production-integrity-audit','backup-create','backup-verify','backup-status']) assert.match(matrix,new RegExp(`id:'${id}'`));
   assert.ok(deploy.indexOf('npm run verify:matrix') < deploy.indexOf('Stopping application writes'));
 });
+
+
+test('final deployment verification uses public health and authenticated database integrity checks',()=>{
+  const deploy=fs.readFileSync(new URL('../../scripts/deploy-1.9.24-vps.sh',import.meta.url),'utf8');
+  const finalBlock=deploy.slice(deploy.indexOf('log "Final health responses"'));
+  assert.match(finalBlock,/api\/health\/live/);
+  assert.match(finalBlock,/api\/health\/ready/);
+  assert.match(finalBlock,/npm run db:integrity --prefix backend/);
+  assert.doesNotMatch(finalBlock,/curl -fsS .*api\/db\/health/);
+});

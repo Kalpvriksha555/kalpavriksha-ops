@@ -2,10 +2,11 @@
 
 ## Corrected behaviour
 
-- Payment Ledger fields are edited locally and create no server traffic while typing.
-- `Save Payment Details` performs one durable finance transaction.
+- Payment Ledger fields update immediately on screen.
+- Payment fields save automatically after a 650 ms pause or immediately when the field loses focus; there is no dedicated save button.
+- The debounce prevents a server write for every keystroke, and only one finance request can run at a time.
 - A finance save no longer triggers a second full task save.
-- The same mutation ID is retained after a timeout, making a manual retry idempotent.
+- The same mutation ID is retained after a timeout, making an automatic or field-blur retry idempotent.
 - A payment receipt is uploaded as a private file reference rather than embedded as base64 in the task JSON.
 - Refund, amount and date validation runs in both the browser and backend.
 - Finance remains assigned to the task's immutable accounting month while retaining the actual payment date.
@@ -24,5 +25,5 @@
 
 ## Verification
 
-- Frontend and backend test suites cover local drafting, explicit save, idempotency, validation, monthly accounting, compact responses and selective relational persistence.
+- Frontend and backend test suites cover responsive drafting, debounced automatic save, idempotency, validation, monthly accounting, compact responses and selective relational persistence.
 - A synthetic selective-write benchmark verifies that 10,000 file rows and 5,000 performance rows are not cloned by a payment mutation.

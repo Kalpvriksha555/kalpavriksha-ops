@@ -460,8 +460,10 @@ curl -fsS "http://127.0.0.1:${PORT}/api/health/live"
 echo
 curl -fsS "http://127.0.0.1:${PORT}/api/health/ready"
 echo
-curl -fsS "http://127.0.0.1:${PORT}/api/db/health"
-echo
+
+log "Final authenticated database integrity"
+cd "$LIVE"
+npm run db:integrity --prefix backend
 
 log "PM2 status"
 pm2 status "$PM2_NAME"

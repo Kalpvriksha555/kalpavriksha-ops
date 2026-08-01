@@ -152,6 +152,21 @@ const createFinanceLedgerDraft = (project = {}) => ({
   screenshot: project.ledger?.screenshot || null
 });
 
+const FINANCE_AUTOSAVE_DELAY_MS = 650;
+
+const getFinanceDraftSignature = (draft = {}) => JSON.stringify({
+  estimate:String(draft.estimate ?? '').trim(),
+  amountIn:String(draft.amountIn ?? '').trim(),
+  expenses:String(draft.expenses ?? '').trim(),
+  refund:String(draft.refund ?? '').trim(),
+  date:String(draft.date ?? '').trim(),
+  receivedFrom:String(draft.receivedFrom ?? '').trim(),
+  txnId:String(draft.txnId ?? '').trim(),
+  mode:String(draft.mode ?? '').trim(),
+  note:String(draft.note ?? '').trim(),
+  screenshotId:draft.screenshot?.id || draft.screenshot || ''
+});
+
 const parseFinanceDraftAmount = (value, label) => {
   const raw = String(value ?? '').trim();
   if (!raw) return 0;
@@ -2627,14 +2642,33 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   const [ledgerDraft, setLedgerDraft] = useState(() => createFinanceLedgerDraft(project));
   const [ledgerDirty, setLedgerDirty] = useState(false);
   const [isSavingLedger, setIsSavingLedger] = useState(false);
-  const [ledgerSaveMessage, setLedgerSaveMessage] = useState('');
+  const [ledgerSaveMessage, setLedgerSaveMessage] = useState('All payment changes are saved automatically.');
+  const [ledgerSaveState, setLedgerSaveState] = useState('saved');
   const [isUploadingLedgerReceipt, setIsUploadingLedgerReceipt] = useState(false);
   const ledgerMutationRef = useRef({ signature:'', id:'' });
+  const ledgerDraftRef = useRef(ledgerDraft);
+  const ledgerDirtyRef = useRef(false);
+  const ledgerAutosaveTimerRef = useRef(null);
+  const ledgerSavePromiseRef = useRef(null);
+  const ledgerQueuedSaveRef = useRef(false);
+  const ledgerAutosaveBlockedSignatureRef = useRef('');
   const latestProjectRef = useRef(project);
 
   useEffect(() => {
     latestProjectRef.current = project;
   }, [project]);
+
+  useEffect(() => {
+    ledgerDraftRef.current = ledgerDraft;
+  }, [ledgerDraft]);
+
+  useEffect(() => {
+    ledgerDirtyRef.current = ledgerDirty;
+  }, [ledgerDirty]);
+
+  useEffect(() => () => {
+    if (ledgerAutosaveTimerRef.current) clearTimeout(ledgerAutosaveTimerRef.current);
+  }, []);
 
   const acceptServerProject = useCallback((serverProject) => {
     if (!serverProject) return;
@@ -2644,7 +2678,12 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
 
   useEffect(() => {
     if (ledgerDirty || isSavingLedger) return;
-    setLedgerDraft(createFinanceLedgerDraft(project));
+    const nextDraft = createFinanceLedgerDraft(project);
+    ledgerDraftRef.current = nextDraft;
+    ledgerAutosaveBlockedSignatureRef.current = '';
+    setLedgerDraft(nextDraft);
+    setLedgerSaveState('saved');
+    setLedgerSaveMessage('All payment changes are saved automatically.');
   }, [project.id, project.financeVersion, project.paymentTrackingUpdatedAt, project.ledger?.updatedAt, ledgerDirty, isSavingLedger]);
 
   const closeFilePreview = useCallback(() => {
@@ -2703,19 +2742,14 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   const activeDraftingForUser = (usersProjects = []) => (usersProjects || []).find(p => samePerson(p.assignedTo, project.assignedTo || user.name) && p.status === 'Drafting' && String(p.id) !== String(project.id));
 
   useEffect(() => {
-    if (!ledgerDirty) return undefined;
+    if (!ledgerDirty && !isSavingLedger) return undefined;
     const warnUnsavedFinance = (event) => {
       event.preventDefault();
       event.returnValue = '';
     };
     window.addEventListener('beforeunload', warnUnsavedFinance);
     return () => window.removeEventListener('beforeunload', warnUnsavedFinance);
-  }, [ledgerDirty]);
-
-  const handleTaskBack = async () => {
-    if (ledgerDirty && !(await requestConfirmation('Payment details have unsaved changes. Leave this task and discard them?', { title:'Discard finance changes?', tone:'danger', confirmLabel:'Discard changes' }))) return;
-    onBack();
-  };
+  }, [ledgerDirty, isSavingLedger]);
 
   const handleSaveCaseEdit = (event) => {
     event.preventDefault();
@@ -3352,10 +3386,18 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       const receipt={...uploaded};
       delete receipt._serverCase;
       delete receipt._persistence;
-      setLedgerDraft(previous => ({ ...previous, screenshot:receipt }));
+      setLedgerDraft(previous => {
+        const next = { ...previous, screenshot:receipt };
+        ledgerDraftRef.current = next;
+        return next;
+      });
+      ledgerDirtyRef.current = true;
       setLedgerDirty(true);
+      ledgerQueuedSaveRef.current = true;
+      ledgerAutosaveBlockedSignatureRef.current = '';
       ledgerMutationRef.current = { signature:'', id:'' };
-      setLedgerSaveMessage('Receipt uploaded. Select Save payment details to link it to the ledger.');
+      setLedgerSaveState('pending');
+      setLedgerSaveMessage('Receipt uploaded. Linking it to the ledger automatically…');
     } catch (error) {
       console.error('Payment receipt upload failed:', error);
       setLedgerSaveMessage(error?.message || 'Payment receipt upload failed.');
@@ -3449,76 +3491,104 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   };
 
   const updateLedger = (field, value) => {
-    if (!showFinancials || isSavingLedger) return;
-    setLedgerDraft(previous => ({ ...previous, [field]:value }));
+    if (!showFinancials) return;
+    setLedgerDraft(previous => {
+      const next = { ...previous, [field]:value };
+      ledgerDraftRef.current = next;
+      return next;
+    });
+    ledgerDirtyRef.current = true;
     setLedgerDirty(true);
-    setLedgerSaveMessage('Unsaved finance changes');
+    ledgerQueuedSaveRef.current = Boolean(ledgerSavePromiseRef.current);
+    ledgerAutosaveBlockedSignatureRef.current = '';
+    setLedgerSaveState('pending');
+    setLedgerSaveMessage('Waiting to save automatically…');
     ledgerMutationRef.current = { signature:'', id:'' };
   };
 
-  const handleSaveLedger = async () => {
-    if (!showFinancials || isSavingLedger || !ledgerDirty) return;
+  const handleSaveLedger = async ({ reason = 'automatic' } = {}) => {
+    if (!showFinancials || isUploadingLedgerReceipt) return false;
+    if (ledgerSavePromiseRef.current) {
+      ledgerQueuedSaveRef.current = true;
+      return ledgerSavePromiseRef.current;
+    }
+    if (!ledgerDirtyRef.current) return true;
+
+    const draftSnapshot = { ...ledgerDraftRef.current };
+    const draftSignature = getFinanceDraftSignature(draftSnapshot);
+    const baseProject = latestProjectRef.current || project;
     let estimate;
     let amountIn;
     let expenses;
     let refund;
     try {
-      estimate = parseFinanceDraftAmount(ledgerDraft.estimate, 'Estimate');
-      amountIn = parseFinanceDraftAmount(ledgerDraft.amountIn, 'Amount received');
-      expenses = parseFinanceDraftAmount(ledgerDraft.expenses, 'Expenses');
-      refund = parseFinanceDraftAmount(ledgerDraft.refund, 'Refund');
+      estimate = parseFinanceDraftAmount(draftSnapshot.estimate, 'Estimate');
+      amountIn = parseFinanceDraftAmount(draftSnapshot.amountIn, 'Amount received');
+      expenses = parseFinanceDraftAmount(draftSnapshot.expenses, 'Expenses');
+      refund = parseFinanceDraftAmount(draftSnapshot.refund, 'Refund');
     } catch (error) {
+      ledgerAutosaveBlockedSignatureRef.current = draftSignature;
+      setLedgerSaveState('error');
       setLedgerSaveMessage(error.message);
       notifyUser(error.message);
-      return;
+      return false;
     }
 
     if (refund > amountIn) {
       const message = 'Refund cannot be greater than the total amount received.';
+      ledgerAutosaveBlockedSignatureRef.current = draftSignature;
+      setLedgerSaveState('error');
       setLedgerSaveMessage(message);
       notifyUser(message);
-      return;
+      return false;
     }
 
     const now = Date.now();
-    const paymentDate = String(ledgerDraft.date || '').trim();
+    const paymentDate = String(draftSnapshot.date || '').trim();
     if (amountIn > 0 && !paymentDate) {
-      const message = 'Select the actual payment date before saving a received amount.';
+      const message = 'Select the actual payment date before recording a received amount.';
+      ledgerAutosaveBlockedSignatureRef.current = draftSignature;
+      setLedgerSaveState('error');
       setLedgerSaveMessage(message);
       notifyUser(message);
-      return;
+      return false;
     }
     const normalizedPaymentDate = normalizeTaskDateKey(paymentDate || getIndiaDateKey(now), '');
     if (paymentDate && normalizedPaymentDate !== paymentDate) {
       const message = 'Select a valid payment date.';
+      ledgerAutosaveBlockedSignatureRef.current = draftSignature;
+      setLedgerSaveState('error');
       setLedgerSaveMessage(message);
       notifyUser(message);
-      return;
+      return false;
     }
     if (paymentDate && paymentDate > getIndiaDateKey(now)) {
       const message = 'Payment date cannot be in the future.';
+      ledgerAutosaveBlockedSignatureRef.current = draftSignature;
+      setLedgerSaveState('error');
       setLedgerSaveMessage(message);
       notifyUser(message);
-      return;
+      return false;
     }
-    const accountingPeriod = normalizeAccountingMonthKey(getProjectFinanceMonthKey(project), getCurrentAccountingMonthKey(now));
+
+    const accountingPeriod = normalizeAccountingMonthKey(getProjectFinanceMonthKey(baseProject), getCurrentAccountingMonthKey(now));
     const nextLedger = {
-      ...(project.ledger || {}),
+      ...(baseProject.ledger || {}),
       amountIn,
       expenses,
       refund,
-      date:paymentDate || project.ledger?.date || project.paymentDate || getIndiaDateKey(now),
+      date:paymentDate || baseProject.ledger?.date || baseProject.paymentDate || getIndiaDateKey(now),
       accountingPeriod,
-      receivedFrom:String(ledgerDraft.receivedFrom || '').trim(),
-      txnId:String(ledgerDraft.txnId || '').trim(),
-      mode:String(ledgerDraft.mode || '').trim(),
-      note:String(ledgerDraft.note || '').trim(),
-      screenshot:ledgerDraft.screenshot || null,
+      receivedFrom:String(draftSnapshot.receivedFrom || '').trim(),
+      txnId:String(draftSnapshot.txnId || '').trim(),
+      mode:String(draftSnapshot.mode || '').trim(),
+      note:String(draftSnapshot.note || '').trim(),
+      screenshot:draftSnapshot.screenshot || null,
       updatedAt:now,
       updatedBy:user?.name || 'Admin'
     };
     const draftProject = {
-      ...project,
+      ...baseProject,
       estimate,
       financeAccountingPeriod:accountingPeriod,
       ledger:nextLedger,
@@ -3537,38 +3607,117 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       paymentStatus:computedStatus === 'Paid' ? 'YES' : (computedStatus === 'Pending' ? 'PENDING' : 'NOT_UPDATED'),
       paymentReceived:amountIn > 0 ? (computedStatus === 'Paid' ? 'YES' : 'PARTIAL') : 'NO'
     };
-    const signature = JSON.stringify({
-      taskId:project.id || project.caseId,
-      financeVersion:Number(project.financeVersion || 0),
+    const mutationSignature = JSON.stringify({
+      taskId:baseProject.id || baseProject.caseId,
+      financeVersion:Number(baseProject.financeVersion || 0),
       estimate,amountIn,expenses,refund,
       date:nextLedger.date,receivedFrom:nextLedger.receivedFrom,txnId:nextLedger.txnId,
       mode:nextLedger.mode,note:nextLedger.note,screenshotId:nextLedger.screenshot?.id || nextLedger.screenshot || ''
     });
-    if (ledgerMutationRef.current.signature !== signature) {
-      ledgerMutationRef.current = { signature, id:createFinanceMutationId() };
+    if (ledgerMutationRef.current.signature !== mutationSignature) {
+      ledgerMutationRef.current = { signature:mutationSignature, id:createFinanceMutationId() };
+    }
+    const financeMutationId = ledgerMutationRef.current.id;
+
+    ledgerQueuedSaveRef.current = false;
+    setIsSavingLedger(true);
+    setLedgerSaveState('saving');
+    setLedgerSaveMessage(reason === 'navigation' ? 'Saving payment changes before leaving…' : 'Saving automatically…');
+
+    const savePromise = (async () => {
+      try {
+        const confirmed = await onUpdateProject(updatedProject, baseProject, {
+          financeOnly:true,
+          financeMutationId
+        });
+        if (!confirmed) {
+          ledgerAutosaveBlockedSignatureRef.current = draftSignature;
+          setLedgerSaveState('error');
+          setLedgerSaveMessage('Automatic save was not confirmed. Your entered values are still here.');
+          return false;
+        }
+
+        latestProjectRef.current = confirmed;
+        const confirmedDraft = createFinanceLedgerDraft(confirmed);
+        const currentDraftSignature = getFinanceDraftSignature(ledgerDraftRef.current);
+        ledgerAutosaveBlockedSignatureRef.current = '';
+
+        if (currentDraftSignature === draftSignature) {
+          ledgerDraftRef.current = confirmedDraft;
+          ledgerDirtyRef.current = false;
+          setLedgerDraft(confirmedDraft);
+          setLedgerDirty(false);
+          ledgerMutationRef.current = { signature:'', id:'' };
+          setLedgerSaveState('saved');
+          setLedgerSaveMessage(`Saved automatically at ${new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' })}`);
+        } else {
+          ledgerDirtyRef.current = true;
+          ledgerQueuedSaveRef.current = true;
+          setLedgerDirty(true);
+          setLedgerSaveState('pending');
+          setLedgerSaveMessage('Saving your latest payment changes automatically…');
+        }
+        return true;
+      } catch (error) {
+        ledgerAutosaveBlockedSignatureRef.current = draftSignature;
+        ledgerDirtyRef.current = true;
+        setLedgerDirty(true);
+        setLedgerSaveState('error');
+        setLedgerSaveMessage(error?.message || 'Automatic payment save failed. Your entered values are still available.');
+        notifyUser(error?.message || 'Automatic payment save failed.');
+        return false;
+      } finally {
+        ledgerSavePromiseRef.current = null;
+        setIsSavingLedger(false);
+      }
+    })();
+
+    ledgerSavePromiseRef.current = savePromise;
+    return savePromise;
+  };
+
+  useEffect(() => {
+    if (!showFinancials || !ledgerDirty || isSavingLedger || isUploadingLedgerReceipt) return undefined;
+    const signature = getFinanceDraftSignature(ledgerDraft);
+    if (signature === ledgerAutosaveBlockedSignatureRef.current) return undefined;
+    if (ledgerAutosaveTimerRef.current) clearTimeout(ledgerAutosaveTimerRef.current);
+    ledgerAutosaveTimerRef.current = setTimeout(() => {
+      ledgerAutosaveTimerRef.current = null;
+      void handleSaveLedger({ reason:'automatic' });
+    }, FINANCE_AUTOSAVE_DELAY_MS);
+    return () => {
+      if (ledgerAutosaveTimerRef.current) clearTimeout(ledgerAutosaveTimerRef.current);
+      ledgerAutosaveTimerRef.current = null;
+    };
+  }, [ledgerDraft, ledgerDirty, isSavingLedger, isUploadingLedgerReceipt, showFinancials]);
+
+  const flushFinanceAutosave = () => {
+    if (ledgerAutosaveTimerRef.current) {
+      clearTimeout(ledgerAutosaveTimerRef.current);
+      ledgerAutosaveTimerRef.current = null;
+    }
+    if (ledgerDirtyRef.current && !ledgerSavePromiseRef.current && !isUploadingLedgerReceipt) {
+      ledgerAutosaveBlockedSignatureRef.current = '';
+      void handleSaveLedger({ reason:'field-blur' });
+    }
+  };
+
+  const handleTaskBack = async () => {
+    if (ledgerAutosaveTimerRef.current) {
+      clearTimeout(ledgerAutosaveTimerRef.current);
+      ledgerAutosaveTimerRef.current = null;
     }
 
-    setIsSavingLedger(true);
-    setLedgerSaveMessage('Saving payment securely…');
-    try {
-      const confirmed = await onUpdateProject(updatedProject, project, {
-        financeOnly:true,
-        financeMutationId:ledgerMutationRef.current.id
-      });
-      if (!confirmed) {
-        setLedgerSaveMessage('Payment was not saved. Your entered values are still here; refresh the task before retrying if another admin changed it.');
-        return;
-      }
-      setLedgerDraft(createFinanceLedgerDraft(confirmed));
-      setLedgerDirty(false);
-      ledgerMutationRef.current = { signature:'', id:'' };
-      setLedgerSaveMessage(`Saved at ${new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' })}`);
-    } catch (error) {
-      setLedgerSaveMessage(error?.message || 'Payment save failed. Your entered values are still available.');
-      notifyUser(error?.message || 'Payment save failed.');
-    } finally {
-      setIsSavingLedger(false);
+    let attempts = 0;
+    while ((ledgerDirtyRef.current || ledgerSavePromiseRef.current) && attempts < 2) {
+      attempts += 1;
+      ledgerAutosaveBlockedSignatureRef.current = '';
+      const saved = await handleSaveLedger({ reason:'navigation' });
+      if (!saved) break;
     }
+
+    if (ledgerDirtyRef.current && !(await requestConfirmation('Payment details could not be saved automatically. Leave this task and discard them?', { title:'Discard finance changes?', tone:'danger', confirmLabel:'Discard changes' }))) return;
+    onBack();
   };
   
   const handlePrintReceipt = () => {
@@ -4310,24 +4459,24 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
               </div>
               
               <div className="space-y-4 text-sm relative z-10">
-                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Total Estimate Amount</label><input type="number" min="0" step="0.01" value={ledgerDraft.estimate} onChange={e => updateLedger('estimate', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Total Estimate Amount</label><input type="number" min="0" step="0.01" value={ledgerDraft.estimate} onChange={e => updateLedger('estimate', e.target.value)} onBlur={flushFinanceAutosave} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
                 
                 <div className="grid grid-cols-2 gap-3">
-                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Amount Received</label><input type="number" min="0" step="0.01" value={ledgerDraft.amountIn} onChange={e => updateLedger('amountIn', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-emerald-100 p-2.5 rounded-xl bg-white font-bold text-emerald-700 outline-none focus:border-emerald-400 disabled:opacity-60" /></div>
-                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Actual Expenses</label><input type="number" min="0" step="0.01" value={ledgerDraft.expenses} onChange={e => updateLedger('expenses', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold text-amber-700 outline-none focus:border-amber-400 disabled:opacity-60" placeholder="e.g. print cost" /></div>
+                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Amount Received</label><input type="number" min="0" step="0.01" value={ledgerDraft.amountIn} onChange={e => updateLedger('amountIn', e.target.value)} onBlur={flushFinanceAutosave} className="w-full border-2 border-emerald-100 p-2.5 rounded-xl bg-white font-bold text-emerald-700 outline-none focus:border-emerald-400 disabled:opacity-60" /></div>
+                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Actual Expenses</label><input type="number" min="0" step="0.01" value={ledgerDraft.expenses} onChange={e => updateLedger('expenses', e.target.value)} onBlur={flushFinanceAutosave} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold text-amber-700 outline-none focus:border-amber-400 disabled:opacity-60" placeholder="e.g. print cost" /></div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
-                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Date Paid</label><input type="date" value={ledgerDraft.date} onChange={e => updateLedger('date', e.target.value)} max={getIndiaDateKey()} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
-                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Refund</label><input type="number" min="0" step="0.01" value={ledgerDraft.refund} onChange={e => updateLedger('refund', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-red-100 p-2.5 rounded-xl bg-white font-bold text-red-600 outline-none focus:border-red-400 disabled:opacity-60" /></div>
+                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Date Paid</label><input type="date" value={ledgerDraft.date} onChange={e => updateLedger('date', e.target.value)} onBlur={flushFinanceAutosave} max={getIndiaDateKey()} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Refund</label><input type="number" min="0" step="0.01" value={ledgerDraft.refund} onChange={e => updateLedger('refund', e.target.value)} onBlur={flushFinanceAutosave} className="w-full border-2 border-red-100 p-2.5 rounded-xl bg-white font-bold text-red-600 outline-none focus:border-red-400 disabled:opacity-60" /></div>
                 </div>
                 
-                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Received From</label><input type="text" value={ledgerDraft.receivedFrom} onChange={e => updateLedger('receivedFrom', e.target.value)} disabled={isSavingLedger} placeholder="Sender Name" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Received From</label><input type="text" value={ledgerDraft.receivedFrom} onChange={e => updateLedger('receivedFrom', e.target.value)} onBlur={flushFinanceAutosave} placeholder="Sender Name" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Transaction ID</label><input type="text" value={ledgerDraft.txnId} onChange={e => updateLedger('txnId', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
-                  <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Payment Mode</label><input type="text" value={ledgerDraft.mode} onChange={e => updateLedger('mode', e.target.value)} disabled={isSavingLedger} placeholder="Cash / UPI / Bank Transfer / Cheque" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                  <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Transaction ID</label><input type="text" value={ledgerDraft.txnId} onChange={e => updateLedger('txnId', e.target.value)} onBlur={flushFinanceAutosave} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                  <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Payment Mode</label><input type="text" value={ledgerDraft.mode} onChange={e => updateLedger('mode', e.target.value)} onBlur={flushFinanceAutosave} placeholder="Cash / UPI / Bank Transfer / Cheque" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
                 </div>
-                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Remarks</label><textarea rows={2} value={ledgerDraft.note} onChange={e => updateLedger('note', e.target.value)} disabled={isSavingLedger} placeholder="Optional payment remarks" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60 resize-none" /></div>
+                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Remarks</label><textarea rows={2} value={ledgerDraft.note} onChange={e => updateLedger('note', e.target.value)} onBlur={flushFinanceAutosave} placeholder="Optional payment remarks" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60 resize-none" /></div>
 
                 <div className="col-span-2 mt-2 border-t-2 border-amber-100 pt-4">
                   <label className="text-amber-800 block mb-3 text-xs font-black uppercase tracking-widest">Payment Screenshot (Optional)</label>
@@ -4354,13 +4503,14 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                     <div>
                       <p className="text-[10px] font-black uppercase tracking-widest text-amber-600">Calculated status</p>
                       <p className="font-black text-slate-800 mt-1">{derivePaymentTrackingStatusFromData({ ...project, estimate:ledgerDraft.estimate, ledger:{ ...(project.ledger || {}), amountIn:ledgerDraft.amountIn, expenses:ledgerDraft.expenses, refund:ledgerDraft.refund, date:ledgerDraft.date } })}</p>
-                      <p className={`text-xs font-bold mt-1 ${ledgerDirty ? 'text-amber-600' : 'text-emerald-600'}`}>{ledgerSaveMessage || (ledgerDirty ? 'Unsaved finance changes' : 'Finance is saved')}</p>
+                      <p className={`text-xs font-bold mt-1 ${ledgerSaveState === 'error' ? 'text-red-600' : (ledgerSaveState === 'saved' ? 'text-emerald-600' : 'text-amber-600')}`}>{ledgerSaveMessage}</p>
                     </div>
-                    <button type="button" onClick={handleSaveLedger} disabled={!ledgerDirty || isSavingLedger || isUploadingLedgerReceipt} className="px-5 py-3 rounded-xl bg-slate-900 text-white font-black hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed min-w-[190px]">
-                      {isSavingLedger ? 'Saving Payment…' : 'Save Payment Details'}
-                    </button>
+                    <div className={`px-4 py-2.5 rounded-xl border font-black text-xs flex items-center whitespace-nowrap ${ledgerSaveState === 'error' ? 'bg-red-50 text-red-700 border-red-100' : (ledgerSaveState === 'saved' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-amber-50 text-amber-700 border-amber-100')}`}>
+                      <RefreshCcw className={`w-4 h-4 mr-2 ${isSavingLedger ? 'animate-spin' : ''}`} />
+                      {isSavingLedger ? 'Auto-saving' : (ledgerSaveState === 'error' ? 'Needs attention' : 'Automatic save')}
+                    </div>
                   </div>
-                  <p className="text-[11px] font-semibold text-slate-500 mt-3">Typing does not write to the server. One durable finance transaction is created only when Save Payment Details is selected.</p>
+                  <p className="text-[11px] font-semibold text-slate-500 mt-3">Changes save automatically after you pause typing or leave a field. An estimate without payment becomes Pending; a received amount reaching the estimate becomes Paid.</p>
                 </div>
               </div>
             </div>

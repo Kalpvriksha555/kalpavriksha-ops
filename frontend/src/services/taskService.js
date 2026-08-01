@@ -263,7 +263,7 @@ export const saveFinanceStatusApi = async ({ apiBase, headers = {}, taskId, stat
     return parseJsonSafe(res);
   } catch (error) {
     if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
-      const timeoutError = new Error('Finance save took too long. Your values remain on screen. Select Save Payment Details again; the same mutation ID prevents duplicate posting if the first attempt completed.');
+      const timeoutError = new Error('Finance auto-save took too long. Your values remain on screen. Leave the field again or make another edit to retry safely; the same mutation ID prevents duplicate posting if the first attempt completed.');
       timeoutError.name = 'FinanceTimeoutError';
       timeoutError.code = 'FINANCE_SAVE_TIMEOUT';
       throw timeoutError;

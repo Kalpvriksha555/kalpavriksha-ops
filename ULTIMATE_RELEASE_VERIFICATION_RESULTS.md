@@ -4,9 +4,9 @@ This release contains the guarded legacy relational-integrity repair, immutable 
 
 Current source verification targets:
 
-- 72 frontend tests
-- 128 backend tests after the clean-release additions
-- 199 combined source tests
+- 73 frontend tests
+- 129 backend tests after the clean-release additions
+- 202 combined source tests
 - 82 backend routes and 72 frontend/backend contract checks
 - 22 pre-downtime deployment gates
 - verified full PostgreSQL/private-file backup before any integrity repair
