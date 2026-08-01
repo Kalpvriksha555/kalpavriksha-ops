@@ -56,7 +56,8 @@
     "verify:integration": "node scripts/frontend-backend-contract-check.mjs",
     "verify:live-stack": "node scripts/live-stack-check.mjs",
     "verify:matrix": "node scripts/full-release-verifier-matrix.mjs",
-    "db:integrity:repair": "npm run db:integrity:repair --prefix backend"
+    "db:integrity:repair": "npm run db:integrity:repair --prefix backend",
+    "db:integrity:canonicalize-current": "npm run db:integrity:canonicalize-current --prefix backend"
   },
   "dependencies": {
     "@vitejs/plugin-react": "6.0.3",

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import {
   analyzeOperationalSameCountHashDrift,
   auditRelationalIntegrityMetadata,
+  canonicalizeCurrentPhysicalIntegrity,
   classifyLegacyShadowIntegrityDrift,
   mergeVerifiedPhysicalCounts,
   reconcileRelationalIntegrityMetadata,
@@ -175,6 +176,45 @@ test('legacy shadow rebaseline changes only metadata, revision evidence, and aud
   assert.equal(update.params[1],438);
   const event=queries.find(item=>item.text.includes('RELATIONAL_LEGACY_SHADOW_REBASELINED'));
   assert.ok(event);
+});
+
+
+test('frozen current physical canonicalization trusts verified PostgreSQL rows without rewriting business collections',async()=>{
+  const queries=[];
+  const metadata={
+    state_version:451,
+    entity_counts:{...emptyCounts},
+    snapshot_hash:'stale-runtime-hash',
+    source:'relational',
+    updated_at:new Date().toISOString()
+  };
+  const client={
+    async query(sql,params=[]){
+      const text=String(sql); queries.push({text,params});
+      if(text.includes('FROM app_state_metadata')) return {rows:[metadata]};
+      if(text.includes('count(*)::int FROM ops_')) return {rows:[{...emptyCounts}]};
+      if(text.includes('FROM ops_deleted_projects')) return {rows:[]};
+      if(text.includes('FROM ops_misc_state')) return {rows:[]};
+      if(text.startsWith('SELECT ') && text.includes(' FROM ops_')) return {rows:[]};
+      return {rows:[]};
+    },
+    release(){}
+  };
+  const result=await canonicalizeCurrentPhysicalIntegrity(
+    {async connect(){return client;}},
+    {backupManifest:'/verified/current-full.manifest.json',expectedStateVersion:451}
+  );
+  assert.equal(result.canonicalized,true);
+  assert.equal(result.previousStateVersion,451);
+  assert.equal(result.stateVersion,452);
+  assert.equal(result.operationalRowsChanged,false);
+  assert.equal(result.snapshotHash,stateSnapshotHash(emptyPersistedState));
+  assert.ok(queries.some(item=>item.text.includes('LOCK TABLE ops_users')));
+  assert.ok(queries.some(item=>item.text.includes('current_physical_integrity_canonicalization')));
+  assert.ok(queries.some(item=>item.text.includes('relational_current_physical_canonicalized')));
+  assert.ok(queries.some(item=>item.text.includes('RELATIONAL_CURRENT_PHYSICAL_CANONICALIZED')));
+  const businessWrites=queries.filter(item=>/^\s*(INSERT INTO|UPDATE|DELETE FROM)\s+ops_/i.test(item.text));
+  assert.deepEqual(businessWrites,[]);
 });
 
 test('same-count hash drift is repairable only when verified revision differences are presence, current-day attendance, and append-only audit',()=>{

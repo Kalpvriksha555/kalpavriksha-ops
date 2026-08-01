@@ -10,8 +10,8 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 STAGE="/var/www/kalpavriksha-monthly-performance-${STAMP}"
 NEXT_DIST="$LIVE/frontend/dist.next-${STAMP}"
 BACKUP_DIR="/var/backups/kalpavriksha-incremental/${STAMP}"
+BACKEND_STOPPED=0
 SWITCH_STARTED=0
-REPAIR_COMPLETED=0
 
 log() { printf '\n[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
@@ -21,9 +21,20 @@ cleanup() {
 
 wait_for_health() {
   local attempt
-  for attempt in $(seq 1 40); do
+  for attempt in $(seq 1 45); do
     if curl -fsS "http://127.0.0.1:${PORT}/api/health/live" >/dev/null 2>&1 \
       && curl -fsS "http://127.0.0.1:${PORT}/api/health/ready" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+wait_for_backend_stop() {
+  local attempt
+  for attempt in $(seq 1 30); do
+    if ! curl -fsS "http://127.0.0.1:${PORT}/api/health/live" >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
@@ -43,12 +54,10 @@ rollback() {
     cp -a "$BACKUP_DIR/postgresStateRepository.js" "$LIVE/backend/src/repositories/postgresStateRepository.js"
     rm -rf "$LIVE/frontend/dist"
     cp -a "$BACKUP_DIR/dist" "$LIVE/frontend/dist"
-    pm2 restart "$PM2_NAME" --update-env >/dev/null || true
-    wait_for_health || true
-  elif [[ "$REPAIR_COMPLETED" == "1" ]]; then
-    # The metadata repair advances the state version. Reload the still-current
-    # backend so its in-memory version matches the committed PostgreSQL state.
-    log "Reloading the existing backend after integrity metadata repair"
+  fi
+
+  if [[ "$BACKEND_STOPPED" == "1" ]]; then
+    log "Restarting the previous backend"
     pm2 restart "$PM2_NAME" --update-env >/dev/null || true
     wait_for_health || true
   fi
@@ -91,21 +100,21 @@ log "Extracting the target without changing the live Git checkout"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 git -C "$LIVE" archive "$TARGET_COMMIT" | tar -x -C "$STAGE"
-
-# Reuse the already installed backend packages. Package manifests and locks are
-# not part of this feature revision, so no backend dependency installation runs.
 ln -s "$LIVE/backend/node_modules" "$STAGE/backend/node_modules"
 
-log "Checking only the files changed by this analytics revision"
+log "Running only the tests tied to this analytics revision"
 node --check "$STAGE/backend/src/server.js"
 node --check "$STAGE/backend/src/repositories/postgresStateRepository.js"
+node --check "$STAGE/backend/scripts/db-integrity-canonicalize-current.mjs"
+bash -n "$STAGE/scripts/deploy-monthly-performance-only-vps.sh"
 (
   cd "$STAGE"
   node --test \
     tests/frontend/monthly-finance-reports-ledger.test.mjs \
     tests/frontend/session-performance.test.mjs \
     tests/backend/session-performance-hardening.test.mjs \
-    tests/backend/relational-integrity-metadata-reconciliation.test.mjs
+    tests/backend/relational-integrity-metadata-reconciliation.test.mjs \
+    tests/backend/end-to-end-lifecycle-integrity.test.mjs
 )
 
 log "Installing only frontend build dependencies and building the latest UI"
@@ -123,20 +132,29 @@ cp -a "$LIVE/backend/src/server.js" "$BACKUP_DIR/server.js"
 cp -a "$LIVE/backend/src/repositories/postgresStateRepository.js" "$BACKUP_DIR/postgresStateRepository.js"
 cp -a "$LIVE/frontend/dist" "$BACKUP_DIR/dist"
 
-log "Repairing only the already-detected stale integrity hash, using the recent verified full backup"
 set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 set +a
 : "${KALPA_BACKUP_ROOT:?KALPA_BACKUP_ROOT is missing from $ENV_FILE}"
-KALPA_INTEGRITY_REPAIR_CONFIRM="REPAIR VERIFIED LEGACY INTEGRITY METADATA" \
-  node "$STAGE/backend/scripts/db-integrity-repair.mjs"
-REPAIR_COMPLETED=1
-node "$STAGE/backend/scripts/db-integrity-audit.mjs"
+
+log "Verifying the existing recent full backup before any downtime"
+KALPA_CURRENT_PHYSICAL_CANONICALIZE_CONFIRM="CANONICALIZE VERIFIED CURRENT PHYSICAL RELATIONAL STATE" \
+KALPA_CANONICALIZE_PREFLIGHT_ONLY="true" \
+  node "$STAGE/backend/scripts/db-integrity-canonicalize-current.mjs"
+
+log "Freezing backend writes"
+pm2 stop "$PM2_NAME" >/dev/null
+BACKEND_STOPPED=1
+wait_for_backend_stop
+
+log "Canonicalizing only integrity metadata from the frozen current PostgreSQL rows"
+KALPA_CURRENT_PHYSICAL_CANONICALIZE_CONFIRM="CANONICALIZE VERIFIED CURRENT PHYSICAL RELATIONAL STATE" \
+KALPA_BACKEND_FROZEN_CONFIRM="BACKEND WRITES ARE STOPPED" \
+  node "$STAGE/backend/scripts/db-integrity-canonicalize-current.mjs"
 
 log "Switching only the two backend runtime files and the compiled frontend"
 SWITCH_STARTED=1
-pm2 stop "$PM2_NAME" >/dev/null
 install -m 0644 "$STAGE/backend/src/server.js" "$LIVE/backend/src/server.js"
 install -m 0644 "$STAGE/backend/src/repositories/postgresStateRepository.js" \
   "$LIVE/backend/src/repositories/postgresStateRepository.js"
@@ -146,6 +164,7 @@ mv "$NEXT_DIST" "$LIVE/frontend/dist"
 pm2 restart "$PM2_NAME" --update-env >/dev/null
 wait_for_health
 pm2 save >/dev/null
+BACKEND_STOPPED=0
 
 curl -fsS "http://127.0.0.1:${PORT}/api/health/live"
 echo
@@ -153,11 +172,11 @@ curl -fsS "http://127.0.0.1:${PORT}/api/health/ready"
 echo
 
 mkdir -p /var/lib/kalpavriksha
-cat > /var/lib/kalpavriksha/runtime-release.json <<EOF
+cat > /var/lib/kalpavriksha/runtime-release.json <<JSON
 {
   "commit": "$TARGET_COMMIT",
   "deployedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "deploymentType": "monthly-performance-incremental",
+  "deploymentType": "monthly-performance-incremental-current-physical-canonicalization",
   "backendFiles": [
     "backend/src/server.js",
     "backend/src/repositories/postgresStateRepository.js"
@@ -165,7 +184,7 @@ cat > /var/lib/kalpavriksha/runtime-release.json <<EOF
   "frontend": "frontend/dist",
   "rollbackDirectory": "$BACKUP_DIR"
 }
-EOF
+JSON
 
 trap - ERR INT TERM
 cleanup
@@ -174,6 +193,7 @@ log "MONTHLY PERFORMANCE LATEST-CHANGES DEPLOYMENT COMPLETED"
 echo "Commit: $TARGET_COMMIT"
 echo "Full phase matrix: not run"
 echo "Database migrations: not run"
-echo "New full backup: not created (recent verified full backup was required)"
+echo "New full backup: not created (the existing recent verified full backup was used)"
 echo "Backend dependency install: not run"
+echo "Operational PostgreSQL rows rewritten: no"
 echo "Rollback copy: $BACKUP_DIR"

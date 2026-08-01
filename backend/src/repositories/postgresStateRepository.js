@@ -1896,6 +1896,149 @@ export async function rebaselineLegacyShadowIntegrity(pool, { actor = 'deploymen
 }
 
 
+
+export async function canonicalizeCurrentPhysicalIntegrity(pool, {
+  actor = 'deployment-current-physical-canonicalizer',
+  backupManifest = '',
+  expectedStateVersion = null
+} = {}) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+    await client.query("SET LOCAL lock_timeout = '20s'");
+    await client.query("SET LOCAL statement_timeout = '180s'");
+    await client.query('SELECT pg_advisory_xact_lock($1)', [ADVISORY_LOCK_ID]);
+    await client.query(`LOCK TABLE ${Object.values(PHYSICAL_COUNT_TABLES).join(', ')} IN SHARE MODE`);
+
+    const metadata = await client.query('SELECT * FROM app_state_metadata WHERE key=$1 FOR UPDATE', ['main']);
+    if (!metadata.rows.length) {
+      const error = new Error('Relational state metadata is missing.');
+      error.code = 'RELATIONAL_METADATA_MISSING';
+      throw error;
+    }
+
+    const row = metadata.rows[0];
+    const currentVersion = Number(row.state_version || 0);
+    if (expectedStateVersion !== null && expectedStateVersion !== undefined
+      && Number(expectedStateVersion) !== currentVersion) {
+      const error = new Error(`Current physical canonicalization refused because state version changed from ${expectedStateVersion} to ${currentVersion}.`);
+      error.code = 'RELATIONAL_STATE_VERSION_CHANGED';
+      throw error;
+    }
+    if (!String(backupManifest || '').trim()) {
+      const error = new Error('A verified full-backup manifest is required before current physical canonicalization.');
+      error.code = 'VERIFIED_FULL_BACKUP_REQUIRED';
+      throw error;
+    }
+    if (!String(row.source || '').startsWith('relational')) {
+      const error = new Error('Current physical canonicalization is permitted only for relational state metadata.');
+      error.code = 'NON_RELATIONAL_METADATA_SOURCE';
+      throw error;
+    }
+
+    const parts = await readRelationalParts(client);
+    const persistedState = recomposeState(parts);
+    const actualCounts = entityCounts(parts);
+    const physicalCounts = await readPhysicalEntityCounts(client);
+    const physicalCountMismatches = compareCounts(actualCounts, physicalCounts);
+    if (physicalCountMismatches.length) {
+      const error = new Error(`Current physical canonicalization refused because reconstructed counts disagree with PostgreSQL for: ${physicalCountMismatches.join(', ')}.`);
+      error.code = 'RELATIONAL_PHYSICAL_COUNT_VERIFICATION_FAILED';
+      error.collections = physicalCountMismatches;
+      throw error;
+    }
+
+    const expectedCounts = row.entity_counts || {};
+    const metadataCountMismatches = compareCounts(expectedCounts, actualCounts);
+    if (metadataCountMismatches.length) {
+      const error = new Error(`Current physical canonicalization refused because metadata counts do not match PostgreSQL for: ${metadataCountMismatches.join(', ')}.`);
+      error.code = 'RELATIONAL_METADATA_COUNT_MISMATCH';
+      error.collections = metadataCountMismatches;
+      throw error;
+    }
+
+    const actualHash = stateSnapshotHash(persistedState);
+    const roundTripParts = decomposeState(persistedState);
+    const roundTripState = recomposeState(roundTripParts);
+    const roundTripHash = stateSnapshotHash(roundTripState);
+    const roundTripCounts = entityCounts(roundTripParts);
+    const roundTripCountMismatches = compareCounts(actualCounts, roundTripCounts);
+    if (actualHash !== roundTripHash || roundTripCountMismatches.length) {
+      const error = new Error('Current physical canonicalization refused because the complete PostgreSQL state did not survive an independent canonical round trip.');
+      error.code = 'RELATIONAL_CANONICAL_ROUND_TRIP_FAILED';
+      error.details = { actualHash, roundTripHash, roundTripCountMismatches };
+      throw error;
+    }
+
+    const expectedHash = String(row.snapshot_hash || '');
+    if (expectedHash === actualHash) {
+      await client.query('COMMIT');
+      return {
+        ok:true,
+        canonicalized:false,
+        reason:'already-healthy',
+        stateVersion:currentVersion,
+        counts:actualCounts,
+        snapshotHash:actualHash
+      };
+    }
+    if (!expectedHash) {
+      const error = new Error('Current physical canonicalization refused because the stored snapshot hash is missing.');
+      error.code = 'RELATIONAL_SNAPSHOT_HASH_MISSING';
+      throw error;
+    }
+
+    const nextVersion = currentVersion + 1;
+    await client.query(
+      `INSERT INTO state_revisions(state_version,actor,reason,snapshot_hash,entity_counts,snapshot)
+       VALUES($1,$2,'current_physical_integrity_canonicalization',$3,$4::jsonb,$5::jsonb)`,
+      [nextVersion, String(actor || 'deployment-current-physical-canonicalizer'), actualHash, JSON.stringify(actualCounts), JSON.stringify(persistedState)]
+    );
+    await client.query(
+      `UPDATE app_state_metadata
+          SET state_version=$2,snapshot_hash=$3,entity_counts=$4::jsonb,
+              source='relational_current_physical_canonicalized',updated_at=now()
+        WHERE key=$1`,
+      ['main', nextVersion, actualHash, JSON.stringify(actualCounts)]
+    );
+    await client.query(
+      `INSERT INTO operational_events(event_type,severity,actor,details)
+       VALUES('RELATIONAL_CURRENT_PHYSICAL_CANONICALIZED','WARN',$1,$2::jsonb)`,
+      [String(actor || 'deployment-current-physical-canonicalizer'), JSON.stringify({
+        previousStateVersion:currentVersion,
+        stateVersion:nextVersion,
+        previousSnapshotHash:expectedHash,
+        snapshotHash:actualHash,
+        counts:actualCounts,
+        physicalCounts,
+        roundTripHash,
+        operationalRowsChanged:false,
+        backupManifest:String(backupManifest || '')
+      })]
+    );
+
+    await client.query('COMMIT');
+    return {
+      ok:true,
+      canonicalized:true,
+      previousStateVersion:currentVersion,
+      stateVersion:nextVersion,
+      previousSnapshotHash:expectedHash,
+      snapshotHash:actualHash,
+      counts:actualCounts,
+      physicalCounts,
+      roundTripHash,
+      operationalRowsChanged:false,
+      backupManifest:String(backupManifest || '')
+    };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function rebaselineOperationalSameCountIntegrity(pool, { actor = 'deployment-operational-integrity-rebaseliner', backupManifest = '' } = {}) {
   const client = await pool.connect();
   try {

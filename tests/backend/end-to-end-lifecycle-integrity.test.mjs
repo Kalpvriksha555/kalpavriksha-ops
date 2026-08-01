@@ -242,7 +242,11 @@ test('monthly performance hot deploy updates only its runtime delta without the 
   assert.match(deploy,/npm ci --prefix "\$STAGE\/frontend"/);
   assert.match(deploy,/monthly-finance-reports-ledger\.test\.mjs/);
   assert.match(deploy,/session-performance-hardening\.test\.mjs/);
-  assert.match(deploy,/db-integrity-repair\.mjs/);
+  assert.match(deploy,/db-integrity-canonicalize-current\.mjs/);
+  assert.match(deploy,/CANONICALIZE VERIFIED CURRENT PHYSICAL RELATIONAL STATE/);
+  assert.match(deploy,/BACKEND WRITES ARE STOPPED/);
+  assert.ok(deploy.indexOf('pm2 stop "$PM2_NAME"') < deploy.indexOf('Canonicalizing only integrity metadata'));
+  assert.match(deploy,/Operational PostgreSQL rows rewritten: no/);
   assert.match(deploy,/api\/health\/ready/);
   assert.doesNotMatch(deploy,/verify:matrix/);
   assert.doesNotMatch(deploy,/db:migrate/);
