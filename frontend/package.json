@@ -1,6 +1,6 @@
 {
   "name": "kalpvriksha-designs-frontend",
-  "version": "2.9.16-task-date-finance-period",
+  "version": "2.9.24-overall-stability-data-safety",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",

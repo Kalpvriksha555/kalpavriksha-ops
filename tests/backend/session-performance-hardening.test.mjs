@@ -40,7 +40,9 @@ test('partial relational writes use the version-matched persisted shadow instead
   assert.match(server, /relationalShadowState = structuredClone\(loaded\.persistedState \|\| loaded\.state\)/);
   assert.match(server, /persistedBaseState: relationalShadowState/);
   assert.match(repository, /persistedBaseState \? decomposeState\(persistedBaseState\) : await readRelationalParts\(client\)/);
-  assert.match(repository, /committedState, revisionSnapshotWritten:shouldWriteRevisionSnapshot/);
+  assert.match(repository, /committedState,/);
+  assert.match(repository, /committedStateOwned: Boolean\(fastSelectedWrite\)/);
+  assert.match(repository, /revisionSnapshotWritten:shouldWriteRevisionSnapshot/);
 });
 
 test('rate limiter periodically removes expired identities', () => {

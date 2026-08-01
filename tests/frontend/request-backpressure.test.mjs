@@ -25,7 +25,7 @@ test('workspace refreshes and pending task retries have in-flight backpressure',
 test('new tasks are persisted before source files are uploaded', () => {
   const createStart = app.indexOf('const filesToAttach = [...leadFiles]');
   const createRequest = app.indexOf('const saveData = await createTaskApi', createStart);
-  const uploadRequest = app.indexOf("uploadProjectFile(file, taskId, 'source'", createStart);
+  const uploadRequest = app.indexOf("uploadProjectFile(file,confirmedProject.id || confirmedProject.caseId,'source'", createStart);
   assert.ok(createStart > 0 && createRequest > createStart && uploadRequest > createRequest);
   assert.match(app.slice(createStart, uploadRequest), /projectConfirmedByBackend/);
 });
@@ -43,10 +43,11 @@ test('state conflicts are retried and are never misclassified as permanent task 
   assert.match(taskService, /isProjectDeletedError/);
 });
 
-test('uploaded task attachments are retained in the durable outbox when linking confirmation fails', () => {
-  assert.match(app, /rememberPendingCreatedProject\(projectWithFiles\)/);
-  assert.match(app, /create-files-pending-confirmation/);
-  assert.doesNotMatch(app, /failedFiles\.push\('attachment list update'\)/);
+test('uploaded task attachments are linked atomically by the upload response', () => {
+  assert.match(fileService, /_serverCase: payload\.case \|\| payload\.project \|\| null/);
+  assert.match(app, /if \(uploaded\?\._serverCase\) \{[\s\S]*applyProjectSnapshot\(\[confirmedProject\]/);
+  assert.doesNotMatch(app, /create-files-pending-confirmation/);
+  assert.doesNotMatch(app, /rememberPendingCreatedProject\(projectWithFiles\)/);
 });
 
 test('portable request deadlines are routed through authFetch instead of AbortSignal.timeout', () => {

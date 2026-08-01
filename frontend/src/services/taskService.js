@@ -27,9 +27,9 @@ export const getPriorityColor = (priority, dueDate) => {
 // this service so components do not create competing API/state code paths.
 
 const FINANCE_FIELDS = Object.freeze([
-  'ledger','financeVersion','paymentTrackingStatus','paymentTrackingUpdatedAt','paymentTrackingUpdatedBy',
+  'estimate','ledger','financeVersion','paymentTrackingStatus','paymentTrackingUpdatedAt','paymentTrackingUpdatedBy',
   'paymentStatus','paymentReceived','paymentAmountIn','refundAmount','payerName','transactionId',
-  'paymentDate','paymentTime','paymentAuditTrail','financeAccountingPeriod'
+  'paymentDate','paymentTime','paymentAuditTrail','financeAccountingPeriod','lastFinanceMutationId','lastFinanceMutationAt'
 ]);
 
 const toTime = (value) => {
@@ -181,14 +181,17 @@ export const fetchBackendState = async ({ apiBase, headers = {}, includePerforma
 
 const TASK_WRITE_TIMEOUT_MS = 2 * 60 * 1000;
 
-export const createTaskApi = async ({ apiBase, headers = {}, task }) => {
+export const createTaskApi = async ({ apiBase, headers = {}, task, expectedTaskVersion, mutationId }) => {
   let res;
+  const normalizedTask=normalizeTaskRecord(task);
+  const expected=expectedTaskVersion ?? normalizedTask.taskVersion ?? 0;
+  const stableMutationId=String(mutationId || normalizedTask.lastTaskMutationId || '').trim();
   try {
     res = await authFetch(`${apiBase}/api/state/projects`, {
       method: 'POST',
       headers,
       timeoutMs:TASK_WRITE_TIMEOUT_MS,
-      body: JSON.stringify({ project: normalizeTaskRecord(task) })
+      body: JSON.stringify({ project: normalizedTask, expectedTaskVersion:expected, mutationId:stableMutationId })
     });
   } catch (error) {
     if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
@@ -241,19 +244,32 @@ export const saveBackendStateApi = async ({ apiBase, headers = {}, payload = {} 
 };
 
 
-export const saveFinanceStatusApi = async ({ apiBase, headers = {}, taskId, status, details = {}, expectedFinanceVersion }) => {
-  const res = await authFetch(`${apiBase}/api/state/projects/${encodeURIComponent(String(taskId))}/payment-status`, {
-    method: 'POST',
-    headers,
-    timeoutMs:TASK_WRITE_TIMEOUT_MS,
-    body: JSON.stringify({
-      paymentTrackingStatus: status,
-      expectedFinanceVersion,
-      ...details
-    })
-  });
-  if (!res.ok) return throwApiError(res, 'Finance save failed');
-  return parseJsonSafe(res);
+const FINANCE_WRITE_TIMEOUT_MS = 45 * 1000;
+
+export const saveFinanceStatusApi = async ({ apiBase, headers = {}, taskId, status, details = {}, expectedFinanceVersion, mutationId }) => {
+  try {
+    const res = await authFetch(`${apiBase}/api/state/projects/${encodeURIComponent(String(taskId))}/payment-status`, {
+      method: 'POST',
+      headers,
+      timeoutMs:FINANCE_WRITE_TIMEOUT_MS,
+      body: JSON.stringify({
+        paymentTrackingStatus: status,
+        expectedFinanceVersion,
+        mutationId,
+        ...details
+      })
+    });
+    if (!res.ok) return throwApiError(res, 'Finance save failed');
+    return parseJsonSafe(res);
+  } catch (error) {
+    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+      const timeoutError = new Error('Finance save took too long. Your values remain on screen. Select Save Payment Details again; the same mutation ID prevents duplicate posting if the first attempt completed.');
+      timeoutError.name = 'FinanceTimeoutError';
+      timeoutError.code = 'FINANCE_SAVE_TIMEOUT';
+      throw timeoutError;
+    }
+    throw error;
+  }
 };
 
 export const fetchFinanceHistoryApi = async ({ apiBase, headers = {}, taskId }) => {

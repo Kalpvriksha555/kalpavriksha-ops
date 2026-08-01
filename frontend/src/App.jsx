@@ -62,6 +62,17 @@ const createOpsBroadcast = () => {
 const opsBroadcast = createOpsBroadcast();
 const OPS_TAB_ID = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
 
+const PERMANENT_TASK_WRITE_CODES = new Set([
+  'TASK_DATE_INVALID','TASK_DATE_FUTURE','TASK_COMPLETION_FORBIDDEN','COMPLETED_FILE_REQUIRED',
+  'TASK_UPDATE_FORBIDDEN','TASK_CREATE_FORBIDDEN','CASE_ACCESS_DENIED','CASE_NOT_FOUND',
+  'TASK_ID_REQUIRED','TASK_INVALID','TASK_DISPLAY_ID_CONFLICT','TASK_REOPEN_FORBIDDEN','VALIDATION_ERROR'
+]);
+const isPermanentTaskWriteError = (error = {}) => {
+  const code=String(error?.code || error?.payload?.code || '').trim().toUpperCase();
+  const status=Number(error?.status || error?.payload?.status || 0);
+  return PERMANENT_TASK_WRITE_CODES.has(code) || status === 400 || status === 403 || status === 404;
+};
+
 const stripInlineDataUrl = (value) => {
   if (typeof value !== 'string') return value;
   if (!value.startsWith('data:')) return value;
@@ -95,9 +106,9 @@ const sanitizeProjectForCache = (project) => {
 const sanitizeProjectsForCache = (projects) => (Array.isArray(projects) ? projects.map(sanitizeProjectForCache) : []);
 
 const FINANCE_COMPARE_FIELDS = Object.freeze([
-  'ledger','financeVersion','paymentTrackingStatus','paymentTrackingUpdatedAt','paymentTrackingUpdatedBy',
+  'estimate','estimateAmount','ledger','financeVersion','paymentTrackingStatus','paymentTrackingUpdatedAt','paymentTrackingUpdatedBy',
   'paymentStatus','paymentReceived','paymentAmountIn','refundAmount','payerName','transactionId',
-  'paymentDate','paymentTime','paymentAuditTrail','financeAccountingPeriod'
+  'paymentDate','paymentTime','paymentAuditTrail','financeAccountingPeriod','lastFinanceMutationId','lastFinanceMutationAt'
 ]);
 
 const financeSignature = (project = {}) => JSON.stringify(Object.fromEntries(
@@ -112,70 +123,158 @@ const applyConfirmedFinance = (project = {}, confirmed = {}) => {
   return next;
 };
 
-const getPendingCreatedProjects = () => {
+const createFinanceMutationId = () => {
   try {
-    const raw = JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
-    return Object.values(raw).map(record => record?.project || record).filter(project => project?.id);
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  } catch {}
+  return `finance-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+};
+
+const createTaskMutationId = (prefix = 'task') => {
+  try {
+    if (globalThis.crypto?.randomUUID) return `${prefix}-${globalThis.crypto.randomUUID()}`;
+  } catch {}
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+};
+
+const operationalActorKey = (user = {}) => String(user.id || user.username || user.name || '').trim().toLowerCase();
+
+const createFinanceLedgerDraft = (project = {}) => ({
+  estimate: String(project.estimate ?? project.estimateAmount ?? ''),
+  amountIn: String(project.ledger?.amountIn ?? project.paymentAmountIn ?? ''),
+  expenses: String(project.ledger?.expenses ?? ''),
+  refund: String(project.ledger?.refund ?? project.refundAmount ?? ''),
+  date: String(project.ledger?.date || project.paymentDate || getIndiaDateKey()),
+  receivedFrom: String(project.ledger?.receivedFrom || project.payerName || ''),
+  txnId: String(project.ledger?.txnId || project.transactionId || ''),
+  mode: String(project.ledger?.mode || ''),
+  note: String(project.ledger?.note || ''),
+  screenshot: project.ledger?.screenshot || null
+});
+
+const parseFinanceDraftAmount = (value, label) => {
+  const raw = String(value ?? '').trim();
+  if (!raw) return 0;
+  const numeric = Number(raw.replace(/[^0-9.-]/g, ''));
+  if (!Number.isFinite(numeric) || numeric < 0 || numeric > 100_000_000) {
+    throw new Error(`${label} must be a valid amount between ₹0 and ₹10,00,00,000.`);
+  }
+  return numeric;
+};
+
+const getPendingCreatedRecords = (actorId = '') => {
+  try {
+    const raw=JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
+    const actorKey=String(actorId || '').trim().toLowerCase();
+    return Object.values(raw).map(record=>record?.project ? record : {project:record}).filter(record=>{
+      if (!record?.project?.id) return false;
+      if (!actorKey) return true;
+      return !record.actorId || String(record.actorId).trim().toLowerCase()===actorKey;
+    });
   } catch(e) { return []; }
 };
-const rememberPendingCreatedProject = (project) => {
+const getPendingCreatedProjects = (actorId = '') => getPendingCreatedRecords(actorId).map(record=>record.project).filter(Boolean);
+const rememberPendingCreatedProject = (project, options = {}) => {
   if (!project?.id) return;
   try {
-    const raw = JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
-    raw[String(project.id)] = { project: sanitizeProjectForCache(project), createdAt: Date.now(), lastAttemptAt: 0, attempts: Number(raw[String(project.id)]?.attempts || 0) };
-    localStorage.setItem('kalpa_pending_created_projects', JSON.stringify(raw));
-  } catch(e) {}
+    const raw=JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
+    const key=String(project.id);
+    const previous=raw[key] || {};
+    const mutationId=String(options.mutationId || previous.mutationId || project.lastTaskMutationId || createTaskMutationId(options.operation === 'create' ? 'create' : 'update')).trim();
+    raw[key]={
+      project:sanitizeProjectForCache(project),
+      actorId:String(options.actorId || previous.actorId || '').trim().toLowerCase(),
+      operation:String(options.operation || previous.operation || (Number(project.taskVersion || 0) > 0 ? 'update' : 'create')),
+      mutationId,
+      expectedTaskVersion:Number(options.expectedTaskVersion ?? previous.expectedTaskVersion ?? project.taskVersion ?? 0),
+      createdAt:Number(previous.createdAt || Date.now()),
+      lastAttemptAt:Number(previous.lastAttemptAt || 0),
+      attempts:Number(previous.attempts || 0)
+    };
+    localStorage.setItem('kalpa_pending_created_projects',JSON.stringify(raw));
+    return raw[key];
+  } catch(e) { return null; }
 };
 const markPendingCreatedAttempt = (projectId) => {
   try {
-    const raw = JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
-    const key = String(projectId || '');
-    if (raw[key]) { raw[key].lastAttemptAt = Date.now(); raw[key].attempts = Number(raw[key].attempts || 0) + 1; localStorage.setItem('kalpa_pending_created_projects', JSON.stringify(raw)); }
+    const raw=JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
+    const key=String(projectId || '');
+    if (raw[key]) { raw[key].lastAttemptAt=Date.now(); raw[key].attempts=Number(raw[key].attempts || 0)+1; localStorage.setItem('kalpa_pending_created_projects',JSON.stringify(raw)); }
   } catch(e) {}
 };
 const forgetPendingCreatedProjects = (...ids) => {
-  const remove = new Set(ids.flat().map(x => String(x)).filter(Boolean));
+  const remove=new Set(ids.flat().map(x=>String(x)).filter(Boolean));
   if (!remove.size) return;
   try {
-    const raw = JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
-    remove.forEach(id => { delete raw[id]; });
-    localStorage.setItem('kalpa_pending_created_projects', JSON.stringify(raw));
+    const raw=JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
+    Object.entries(raw).forEach(([key,record])=>{
+      const project=record?.project || record || {};
+      const identities=[key,project.id,project.caseId,project.displayId,...(project.previousTaskIds || [])].map(x=>String(x || '')).filter(Boolean);
+      if (identities.some(id=>remove.has(id))) delete raw[key];
+    });
+    localStorage.setItem('kalpa_pending_created_projects',JSON.stringify(raw));
   } catch(e) {}
 };
-const getProtectedCreatedProjectIds = () => new Set(getPendingCreatedProjects().flatMap(p => [p.id, p.caseId]).map(x => String(x || '')).filter(Boolean));
+const getProtectedCreatedProjectIds = () => new Set(getPendingCreatedProjects().flatMap(p=>[p.id,p.caseId,p.displayId]).map(x=>String(x || '')).filter(Boolean));
 
-const getPendingDeletedProjectIds = () => {
+const getPendingDeletedRecords = (actorId = '') => {
   try {
     const raw = JSON.parse(localStorage.getItem('kalpa_pending_deleted_project_ids') || '{}') || {};
-    return Object.keys(raw).map(x => String(x)).filter(Boolean);
+    const actorKey = String(actorId || '').trim().toLowerCase();
+    return Object.values(raw).map(record => (typeof record === 'string' ? { id: record } : record)).filter(record => {
+      if (!record?.id) return false;
+      if (!actorKey) return true;
+      return !record.actorId || String(record.actorId).trim().toLowerCase() === actorKey;
+    });
   } catch(e) { return []; }
 };
-const rememberPendingDeletedProjects = (...ids) => {
-  const incoming = ids.flat().map(x => String(x || '')).filter(Boolean);
-  if (!incoming.length) return getPendingDeletedProjectIds();
+const getPendingDeletedProjectIds = (actorId = '') => getPendingDeletedRecords(actorId).map(record => String(record.id || '')).filter(Boolean);
+const rememberPendingDeletedProjects = (ids, options = {}) => {
+  const incoming = (Array.isArray(ids) ? ids : [ids]).flat().map(x => String(x || '')).filter(Boolean);
+  const actorId = String(options.actorId || '').trim().toLowerCase();
+  if (!incoming.length) return getPendingDeletedProjectIds(actorId);
   try {
     const raw = JSON.parse(localStorage.getItem('kalpa_pending_deleted_project_ids') || '{}') || {};
-    incoming.forEach(id => { raw[id] = { id, deletedAt: raw[id]?.deletedAt || Date.now(), lastAttemptAt: raw[id]?.lastAttemptAt || 0, attempts: Number(raw[id]?.attempts || 0) }; });
+    incoming.forEach(id => {
+      const previous = typeof raw[id] === 'object' && raw[id] ? raw[id] : {};
+      raw[id] = {
+        id,
+        actorId: actorId || previous.actorId || '',
+        deletedAt: previous.deletedAt || Date.now(),
+        lastAttemptAt: previous.lastAttemptAt || 0,
+        attempts: Number(previous.attempts || 0)
+      };
+    });
     localStorage.setItem('kalpa_pending_deleted_project_ids', JSON.stringify(raw));
   } catch(e) {}
-  return getPendingDeletedProjectIds();
+  return getPendingDeletedProjectIds(actorId);
 };
-const markPendingDeletedAttempt = (id) => {
+const markPendingDeletedAttempt = (id, actorId = '') => {
   try {
     const raw = JSON.parse(localStorage.getItem('kalpa_pending_deleted_project_ids') || '{}') || {};
     const key = String(id || '');
-    if (raw[key]) { raw[key].lastAttemptAt = Date.now(); raw[key].attempts = Number(raw[key].attempts || 0) + 1; localStorage.setItem('kalpa_pending_deleted_project_ids', JSON.stringify(raw)); }
+    const actorKey = String(actorId || '').trim().toLowerCase();
+    const record = raw[key];
+    if (record && (!actorKey || !record.actorId || String(record.actorId).trim().toLowerCase() === actorKey)) {
+      record.lastAttemptAt = Date.now();
+      record.attempts = Number(record.attempts || 0) + 1;
+      localStorage.setItem('kalpa_pending_deleted_project_ids', JSON.stringify(raw));
+    }
   } catch(e) {}
 };
-const forgetPendingDeletedProjects = (...ids) => {
-  const remove = new Set(ids.flat().map(x => String(x || '')).filter(Boolean));
-  if (!remove.size) return getPendingDeletedProjectIds();
+const forgetPendingDeletedProjects = (ids, options = {}) => {
+  const remove = new Set((Array.isArray(ids) ? ids : [ids]).flat().map(x => String(x || '')).filter(Boolean));
+  const actorKey = String(options.actorId || '').trim().toLowerCase();
+  if (!remove.size) return getPendingDeletedProjectIds(actorKey);
   try {
     const raw = JSON.parse(localStorage.getItem('kalpa_pending_deleted_project_ids') || '{}') || {};
-    remove.forEach(id => { delete raw[id]; });
+    remove.forEach(id => {
+      const record = raw[id];
+      if (!record || !actorKey || !record.actorId || String(record.actorId).trim().toLowerCase() === actorKey) delete raw[id];
+    });
     localStorage.setItem('kalpa_pending_deleted_project_ids', JSON.stringify(raw));
   } catch(e) {}
-  return getPendingDeletedProjectIds();
+  return getPendingDeletedProjectIds(actorKey);
 };
 const getDeletedProjectIds = () => {
   try {
@@ -246,16 +345,23 @@ const projectIdentityMatches = (a = {}, b = {}) => {
   const bIds = [b.id, b.caseId, ...(b.previousTaskIds || [])].map(x => String(x || '')).filter(Boolean);
   return aIds.some(id => bIds.includes(id));
 };
-const confirmPendingCreatedProjectsAgainstServer = (serverProjects = []) => {
+const confirmPendingCreatedProjectsAgainstServer = (serverProjects = [], actorId = '') => {
   try {
-    const pending = getPendingCreatedProjects();
-    const confirmed = pending.filter(p => (serverProjects || []).some(s => projectIdentityMatches(p, s))).flatMap(p => [p.id, p.caseId]).filter(Boolean);
+    const confirmed=[];
+    for (const record of getPendingCreatedRecords(actorId)) {
+      const pendingProject=record.project || {};
+      const serverProject=(serverProjects || []).find(candidate=>projectIdentityMatches(pendingProject,candidate));
+      if (!serverProject) continue;
+      const mutationMatched=record.mutationId && String(serverProject.lastTaskMutationId || '')===String(record.mutationId);
+      const safeLegacyCreateConfirmation=record.operation==='create' && !record.mutationId && Number(serverProject.taskVersion || 0)>=1;
+      if (mutationMatched || safeLegacyCreateConfirmation) confirmed.push(pendingProject.id,pendingProject.caseId,pendingProject.displayId);
+    }
     if (confirmed.length) forgetPendingCreatedProjects(confirmed);
   } catch(e) {}
 };
-const protectRecentlyCreatedProjects = (incoming = [], current = []) => {
+const protectRecentlyCreatedProjects = (incoming = [], current = [], actorId = '') => {
   const recent = getRecentCreatedProjects();
-  const pending = getPendingCreatedProjects();
+  const pending = getPendingCreatedProjects(actorId);
   return mergeProjectsByFreshness(mergeProjectsByFreshness(mergeProjectsByFreshness(incoming, current), recent), pending);
 };
 const filterDeletedProjects = (projects = []) => {
@@ -267,8 +373,9 @@ const filterDeletedProjects = (projects = []) => {
   const list = Array.isArray(projects) ? projects : [];
   const supersededIds = new Set();
   list.forEach(p => {
-    (p?.previousTaskIds || []).forEach(id => { if (id) supersededIds.add(String(id)); });
-    if (p?.supersedesTaskId) supersededIds.add(String(p.supersedesTaskId));
+    const ownIds=new Set([p?.id,p?.caseId,p?.displayId].map(value=>String(value || '')).filter(Boolean));
+    (p?.previousTaskIds || []).forEach(id => { if (id && !ownIds.has(String(id))) supersededIds.add(String(id)); });
+    if (p?.supersedesTaskId && !ownIds.has(String(p.supersedesTaskId))) supersededIds.add(String(p.supersedesTaskId));
   });
   return list.filter(p => {
     if (!p) return false;
@@ -338,16 +445,34 @@ const chatTimeValue = (message = {}) => {
   return Number.isNaN(parsed) ? 0 : parsed;
 };
 
-const mergeChatMessagesByFreshness = (current = [], incoming = []) => {
-  const byId = new Map();
-  [...sanitizeChatsForCache(current), ...sanitizeChatsForCache(incoming)].forEach((message) => {
+const stableRecordEqual = (left, right) => {
+  if (left === right) return true;
+  try { return JSON.stringify(left) === JSON.stringify(right); } catch { return false; }
+};
+
+const reuseStableRecords = (current = [], next = [], keyFactory = (item) => item?.id) => {
+  const previous = Array.isArray(current) ? current : [];
+  const previousByKey = new Map(previous.filter(Boolean).map(item => [String(keyFactory(item) || ''), item]));
+  const reused = (Array.isArray(next) ? next : []).map(item => {
+    const key = String(keyFactory(item) || '');
+    const existing = key ? previousByKey.get(key) : null;
+    return existing && stableRecordEqual(existing, item) ? existing : item;
+  });
+  return reused.length === previous.length && reused.every((item, index) => item === previous[index]) ? previous : reused;
+};
+
+const mergeChatMessagesByFreshness = (current = [], incoming = [], replaceIds = []) => {
+  const replaced = new Set((replaceIds || []).map(value => String(value || '')).filter(Boolean));
+  const base = (Array.isArray(current) ? current : []).filter(message => !replaced.has(String(message?.id || '')));
+  const byId = new Map(base.filter(Boolean).map(message => [String(message.id || `${message.sender || message.by || ''}-${message.recipient || ''}-${message.sentAt || message.createdAt || ''}-${message.text || message.fileName || ''}`), message]));
+  sanitizeChatsForCache(incoming).forEach((message) => {
     if (!message) return;
     const key = String(message.id || `${message.sender || message.by || ''}-${message.recipient || ''}-${message.sentAt || message.createdAt || ''}-${message.text || message.fileName || ''}`);
     const existing = byId.get(key);
     if (!existing) { byId.set(key, message); return; }
     const readBy = [...(existing.readBy || []), ...(message.readBy || [])].filter(Boolean);
     const reactions = { ...(existing.reactions || {}), ...(message.reactions || {}) };
-    byId.set(key, {
+    const merged = {
       ...existing,
       ...message,
       readBy: Array.from(new Map(readBy.map((entry) => {
@@ -356,9 +481,25 @@ const mergeChatMessagesByFreshness = (current = [], incoming = []) => {
       })).values()),
       reactions,
       updatedAt: Math.max(chatTimeValue(existing), chatTimeValue(message)),
-    });
+    };
+    byId.set(key, stableRecordEqual(existing, merged) ? existing : merged);
   });
-  return Array.from(byId.values()).sort((a, b) => chatTimeValue(a) - chatTimeValue(b));
+  const sorted = Array.from(byId.values()).sort((a, b) => chatTimeValue(a) - chatTimeValue(b));
+  return reuseStableRecords(current, sorted, message => message?.id || `${message?.sender || message?.by || ''}-${message?.sentAt || message?.createdAt || ''}`);
+};
+
+const mergeNotificationsStable = (current = [], incoming = [], replaceIds = []) => {
+  const replaced = new Set((replaceIds || []).map(value => String(value || '')).filter(Boolean));
+  const byId = new Map((Array.isArray(current) ? current : []).filter(item => item?.id && !replaced.has(String(item.id))).map(item => [String(item.id), item]));
+  (Array.isArray(incoming) ? incoming : []).forEach(item => {
+    if (!item?.id) return;
+    const key = String(item.id);
+    const existing = byId.get(key);
+    const merged = existing ? { ...existing, ...item } : item;
+    byId.set(key, existing && stableRecordEqual(existing, merged) ? existing : merged);
+  });
+  const next = Array.from(byId.values()).sort((a,b) => Number(b.createdAt || b.id || 0) - Number(a.createdAt || a.id || 0));
+  return reuseStableRecords(current, next, item => item?.id);
 };
 
 const AUTHORIZATION_CACHE_SCOPE_KEY = 'kalpa_authorization_cache_scope_v1';
@@ -368,7 +509,7 @@ const clearRoleScopedOperationalCaches = (user = {}) => {
   let existing = '';
   try { existing = localStorage.getItem(AUTHORIZATION_CACHE_SCOPE_KEY) || ''; } catch {}
   if (existing !== scope) {
-    ['kalpa_users','kalpa_projects','kalpa_projects_backup','kalpa_chats','kalpa_notifs','kalpa_attendance','kalpa_pending_created_projects','kalpa_pending_deleted_project_ids','kalpa_recent_created_projects'].forEach(key => {
+    ['kalpa_users','kalpa_projects','kalpa_projects_backup','kalpa_chats','kalpa_notifs','kalpa_attendance','kalpa_recent_created_projects'].forEach(key => {
       try { localStorage.removeItem(key); } catch {}
     });
   }
@@ -516,7 +657,7 @@ const createEmployeeLifecycleProfile = (user = {}, existing = {}) => {
   const active = lifecycleStatus === 'ACTIVE';
   const base = { ...existing, ...user, role, status };
   const profileCreatedAt = existing.profileCreatedAt || user.profileCreatedAt || now;
-  const profileUpdatedAt = now;
+  const profileUpdatedAt = user.profileUpdatedAt || existing.profileUpdatedAt || user.updatedAt || existing.updatedAt || profileCreatedAt;
   const workingRole = role === ROLES.ADMIN ? 'ADMIN' : (role === ROLES.MANAGER ? 'MANAGER' : 'DESIGNER');
   const previousEvents = Array.isArray(existing.lifecycleEvents) ? existing.lifecycleEvents : [];
   const incomingEvents = Array.isArray(user.lifecycleEvents) ? user.lifecycleEvents : [];
@@ -688,6 +829,13 @@ const normalizeTeamUsers = (list = []) => {
   return [...byKey.values()];
 };
 
+const mergeTeamUsersStable = (existing = [], incoming = [], replaceIds = []) => {
+  const replaced = new Set((replaceIds || []).map(value => String(value || '')).filter(Boolean));
+  const base = (Array.isArray(existing) ? existing : []).filter(user => !replaced.has(String(user?.id || '')));
+  const next = normalizeTeamUsers([...base, ...(Array.isArray(incoming) ? incoming : [])]);
+  return reuseStableRecords(existing, next, user => user?.id || user?.username || identityKey(user?.name));
+};
+
 const normalizePersonName = (name = '') => normalizeTeamUser({ name, username: name }).name || name;
 const identityKey = (value = '') => normalizePersonName(String(value || '')).toLowerCase().replace(/[^a-z0-9]/g, '');
 const samePerson = (a = '', b = '') => identityKey(a) === identityKey(b);
@@ -700,9 +848,15 @@ const attendanceLogFreshness = (log = {}) => Math.max(
   Number(log.loginAt) || 0,
   Number(log.firstLoginAt) || 0
 );
-const mergeAttendanceLogsStable = (existing = [], incoming = []) => {
+const mergeAttendanceLogsStable = (existing = [], incoming = [], replaceIds = []) => {
+  const replaced = new Set((replaceIds || []).map(value => String(value || '')).filter(Boolean));
   const byKey = new Map();
-  [...(Array.isArray(existing) ? existing : []), ...(Array.isArray(incoming) ? incoming : [])].filter(Boolean).forEach(log => {
+  (Array.isArray(existing) ? existing : []).filter(Boolean).forEach(log => {
+    const key = attendanceLogKey(log);
+    if (!key || key === '_' || replaced.has(String(log.id || '')) || replaced.has(key)) return;
+    byKey.set(key, log);
+  });
+  (Array.isArray(incoming) ? incoming : []).filter(Boolean).forEach(log => {
     const key = attendanceLogKey(log);
     if (!key || key === '_') return;
     const prev = byKey.get(key);
@@ -711,7 +865,7 @@ const mergeAttendanceLogsStable = (existing = [], incoming = []) => {
     const nextFresh = attendanceLogFreshness(log);
     const fresher = nextFresh >= prevFresh ? log : prev;
     const older = nextFresh >= prevFresh ? prev : log;
-    byKey.set(key, {
+    const merged = {
       ...older,
       ...fresher,
       totalLoggedInMinutes: Math.max(Number(prev.totalLoggedInMinutes) || 0, Number(log.totalLoggedInMinutes) || 0),
@@ -721,9 +875,10 @@ const mergeAttendanceLogsStable = (existing = [], incoming = []) => {
       loginAt: (Number(prev.loginAt) && Number(log.loginAt)) ? Math.min(Number(prev.loginAt), Number(log.loginAt)) : (Number(prev.loginAt) || Number(log.loginAt) || null),
       firstLoginAt: (Number(prev.firstLoginAt) && Number(log.firstLoginAt)) ? Math.min(Number(prev.firstLoginAt), Number(log.firstLoginAt)) : (Number(prev.firstLoginAt) || Number(log.firstLoginAt) || null),
       loginTime: prev.loginTime || log.loginTime || fresher.loginTime || ''
-    });
+    };
+    byKey.set(key, stableRecordEqual(prev, merged) ? prev : merged);
   });
-  return [...byKey.values()];
+  return reuseStableRecords(existing, [...byKey.values()], attendanceLogKey);
 };
 
 const readEntryName = (entry) => typeof entry === 'string' ? entry : (entry?.name || '');
@@ -827,6 +982,53 @@ const mergeProjectsByFreshness = (current = [], incoming = []) => {
       map.set(key, existing ? mergeProjectRecordSafely(existing, p) : p);
     });
   return applyAssignmentLedgerToProjects(Array.from(map.values()).sort((a,b) => projectFreshness(b) - projectFreshness(a)));
+};
+
+const latestCollectionMarker = (items = []) => {
+  const list = Array.isArray(items) ? items : [];
+  const last = list[list.length - 1] || {};
+  return `${list.length}:${last.id || last.fileId || last.at || last.time || last.updatedAt || last.createdAt || ''}`;
+};
+
+const projectUiRevision = (project = {}) => [
+  project.id || '',
+  project.caseId || '',
+  project.displayId || '',
+  project.taskVersion || 0,
+  project.financeVersion || 0,
+  project.updatedAt || 0,
+  project.syncVersion || 0,
+  project.assignmentVersion || 0,
+  project.assignedTo || '',
+  project.assigneeId || '',
+  project.status || '',
+  project.reviewStatus || '',
+  project.priority || '',
+  project.customerName || '',
+  project.location || project.city || '',
+  project.client || project.bankName || '',
+  project.paymentStatus || '',
+  project.paymentTrackingStatus || '',
+  project.paymentTrackingUpdatedAt || 0,
+  project.ledger?.updatedAt || project.ledger?.lastUpdatedAt || 0,
+  latestCollectionMarker(project.documents),
+  latestCollectionMarker(project.workFiles),
+  latestCollectionMarker(project.completedFiles),
+  latestCollectionMarker(project.revisionFiles),
+  latestCollectionMarker(project.comments),
+  latestCollectionMarker(project.history),
+  latestCollectionMarker(project.timeline),
+  latestCollectionMarker(project.revisions)
+].join('|');
+
+const reuseStableProjects = (current = [], next = []) => {
+  const previous = Array.isArray(current) ? current : [];
+  const byId = new Map(previous.filter(Boolean).map(project => [String(project.id || project.caseId || ''), project]));
+  const reused = (Array.isArray(next) ? next : []).map(project => {
+    const existing = byId.get(String(project?.id || project?.caseId || ''));
+    return existing && projectUiRevision(existing) === projectUiRevision(project) ? existing : project;
+  });
+  return reused.length === previous.length && reused.every((project, index) => project === previous[index]) ? previous : reused;
 };
 
 const persistAndBroadcastProjects = (projects) => {
@@ -2412,7 +2614,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
   );
 };
 
-const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, projects = [], onDeleteTask }) => {
+const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjectConfirmed, users, projects = [], onDeleteTask }) => {
   const [newSubTask, setNewSubTask] = useState('');
   const [newNote, setNewNote] = useState('');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -2422,6 +2624,28 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const [downloadedFileMap, setDownloadedFileMap] = useState(() => listCachedProjectFiles());
   const [filePreview, setFilePreview] = useState(null);
   const [filePreviewUi, setFilePreviewUi] = useState({ zoom: 1, rotation: 0, fitMode: 'width' });
+  const [ledgerDraft, setLedgerDraft] = useState(() => createFinanceLedgerDraft(project));
+  const [ledgerDirty, setLedgerDirty] = useState(false);
+  const [isSavingLedger, setIsSavingLedger] = useState(false);
+  const [ledgerSaveMessage, setLedgerSaveMessage] = useState('');
+  const [isUploadingLedgerReceipt, setIsUploadingLedgerReceipt] = useState(false);
+  const ledgerMutationRef = useRef({ signature:'', id:'' });
+  const latestProjectRef = useRef(project);
+
+  useEffect(() => {
+    latestProjectRef.current = project;
+  }, [project]);
+
+  const acceptServerProject = useCallback((serverProject) => {
+    if (!serverProject) return;
+    latestProjectRef.current = serverProject;
+    if (typeof onServerProjectConfirmed === 'function') onServerProjectConfirmed(serverProject);
+  }, [onServerProjectConfirmed]);
+
+  useEffect(() => {
+    if (ledgerDirty || isSavingLedger) return;
+    setLedgerDraft(createFinanceLedgerDraft(project));
+  }, [project.id, project.financeVersion, project.paymentTrackingUpdatedAt, project.ledger?.updatedAt, ledgerDirty, isSavingLedger]);
 
   const closeFilePreview = useCallback(() => {
     setFilePreview((current) => {
@@ -2478,6 +2702,21 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const showFinancials = user.role === ROLES.ADMIN;
   const activeDraftingForUser = (usersProjects = []) => (usersProjects || []).find(p => samePerson(p.assignedTo, project.assignedTo || user.name) && p.status === 'Drafting' && String(p.id) !== String(project.id));
 
+  useEffect(() => {
+    if (!ledgerDirty) return undefined;
+    const warnUnsavedFinance = (event) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnUnsavedFinance);
+    return () => window.removeEventListener('beforeunload', warnUnsavedFinance);
+  }, [ledgerDirty]);
+
+  const handleTaskBack = async () => {
+    if (ledgerDirty && !(await requestConfirmation('Payment details have unsaved changes. Leave this task and discard them?', { title:'Discard finance changes?', tone:'danger', confirmLabel:'Discard changes' }))) return;
+    onBack();
+  };
+
   const handleSaveCaseEdit = (event) => {
     event.preventDefault();
     if (!canManage) return;
@@ -2487,7 +2726,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     const now = Date.now();
     const changeReason = String(fd.get('changeReason') || '').trim();
     const previousSnapshot = {
-      id: project.id,
+      id: project.displayId || project.caseId || project.id,
       type: project.type || '',
       client: project.client || '',
       customerName: project.customerName || '',
@@ -2520,7 +2759,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     const idSourceChanged = ['client', 'customerName', 'location'].some(k => changedFields.includes(k));
     const nextTaskId = idSourceChanged
       ? generateTraceableTaskId({ location: nextSnapshot.location, client: nextSnapshot.client, customerName: nextSnapshot.customerName, projects, excludeId: project.id })
-      : project.id;
+      : (project.displayId || project.caseId || project.id);
     const reassignmentHistory = [...(project.reassignmentHistory || [])];
     if (String(previousSnapshot.assignedTo || 'Unassigned') !== String(nextSnapshot.assignedTo || 'Unassigned')) {
       reassignmentHistory.push({ from: previousSnapshot.assignedTo || 'Unassigned', to: nextSnapshot.assignedTo || 'Unassigned', by: user.name, time: new Date(now).toLocaleString(), reason: changeReason || 'Case edited' });
@@ -2528,9 +2767,14 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
     const updatedProject = {
       ...project,
       ...nextSnapshot,
-      id: nextTaskId,
-      previousTaskIds: nextTaskId !== project.id ? [...new Set([...(project.previousTaskIds || []), project.id])].filter(Boolean) : (project.previousTaskIds || []),
-      supersedesTaskId: nextTaskId !== project.id ? project.id : project.supersedesTaskId,
+      // Keep the database primary ID immutable. Only the human-facing traceable
+      // task number changes, so editing a customer/bank/location can never turn
+      // into a save-followed-by-delete of the same row.
+      id: project.id,
+      displayId: nextTaskId,
+      previousTaskIds: nextTaskId !== (project.displayId || project.caseId || project.id)
+        ? [...new Set([...(project.previousTaskIds || []), ...((project.displayId || project.caseId) && String(project.displayId || project.caseId) !== String(project.id) ? [project.displayId || project.caseId] : [])])].filter(Boolean)
+        : (project.previousTaskIds || []),
       caseId: nextTaskId,
       taskName: [nextSnapshot.type, nextSnapshot.customerName, nextSnapshot.location].filter(Boolean).join(' • '),
       updatedAt: now,
@@ -2542,11 +2786,11 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
       reassignmentHistory,
       caseEditHistory: [
         ...(project.caseEditHistory || []),
-        { id: now, by: user.name, editedBy: user.name, at: now, editedAt: now, time: new Date(now).toLocaleString(), reason: changeReason, changedFields: nextTaskId !== project.id ? [...changedFields, 'taskId'] : changedFields, before: previousSnapshot, after: { ...nextSnapshot, id: nextTaskId } }
+        { id: now, by: user.name, editedBy: user.name, at: now, editedAt: now, time: new Date(now).toLocaleString(), reason: changeReason, changedFields: nextTaskId !== (project.displayId || project.caseId || project.id) ? [...changedFields, 'taskId'] : changedFields, before: previousSnapshot, after: { ...nextSnapshot, id: nextTaskId } }
       ],
       timeline: [
         ...(project.timeline || []),
-        { id: now, text: `Case edited by ${user.name}${nextTaskId !== project.id ? ` • Task ID changed ${project.id} → ${nextTaskId}` : ''}${changeReason ? `: ${changeReason}` : ''}`, time: new Date(now).toLocaleString() }
+        { id: now, text: `Case edited by ${user.name}${nextTaskId !== (project.displayId || project.caseId || project.id) ? ` • Task ID changed ${project.displayId || project.caseId || project.id} → ${nextTaskId}` : ''}${changeReason ? `: ${changeReason}` : ''}`, time: new Date(now).toLocaleString() }
       ]
     };
     onUpdateProject(updatedProject, project);
@@ -2926,78 +3170,70 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   };
 
   const handleFileUpload = async (type, e) => {
-    const files = Array.from(e?.target?.files || []);
-    if (!files || files.length === 0) return;
-    if (fileTransfer.active && fileTransfer.phase !== 'complete' && fileTransfer.phase !== 'error') {
+    const files=Array.from(e?.target?.files || []);
+    if (!files.length) return;
+    if (fileTransfer.active && !['complete','error'].includes(fileTransfer.phase)) {
       notifyUser(`${fileTransfer.label || 'File transfer'} is already in progress. Please wait until it completes before starting another upload/download.`);
-      if (e?.target) e.target.value = '';
+      if (e?.target) e.target.value='';
       return;
     }
     if (type === 'completed') setIsUploadingFinal(true);
-
-    const totalFiles = files.length;
-    const totalUploadBytes = files.reduce((sum, f) => sum + Number(f.size || 0), 0);
-    const transferStartedAt = Date.now();
-    const currentLabel = type === 'completed' ? 'Uploading final file' : type === 'working' ? 'Uploading work file' : 'Uploading source file';
-    updateFileTransfer({ active: true, phase: 'uploading', label: currentLabel, fileName: files[0]?.name || 'file', transferType: type, progress: 1, loaded: 0, total: totalUploadBytes, speedBps: 0, etaSeconds: 0, startedAt: transferStartedAt, message: totalFiles > 1 ? `Uploading 1 of ${totalFiles}` : 'Upload started. Please do not upload again.' });
+    const totalFiles=files.length;
+    const totalUploadBytes=files.reduce((sum,file)=>sum+Number(file.size || 0),0);
+    const transferStartedAt=Date.now();
+    const currentLabel=type === 'completed' ? 'Uploading final file' : type === 'working' ? 'Uploading work file' : 'Uploading source file';
+    updateFileTransfer({active:true,phase:'uploading',label:currentLabel,fileName:files[0]?.name || 'file',transferType:type,progress:1,loaded:0,total:totalUploadBytes,speedBps:0,etaSeconds:0,startedAt:transferStartedAt,message:totalFiles > 1 ? `Uploading 1 of ${totalFiles}` : 'Upload started. Please do not upload again.'});
 
     try {
-      const updatedProject = { ...project };
-      if (!updatedProject.documents) updatedProject.documents = [];
-      if (!updatedProject.completedFiles) updatedProject.completedFiles = [];
-
-      for (let index = 0; index < files.length; index += 1) {
-        const file = files[index];
-        updateFileTransfer({ active: true, phase: 'uploading', label: currentLabel, fileName: file.name, transferType: type, message: totalFiles > 1 ? `Uploading ${index + 1} of ${totalFiles}` : 'Uploading...' });
-        const uploadedDoc = await uploadProjectFile(file, project.id, type, user.name, (info) => {
-          const meta = normalizeTransferProgress(info);
-          const safePct = Math.max(1, Math.min(99, Number(meta.percent) || 1));
-          const aggregatePct = Math.round(((index / totalFiles) * 100) + (safePct / totalFiles));
-          const previousBytes = files.slice(0, index).reduce((sum, f) => sum + Number(f.size || 0), 0);
-          const totalBytes = totalUploadBytes;
-          const loadedBytes = previousBytes + Number(meta.loaded || 0);
-          const elapsedSeconds = Math.max(0.5, (Date.now() - transferStartedAt) / 1000);
-          const speedBps = loadedBytes > 0 ? loadedBytes / elapsedSeconds : 0;
-          const remainingBytes = Math.max(0, totalBytes - loadedBytes);
-          const etaSeconds = speedBps > 0 && remainingBytes > 0 ? Math.ceil(remainingBytes / speedBps) : 0;
-          updateFileTransfer({ transferType: type, progress: Math.max(1, Math.min(99, aggregatePct)), loaded: loadedBytes, total: totalBytes, speedBps, etaSeconds, message: totalFiles > 1 ? `Uploading ${index + 1} of ${totalFiles} • ${safePct}%` : `${safePct}% uploaded` });
+      let latestConfirmed=latestProjectRef.current || project;
+      let fallbackProject=null;
+      for (let index=0; index<files.length; index+=1) {
+        const file=files[index];
+        updateFileTransfer({active:true,phase:'uploading',label:currentLabel,fileName:file.name,transferType:type,message:totalFiles > 1 ? `Uploading ${index + 1} of ${totalFiles}` : 'Uploading...'});
+        const uploadedDoc=await uploadProjectFile(file,latestConfirmed.id || latestConfirmed.caseId,type,user.name,(info)=>{
+          const meta=normalizeTransferProgress(info);
+          const safePct=Math.max(1,Math.min(99,Number(meta.percent) || 1));
+          const aggregatePct=Math.round(((index / totalFiles) * 100)+(safePct / totalFiles));
+          const previousBytes=files.slice(0,index).reduce((sum,item)=>sum+Number(item.size || 0),0);
+          const loadedBytes=previousBytes+Number(meta.loaded || 0);
+          const elapsedSeconds=Math.max(0.5,(Date.now()-transferStartedAt)/1000);
+          const speedBps=loadedBytes > 0 ? loadedBytes/elapsedSeconds : 0;
+          const remainingBytes=Math.max(0,totalUploadBytes-loadedBytes);
+          updateFileTransfer({transferType:type,progress:Math.max(1,Math.min(99,aggregatePct)),loaded:loadedBytes,total:totalUploadBytes,speedBps,etaSeconds:speedBps > 0 && remainingBytes > 0 ? Math.ceil(remainingBytes/speedBps) : 0,message:totalFiles > 1 ? `Uploading ${index + 1} of ${totalFiles} • ${safePct}%` : `${safePct}% uploaded`});
         });
-        updatedProject.documents.push(uploadedDoc);
-
-        if (type === 'completed') {
-          updatedProject.completedFiles.push(uploadedDoc);
+        if (uploadedDoc?._serverCase) {
+          latestConfirmed=uploadedDoc._serverCase;
+          acceptServerProject(latestConfirmed);
+          fallbackProject=null;
+        } else {
+          const cleanDoc={...uploadedDoc};
+          delete cleanDoc._serverCase;
+          delete cleanDoc._persistence;
+          const base=fallbackProject || latestConfirmed;
+          fallbackProject={
+            ...base,
+            documents:[...(base.documents || []),cleanDoc],
+            completedFiles:type === 'completed' ? [...(base.completedFiles || []),cleanDoc] : (base.completedFiles || []),
+            workFiles:type === 'working' ? [...(base.workFiles || []),cleanDoc] : (base.workFiles || []),
+            timeline:[...(base.timeline || []),{id:Date.now()+Math.random(),text:`File uploaded: ${file.name}`,time:new Date().toLocaleString()}]
+          };
+          if (type === 'completed') {
+            fallbackProject={...fallbackProject,status:'Internal Review',submittedAt:fallbackProject.submittedAt || Date.now(),draftingCompletedAt:fallbackProject.draftingCompletedAt || Date.now(),internalReviewStartedAt:fallbackProject.internalReviewStartedAt || Date.now(),completedAt:null,finalConclusion:'Pending Internal Review',reviewStatus:'Pending'};
+          }
+          latestConfirmed=fallbackProject;
         }
-
-        updatedProject.timeline = [...(updatedProject.timeline||[]), {
-          id: Date.now() + Math.random(),
-          text: `File uploaded: ${file.name}`,
-          time: new Date().toLocaleString()
-        }];
       }
-
-      if (type === 'completed') {
-        updatedProject.status = 'Internal Review';
-        updatedProject.submittedAt = updatedProject.submittedAt || Date.now();
-        updatedProject.draftingCompletedAt = updatedProject.draftingCompletedAt || Date.now();
-        updatedProject.internalReviewStartedAt = updatedProject.internalReviewStartedAt || Date.now();
-        updatedProject.completedAt = null;
-        updatedProject.finalConclusion = 'Pending Internal Review';
-        updatedProject.reviewStatus = 'Pending';
-        updatedProject.subTasks = (updatedProject.subTasks || []).map(st => isSubTaskOpen(st) ? { ...st, status: 'Done', completedBy: user.name, completedAt: Date.now() } : st);
-        updatedProject.timeline.push({ id: Date.now()+3, text: 'Completed work file uploaded. Sent for internal review before final approval.', time: new Date().toLocaleString() });
-      }
-
-      if (e?.target) e.target.value = '';
-      onUpdateProject(updatedProject, project);
-      updateFileTransfer({ active: true, phase: 'complete', label: 'Upload complete', progress: 100, message: `${totalFiles} file${totalFiles > 1 ? 's' : ''} uploaded successfully.` });
-      window.setTimeout(() => resetFileTransfer(), 2600);
-    } catch (error) {
-      console.error('File upload failed:', error);
-      updateFileTransfer({ active: true, phase: 'error', label: 'Upload failed', progress: 100, message: error?.message || 'Please check your internet connection and try again.' });
+      if (fallbackProject) await onUpdateProject(fallbackProject,latestProjectRef.current || project);
+      if (e?.target) e.target.value='';
+      updateFileTransfer({active:true,phase:'complete',label:'Upload complete',progress:100,message:`${totalFiles} file${totalFiles > 1 ? 's' : ''} uploaded and linked successfully.`});
+      window.setTimeout(()=>resetFileTransfer(),2600);
+    } catch(error) {
+      console.error('File upload failed:',error);
+      updateFileTransfer({active:true,phase:'error',label:'Upload failed',progress:100,message:error?.message || 'Please check your internet connection and try again.'});
       notifyUser(`File upload failed: ${error?.message || 'Please check your internet connection and try again.'}`);
     } finally {
       if (type === 'completed') setIsUploadingFinal(false);
-      if (e?.target) e.target.value = '';
+      if (e?.target) e.target.value='';
     }
   };
 
@@ -3016,12 +3252,16 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
           const safePct = Math.max(1, Math.min(99, Number(meta.percent) || 1));
           updateFileTransfer({ active: true, phase: 'uploading', label: attachmentType === 'revision' ? 'Uploading revision attachment' : 'Uploading attachment', fileName: file.name, transferType: attachmentType, progress: safePct, loaded: meta.loaded || 0, total: meta.total || Number(file.size || 0), speedBps: meta.speedBps || 0, etaSeconds: meta.etaSeconds || 0, message: `${safePct}% uploaded` });
         });
+        if (uploadedDoc?._serverCase) acceptServerProject(uploadedDoc._serverCase);
+        const cleanUploadedDoc={...uploadedDoc};
+        delete cleanUploadedDoc._serverCase;
+        delete cleanUploadedDoc._persistence;
         uploadedDocs.push({
-          ...uploadedDoc,
-          id: uploadedDoc.id || `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          ...cleanUploadedDoc,
+          id: cleanUploadedDoc.id || `${Date.now()}-${Math.random().toString(36).slice(2)}`,
           type: attachmentType,
-          uploadedBy: uploadedDoc.uploadedBy || user.name,
-          uploadedAt: uploadedDoc.uploadedAt || Date.now(),
+          uploadedBy: cleanUploadedDoc.uploadedBy || user.name,
+          uploadedAt: cleanUploadedDoc.uploadedAt || Date.now(),
         });
       }
       setAttachments(prev => [...prev, ...uploadedDocs]);
@@ -3073,56 +3313,66 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
 
   const handleFileDelete = async (docToDelete) => {
     if (!docToDelete) return;
-    if (!canDeleteProjectFile(docToDelete, user)) {
+    if (!canDeleteProjectFile(docToDelete,user)) {
       notifyUser('Only Admin, Manager, or the uploader can delete this file.');
       return;
     }
-    const fileName = docToDelete.name || 'this file';
-    if (!(await requestConfirmation(`Delete ${fileName}? This will remove it from this task.`, { title: 'Delete file', tone: 'danger', confirmLabel: 'Delete file' }))) return;
-
+    const fileName=docToDelete.name || 'this file';
+    if (!(await requestConfirmation(`Delete ${fileName}? This will remove it from this task.`,{title:'Delete file',tone:'danger',confirmLabel:'Delete file'}))) return;
     try {
-      await deleteProjectFileFromServer(docToDelete);
-    } catch (error) {
+      const payload=await deleteProjectFileFromServer(docToDelete);
+      const confirmed=payload?.case || payload?.project || payload?.cases?.find(item=>projectIdentityMatches(item,latestProjectRef.current || project));
+      if (confirmed) {
+        acceptServerProject(confirmed);
+      } else {
+        // Compatibility fallback for an older backend. The current backend
+        // returns the committed task, so this branch should not issue a second
+        // write during normal production operation.
+        const base=latestProjectRef.current || project;
+        const sameFile=(doc)=>String(doc?.id || '')===String(docToDelete.id || '');
+        const localOnly={...base,documents:(base.documents || []).filter(doc=>!sameFile(doc)),completedFiles:(base.completedFiles || []).filter(doc=>!sameFile(doc)),workFiles:(base.workFiles || []).filter(doc=>!sameFile(doc)),sourceFiles:(base.sourceFiles || []).filter(doc=>!sameFile(doc))};
+        latestProjectRef.current=localOnly;
+        if (typeof onServerProjectConfirmed === 'function') onServerProjectConfirmed(localOnly);
+      }
+      notifyUser(`${fileName} was deleted.`);
+    } catch(error) {
       notifyUser(error?.message || 'The file could not be deleted. Nothing was removed from this task.');
       return;
     }
-
-    const sameFile = (doc) => {
-      if (!doc) return false;
-      if (docToDelete.id && doc.id) return String(doc.id) === String(docToDelete.id);
-      return String(doc.url || doc.downloadUrl || doc.name || '') === String(docToDelete.url || docToDelete.downloadUrl || docToDelete.name || '');
-    };
-
-    const updatedProject = {
-      ...project,
-      documents: (project.documents || []).filter(doc => !sameFile(doc)),
-      completedFiles: (project.completedFiles || []).filter(doc => !sameFile(doc)),
-      timeline: [
-        ...(project.timeline || []),
-        { id: Date.now(), text: `File deleted: ${fileName}`, time: new Date().toLocaleString() }
-      ]
-    };
-
-    onUpdateProject(updatedProject, project);
   };
 
-  const handleLedgerScreenshot = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const base64 = await fileToBase64(file);
-    const updatedProject = {
-      ...project,
-      ledger: { ...(project.ledger || {}), screenshot: base64, updatedAt: Date.now() }
-    };
-    onUpdateProject(updatedProject, project);
+
+  const handleLedgerScreenshot = async (event) => {
+    const file = event?.target?.files?.[0];
+    if (!file || !showFinancials || isUploadingLedgerReceipt) return;
+    setIsUploadingLedgerReceipt(true);
+    setLedgerSaveMessage('Uploading payment receipt…');
+    try {
+      const uploaded = await uploadProjectFile(file, project.id || project.caseId, 'payment-receipt', user.name);
+      const receipt={...uploaded};
+      delete receipt._serverCase;
+      delete receipt._persistence;
+      setLedgerDraft(previous => ({ ...previous, screenshot:receipt }));
+      setLedgerDirty(true);
+      ledgerMutationRef.current = { signature:'', id:'' };
+      setLedgerSaveMessage('Receipt uploaded. Select Save payment details to link it to the ledger.');
+    } catch (error) {
+      console.error('Payment receipt upload failed:', error);
+      setLedgerSaveMessage(error?.message || 'Payment receipt upload failed.');
+      notifyUser(error?.message || 'Payment receipt upload failed.');
+    } finally {
+      setIsUploadingLedgerReceipt(false);
+      if (event?.target) event.target.value = '';
+    }
   };
 
   const handleAddSubTask = () => {
     const revisionText = newSubTask.trim();
     if (!revisionText && subTaskAttachments.length === 0) return;
+    const baseProject=latestProjectRef.current || project;
     const now = Date.now();
     const title = revisionText || `Revision attachment added by ${user.name}`;
-    const revisionNumber = getNextRevisionNumber(project);
+    const revisionNumber = getNextRevisionNumber(baseProject);
     const revisionItem = {
       id: now,
       title,
@@ -3135,39 +3385,39 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
       revisionNumber,
       revisionCode: `R${revisionNumber}`
     };
-    const isArchivedCompletedCase = project.status === 'Completed';
-    const revisionWorkItem = isArchivedCompletedCase ? makeRevisionWorkItem(project, revisionItem, user.name) : null;
+    const isArchivedCompletedCase = baseProject.status === 'Completed';
+    const revisionWorkItem = isArchivedCompletedCase ? makeRevisionWorkItem(baseProject, revisionItem, user.name) : null;
     const updatedProject = {
-      ...project,
+      ...baseProject,
       // Keep archived completed cases completed/permanent. The active revision is created as a temporary work item.
-      priority: isArchivedCompletedCase ? project.priority : 'Urgent',
-      status: isArchivedCompletedCase ? project.status : 'Revision Pending',
+      priority: isArchivedCompletedCase ? baseProject.priority : 'Urgent',
+      status: isArchivedCompletedCase ? baseProject.status : 'Revision Pending',
       showInMyTasks: true,
       revisionAssignedAt: now,
-      assignedAt: isArchivedCompletedCase ? project.assignedAt : now,
+      assignedAt: isArchivedCompletedCase ? baseProject.assignedAt : now,
       assignmentVersion: now,
-      reviewStatus: isArchivedCompletedCase ? project.reviewStatus : 'Reverted',
+      reviewStatus: isArchivedCompletedCase ? baseProject.reviewStatus : 'Reverted',
       revisionRequestedAt: now,
       reviewedBy: user.name,
-      documents: isArchivedCompletedCase ? (project.documents || []) : [...(project.documents || []), ...subTaskAttachments],
-      subTasks: isArchivedCompletedCase ? (project.subTasks || []) : [...(project.subTasks || []), revisionItem],
+      documents: isArchivedCompletedCase ? (baseProject.documents || []) : [...(baseProject.documents || []), ...subTaskAttachments],
+      subTasks: isArchivedCompletedCase ? (baseProject.subTasks || []) : [...(baseProject.subTasks || []), revisionItem],
       revisionHistory: [
-        ...(project.revisionHistory || []),
+        ...(baseProject.revisionHistory || []),
         { ...revisionItem, action: 'Revision Requested', reviewer: user.name, at: now, workItemId: revisionWorkItem?.id || null }
       ],
       reviewHistory: [
-        ...(project.reviewHistory || []),
+        ...(baseProject.reviewHistory || []),
         { id: now, action: 'Revision Requested', comment: title, reviewer: user.name, at: now, attachments: subTaskAttachments, revisionNumber, workItemId: revisionWorkItem?.id || null }
       ],
       timeline: [
-        ...(project.timeline || []),
+        ...(baseProject.timeline || []),
         { id: now, text: `Revision ${revisionNumber} requested by ${user.name}: ${title}`, time: new Date(now).toLocaleString() },
         ...(isArchivedCompletedCase ? [{ id: now + 0.5, text: `Temporary revision work item created for today while original task ID remains permanent.`, time: new Date(now).toLocaleString() }] : []),
         ...(subTaskAttachments.length ? [{ id: now + 1, text: `Revision attachment added by ${user.name}: ${subTaskAttachments.map(d => d.name).join(', ')}`, time: new Date(now).toLocaleString() }] : [])
       ],
       ...(revisionWorkItem ? { _spawnProjects: [revisionWorkItem] } : {})
     };
-    onUpdateProject(updatedProject, project);
+    onUpdateProject(updatedProject, baseProject);
     setNewSubTask('');
     setSubTaskAttachments([]);
   };
@@ -3182,41 +3432,143 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const handleAddNote = () => {
     const noteText = newNote.trim();
     if (!noteText && noteAttachments.length === 0) return;
+    const baseProject=latestProjectRef.current || project;
     const now = Date.now();
     const updatedProject = {
-      ...project,
-      notes: [...(project.notes||[]), { id: now, text: noteText || `Attachment added by ${user.name}`, author: user.name, time: new Date(now).toLocaleString(), attachments: noteAttachments }],
-      documents: [...(project.documents || []), ...noteAttachments],
+      ...baseProject,
+      notes: [...(baseProject.notes||[]), { id: now, text: noteText || `Attachment added by ${user.name}`, author: user.name, time: new Date(now).toLocaleString(), attachments: noteAttachments }],
+      documents: [...(baseProject.documents || []), ...noteAttachments],
       timeline: [
-        ...(project.timeline || []),
+        ...(baseProject.timeline || []),
         ...(noteAttachments.length ? [{ id: now + 1, text: `Discussion attachment added by ${user.name}: ${noteAttachments.map(d => d.name).join(', ')}`, time: new Date(now).toLocaleString() }] : [])
       ]
     };
-    onUpdateProject(updatedProject, project);
+    onUpdateProject(updatedProject, baseProject);
     setNewNote('');
     setNoteAttachments([]);
   };
 
   const updateLedger = (field, value) => {
-    if (!showFinancials) return;
+    if (!showFinancials || isSavingLedger) return;
+    setLedgerDraft(previous => ({ ...previous, [field]:value }));
+    setLedgerDirty(true);
+    setLedgerSaveMessage('Unsaved finance changes');
+    ledgerMutationRef.current = { signature:'', id:'' };
+  };
+
+  const handleSaveLedger = async () => {
+    if (!showFinancials || isSavingLedger || !ledgerDirty) return;
+    let estimate;
+    let amountIn;
+    let expenses;
+    let refund;
+    try {
+      estimate = parseFinanceDraftAmount(ledgerDraft.estimate, 'Estimate');
+      amountIn = parseFinanceDraftAmount(ledgerDraft.amountIn, 'Amount received');
+      expenses = parseFinanceDraftAmount(ledgerDraft.expenses, 'Expenses');
+      refund = parseFinanceDraftAmount(ledgerDraft.refund, 'Refund');
+    } catch (error) {
+      setLedgerSaveMessage(error.message);
+      notifyUser(error.message);
+      return;
+    }
+
+    if (refund > amountIn) {
+      const message = 'Refund cannot be greater than the total amount received.';
+      setLedgerSaveMessage(message);
+      notifyUser(message);
+      return;
+    }
+
     const now = Date.now();
-    const nextLedgerDate = field === 'date' ? value : (project.ledger?.date || project.paymentDate || getIndiaDateKey(now));
+    const paymentDate = String(ledgerDraft.date || '').trim();
+    if (amountIn > 0 && !paymentDate) {
+      const message = 'Select the actual payment date before saving a received amount.';
+      setLedgerSaveMessage(message);
+      notifyUser(message);
+      return;
+    }
+    const normalizedPaymentDate = normalizeTaskDateKey(paymentDate || getIndiaDateKey(now), '');
+    if (paymentDate && normalizedPaymentDate !== paymentDate) {
+      const message = 'Select a valid payment date.';
+      setLedgerSaveMessage(message);
+      notifyUser(message);
+      return;
+    }
+    if (paymentDate && paymentDate > getIndiaDateKey(now)) {
+      const message = 'Payment date cannot be in the future.';
+      setLedgerSaveMessage(message);
+      notifyUser(message);
+      return;
+    }
     const accountingPeriod = normalizeAccountingMonthKey(getProjectFinanceMonthKey(project), getCurrentAccountingMonthKey(now));
-    const nextLedger = { ...(project.ledger || {}), [field]: value, date:nextLedgerDate, accountingPeriod, updatedAt: now, updatedBy: user?.name || 'Admin' };
-    const draftProject = { ...project, financeAccountingPeriod:accountingPeriod, ledger: nextLedger };
+    const nextLedger = {
+      ...(project.ledger || {}),
+      amountIn,
+      expenses,
+      refund,
+      date:paymentDate || project.ledger?.date || project.paymentDate || getIndiaDateKey(now),
+      accountingPeriod,
+      receivedFrom:String(ledgerDraft.receivedFrom || '').trim(),
+      txnId:String(ledgerDraft.txnId || '').trim(),
+      mode:String(ledgerDraft.mode || '').trim(),
+      note:String(ledgerDraft.note || '').trim(),
+      screenshot:ledgerDraft.screenshot || null,
+      updatedAt:now,
+      updatedBy:user?.name || 'Admin'
+    };
+    const draftProject = {
+      ...project,
+      estimate,
+      financeAccountingPeriod:accountingPeriod,
+      ledger:nextLedger,
+      paymentAmountIn:amountIn,
+      refundAmount:refund,
+      payerName:nextLedger.receivedFrom,
+      transactionId:nextLedger.txnId,
+      paymentDate:nextLedger.date
+    };
     const computedStatus = derivePaymentTrackingStatusFromData(draftProject);
-    const amountIn = getPaymentReceivedAmount(draftProject);
     const updatedProject = {
       ...draftProject,
-      paymentTrackingStatus: computedStatus,
-      paymentTrackingUpdatedAt: now,
-      paymentTrackingUpdatedBy: user?.name || 'Admin',
-      paymentStatus: computedStatus === 'Paid' ? 'YES' : (computedStatus === 'Pending' ? 'PENDING' : 'NOT_UPDATED'),
-      paymentReceived: computedStatus === 'Paid' ? 'YES' : (computedStatus === 'Pending' ? 'PARTIAL' : 'NO'),
-      paymentAmountIn: amountIn,
-      paymentDate: nextLedger.date || project.paymentDate,
+      paymentTrackingStatus:computedStatus,
+      paymentTrackingUpdatedAt:now,
+      paymentTrackingUpdatedBy:user?.name || 'Admin',
+      paymentStatus:computedStatus === 'Paid' ? 'YES' : (computedStatus === 'Pending' ? 'PENDING' : 'NOT_UPDATED'),
+      paymentReceived:amountIn > 0 ? (computedStatus === 'Paid' ? 'YES' : 'PARTIAL') : 'NO'
     };
-    onUpdateProject(updatedProject, project);
+    const signature = JSON.stringify({
+      taskId:project.id || project.caseId,
+      financeVersion:Number(project.financeVersion || 0),
+      estimate,amountIn,expenses,refund,
+      date:nextLedger.date,receivedFrom:nextLedger.receivedFrom,txnId:nextLedger.txnId,
+      mode:nextLedger.mode,note:nextLedger.note,screenshotId:nextLedger.screenshot?.id || nextLedger.screenshot || ''
+    });
+    if (ledgerMutationRef.current.signature !== signature) {
+      ledgerMutationRef.current = { signature, id:createFinanceMutationId() };
+    }
+
+    setIsSavingLedger(true);
+    setLedgerSaveMessage('Saving payment securely…');
+    try {
+      const confirmed = await onUpdateProject(updatedProject, project, {
+        financeOnly:true,
+        financeMutationId:ledgerMutationRef.current.id
+      });
+      if (!confirmed) {
+        setLedgerSaveMessage('Payment was not saved. Your entered values are still here; refresh the task before retrying if another admin changed it.');
+        return;
+      }
+      setLedgerDraft(createFinanceLedgerDraft(confirmed));
+      setLedgerDirty(false);
+      ledgerMutationRef.current = { signature:'', id:'' };
+      setLedgerSaveMessage(`Saved at ${new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' })}`);
+    } catch (error) {
+      setLedgerSaveMessage(error?.message || 'Payment save failed. Your entered values are still available.');
+      notifyUser(error?.message || 'Payment save failed.');
+    } finally {
+      setIsSavingLedger(false);
+    }
   };
   
   const handlePrintReceipt = () => {
@@ -3497,7 +3849,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
       )}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-5 bg-white p-5 rounded-3xl border-2 border-slate-100 shadow-sm">
         <div className="flex items-center space-x-5">
-          <button type="button" onClick={onBack} className="p-3 bg-slate-50 hover:bg-slate-100 rounded-xl transition-colors flex-shrink-0 border border-slate-200">
+          <button type="button" onClick={handleTaskBack} className="p-3 bg-slate-50 hover:bg-slate-100 rounded-xl transition-colors flex-shrink-0 border border-slate-200">
             <ArrowLeft className="w-6 h-6 text-slate-700" />
           </button>
           <div>
@@ -3958,34 +4310,57 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
               </div>
               
               <div className="space-y-4 text-sm relative z-10">
-                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Total Estimate Amount</label><input type="number" value={project.estimate || ''} onChange={e => onUpdateProject({...project, estimate: e.target.value}, project)} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400" /></div>
+                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Total Estimate Amount</label><input type="number" min="0" step="0.01" value={ledgerDraft.estimate} onChange={e => updateLedger('estimate', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
                 
                 <div className="grid grid-cols-2 gap-3">
-                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Amount Received</label><input type="number" value={project.ledger?.amountIn || ''} onChange={e => updateLedger('amountIn', e.target.value)} className="w-full border-2 border-emerald-100 p-2.5 rounded-xl bg-white font-bold text-emerald-700 outline-none focus:border-emerald-400" /></div>
-                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Actual Expenses</label><input type="number" value={project.ledger?.expenses || ''} onChange={e => updateLedger('expenses', e.target.value)} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold text-amber-700 outline-none focus:border-amber-400" placeholder="e.g. print cost" /></div>
+                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Amount Received</label><input type="number" min="0" step="0.01" value={ledgerDraft.amountIn} onChange={e => updateLedger('amountIn', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-emerald-100 p-2.5 rounded-xl bg-white font-bold text-emerald-700 outline-none focus:border-emerald-400 disabled:opacity-60" /></div>
+                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Actual Expenses</label><input type="number" min="0" step="0.01" value={ledgerDraft.expenses} onChange={e => updateLedger('expenses', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold text-amber-700 outline-none focus:border-amber-400 disabled:opacity-60" placeholder="e.g. print cost" /></div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
-                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Date Paid</label><input type="date" value={project.ledger?.date || ''} onChange={e => updateLedger('date', e.target.value)} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400" /></div>
-                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Refund</label><input type="number" value={project.ledger?.refund || ''} onChange={e => updateLedger('refund', e.target.value)} className="w-full border-2 border-red-100 p-2.5 rounded-xl bg-white font-bold text-red-600 outline-none focus:border-red-400" /></div>
+                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Date Paid</label><input type="date" value={ledgerDraft.date} onChange={e => updateLedger('date', e.target.value)} max={getIndiaDateKey()} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Refund</label><input type="number" min="0" step="0.01" value={ledgerDraft.refund} onChange={e => updateLedger('refund', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-red-100 p-2.5 rounded-xl bg-white font-bold text-red-600 outline-none focus:border-red-400 disabled:opacity-60" /></div>
                 </div>
                 
-                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Received From</label><input type="text" value={project.ledger?.receivedFrom || ''} onChange={e => updateLedger('receivedFrom', e.target.value)} placeholder="Sender Name" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400" /></div>
-                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Transaction ID</label><input type="text" value={project.ledger?.txnId || ''} onChange={e => updateLedger('txnId', e.target.value)} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400" /></div>
-                
+                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Received From</label><input type="text" value={ledgerDraft.receivedFrom} onChange={e => updateLedger('receivedFrom', e.target.value)} disabled={isSavingLedger} placeholder="Sender Name" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Transaction ID</label><input type="text" value={ledgerDraft.txnId} onChange={e => updateLedger('txnId', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                  <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Payment Mode</label><input type="text" value={ledgerDraft.mode} onChange={e => updateLedger('mode', e.target.value)} disabled={isSavingLedger} placeholder="Cash / UPI / Bank Transfer / Cheque" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                </div>
+                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Remarks</label><textarea rows={2} value={ledgerDraft.note} onChange={e => updateLedger('note', e.target.value)} disabled={isSavingLedger} placeholder="Optional payment remarks" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60 resize-none" /></div>
+
                 <div className="col-span-2 mt-2 border-t-2 border-amber-100 pt-4">
                   <label className="text-amber-800 block mb-3 text-xs font-black uppercase tracking-widest">Payment Screenshot (Optional)</label>
                   <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-                    <label className="cursor-pointer bg-white px-5 py-3 border-2 border-amber-200 text-amber-700 font-bold rounded-xl hover:bg-amber-100 transition-colors shadow-sm w-full sm:w-auto text-center flex justify-center items-center">
-                      <Upload className="w-5 h-5 mr-2 inline"/> Upload Receipt
-                      <input type="file" className="hidden" accept="image/*" onChange={handleLedgerScreenshot} />
+                    <label className={`cursor-pointer bg-white px-5 py-3 border-2 border-amber-200 text-amber-700 font-bold rounded-xl hover:bg-amber-100 transition-colors shadow-sm w-full sm:w-auto text-center flex justify-center items-center ${isUploadingLedgerReceipt || isSavingLedger ? 'opacity-60 pointer-events-none' : ''}`}>
+                      <Upload className="w-5 h-5 mr-2 inline"/> {isUploadingLedgerReceipt ? 'Uploading Receipt…' : 'Upload Receipt'}
+                      <input type="file" className="hidden" accept="image/*,.pdf" disabled={isUploadingLedgerReceipt || isSavingLedger} onChange={handleLedgerScreenshot} />
                     </label>
-                    {project.ledger?.screenshot && (
-                      <a href={project.ledger.screenshot} target="_blank" rel="noreferrer" className="text-sm font-black text-indigo-700 hover:text-indigo-800 bg-indigo-50 px-4 py-3 rounded-xl border border-indigo-100 flex items-center transition-colors">
+                    {ledgerDraft.screenshot && typeof ledgerDraft.screenshot === 'object' && (
+                      <button type="button" onClick={() => handleTrackedDownload(ledgerDraft.screenshot)} className="text-sm font-black text-indigo-700 hover:text-indigo-800 bg-indigo-50 px-4 py-3 rounded-xl border border-indigo-100 flex items-center transition-colors">
+                         <ImageIcon className="w-4 h-4 mr-2" /> Open Attached Receipt
+                      </button>
+                    )}
+                    {ledgerDraft.screenshot && typeof ledgerDraft.screenshot === 'string' && (
+                      <a href={ledgerDraft.screenshot} target="_blank" rel="noreferrer" className="text-sm font-black text-indigo-700 hover:text-indigo-800 bg-indigo-50 px-4 py-3 rounded-xl border border-indigo-100 flex items-center transition-colors">
                          <ImageIcon className="w-4 h-4 mr-2" /> View Attached Receipt
                       </a>
                     )}
                   </div>
+                </div>
+
+                <div className="rounded-2xl border border-amber-200 bg-white p-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[10px] font-black uppercase tracking-widest text-amber-600">Calculated status</p>
+                      <p className="font-black text-slate-800 mt-1">{derivePaymentTrackingStatusFromData({ ...project, estimate:ledgerDraft.estimate, ledger:{ ...(project.ledger || {}), amountIn:ledgerDraft.amountIn, expenses:ledgerDraft.expenses, refund:ledgerDraft.refund, date:ledgerDraft.date } })}</p>
+                      <p className={`text-xs font-bold mt-1 ${ledgerDirty ? 'text-amber-600' : 'text-emerald-600'}`}>{ledgerSaveMessage || (ledgerDirty ? 'Unsaved finance changes' : 'Finance is saved')}</p>
+                    </div>
+                    <button type="button" onClick={handleSaveLedger} disabled={!ledgerDirty || isSavingLedger || isUploadingLedgerReceipt} className="px-5 py-3 rounded-xl bg-slate-900 text-white font-black hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed min-w-[190px]">
+                      {isSavingLedger ? 'Saving Payment…' : 'Save Payment Details'}
+                    </button>
+                  </div>
+                  <p className="text-[11px] font-semibold text-slate-500 mt-3">Typing does not write to the server. One durable finance transaction is created only when Save Payment Details is selected.</p>
                 </div>
               </div>
             </div>
@@ -4144,6 +4519,7 @@ function AppShell() {
   const heartbeatRequestInFlightRef = useRef(false);
   const workspaceRefreshInFlightRef = useRef(false);
   const pendingCreateFlushInFlightRef = useRef(false);
+  const financeSaveInFlightRef = useRef(new Set());
   const workspaceStateVersionRef = useRef(-1);
   const workspaceDataRevisionRef = useRef(-1);
   const workspacePresenceGenerationRef = useRef(-1);
@@ -4365,7 +4741,79 @@ function AppShell() {
     try { document.documentElement.classList.toggle('kd-dark-root', !!darkMode); } catch(e) {}
   }, [darkMode]);
   
-  const activeUsers = normalizeTeamUsers(users && users.length > 0 ? users : INITIAL_USERS);
+  useEffect(() => {
+    if (currentUser?.role === ROLES.DESIGNER && activeTab === 'board') setActiveTab('command');
+  }, [currentUser?.role, activeTab]);
+
+  const activeUsers = useMemo(() => normalizeTeamUsers(users && users.length > 0 ? users : INITIAL_USERS), [users]);
+  const deferredGlobalSearch = React.useDeferredValue(globalSearch);
+  const normalizedGlobalSearch = useMemo(() => deferredGlobalSearch.trim().toLowerCase(), [deferredGlobalSearch]);
+  const myNotifs = useMemo(() => getVisibleNotifications(notifications, currentUser || {})
+    .map(notification => ({
+      ...notification,
+      category:notification.category || getNotificationCategory(notification),
+      priority:notification.priority || getNotificationPriority(notification)
+    })), [notifications, currentUser?.id, currentUser?.name, currentUser?.role]);
+  const unreadNotifs = useMemo(() => myNotifs.filter(notification => !(notification.readBy || []).includes(currentUser?.name)).length, [myNotifs, currentUser?.name]);
+  const notificationCounts = useMemo(() => {
+    if (!showNotifs) return {};
+    return NOTIFICATION_CATEGORIES.reduce((accumulator, label) => {
+      accumulator[label] = label === 'All' ? myNotifs.length : myNotifs.filter(notification => notification.category === label).length;
+      return accumulator;
+    }, {});
+  }, [showNotifs, myNotifs]);
+  const filteredNotifs = useMemo(() => {
+    if (!showNotifs) return [];
+    return myNotifs.filter(notification => {
+      if (notifFilter !== 'All' && notification.category !== notifFilter) return false;
+      const query = notifSearch.trim().toLowerCase();
+      if (!query) return true;
+      return [notification.title, notification.category, notification.priority, notification.type, notification.time]
+        .filter(Boolean).join(' ').toLowerCase().includes(query);
+    });
+  }, [showNotifs, myNotifs, notifFilter, notifSearch]);
+  const activityTimeline = useMemo(
+    () => showNotifs ? buildActivityTimeline(projects, chatMessages, notifications) : [],
+    [showNotifs, projects, chatMessages, notifications]
+  );
+  const globalCaseResults = useMemo(() => !normalizedGlobalSearch ? [] : (projects || [])
+    .filter(project => [project.id, formatTaskId(project.id), project.client, project.bankName, project.branchName, project.customerName, project.location, project.assignedTo, project.type, project.status, project.description, project.paymentStatus, project.paymentTrackingStatus, getLatestCompletedFileName(project), project.createdAt ? formatDateTime(project.createdAt) : '', project.completedAt ? formatDateTime(project.completedAt) : '']
+      .filter(Boolean).join(' ').toLowerCase().includes(normalizedGlobalSearch))
+    .sort((left, right) => (right.updatedAt || right.createdAt || 0) - (left.updatedAt || left.createdAt || 0)), [projects, normalizedGlobalSearch]);
+  const globalPeopleResults = useMemo(() => !normalizedGlobalSearch ? [] : (activeUsers || [])
+    .filter(user => [user.name, user.username, user.role, user.availability, user.status].filter(Boolean).join(' ').toLowerCase().includes(normalizedGlobalSearch))
+    .slice(0, 8), [activeUsers, normalizedGlobalSearch]);
+  const globalNotificationResults = useMemo(() => !normalizedGlobalSearch ? [] : (myNotifs || [])
+    .filter(notification => [notification.title, notification.message, notification.type, notification.category, notification.priority, notification.time].filter(Boolean).join(' ').toLowerCase().includes(normalizedGlobalSearch))
+    .slice(0, 8), [myNotifs, normalizedGlobalSearch]);
+  const globalChatResults = useMemo(() => !normalizedGlobalSearch ? [] : (chatMessages || [])
+    .filter(message => [message.sender, message.text, message.channel, message.to, message.fileName].filter(Boolean).join(' ').toLowerCase().includes(normalizedGlobalSearch))
+    .sort((left, right) => Number(right.createdAt || right.id || 0) - Number(left.createdAt || left.id || 0))
+    .slice(0, 8), [chatMessages, normalizedGlobalSearch]);
+  const displayedProjects = useMemo(() => {
+    if (activeTab !== 'board' && activeTab !== 'my_tasks') return [];
+    return (projects || [])
+    .filter(project => {
+      if (activeTab === 'my_tasks') {
+        if (normalizePersonName(project.assignedTo) !== normalizePersonName(currentUser?.name || '')) return false;
+        const statusValue = normalizeWorkStatusForRevision(project.status || project.reviewStatus || '');
+        const isRevisionForMe = project.showInMyTasks || isRevisionWorkItem(project) || statusValue.includes('REVISION') || hasActiveRevision(project);
+        if (project.status !== 'Completed' || isRevisionForMe) return true;
+        if (!shouldShowOnOperationsDate(project, selectedBoardDate)) return false;
+      } else if (activeTab === 'board' && !shouldShowOnOperationsDate(project, selectedBoardDate)) return false;
+      if (normalizedGlobalSearch) {
+        const haystack = [project.id, project.client, project.bankName, project.branchName, project.customerName, project.location, project.assignedTo, project.type, project.status, project.description]
+          .filter(Boolean).join(' ').toLowerCase();
+        if (!haystack.includes(normalizedGlobalSearch)) return false;
+      }
+      return true;
+    })
+    .sort((left, right) => (right.createdAt || 0) - (left.createdAt || 0));
+  }, [projects, activeTab, currentUser?.name, selectedBoardDate, normalizedGlobalSearch]);
+  const assignmentRecommendations = useMemo(
+    () => showNewLead ? getAssignmentRecommendations(activeUsers, projects) : [],
+    [showNewLead, activeUsers, projects]
+  );
   const financeSafeHeaders = React.useMemo(() => ({}), []);
   const jsonFinanceSafeHeaders = React.useMemo(() => ({
     'Content-Type': 'application/json'
@@ -4399,14 +4847,15 @@ function AppShell() {
       // alternated on screen every 25-30 seconds.
       if (action === 'heartbeat') return;
       if (data?.user) {
-        setUsers(prev => normalizeTeamUsers((prev || []).map(u => String(u.id) === String(data.user.id) ? { ...u, ...data.user } : u)));
+        setUsers(prev => mergeTeamUsersStable(prev, [data.user], [String(data.user.id || '')]));
         const own = currentUserRef.current;
         if (own && String(own.id) === String(data.user.id) && action !== 'logout') {
           setCurrentUser(prev => prev ? { ...prev, ...data.user } : prev);
         }
       }
-      if (Array.isArray(data?.users)) setUsers(prev => normalizeTeamUsers([...(prev || []), ...data.users]));
-      if (Array.isArray(data?.attendanceLogs)) setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, data.attendanceLogs));
+      if (Array.isArray(data?.users)) setUsers(prev => mergeTeamUsersStable(prev, data.users));
+      if (data?.attendanceLog) setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, [data.attendanceLog], [String(data.attendanceLog.id || '')]));
+      else if (Array.isArray(data?.attendanceLogs)) setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, data.attendanceLogs));
     }).catch(() => {}).finally(() => {
       if (action === 'heartbeat') heartbeatRequestInFlightRef.current = false;
     });
@@ -4415,25 +4864,28 @@ function AppShell() {
 
   const applyProjectSnapshot = useCallback((incomingProjects = [], options = {}) => {
     if (!Array.isArray(incomingProjects)) return;
-    const { persistCache = !USE_BACKEND_STATE, updateSelected = true, source = 'unknown' } = options;
+    const { persistCache = !USE_BACKEND_STATE, updateSelected = true, replaceIds = [], source = 'unknown' } = options;
     const incoming = filterDeletedProjects(sanitizeProjectsForCache(incomingProjects));
-    confirmPendingCreatedProjectsAgainstServer(incoming);
+    confirmPendingCreatedProjectsAgainstServer(incoming, operationalActorKey(currentUser));
     setProjects(prev => {
-      const merged = filterDeletedProjects(protectRecentlyCreatedProjects(incoming, prev));
-      const prevFingerprint = (prev || []).map(p => `${p.id}:${p.updatedAt || 0}:${p.assignmentVersion || 0}:${p.assignedTo || ''}:${p.status || ''}`).sort().join('|');
-      const mergedFingerprint = (merged || []).map(p => `${p.id}:${p.updatedAt || 0}:${p.assignmentVersion || 0}:${p.assignedTo || ''}:${p.status || ''}`).sort().join('|');
-      if (mergedFingerprint === prevFingerprint) return prev;
+      const replacementIds = new Set((replaceIds || []).map(value => String(value || '')).filter(Boolean));
+      const base = replacementIds.size
+        ? (prev || []).filter(project => ![project?.id, project?.caseId, project?.displayId].some(value => replacementIds.has(String(value || ''))))
+        : (prev || []);
+      const merged = filterDeletedProjects(protectRecentlyCreatedProjects(incoming, base, operationalActorKey(currentUser)));
+      const stable = reuseStableProjects(prev, merged);
+      if (stable === prev) return prev;
       if (persistCache) {
         try {
-          const compact = sanitizeProjectsForCache(merged);
+          const compact = sanitizeProjectsForCache(stable);
           localStorage.setItem('kalpa_projects_backup', JSON.stringify(compact));
           localStorage.setItem('kalpa_projects', JSON.stringify(compact));
         } catch(e) {}
       }
-      if (updateSelected) setSelectedProject(sel => sel ? (merged.find(project => String(project.id) === String(sel.id)) || sel) : sel);
-      return merged;
+      if (updateSelected) setSelectedProject(sel => sel ? (stable.find(project => String(project.id) === String(sel.id)) || sel) : sel);
+      return stable;
     });
-  }, []);
+  }, [USE_BACKEND_STATE, currentUser?.id, currentUser?.username, currentUser?.name]);
 
   // Central production persistence: operational data is hydrated only after
   // the backend has verified the secure session. Cached business data is never
@@ -4447,15 +4899,15 @@ function AppShell() {
       try {
         const data = await fetchBackendState({ apiBase: API_BASE, headers: financeSafeHeaders, includePerformance:false, compact:true });
         if (cancelled) return;
-        if (Array.isArray(data.users)) setUsers(normalizeTeamUsers(data.users));
+        if (Array.isArray(data.users)) setUsers(prev => mergeTeamUsersStable(prev, data.users, (prev || []).map(user => String(user.id || ''))));
         if (Array.isArray(data.deletedProjectIds)) replaceConfirmedDeletedProjects(data.deletedProjectIds);
         if (Array.isArray(data.projects)) applyProjectSnapshot(data.projects, { source: 'backend-hydrate' });
         if (Array.isArray(data.chatMessages)) {
           const incomingChats = sanitizeChatsForCache(data.chatMessages);
-          setChatMessages(incomingChats);
+          setChatMessages(prev => reuseStableRecords(prev, incomingChats, message => message?.id));
           if (!USE_BACKEND_STATE) { try { localStorage.setItem('kalpa_chats', JSON.stringify(incomingChats)); } catch(e) {} }
         }
-        if (Array.isArray(data.notifications)) setNotifications(data.notifications);
+        if (Array.isArray(data.notifications)) setNotifications(prev => mergeNotificationsStable(prev, data.notifications, (prev || []).map(item => String(item.id || ''))));
         if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, data.attendanceLogs));
         if (Array.isArray(data.performanceRecords)) setPerformanceRecords(data.performanceRecords);
         if (data.performanceSummary && typeof data.performanceSummary === 'object') setPerformanceSummary(data.performanceSummary);
@@ -4523,32 +4975,30 @@ function AppShell() {
       if (Number.isFinite(Number(data.presenceGeneration))) workspacePresenceGenerationRef.current = Number(data.presenceGeneration);
       if (data.collectionRevisions && typeof data.collectionRevisions === 'object') workspaceCollectionRevisionsRef.current = data.collectionRevisions;
       if (data.unchanged) return;
-      if (Array.isArray(data.users)) setUsers(prev => normalizeTeamUsers([...(prev || []), ...data.users]));
-      if (Array.isArray(data.deletedProjectIds)) replaceConfirmedDeletedProjects(data.deletedProjectIds);
-      if (Array.isArray(data.projects)) applyProjectSnapshot(data.projects, { source: 'adaptive-sync' });
-      if (Array.isArray(data.chatMessages)) {
-        setChatMessages(prev => {
-          const merged = mergeChatMessagesByFreshness(prev, data.chatMessages);
-          if (!USE_BACKEND_STATE) { try { localStorage.setItem('kalpa_chats', JSON.stringify(sanitizeChatsForCache(merged))); } catch(e) {} }
-          return merged;
-        });
-      }
-      if (Array.isArray(data.notifications)) {
-        setNotifications(prev => {
-          const byId = new Map();
-          [...(prev || []), ...data.notifications].forEach(n => { if (n?.id) byId.set(String(n.id), { ...(byId.get(String(n.id)) || {}), ...n }); });
-          return Array.from(byId.values()).sort((a,b) => Number(b.id || 0) - Number(a.id || 0));
-        });
-      }
-      if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, data.attendanceLogs));
-      if (data.partial === 'presence') {
+      const rowDeltaIds = data.rowDeltaIds && typeof data.rowDeltaIds === 'object' ? data.rowDeltaIds : {};
+      React.startTransition(() => {
+        if (Array.isArray(data.users)) setUsers(prev => mergeTeamUsersStable(prev, data.users, rowDeltaIds.users || []));
+        if (Array.isArray(data.deletedProjectIds)) replaceConfirmedDeletedProjects(data.deletedProjectIds);
+        if (Array.isArray(data.projects) || Array.isArray(rowDeltaIds.cases)) applyProjectSnapshot(data.projects || [], { source: 'adaptive-sync', replaceIds:rowDeltaIds.cases || [] });
+        if (Array.isArray(data.chatMessages) || Array.isArray(rowDeltaIds.teamChat)) {
+          setChatMessages(prev => {
+            const merged = mergeChatMessagesByFreshness(prev, data.chatMessages || [], rowDeltaIds.teamChat || []);
+            if (!USE_BACKEND_STATE) { try { localStorage.setItem('kalpa_chats', JSON.stringify(sanitizeChatsForCache(merged))); } catch(e) {} }
+            return merged;
+          });
+        }
+        if (Array.isArray(data.notifications) || Array.isArray(rowDeltaIds.notifications)) {
+          setNotifications(prev => mergeNotificationsStable(prev, data.notifications || [], rowDeltaIds.notifications || []));
+        }
+        if (Array.isArray(data.attendanceLogs) || Array.isArray(rowDeltaIds.attendanceLogs)) {
+          setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, data.attendanceLogs || [], rowDeltaIds.attendanceLogs || []));
+        }
+        if (Array.isArray(data.performanceRecords)) setPerformanceRecords(data.performanceRecords);
+        if (data.performanceSummary && typeof data.performanceSummary === 'object') setPerformanceSummary(data.performanceSummary);
         setShowLocalBanner(data.database === 'json-file');
-        return;
-      }
-      if (Array.isArray(data.performanceRecords)) setPerformanceRecords(data.performanceRecords);
-      if (data.performanceSummary && typeof data.performanceSummary === 'object') setPerformanceSummary(data.performanceSummary);
-      setShowLocalBanner(data.database === 'json-file');
-      setDbError(null);
+        if (data.partial !== 'presence') setDbError(null);
+      });
+      if (data.partial === 'presence') return;
     } catch (error) {
       console.warn('Adaptive workspace sync failed', error);
     } finally {
@@ -4576,31 +5026,47 @@ function AppShell() {
     let cancelled = false;
     const flushPendingCreatedProjects = async () => {
       if (pendingCreateFlushInFlightRef.current) return;
-      const pending = getPendingCreatedProjects();
+      const pending = getPendingCreatedRecords(operationalActorKey(currentUser));
       if (!pending.length) return;
       pendingCreateFlushInFlightRef.current = true;
       try {
-        for (const project of pending) {
+        for (const record of pending) {
+          const project=record.project || {};
           if (cancelled || !project?.id) continue;
           try {
             markPendingCreatedAttempt(project.id);
-            const data = await createTaskApi({
-              apiBase: API_BASE,
-              headers: jsonFinanceSafeHeaders,
-              task: sanitizeProjectForCache(project)
+            const data=await createTaskApi({
+              apiBase:API_BASE,
+              headers:jsonFinanceSafeHeaders,
+              task:sanitizeProjectForCache(project),
+              expectedTaskVersion:Number(record.expectedTaskVersion ?? project.taskVersion ?? 0),
+              mutationId:record.mutationId
             });
-            const savedProject = data.project || data.case || project;
-            forgetPendingCreatedProjects(project.id, project.caseId);
-            rememberRecentCreatedProject(savedProject);
-            applyProjectSnapshot([savedProject], { source: 'pending-create-confirmed' });
+            const savedProject=data.project || data.case;
+            if (savedProject && (!record.mutationId || String(savedProject.lastTaskMutationId || '')===String(record.mutationId) || data.idempotent)) {
+              forgetPendingCreatedProjects(project.id,project.caseId,project.displayId);
+              rememberRecentCreatedProject(savedProject);
+              applyProjectSnapshot([savedProject],{source:'pending-task-confirmed'});
+            }
           } catch(e) {
             if (isProjectDeletedError(e)) {
-              forgetPendingCreatedProjects(project.id, project.caseId);
-              rememberDeletedProjectsForce(e?.payload?.deletedProjectIds || [project.id, project.caseId]);
-              setProjects(prev => filterDeletedProjects(prev || []));
+              forgetPendingCreatedProjects(project.id,project.caseId,project.displayId);
+              rememberDeletedProjectsForce(e?.payload?.deletedProjectIds || [project.id,project.caseId]);
+              setProjects(prev=>filterDeletedProjects(prev || []));
               continue;
             }
-            console.warn('Pending task save retry failed:', e.message);
+            if (['TASK_VERSION_CONFLICT','TASK_VERSION_REQUIRED'].includes(String(e?.code || ''))) {
+              forgetPendingCreatedProjects(project.id,project.caseId,project.displayId);
+              await refreshWorkspaceSnapshot().catch(()=>{});
+              continue;
+            }
+            if (isPermanentTaskWriteError(e)) {
+              forgetPendingCreatedProjects(project.id,project.caseId,project.displayId);
+              await refreshWorkspaceSnapshot().catch(()=>{});
+              console.warn('Pending task write was rejected permanently and removed from the retry outbox:',e.message);
+              continue;
+            }
+            console.warn('Pending task save retry failed:',e.message);
           }
         }
       } finally {
@@ -4612,7 +5078,7 @@ function AppShell() {
     window.addEventListener('online', flushPendingCreatedProjects);
     window.addEventListener('focus', flushPendingCreatedProjects);
     return () => { cancelled = true; clearInterval(timer); window.removeEventListener('online', flushPendingCreatedProjects); window.removeEventListener('focus', flushPendingCreatedProjects); };
-  }, [USE_BACKEND_STATE, backendStateReady, isDbReady, jsonFinanceSafeHeaders, currentUser?.role, applyProjectSnapshot]);
+  }, [USE_BACKEND_STATE, backendStateReady, isDbReady, jsonFinanceSafeHeaders, currentUser?.id, currentUser?.username, currentUser?.name, applyProjectSnapshot, refreshWorkspaceSnapshot]);
 
 
   // Durable delete-task outbox: a deleted task remains hidden everywhere and the
@@ -4622,17 +5088,18 @@ function AppShell() {
     if (!USE_BACKEND_STATE || !backendStateReady || !isDbReady) return;
     let cancelled = false;
     const flushPendingDeletedProjects = async () => {
-      const pendingIds = getPendingDeletedProjectIds();
+      const deleteActorKey = operationalActorKey(currentUser);
+      const pendingIds = getPendingDeletedProjectIds(deleteActorKey);
       if (!pendingIds.length) return;
       setProjects(prev => filterDeletedProjects(prev || []));
       for (const id of pendingIds) {
         if (cancelled || !id) continue;
         try {
-          markPendingDeletedAttempt(id);
+          markPendingDeletedAttempt(id, deleteActorKey);
           const data = await deleteTaskApi({ apiBase: API_BASE, taskId: id, headers: jsonFinanceSafeHeaders });
           if (Array.isArray(data.deletedProjectIds)) rememberDeletedProjectsForce(data.deletedProjectIds);
           // Keep the confirmed deleted-id memory, but remove it from retry outbox.
-          forgetPendingDeletedProjects(id);
+          forgetPendingDeletedProjects(id, { actorId: deleteActorKey });
         } catch (e) {
           console.warn('Pending task delete retry failed:', e.message);
         }
@@ -4643,7 +5110,7 @@ function AppShell() {
     window.addEventListener('online', flushPendingDeletedProjects);
     window.addEventListener('focus', flushPendingDeletedProjects);
     return () => { cancelled = true; clearInterval(timer); window.removeEventListener('online', flushPendingDeletedProjects); window.removeEventListener('focus', flushPendingDeletedProjects); };
-  }, [USE_BACKEND_STATE, backendStateReady, isDbReady, jsonFinanceSafeHeaders]);
+  }, [USE_BACKEND_STATE, backendStateReady, isDbReady, jsonFinanceSafeHeaders, currentUser?.id, currentUser?.username, currentUser?.name]);
 
   // Keep assignment/status changes live across tabs without creating storage-event loops.
   // Important: never write back to localStorage while handling an incoming sync event;
@@ -4784,7 +5251,7 @@ function AppShell() {
       setUsers(normalizeTeamUsers(savedUsers ? JSON.parse(savedUsers) : INITIAL_USERS));
       const localProjects = savedProjects ? JSON.parse(savedProjects) : [];
       const backupProjects = savedProjectsBackup ? JSON.parse(savedProjectsBackup) : [];
-      setProjects(() => filterDeletedProjects(protectRecentlyCreatedProjects(sanitizeProjectsForCache(localProjects), sanitizeProjectsForCache(backupProjects))));
+      setProjects(() => filterDeletedProjects(protectRecentlyCreatedProjects(sanitizeProjectsForCache(localProjects), sanitizeProjectsForCache(backupProjects), operationalActorKey(currentUser))));
       setChatMessages(savedChats ? sanitizeChatsForCache(JSON.parse(savedChats)) : []);
       setNotifications(savedNotifs ? JSON.parse(savedNotifs) : []);
       setAttendanceLogs(savedLogs ? JSON.parse(savedLogs) : []);
@@ -4810,8 +5277,8 @@ function AppShell() {
           const cloudProjects = filterDeletedProjects(sanitizeProjectsForCache(snap.docs.map(doc => doc.data())));
           if (cloudProjects.length > 0) {
             setProjects(prev => {
-              confirmPendingCreatedProjectsAgainstServer(cloudProjects);
-              const merged = filterDeletedProjects(protectRecentlyCreatedProjects(cloudProjects, prev));
+              confirmPendingCreatedProjectsAgainstServer(cloudProjects, operationalActorKey(currentUser));
+              const merged = filterDeletedProjects(protectRecentlyCreatedProjects(cloudProjects, prev, operationalActorKey(currentUser)));
               try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(merged)); localStorage.setItem('kalpa_projects', JSON.stringify(merged)); merged.forEach(recordAssignmentLedger); } catch(e) {}
               return merged;
             });
@@ -4873,8 +5340,8 @@ function AppShell() {
         const cloudProjects = filterDeletedProjects(sanitizeProjectsForCache(snap.docs.map(d => d.data())));
         if (cloudProjects.length) {
           setProjects(prev => {
-            confirmPendingCreatedProjectsAgainstServer(cloudProjects);
-            const merged = filterDeletedProjects(protectRecentlyCreatedProjects(cloudProjects, prev));
+            confirmPendingCreatedProjectsAgainstServer(cloudProjects, operationalActorKey(currentUser));
+            const merged = filterDeletedProjects(protectRecentlyCreatedProjects(cloudProjects, prev, operationalActorKey(currentUser)));
             try { localStorage.setItem('kalpa_projects_backup', JSON.stringify(merged)); localStorage.setItem('kalpa_projects', JSON.stringify(merged)); merged.forEach(recordAssignmentLedger); } catch(e) {}
             setSelectedProject(sel => sel ? (merged.find(p => String(p.id) === String(sel.id)) || sel) : sel);
             return merged;
@@ -4955,10 +5422,10 @@ function AppShell() {
       });
     };
 
-    ensureLocalAttendanceRow();
+    if (!USE_BACKEND_STATE) ensureLocalAttendanceRow();
     postPresenceUpdate('login', currentUser);
 
-    const attendanceTimer = setInterval(() => {
+    const attendanceTimer = USE_BACKEND_STATE ? null : setInterval(() => {
       const liveUser = currentUserRef.current || currentUser;
       setAttendanceLogs(prev => {
         const currentLog = (prev || []).find(l => l.id === logId);
@@ -4998,12 +5465,12 @@ function AppShell() {
       const beatNow = Date.now();
       const refreshed = { ...liveUser, isOnline: true, lastSeenAt: beatNow, lastHeartbeatAt: beatNow };
       currentUserRef.current = refreshed;
-      setUsers(prev => normalizeTeamUsers((prev || []).map(u => String(u.id) === String(refreshed.id) ? { ...u, ...refreshed } : u)));
+      if (!USE_BACKEND_STATE) setUsers(prev => mergeTeamUsersStable(prev, [refreshed], [String(refreshed.id || '')]));
       if (!USE_BACKEND_STATE && firebaseUser) handleUpdateUser(refreshed);
       postPresenceUpdate('heartbeat', refreshed);
     }, 25000);
 
-    return () => { clearInterval(attendanceTimer); clearInterval(heartbeatTimer); };
+    return () => { if (attendanceTimer) clearInterval(attendanceTimer); clearInterval(heartbeatTimer); };
   }, [currentUser?.id, isDbReady, firebaseUser, postPresenceUpdate]);
 
 
@@ -5043,8 +5510,9 @@ function AppShell() {
     }
   };
 
-  const handleUpdateProject = async (updatedProject, oldProject) => {
+  const handleUpdateProject = async (updatedProject, oldProject, options = {}) => {
     const previousProject = oldProject ? normalizeProjectRecord(oldProject) : null;
+    const financeOnly = options?.financeOnly === true;
     const spawnedProjects = Array.isArray(updatedProject?._spawnProjects) ? updatedProject._spawnProjects : [];
     if (updatedProject && Object.prototype.hasOwnProperty.call(updatedProject, '_spawnProjects')) {
       const { _spawnProjects, ...cleanProject } = updatedProject;
@@ -5054,16 +5522,24 @@ function AppShell() {
 
     const financeChanged = previousProject && financeSignature(previousProject) !== financeSignature(updatedProject);
     if (financeChanged && currentUser?.role === ROLES.ADMIN && USE_BACKEND_STATE && backendStateReady && isDbReady) {
+      const financeTaskKey = String(updatedProject.id || updatedProject.caseId || '').trim();
+      if (financeSaveInFlightRef.current.has(financeTaskKey)) {
+        notifyUser('A payment update for this task is already being saved. Please wait for it to finish.');
+        return null;
+      }
+      financeSaveInFlightRef.current.add(financeTaskKey);
       try {
         const financeResponse = await saveFinanceStatusApi({
           apiBase: API_BASE,
           headers: jsonFinanceSafeHeaders,
-          taskId: updatedProject.id || updatedProject.caseId,
+          taskId: financeTaskKey,
           status: getPaymentTrackingStatus(updatedProject),
           expectedFinanceVersion: Number(previousProject.financeVersion || 0),
+          mutationId: options?.financeMutationId || createFinanceMutationId(),
           details: {
+            estimate: getPaymentEstimateAmount(updatedProject),
             amountIn: getPaymentReceivedAmount(updatedProject),
-            paymentDate: updatedProject.ledger?.date || updatedProject.paymentDate || '',
+            paymentDate: normalizeTaskDateKey(updatedProject.ledger?.date || updatedProject.paymentDate || getIndiaDateKey(), getIndiaDateKey()),
             accountingPeriod: getProjectFinanceMonthKey(updatedProject) || updatedProject.financeAccountingPeriod || updatedProject.ledger?.accountingPeriod || normalizeAccountingMonthKey(updatedProject.ledger?.date || updatedProject.paymentDate, getCurrentAccountingMonthKey()),
             paymentTime: updatedProject.paymentTime || '',
             mode: updatedProject.ledger?.mode || '',
@@ -5071,141 +5547,175 @@ function AppShell() {
             payerName: updatedProject.ledger?.receivedFrom || updatedProject.payerName || '',
             expenses: Number(updatedProject.ledger?.expenses) || 0,
             refund: Number(updatedProject.ledger?.refund ?? updatedProject.refundAmount) || 0,
-            note: updatedProject.paymentAuditTrail?.[0]?.note || ''
+            note: updatedProject.ledger?.note || updatedProject.paymentAuditTrail?.[0]?.note || '',
+            screenshot: updatedProject.ledger?.screenshot || null
           }
         });
         const confirmed = financeResponse?.project || financeResponse?.case;
-        if (!confirmed || !financeResponse?.persistence?.database) {
+        if (!confirmed || (!financeResponse?.persistence?.database && !financeResponse?.idempotent)) {
           throw new Error('The finance update was not confirmed by durable storage.');
         }
-        updatedProject = normalizeProjectRecord(applyConfirmedFinance(updatedProject, confirmed));
+        updatedProject = normalizeProjectRecord(financeOnly ? { ...updatedProject, ...confirmed } : applyConfirmedFinance(updatedProject, confirmed));
+
+        if (financeOnly) {
+          setSelectedProject(updatedProject);
+          setProjects(prev => {
+            const next = filterDeletedProjects(mergeProjectsByFreshness(prev || [], [updatedProject]));
+            persistAndBroadcastProjects(next);
+            return next;
+          });
+          return updatedProject;
+        }
       } catch (error) {
         console.error('Finance save blocked:', error);
-        notifyUser(error?.message || 'Finance could not be saved to the server. No local finance change was accepted.');
-        applyProjectSnapshot([previousProject], { source: 'finance-save-reverted' });
-        setSelectedProject(previousProject);
-        return;
+        const message = error?.code === 'FINANCE_VERSION_CONFLICT'
+          ? 'Finance changed on another screen. Your entry was not overwritten. Refresh this task and save again.'
+          : (error?.message || 'Finance could not be saved to the server. No local finance change was accepted.');
+        notifyUser(message);
+        if (previousProject) {
+          applyProjectSnapshot([previousProject], { source: 'finance-save-reverted' });
+          setSelectedProject(previousProject);
+        }
+        return null;
+      } finally {
+        financeSaveInFlightRef.current.delete(financeTaskKey);
       }
+    } else if (financeOnly) {
+      if (financeChanged) notifyUser('Finance cannot be saved until the production database connection is ready.');
+      return financeChanged ? null : updatedProject;
     }
 
-    const normalizedSpawned = spawnedProjects.map(p => normalizeProjectRecord({ ...p, updatedAt: p.updatedAt || Date.now(), syncVersion: p.syncVersion || Date.now() }));
+    const normalizedSpawned=spawnedProjects.map(item=>normalizeProjectRecord({...item,updatedAt:item.updatedAt || Date.now(),syncVersion:item.syncVersion || Date.now()}));
 
-    // When a temporary revision work item is finally approved, copy its outcome back to the permanent original task.
-    let linkedOriginalUpdate = null;
+    // When a temporary revision work item is finally approved, copy its outcome
+    // back to the permanent original task in a separate version-checked write.
+    let linkedOriginalUpdate=null;
     if (isRevisionWorkItem(updatedProject) && updatedProject.status === 'Completed' && updatedProject.originalTaskId) {
-      const original = projects.find(p => String(p.id) === String(updatedProject.originalTaskId));
+      const original=projects.find(item=>String(item.id)===String(updatedProject.originalTaskId));
       if (original) {
-        const now = Date.now();
-        const revisionNumber = updatedProject.revisionNumber || getNextRevisionNumber(original);
-        const revisionFiles = [...(updatedProject.completedFiles || []), ...(updatedProject.documents || []).filter(d => String(d.type || '').toLowerCase() === 'completed')];
-        linkedOriginalUpdate = normalizeProjectRecord({
+        const stamp=Date.now();
+        const revisionNumber=updatedProject.revisionNumber || getNextRevisionNumber(original);
+        const revisionFiles=[...(updatedProject.completedFiles || []),...(updatedProject.documents || []).filter(doc=>String(doc.type || '').toLowerCase()==='completed')];
+        linkedOriginalUpdate=normalizeProjectRecord({
           ...original,
-          updatedAt: now,
-          syncVersion: now,
-          documents: [...(original.documents || []), ...revisionFiles],
-          completedFiles: [...(original.completedFiles || []), ...revisionFiles],
-          revisionHistory: [
-            ...(original.revisionHistory || []),
-            {
-              id: now,
-              revisionNumber,
-              revisionCode: `R${revisionNumber}`,
-              action: 'Revision Completed',
-              status: 'Completed',
-              completedBy: updatedProject.completedBy || updatedProject.assignedTo,
-              completedAt: updatedProject.completedAt || now,
-              workItemId: updatedProject.id,
-              files: revisionFiles
-            }
-          ],
-          timeline: [
-            ...(original.timeline || []),
-            { id: now, text: `Revision ${revisionNumber} completed and linked back to original task ${original.id}.`, time: new Date(now).toLocaleString() }
-          ]
+          updatedAt:stamp,
+          syncVersion:stamp,
+          documents:[...(original.documents || []),...revisionFiles],
+          completedFiles:[...(original.completedFiles || []),...revisionFiles],
+          revisionHistory:[...(original.revisionHistory || []),{id:stamp,revisionNumber,revisionCode:`R${revisionNumber}`,action:'Revision Completed',status:'Completed',completedBy:updatedProject.completedBy || updatedProject.assignedTo,completedAt:updatedProject.completedAt || stamp,workItemId:updatedProject.id,files:revisionFiles}],
+          timeline:[...(original.timeline || []),{id:stamp,text:`Revision ${revisionNumber} completed and linked back to original task ${original.id}.`,time:new Date(stamp).toLocaleString()}]
         });
       }
     }
 
-    const projectsToSave = [updatedProject, ...normalizedSpawned, ...(linkedOriginalUpdate ? [linkedOriginalUpdate] : [])];
-    projectsToSave.forEach(p => { if (isAssignedValue(p.assignedTo)) recordAssignmentLedger(p); });
-    oldProject = previousProject;
-    const changedPrimaryTaskId = oldProject?.id && updatedProject?.id && String(oldProject.id) !== String(updatedProject.id);
-    if (changedPrimaryTaskId) rememberDeletedProjects(oldProject.id, oldProject.caseId);
-    // Update the screen immediately. Previously the app waited for Firestore;
-    // if a completed file was large or Firebase rejected it, the upload looked like nothing happened.
+    const projectsToSave=[updatedProject,...normalizedSpawned,...(linkedOriginalUpdate ? [linkedOriginalUpdate] : [])];
+    projectsToSave.forEach(item=>{ if (isAssignedValue(item.assignedTo)) recordAssignmentLedger(item); });
+
+    // Optimistic UI remains fast, but every server write below carries the
+    // version that was actually displayed and a stable mutation ID. A stale tab
+    // therefore cannot silently overwrite a newer task.
     setSelectedProject(updatedProject);
-    setProjects(prev => {
-      const ids = new Set(projectsToSave.map(p => String(p.id)));
-      if (changedPrimaryTaskId) {
-        ids.add(String(oldProject.id));
-        if (oldProject.caseId) ids.add(String(oldProject.caseId));
-      }
-      const next = filterDeletedProjects(mergeProjectsByFreshness((prev || []).filter(p => !ids.has(String(p.id)) && !ids.has(String(p.caseId || ''))), projectsToSave));
+    setProjects(previous=>{
+      const ids=new Set(projectsToSave.flatMap(item=>[item.id,item.caseId,item.displayId]).map(value=>String(value || '')).filter(Boolean));
+      const next=filterDeletedProjects(mergeProjectsByFreshness((previous || []).filter(item=>!ids.has(String(item.id || '')) && !ids.has(String(item.caseId || '')) && !ids.has(String(item.displayId || ''))),projectsToSave));
       persistAndBroadcastProjects(next);
       return next;
     });
-    
-    if (firebaseUser && !isLocalMock) {
-        for (const projectToSave of projectsToSave) {
-          try {
-            await setDoc(
-              doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', projectToSave.id.toString()),
-              stripLargeLocalFilesForCloud(projectToSave)
-            );
-          } catch(e){
-            console.warn('Project cloud save failed, but local screen has been updated.', e);
-          }
-        }
-        if (changedPrimaryTaskId) {
-          try { await deleteDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', oldProject.id.toString())); } catch(e) {}
-        }
-    }
 
-    if (USE_BACKEND_STATE && backendStateReady && isDbReady) {
+    if (firebaseUser && !isLocalMock) {
       for (const projectToSave of projectsToSave) {
         try {
-          const data = await createTaskApi({
-            apiBase: API_BASE,
-            headers: jsonFinanceSafeHeaders,
-            task: sanitizeProjectForCache(projectToSave)
-          });
-          forgetPendingCreatedProjects(projectToSave.id, projectToSave.caseId);
-          if (data?.project || data?.case) applyProjectSnapshot([data.project || data.case], { source: 'task-update-confirmed' });
-        } catch (e) {
-          if (isProjectDeletedError(e)) {
-            rememberDeletedProjectsForce(e?.payload?.deletedProjectIds || [projectToSave.id, projectToSave.caseId]);
-            setProjects(prev => filterDeletedProjects(prev || []));
-          } else {
-            rememberPendingCreatedProject(projectToSave);
-            console.warn('Task update queued for retry:', e.message);
-          }
+          await setDoc(doc(db,'artifacts',safeAppId,'public','data','projects',String(projectToSave.id)),stripLargeLocalFilesForCloud(projectToSave));
+        } catch(error) {
+          console.warn('Project cloud save failed, but the authoritative backend write will continue.',error);
         }
       }
     }
 
-    if (changedPrimaryTaskId && USE_BACKEND_STATE) {
-      try { await deleteTaskApi({ apiBase: API_BASE, taskId: oldProject.id, headers: jsonFinanceSafeHeaders }); } catch(e) {}
+    let confirmedPrimary=updatedProject;
+    if (USE_BACKEND_STATE && backendStateReady && isDbReady) {
+      for (let index=0; index<projectsToSave.length; index+=1) {
+        const projectToSave=projectsToSave[index];
+        const knownExisting=[previousProject,...projects].filter(Boolean).find(candidate=>projectIdentityMatches(candidate,projectToSave));
+        const isCreate=!knownExisting;
+        const expectedTaskVersion=Number(knownExisting?.taskVersion ?? projectToSave.taskVersion ?? 0);
+        const mutationId=index === 0 && options?.taskMutationId
+          ? String(options.taskMutationId)
+          : createTaskMutationId(isCreate ? 'create' : 'update');
+        try {
+          const data=await createTaskApi({
+            apiBase:API_BASE,
+            headers:jsonFinanceSafeHeaders,
+            task:sanitizeProjectForCache(projectToSave),
+            expectedTaskVersion,
+            mutationId
+          });
+          const confirmed=data?.project || data?.case;
+          forgetPendingCreatedProjects(projectToSave.id,projectToSave.caseId,projectToSave.displayId);
+          if (confirmed) {
+            applyProjectSnapshot([confirmed],{source:'task-update-confirmed'});
+            if (index===0) confirmedPrimary=confirmed;
+          }
+        } catch(error) {
+          if (isProjectDeletedError(error)) {
+            forgetPendingCreatedProjects(projectToSave.id,projectToSave.caseId,projectToSave.displayId);
+            rememberDeletedProjectsForce(error?.payload?.deletedProjectIds || [projectToSave.id,projectToSave.caseId]);
+            setProjects(previous=>filterDeletedProjects(previous || []));
+            continue;
+          }
+          if (['TASK_VERSION_CONFLICT','TASK_VERSION_REQUIRED'].includes(String(error?.code || ''))) {
+            forgetPendingCreatedProjects(projectToSave.id,projectToSave.caseId,projectToSave.displayId);
+            notifyUser('This task changed on another screen. Your older copy was not allowed to overwrite it. The latest version is being reloaded.');
+            await refreshWorkspaceSnapshot().catch(()=>{});
+            continue;
+          }
+          if (isPermanentTaskWriteError(error)) {
+            forgetPendingCreatedProjects(projectToSave.id,projectToSave.caseId,projectToSave.displayId);
+            const failedIds=new Set([projectToSave.id,projectToSave.caseId,projectToSave.displayId].map(value=>String(value || '')).filter(Boolean));
+            setProjects(previous=>{
+              const withoutRejected=(previous || []).filter(item=>!failedIds.has(String(item.id || '')) && !failedIds.has(String(item.caseId || '')) && !failedIds.has(String(item.displayId || '')));
+              const restored=knownExisting ? mergeProjectsByFreshness(withoutRejected,[knownExisting]) : withoutRejected;
+              const next=filterDeletedProjects(restored);
+              persistAndBroadcastProjects(next);
+              return next;
+            });
+            if (index===0) setSelectedProject(knownExisting || null);
+            notifyUser(error?.message || 'The task update was rejected and was not queued for repeated retries.');
+            continue;
+          }
+          rememberPendingCreatedProject(projectToSave,{
+            actorId:operationalActorKey(currentUser),
+            operation:isCreate ? 'create' : 'update',
+            mutationId,
+            expectedTaskVersion
+          });
+          console.warn('Task write retained in the durable retry outbox:',error.message);
+          notifyUser('The task is visible locally and its server confirmation will retry automatically. Do not recreate it.');
+        }
+      }
     }
 
-    normalizedSpawned.forEach(spawned => {
-      const targetRole = activeUsers.find(u => u.name === spawned.assignedTo)?.role || ROLES.DESIGNER;
-      addNotification(targetRole, spawned.assignedTo, `URGENT REVISION assigned: ${getDisplayTaskId(spawned)} ${spawned.revisionCode || ''}`.trim(), 'urgent');
-      addNotification(ROLES.MANAGER, null, `Revision work item created: ${getDisplayTaskId(spawned)} ${spawned.revisionCode || ''}`.trim(), 'urgent');
-    });
-
-    if (oldProject && updatedProject.status !== oldProject.status) {
-      if (updatedProject.status === 'Completed') addNotification(ROLES.MANAGER, null, `Task ${getDisplayTaskId(updatedProject)} completed and ready`, 'success');
-      if (updatedProject.status === 'Completed') addNotification(ROLES.DESIGNER, updatedProject.assignedTo, `Task ${getDisplayTaskId(updatedProject)} marked as Completed`, 'success');
+    // The backend now creates assignment/completion/urgent notifications in the
+    // same transaction as the task. Keep the legacy notification path only for
+    // offline/Firebase mode to avoid extra 7–14 second persistence writes.
+    if (!USE_BACKEND_STATE) {
+      normalizedSpawned.forEach(spawned=>{
+        const targetRole=activeUsers.find(member=>member.name===spawned.assignedTo)?.role || ROLES.DESIGNER;
+        addNotification(targetRole,spawned.assignedTo,`URGENT REVISION assigned: ${getDisplayTaskId(spawned)} ${spawned.revisionCode || ''}`.trim(),'urgent');
+        addNotification(ROLES.MANAGER,null,`Revision work item created: ${getDisplayTaskId(spawned)} ${spawned.revisionCode || ''}`.trim(),'urgent');
+      });
+      if (previousProject && updatedProject.status !== previousProject.status && updatedProject.status === 'Completed') {
+        addNotification(ROLES.MANAGER,null,`Task ${getDisplayTaskId(updatedProject)} completed and ready`,'success');
+        addNotification(ROLES.DESIGNER,updatedProject.assignedTo,`Task ${getDisplayTaskId(updatedProject)} marked as Completed`,'success');
+      }
+      if (previousProject && updatedProject.priority === 'Urgent' && previousProject.priority !== 'Urgent') addNotification(ROLES.DESIGNER,updatedProject.assignedTo,`URGENT REVISION: Task ${getDisplayTaskId(updatedProject)}`,'urgent');
+      if (previousProject && updatedProject.assignedTo !== previousProject.assignedTo && updatedProject.assignedTo !== 'Unassigned') {
+        const targetRole=activeUsers.find(member=>member.name===updatedProject.assignedTo)?.role || ROLES.DESIGNER;
+        addNotification(targetRole,updatedProject.assignedTo,`Task Re-assigned to you: ${getDisplayTaskId(updatedProject)}`,'info');
+      }
     }
-    if (oldProject && updatedProject.priority === 'Urgent' && oldProject.priority !== 'Urgent') {
-      addNotification(ROLES.DESIGNER, updatedProject.assignedTo, `URGENT REVISION: Task ${getDisplayTaskId(updatedProject)}`, 'urgent');
-    }
-    if (oldProject && updatedProject.assignedTo !== oldProject.assignedTo && updatedProject.assignedTo !== 'Unassigned') {
-      const targetRole = activeUsers.find(u => u.name === updatedProject.assignedTo)?.role || ROLES.DESIGNER;
-      addNotification(targetRole, updatedProject.assignedTo, `Task Re-assigned to you: ${getDisplayTaskId(updatedProject)}`, 'info');
-    }
+    return confirmedPrimary;
   };
-  
 
   const handlePaymentStatusChange = async (project, status) => {
     if (!project || currentUser?.role !== ROLES.ADMIN) return;
@@ -5237,12 +5747,12 @@ function AppShell() {
         transactionId: String(transactionId).trim(),
         note: String(note).trim(),
       });
-      await handleUpdateProject(updatedProject, project);
+      await handleUpdateProject(updatedProject, project, { financeOnly:true, financeMutationId:createFinanceMutationId() });
       return;
     }
 
     const updatedProject = buildPaymentTrackingUpdate(project, normalizedStatus, currentUser);
-    await handleUpdateProject(updatedProject, project);
+    await handleUpdateProject(updatedProject, project, { financeOnly:true, financeMutationId:createFinanceMutationId() });
   };
 
   const handleDeleteTask = async (taskId) => {
@@ -5260,7 +5770,7 @@ function AppShell() {
      forgetPendingCreatedProjects(deleteIds);
      forgetRecentCreatedProjects(deleteIds);
      rememberDeletedProjectsForce(deleteIds);
-     rememberPendingDeletedProjects(deleteIds);
+     rememberPendingDeletedProjects(deleteIds, { actorId: operationalActorKey(currentUser) });
      setProjects(prev => {
        const deleteSet = new Set(deleteIds);
        const next = filterDeletedProjects((prev || []).filter(p => !deleteSet.has(String(p.id)) && !deleteSet.has(String(p.caseId || ''))));
@@ -5276,7 +5786,7 @@ function AppShell() {
        if (USE_BACKEND_STATE) {
          const data = await deleteTaskApi({ apiBase: API_BASE, taskId: id, headers: jsonFinanceSafeHeaders });
          if (Array.isArray(data.deletedProjectIds)) rememberDeletedProjectsForce(data.deletedProjectIds);
-         forgetPendingDeletedProjects(deleteIds);
+         forgetPendingDeletedProjects(deleteIds, { actorId: operationalActorKey(currentUser) });
        }
      } catch (e) { console.warn('Backend delete failed after local deletion:', e); }
      try {
@@ -5710,36 +6220,7 @@ function AppShell() {
   if (!isDbReady) return <PageLoadingScreen />;
 
   const canManage = currentUser.role === ROLES.ADMIN || currentUser.role === ROLES.MANAGER;
-  if (currentUser.role === ROLES.DESIGNER && activeTab === 'board') setTimeout(() => setActiveTab('command'), 0);
-  const myNotifs = getVisibleNotifications(notifications, currentUser)
-    .map(n => ({ ...n, category: n.category || getNotificationCategory(n), priority: n.priority || getNotificationPriority(n) }));
-  const unreadNotifs = myNotifs.filter(n => !(n.readBy||[]).includes(currentUser.name)).length;
-  const notificationCounts = NOTIFICATION_CATEGORIES.reduce((acc, label) => {
-    acc[label] = label === 'All' ? myNotifs.length : myNotifs.filter(n => n.category === label).length;
-    return acc;
-  }, {});
-  const filteredNotifs = myNotifs.filter(n => {
-    if (notifFilter !== 'All' && n.category !== notifFilter) return false;
-    const q = notifSearch.trim().toLowerCase();
-    if (!q) return true;
-    return [n.title, n.category, n.priority, n.type, n.time].filter(Boolean).join(' ').toLowerCase().includes(q);
-  });
-  const activityTimeline = buildActivityTimeline(projects, chatMessages, notifications);
-  const normalizedGlobalSearch = globalSearch.trim().toLowerCase();
-  const globalCaseResults = !normalizedGlobalSearch ? [] : (projects || [])
-    .filter(p => [p.id, formatTaskId(p.id), p.client, p.bankName, p.branchName, p.customerName, p.location, p.assignedTo, p.type, p.status, p.description, p.paymentStatus, p.paymentTrackingStatus, getLatestCompletedFileName(p), p.createdAt ? formatDateTime(p.createdAt) : '', p.completedAt ? formatDateTime(p.completedAt) : '']
-      .filter(Boolean).join(' ').toLowerCase().includes(normalizedGlobalSearch))
-    .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
-  const globalPeopleResults = !normalizedGlobalSearch ? [] : (activeUsers || [])
-    .filter(u => [u.name, u.username, u.role, u.availability, u.status].filter(Boolean).join(' ').toLowerCase().includes(normalizedGlobalSearch))
-    .slice(0, 8);
-  const globalNotificationResults = !normalizedGlobalSearch ? [] : (myNotifs || [])
-    .filter(n => [n.title, n.message, n.type, n.category, n.priority, n.time].filter(Boolean).join(' ').toLowerCase().includes(normalizedGlobalSearch))
-    .slice(0, 8);
-  const globalChatResults = !normalizedGlobalSearch ? [] : (chatMessages || [])
-    .filter(m => [m.sender, m.text, m.channel, m.to, m.fileName].filter(Boolean).join(' ').toLowerCase().includes(normalizedGlobalSearch))
-    .sort((a, b) => Number(b.createdAt || b.id || 0) - Number(a.createdAt || a.id || 0))
-    .slice(0, 8);
+
 
   const persistSavedGlobalFilters = (nextFilters) => {
     const clean = (nextFilters || []).filter(f => f && f.query).slice(0, 12);
@@ -5772,28 +6253,7 @@ function AppShell() {
     persistSavedGlobalFilters(savedGlobalFilters.filter(f => f.id !== filterId));
   };
 
-  const displayedProjects = projects
-    .filter(p => {
-      if (activeTab === 'my_tasks') {
-        if (normalizePersonName(p.assignedTo) !== normalizePersonName(currentUser.name)) return false;
-        const statusKey = normalizeWorkStatusForRevision(p.status || p.reviewStatus || '');
-        const isRevisionForMe = p.showInMyTasks || isRevisionWorkItem(p) || statusKey.includes('REVISION') || hasActiveRevision(p);
-        // Every assigned pending/revision task must appear instantly in My Tasks until completion,
-        // regardless of selected date. This includes temporary revision work items created from Archive.
-        if (p.status !== 'Completed' || isRevisionForMe) return true;
-        if (!shouldShowOnOperationsDate(p, selectedBoardDate)) return false;
-      } else if (activeTab === 'board' && !shouldShowOnOperationsDate(p, selectedBoardDate)) return false;
-      const q = globalSearch.trim().toLowerCase();
-      if (q) {
-        const haystack = [p.id, p.client, p.bankName, p.branchName, p.customerName, p.location, p.assignedTo, p.type, p.status, p.description]
-          .filter(Boolean)
-          .join(' ')
-          .toLowerCase();
-        if (!haystack.includes(q)) return false;
-      }
-      return true;
-    })
-    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
 
   return (
     <div className={`min-h-screen bg-slate-50/50 font-sans text-slate-900 pb-20 antialiased selection:bg-indigo-100 selection:text-indigo-900 transition-colors duration-300 ${darkMode ? 'kd-dark' : ''}`}>
@@ -5944,9 +6404,10 @@ function AppShell() {
           <MainTabNavigation currentUser={currentUser} ROLES={ROLES} activeTab={activeTab} setActiveTab={setActiveTab} />
         )}
 
+        <AppErrorBoundary key={`workspace:${activeTab}:${selectedProject?.id || selectedProject?.caseId || 'none'}`}>
         <React.Suspense fallback={<PageLoadingScreen title="Loading workspace" subtitle="Preparing this section…" />}>
         {selectedProject ? (
-          <TaskDetailView project={selectedProject} user={currentUser} onBack={closeTaskDetail} onUpdateProject={handleUpdateProject} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} />
+          <TaskDetailView project={selectedProject} user={currentUser} onBack={closeTaskDetail} onUpdateProject={handleUpdateProject} onServerProjectConfirmed={(confirmedProject) => applyProjectSnapshot([confirmedProject], { source:'task-detail-server-confirmed' })} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} />
         ) : activeTab === 'command' ? (
           <CommandCentreView projects={projects} users={activeUsers} attendanceLogs={attendanceLogs} currentUser={currentUser} onOpenPerformance={() => setActiveTab('productivity')} onSelectProject={(p) => openTaskDetail(p, 'command')} onNavigate={(target) => { if (target === 'newCase') { setShowNewLead(true); return; } if (target === 'notifications') { setShowNotifs(true); return; } setActiveTab(target); }} />
         ) : activeTab === 'productivity' ? (
@@ -6008,6 +6469,7 @@ function AppShell() {
           />
         )}
         </React.Suspense>
+        </AppErrorBoundary>
       </main>
 
       {globalFilePreview && (
@@ -6175,8 +6637,9 @@ function AppShell() {
                // appears briefly and then vanishes on the next sync/filter pass.
                forgetDeletedProjects(newP.id, newP.caseId);
                rememberRecentCreatedProject(newP);
-               rememberPendingCreatedProject(newP);
-               const nextProjects = filterDeletedProjects(mergeProjectsByFreshness((projects || []).filter(p => String(p.id) !== String(newP.id)), [newP, ...getRecentCreatedProjects(), ...getPendingCreatedProjects()]));
+               const createMutationId=createTaskMutationId('create');
+               rememberPendingCreatedProject(newP,{actorId:operationalActorKey(currentUser),operation:'create',mutationId:createMutationId,expectedTaskVersion:0});
+               const nextProjects = filterDeletedProjects(mergeProjectsByFreshness((projects || []).filter(p => String(p.id) !== String(newP.id)), [newP, ...getRecentCreatedProjects(), ...getPendingCreatedProjects(operationalActorKey(currentUser))]));
                persistAndBroadcastProjects(nextProjects);
                setProjects(() => nextProjects);
                setSelectedBoardDate(taskDate);
@@ -6189,7 +6652,9 @@ function AppShell() {
                    const saveData = await createTaskApi({
                      apiBase: API_BASE,
                      headers: jsonFinanceSafeHeaders,
-                     task: sanitizeProjectForCache(newP)
+                     task: sanitizeProjectForCache(newP),
+                     expectedTaskVersion:0,
+                     mutationId:createMutationId
                    });
                    if (saveData?.project || saveData?.case) {
                      confirmedProject = saveData.project || saveData.case;
@@ -6199,6 +6664,18 @@ function AppShell() {
                      applyProjectSnapshot([confirmedProject], { source: 'create-confirmed' });
                    }
                  } catch (saveErr) {
+                   const versionRejected=['TASK_VERSION_CONFLICT','TASK_VERSION_REQUIRED'].includes(String(saveErr?.code || ''));
+                   if (versionRejected || isPermanentTaskWriteError(saveErr)) {
+                     forgetPendingCreatedProjects(newP.id,newP.caseId,newP.displayId);
+                     forgetRecentCreatedProjects(newP.id,newP.caseId,newP.displayId);
+                     setProjects(previous=>{
+                       const rejectedIds=new Set([newP.id,newP.caseId,newP.displayId].map(value=>String(value || '')).filter(Boolean));
+                       const next=filterDeletedProjects((previous || []).filter(item=>!rejectedIds.has(String(item.id || '')) && !rejectedIds.has(String(item.caseId || '')) && !rejectedIds.has(String(item.displayId || ''))));
+                       persistAndBroadcastProjects(next);
+                       return next;
+                     });
+                     throw saveErr;
+                   }
                    console.warn('Immediate task save failed; local task is kept and background sync will retry:', saveErr.message);
                  }
                }
@@ -6210,50 +6687,22 @@ function AppShell() {
                setNewTaskCategory(TASK_CATEGORIES[0]);
 
                if (filesToAttach.length && projectConfirmedByBackend && USE_BACKEND_STATE) {
-                 const uploadedDocs = [];
-                 const failedFiles = [];
+                 const failedFiles=[];
                  for (const file of filesToAttach) {
                    try {
-                     uploadedDocs.push(await uploadProjectFile(file, taskId, 'source', currentUser.name));
-                   } catch (fileErr) {
-                     console.warn('Source file attach failed after task creation:', fileErr);
+                     const uploaded=await uploadProjectFile(file,confirmedProject.id || confirmedProject.caseId,'source',currentUser.name);
+                     if (uploaded?._serverCase) {
+                       confirmedProject=uploaded._serverCase;
+                       rememberRecentCreatedProject(confirmedProject);
+                       applyProjectSnapshot([confirmedProject],{source:'create-source-file-confirmed'});
+                     }
+                   } catch(fileErr) {
+                     console.warn('Source file attach failed after task creation:',fileErr);
                      failedFiles.push(file.name);
                    }
                  }
-                 if (uploadedDocs.length) {
-                   const attachmentStamp = Date.now();
-                   const projectWithFiles = {
-                     ...confirmedProject,
-                     documents: [...(confirmedProject.documents || []), ...uploadedDocs],
-                     timeline: [
-                       ...(confirmedProject.timeline || []),
-                       { id: attachmentStamp, text: `${uploadedDocs.length} Source File(s) Attached`, time: new Date(attachmentStamp).toLocaleString() }
-                     ],
-                     updatedAt: attachmentStamp,
-                     syncVersion: attachmentStamp
-                   };
-                   try {
-                     const attachedData = await createTaskApi({
-                       apiBase: API_BASE,
-                       headers: jsonFinanceSafeHeaders,
-                       task: sanitizeProjectForCache(projectWithFiles)
-                     });
-                     const attachedProject = attachedData?.project || attachedData?.case || projectWithFiles;
-                     rememberRecentCreatedProject(attachedProject);
-                     applyProjectSnapshot([attachedProject], { source: 'create-files-confirmed' });
-                     confirmedProject = attachedProject;
-                   } catch (attachSaveErr) {
-                     console.warn('Task was created and files were stored; attachment linking was queued for retry:', attachSaveErr);
-                     confirmedProject = projectWithFiles;
-                     rememberPendingCreatedProject(projectWithFiles);
-                     rememberRecentCreatedProject(projectWithFiles);
-                     applyProjectSnapshot([projectWithFiles], { source: 'create-files-pending-confirmation' });
-                     notifyUser(`Task ${taskId} and its uploaded files are safe. Final attachment linking will retry automatically.`);
-                   }
-                 }
-                 if (failedFiles.length) {
-                   notifyUser(`Task ${taskId} was created, but these files did not upload and need to be tried again: ${failedFiles.join(', ')}`);
-                 }
+                 if (failedFiles.length) notifyUser(`Task ${taskId} was created, but these files did not upload and need to be tried again: ${failedFiles.join(', ')}`);
+
                } else if (filesToAttach.length && USE_BACKEND_STATE && !projectConfirmedByBackend) {
                  notifyUser(`Task ${taskId} is saved locally and waiting for server sync. Its source files were not uploaded; attach them after the task appears online.`);
                }
@@ -6262,9 +6711,9 @@ function AppShell() {
                    try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', confirmedProject.id), stripLargeLocalFilesForCloud(confirmedProject)); } catch(e){}
                }
 
-               if (newP.assignedTo !== 'Unassigned') {
+               if (!USE_BACKEND_STATE && newP.assignedTo !== 'Unassigned') {
                    const targetRole = activeUsers.find(u => u.name === newP.assignedTo)?.role || ROLES.DESIGNER;
-                   addNotification(targetRole, newP.assignedTo, `New Task Assigned: ${newP.id}`, 'info');
+                   addNotification(targetRole, newP.assignedTo, `New Task Assigned: ${getDisplayTaskId(newP)}`, 'info');
                }
                } catch (err) {
                  console.error('Create task failed:', err);
@@ -6296,11 +6745,11 @@ function AppShell() {
                    <label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Assign To</label>
                    <select name="assignedTo" className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none transition-colors font-bold text-indigo-700 cursor-pointer">
                      <option value="Unassigned">Leave Unassigned</option>
-                     {getAssignmentRecommendations(activeUsers, projects).map(u => <option key={u.id} value={u.name}>{u.name} • {u.active}/{u.limit} active</option>)}
+                     {assignmentRecommendations.map(u => <option key={u.id} value={u.name}>{u.name} • {u.active}/{u.limit} active</option>)}
                    </select>
                    <div className="mt-3 bg-indigo-50 border border-indigo-100 rounded-xl p-3">
                      <p className="text-[10px] font-black uppercase tracking-widest text-indigo-600 mb-2">Recommended now</p>
-                     {getAssignmentRecommendations(activeUsers, projects).slice(0,3).map((u, idx) => (
+                     {assignmentRecommendations.slice(0,3).map((u, idx) => (
                        <div key={u.id} className="flex justify-between items-center bg-white rounded-lg px-3 py-2 mb-1 border border-indigo-100">
                          <span className="text-xs font-extrabold text-slate-700">{idx + 1}. {u.name}</span>
                          <span className={`text-[10px] font-black px-2 py-1 rounded-md ${u.active >= u.limit ? 'bg-orange-100 text-orange-700' : 'bg-emerald-100 text-emerald-700'}`}>{u.active}/{u.limit} active</span>

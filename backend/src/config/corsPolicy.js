@@ -1,9 +1,23 @@
 const HTTP_PROTOCOLS = new Set(['http:', 'https:']);
 
-export const parseCorsOrigins = value => String(value || '')
-  .split(',')
-  .map(origin => origin.trim())
-  .filter(Boolean);
+export const normalizeCorsOrigin = value => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    if (!HTTP_PROTOCOLS.has(parsed.protocol)) return '';
+    return parsed.origin;
+  } catch {
+    return '';
+  }
+};
+
+export const parseCorsOrigins = value => [...new Set(
+  String(value || '')
+    .split(',')
+    .map(normalizeCorsOrigin)
+    .filter(Boolean)
+)];
 
 export const isLoopbackDevelopmentOrigin = origin => {
   if (!origin) return false;
@@ -22,7 +36,7 @@ export const isLoopbackDevelopmentOrigin = origin => {
 export const createCorsOriginPolicy = ({ configuredOrigins = [], production = false } = {}) => {
   const trustedOrigins = new Set(
     configuredOrigins
-      .map(origin => String(origin || '').trim())
+      .map(normalizeCorsOrigin)
       .filter(Boolean)
   );
 
@@ -30,7 +44,7 @@ export const createCorsOriginPolicy = ({ configuredOrigins = [], production = fa
     // Requests without an Origin header are server-to-server, same-origin, curl,
     // health checks, or local tooling. CORS does not apply to them.
     if (!origin) return true;
-    if (trustedOrigins.has(origin)) return true;
+    if (trustedOrigins.has(normalizeCorsOrigin(origin))) return true;
     // Development may move from 5173 to another Vite port when the preferred
     // port is already occupied. Permit only genuine loopback hosts, never
     // lookalike domains, and keep production strictly allowlisted.

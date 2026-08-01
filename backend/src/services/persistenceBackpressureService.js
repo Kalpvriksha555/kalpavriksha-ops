@@ -1,5 +1,3 @@
-const clone = (value) => structuredClone(value ?? []);
-
 export function mergeLatestPresenceIntoSnapshot({
   snapshot = {},
   liveState = {},
@@ -14,8 +12,11 @@ export function mergeLatestPresenceIntoSnapshot({
   return {
     state: {
       ...snapshot,
-      users: clone(liveState?.users),
-      attendanceLogs: clone(liveState?.attendanceLogs)
+      // Presence writers replace these top-level arrays instead of mutating them
+      // in place, so a queued persistence snapshot can safely retain the current
+      // references without cloning every historical attendance row.
+      users: liveState?.users || [],
+      attendanceLogs: liveState?.attendanceLogs || []
     },
     includedPresenceGeneration: currentGeneration,
     merged: true
@@ -31,7 +32,7 @@ export function preserveDirtyPresenceAfterReload({
   if (Number(mutationGeneration || 0) <= Number(persistedGeneration || 0)) return committedState;
   return {
     ...committedState,
-    users: clone(liveState?.users),
-    attendanceLogs: clone(liveState?.attendanceLogs)
+    users: liveState?.users || [],
+    attendanceLogs: liveState?.attendanceLogs || []
   };
 }

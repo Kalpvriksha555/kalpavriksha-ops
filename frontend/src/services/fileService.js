@@ -1,6 +1,20 @@
 import { authFetch, getCsrfToken } from './authService';
 import { API_BASE } from '../config/appConfig';
 
+const uploadMutationIds = new WeakMap();
+const uploadMutationIdFor = (file) => {
+  if (file && typeof file === 'object') {
+    const existing = uploadMutationIds.get(file);
+    if (existing) return existing;
+    const uuid = globalThis.crypto?.randomUUID?.();
+    const created = `upload:${uuid || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+    uploadMutationIds.set(file, created);
+    return created;
+  }
+  const uuid = globalThis.crypto?.randomUUID?.();
+  return `upload:${uuid || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+};
+
 export const absoluteApiUrl = (url = '', version = '') => {
   let value = String(url || '').trim();
   if (!value) return '';
@@ -290,13 +304,16 @@ export const uploadProjectFile = async (file, projectId, type, uploadedBy, onPro
     mimeType: file.type || 'application/octet-stream'
   };
 
+  const mutationId = uploadMutationIdFor(file);
   const form = new FormData();
   form.append('file', file);
   form.append('projectId', projectId || '');
   form.append('type', type || 'source');
+  form.append('mutationId', mutationId);
 
   try {
     const payload = await uploadWithXhr(`${API_BASE}/api/files/upload`, form, onProgress);
+    if (file && typeof file === 'object') uploadMutationIds.delete(file);
     return {
       ...baseDoc,
       ...payload.file,
@@ -306,7 +323,9 @@ export const uploadProjectFile = async (file, projectId, type, uploadedBy, onPro
       date: new Date().toLocaleDateString(),
       url: payload.file?.url || payload.file?.downloadUrl || '',
       previewUrl: payload.file?.previewUrl || (payload.file?.id ? `/api/files/${payload.file.id}/preview` : ''),
-      downloadUrl: payload.file?.downloadUrl || (payload.file?.id ? `/api/files/${payload.file.id}/download` : '')
+      downloadUrl: payload.file?.downloadUrl || (payload.file?.id ? `/api/files/${payload.file.id}/download` : ''),
+      _serverCase: payload.case || payload.project || null,
+      _persistence: payload.persistence || null
     };
   } catch (error) {
     console.error('Backend file upload failed:', error);

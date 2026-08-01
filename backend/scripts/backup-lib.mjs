@@ -15,17 +15,33 @@ export const sha256File = filePath => {
   return hash.digest('hex');
 };
 export const fileMeta = filePath => ({ file:path.basename(filePath), sizeBytes:fs.statSync(filePath).size, sha256:sha256File(filePath) });
-export const commandExists = command => spawnSync(command,['--version'],{stdio:'ignore'}).status===0;
-export function run(command,args,{env=process.env,stdio='pipe'}={}) {
-  const result=spawnSync(command,args,{env,encoding:'utf8',stdio});
+export const commandExists = command => spawnSync(command,['--version'],{stdio:'ignore',timeout:5000,killSignal:'SIGTERM'}).status===0;
+export function run(command,args,{env=process.env,stdio='pipe',timeoutMs=Number(process.env.BACKUP_COMMAND_TIMEOUT_MS || 30 * 60 * 1000)}={}) {
+  const timeout=Math.max(5_000,Number(timeoutMs || 0));
+  const result=spawnSync(command,args,{env,encoding:'utf8',stdio,timeout,killSignal:'SIGTERM',maxBuffer:16 * 1024 * 1024});
+  if(result.error){
+    const timedOut=result.error.code==='ETIMEDOUT';
+    const error=new Error(timedOut ? `${command} exceeded the ${Math.round(timeout/1000)} second backup deadline.` : `${command} could not start: ${result.error.message}`);
+    error.code=timedOut?'BACKUP_COMMAND_TIMEOUT':'BACKUP_COMMAND_START_FAILED';
+    error.command=command;
+    throw error;
+  }
   if(result.status!==0){const error=new Error(`${command} failed (${result.status}): ${String(result.stderr || result.stdout || '').trim()}`);error.code='BACKUP_COMMAND_FAILED';error.command=command;throw error;}
   return result;
 }
 export function atomicJson(filePath,payload){
   ensureDir(path.dirname(filePath));
-  const temp=`${filePath}.${process.pid}.tmp`;
-  fs.writeFileSync(temp,JSON.stringify(payload,null,2));
-  fs.renameSync(temp,filePath);
+  const temp=`${filePath}.${process.pid}.${Date.now()}.tmp`;
+  const body=JSON.stringify(payload,null,2);
+  let fd=null;
+  try{
+    fd=fs.openSync(temp,'w',0o600);
+    fs.writeFileSync(fd,body,'utf8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);fd=null;
+    fs.renameSync(temp,filePath);
+    try{const dirFd=fs.openSync(path.dirname(filePath),'r');try{fs.fsyncSync(dirFd);}finally{fs.closeSync(dirFd);}}catch{}
+  }catch(error){if(fd!==null)try{fs.closeSync(fd);}catch{}try{fs.rmSync(temp,{force:true});}catch{}throw error;}
 }
 export function listManifests(root){
   ensureDir(root);
@@ -47,8 +63,8 @@ export function verifyManifest(manifestPath,{verifyContents=true}={}){
     const check={component:key,ok,sizeBytes,sha256};
     if(ok&&verifyContents){
       try{
-        if(key==='database')run(process.env.PG_RESTORE_BIN || 'pg_restore',['--list',fp]);
-        if(key==='files')run(process.env.TAR_BIN || 'tar',['-tzf',fp]);
+        if(key==='database')run(process.env.PG_RESTORE_BIN || 'pg_restore',['--list',fp],{stdio:'ignore',timeoutMs:Number(process.env.BACKUP_VERIFY_DATABASE_TIMEOUT_MS || 10 * 60 * 1000)});
+        if(key==='files')run(process.env.TAR_BIN || 'tar',['-tzf',fp],{stdio:'ignore',timeoutMs:Number(process.env.BACKUP_VERIFY_FILES_TIMEOUT_MS || 30 * 60 * 1000)});
         check.contentReadable=true;
       }catch(error){check.ok=false;check.contentReadable=false;check.error=error.message;}
     }
@@ -59,7 +75,7 @@ export function verifyManifest(manifestPath,{verifyContents=true}={}){
 }
 export async function recordBackupRun(databaseUrl,record={}){
   if(!/^postgres(ql)?:\/\//i.test(String(databaseUrl||'')))return;
-  const {Pool}=pg;const pool=new Pool({connectionString:databaseUrl,ssl:process.env.DB_SSL==='true'?{rejectUnauthorized:false}:undefined,connectionTimeoutMillis:Number(process.env.DB_CONNECT_TIMEOUT_MS||10000)});
+  const {Pool}=pg;const pool=new Pool({connectionString:databaseUrl,ssl:process.env.DB_SSL==='true'?{rejectUnauthorized:false}:undefined,connectionTimeoutMillis:Number(process.env.DB_CONNECT_TIMEOUT_MS||10000),query_timeout:Number(process.env.DB_QUERY_TIMEOUT_MS||120000)});
   try{
     await pool.query(
       `INSERT INTO backup_runs(id,backup_type,status,manifest_path,database_file,files_archive,database_sha256,files_sha256,size_bytes,details,started_at,completed_at,verified_at,updated_at)

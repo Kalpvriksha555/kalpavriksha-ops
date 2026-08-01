@@ -1,0 +1,123 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+
+const server=fs.readFileSync(new URL('../../backend/src/server.js',import.meta.url),'utf8');
+
+test('task route uses immutable IDs, version checks, and idempotent mutation confirmation',()=>{
+  assert.match(server,/next\.id = existing\.id/);
+  assert.match(server,/assertExpectedTaskVersion\(existing, incoming, req\.body \|\| \{\}\)/);
+  assert.match(server,/existing\.lastTaskMutationId/);
+  assert.match(server,/idempotent:true/);
+  assert.match(server,/safeIncoming\.taskVersion = nextTaskVersion\(existing\)/);
+});
+
+test('lifecycle cannot enter review or completion without a stored final deliverable',()=>{
+  assert.match(server,/COMPLETED_FILE_REQUIRED/);
+  assert.match(server,/TASK_COMPLETION_FORBIDDEN/);
+  assert.match(server,/assertTaskLifecycleTransition\(existing, safeIncoming, actor\)/);
+  assert.match(server,/assertTaskLifecycleTransition\(c,\{\.\.\.c,status:'COMPLETED'\},actor\)/);
+});
+
+test('all operational upload purposes are accepted and task files are linked atomically',()=>{
+    for (const marker of ["source:'SOURCE'","working:'WORKING'","completed:'FINAL'","revision:'REVISION'","discussion:'DISCUSSION'","'payment-receipt':'PAYMENT_RECEIPT'","chat:'CHAT'"]) assert.ok(server.includes(marker), `missing upload purpose ${marker}`);
+  assert.match(server,/attachStoredFileToCase/);
+  assert.match(server,/collections\.push\('cases'\)/);
+  assert.match(server,/res\.status\(201\)\.json\(\{ok:true,file,project:visibleCase,case:visibleCase,persistence\}\)/);
+});
+
+test('long uploads reauthorise a fresh task immediately before persistence',()=>{
+  const start=server.indexOf("app.post('/api/files/upload'");
+  const end=server.indexOf("app.get('/api/files/:id'",start);
+  const block=server.slice(start,end);
+  assert.ok(block.indexOf('prepareSecureUploads') < block.indexOf('taskDb(projectId'));
+  assert.match(block,/authorizeUpload\(readDb\(\)\)/);
+  assert.match(block,/const caseRecord=authorizeUpload\(d\)/);
+});
+
+test('hot task, upload, and delete paths avoid cloning unrelated workspace collections',()=>{
+  assert.match(server,/function taskDb\(/);
+  assert.match(server,/function fileDeleteDb\(/);
+  assert.match(server,/takeSnapshotOwnership:true/);
+  const projectStart=server.indexOf("app.post('/api/state/projects'");
+  const projectEnd=server.indexOf("app.delete('/api/state/projects",projectStart);
+  assert.match(server.slice(projectStart,projectEnd),/taskDb\(projectId,\{audit:true,notifications:true\}\)/);
+});
+
+test('file deletion returns the committed affected task instead of requiring a second browser write',()=>{
+  const start=server.indexOf("app.delete('/api/files/:id'");
+  const end=server.indexOf("app.get('/api/system/files/storage-health'",start);
+  const block=server.slice(start,end);
+  assert.match(block,/visibleCases/);
+  assert.match(block,/case:visibleCases\[0\] \|\| null/);
+  assert.match(block,/takeSnapshotOwnership:true/);
+});
+
+test('partial admin and manager edits preserve omitted task fields and do not supersede their own immutable id',()=>{
+  const start=server.indexOf('function authorizedProjectUpdate');
+  const end=server.indexOf('function sanitizeCaseForActor',start);
+  const block=server.slice(start,end);
+  assert.match(block,/preserveFinanceFields\(existing, \{ \.\.\.existing, \.\.\.\(incoming \|\| \{\}\) \}\)/);
+  assert.match(block,/previousDisplayId !== String\(existing\.id \|\| ''\)/);
+  assert.match(block,/next\.id = existing\.id/);
+});
+
+test('dedicated task lifecycle routes use selective snapshots and transfer ownership without cloning the workspace',()=>{
+  assert.match(server,/function requestTaskDb\(req = \{\}, options = \{\}\)/);
+  assert.match(server,/requireCaseAction\('update',\{notifications:true,audit:true\}\)/);
+  assert.match(server,/requireCaseAction\('upload-final',\{files:true,notifications:true,audit:true\}\)/);
+  assert.match(server,/const transientState = readDb\(\)/);
+  for (const reason of ['case_assign','case_start','case_source_upload','case_manager_complete','case_revision_open','case_timeline_add']) {
+    const index=server.indexOf(`reason:'${reason}'`);
+    assert.ok(index > 0, `missing ${reason}`);
+    assert.match(server.slice(index,index+220),/takeSnapshotOwnership:true/);
+  }
+  assert.match(server,/reason:isRevision\?'case_revision_final_upload':'case_final_upload',takeSnapshotOwnership:true/);
+});
+
+test('task display-id collisions are rejected before renamed records can merge',()=>{
+  assert.match(server,/function assertCaseDisplayIdentityAvailable/);
+  assert.match(server,/error\.code='TASK_DISPLAY_ID_CONFLICT'/);
+  const routeStart=server.indexOf("app.post('/api/state/projects'");
+  const routeEnd=server.indexOf("app.delete('/api/state/projects",routeStart);
+  const route=server.slice(routeStart,routeEnd);
+  assert.ok(route.indexOf('assertCaseDisplayIdentityAvailable') < route.indexOf('mergeCasesPreservingFreshest'));
+});
+
+test('atomic file upload validates lifecycle against the pre-upload task, not the mutated object',()=>{
+  const start=server.indexOf("app.post('/api/files/upload'");
+  const end=server.indexOf("app.get('/api/files/:id'",start);
+  const block=server.slice(start,end);
+  assert.match(block,/const previousCase=structuredClone\(caseRecord\)/);
+  assert.match(block,/assertTaskLifecycleTransition\(previousCase,updatedCase,actor\)/);
+  assert.doesNotMatch(block,/assertTaskLifecycleTransition\(caseRecord,updatedCase,actor\)/);
+});
+
+test('finance snapshots clone only payment rows linked to the selected task',()=>{
+  const start=server.indexOf('function financeDb');
+  const end=server.indexOf('function taskDb',start);
+  const block=server.slice(start,end);
+  assert.match(block,/const payments=\(memoryState\.payments \|\| \[\]\)\.slice\(\)/);
+  assert.match(block,/if \(matchesLinkedId \|\| matchesTask\) payments\[index\]=payment \? \{\.\.\.payment\} : payment/);
+  assert.doesNotMatch(block,/\.map\(payment => payment \? \{ \.\.\.payment \}/);
+});
+
+test('deleting through any current or historical task alias removes the immutable task and tombstones every alias',()=>{
+  const start=server.indexOf("app.delete('/api/state/projects/:id'");
+  const end=server.indexOf("app.post('/api/presence'",start);
+  const block=server.slice(start,end);
+  assert.match(block,/const target=req\.caseRecord/);
+  assert.match(block,/const targetIds=new Set\(\[\.\.\.getCaseIdentitySet\(target\),requestedId\]/);
+  assert.match(block,/for \(const identity of targetIds\) rememberDeletedProject\(d,identity\)/);
+  assert.match(block,/String\(record\?\.id \|\| ''\)!==String\(target\.id \|\| ''\)/);
+});
+
+test('designers cannot restart or upload over completed work until a manager reopens revision',()=>{
+  assert.match(server,/error\.code = 'TASK_REOPEN_FORBIDDEN'/);
+  const startRoute=server.slice(server.indexOf("app.post('/api/cases/:id/start'"),server.indexOf("app.post('/api/cases/:id/upload-source'"));
+  assert.match(startRoute,/const previousCase=structuredClone\(c\)/);
+  assert.match(startRoute,/assertTaskLifecycleTransition\(previousCase,c,actor\)/);
+  const finalRoute=server.slice(server.indexOf("app.post('/api/cases/:id/upload-final'"),server.indexOf("app.post('/api/cases/:id/manager-complete'"));
+  assert.match(finalRoute,/isRevision=requestedRevision \|\| statusKey\(c\.status\)==='REOPENEDFORREVISION'/);
+  assert.match(finalRoute,/assertTaskLifecycleTransition\(previousCase,c,actor\)/);
+});

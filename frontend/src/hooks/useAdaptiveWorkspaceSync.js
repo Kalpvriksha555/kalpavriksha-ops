@@ -13,19 +13,49 @@ export const useAdaptiveWorkspaceSync = ({ enabled, refresh, visibleIntervalMs =
     if (!enabled) return undefined;
     let cancelled = false;
     let timer = null;
+    let inFlight = null;
+    let queuedForce = false;
+
+    const clearTimer = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = null;
+    };
 
     const schedule = () => {
       if (cancelled) return;
+      clearTimer();
       const delay = document.visibilityState === 'hidden' ? hiddenIntervalMs : visibleIntervalMs;
-      timer = window.setTimeout(run, delay);
+      timer = window.setTimeout(() => run(), delay);
     };
 
-    const run = async ({ force = false } = {}) => {
-      if (cancelled) return;
+    const run = ({ force = false } = {}) => {
+      if (cancelled) return Promise.resolve();
+      if (inFlight) {
+        // Focus/online/visibility events can arrive together. Collapse them into
+        // one follow-up refresh instead of starting parallel API requests and
+        // leaving multiple timers behind.
+        queuedForce = queuedForce || force;
+        return inFlight;
+      }
       const now = Date.now();
-      if (!force && now - lastRunRef.current < MIN_EVENT_GAP_MS) { schedule(); return; }
+      if (!force && now - lastRunRef.current < MIN_EVENT_GAP_MS) {
+        schedule();
+        return Promise.resolve();
+      }
       lastRunRef.current = now;
-      try { await refreshRef.current?.(); } finally { if (timer) window.clearTimeout(timer); schedule(); }
+      clearTimer();
+      inFlight = Promise.resolve()
+        .then(() => refreshRef.current?.())
+        .catch(() => undefined)
+        .finally(() => {
+          inFlight = null;
+          if (cancelled) return;
+          if (queuedForce) {
+            queuedForce = false;
+            run({ force: true });
+          } else schedule();
+        });
+      return inFlight;
     };
 
     const onFocus = () => run({ force: true });
@@ -38,7 +68,8 @@ export const useAdaptiveWorkspaceSync = ({ enabled, refresh, visibleIntervalMs =
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
       cancelled = true;
-      if (timer) window.clearTimeout(timer);
+      clearTimer();
+      queuedForce = false;
       window.removeEventListener('focus', onFocus);
       window.removeEventListener('online', onOnline);
       document.removeEventListener('visibilitychange', onVisibility);

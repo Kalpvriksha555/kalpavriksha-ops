@@ -11,6 +11,7 @@ test('file deletion rejects non-success responses instead of silently removing t
   const start = app.indexOf('const handleFileDelete = async');
   const end = app.indexOf('const handleLedgerScreenshot', start);
   const block = app.slice(start, end);
-  assert.match(block, /try \{[\s\S]*await deleteProjectFileFromServer\(docToDelete\);[\s\S]*\} catch \(error\) \{[\s\S]*return;[\s\S]*\}/);
-  assert.ok(block.indexOf('await deleteProjectFileFromServer') < block.indexOf('const updatedProject'));
+  assert.match(block, /try \{[\s\S]*await deleteProjectFileFromServer\(docToDelete\);[\s\S]*\} catch\(error\) \{[\s\S]*return;[\s\S]*\}/);
+  assert.match(block, /acceptServerProject\(confirmed\)/);
+  assert.doesNotMatch(block, /onUpdateProject\(updatedProject/);
 });

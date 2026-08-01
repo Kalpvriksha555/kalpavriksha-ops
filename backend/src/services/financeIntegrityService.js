@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
 
 export const FINANCE_FIELDS = Object.freeze([
+  'estimate',
+  'estimateAmount',
   'ledger',
   'financeVersion',
   'paymentTrackingStatus',
@@ -15,7 +17,9 @@ export const FINANCE_FIELDS = Object.freeze([
   'paymentDate',
   'paymentTime',
   'paymentAuditTrail',
-  'financeAccountingPeriod'
+  'financeAccountingPeriod',
+  'lastFinanceMutationId',
+  'lastFinanceMutationAt'
 ]);
 
 export const toTimestamp = (value) => {

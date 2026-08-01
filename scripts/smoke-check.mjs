@@ -13,7 +13,12 @@ const pkg = JSON.parse(read('package.json'));
 check('Active frontend entry exists', fs.existsSync('frontend/src/App.jsx') && fs.existsSync('frontend/src/main.jsx'));
 check('Backend entry exists', fs.existsSync('backend/src/server.js'));
 check('Full-stack localhost command starts both services', pkg.scripts?.dev === 'node scripts/start-all.mjs' && pkg.scripts?.start === 'node scripts/start-all.mjs');
-check('Local frontend defaults to local API', config.includes("'http://localhost:8080'") && config.includes('VITE_API_URL'));
+check('Local frontend uses the same-origin Vite proxy',
+  config.includes("allowExternalDevelopmentApi ? configuredApiBase : ''") &&
+  viteConfig.includes("const localApiTarget = 'http://127.0.0.1:8080'") &&
+  viteConfig.includes("'/api'") &&
+  viteConfig.includes("'/uploads'")
+);
 check('Production frontend requires explicit API URL', config.includes('Production build requires VITE_API_URL'));
 check('Production build blocks missing API URL', viteConfig.includes('Production build blocked: set VITE_API_URL'));
 check('Backend exposes state hydration', server.includes("app.get('/api/state'"));

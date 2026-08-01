@@ -2,6 +2,24 @@ import { API_BASE } from '../config/appConfig';
 import { authFetch } from './authService';
 
 const parseJson = async (response) => response.json().catch(() => ({}));
+
+const transientMutationIds = new WeakMap();
+const createMutationId = (prefix = 'mutation') => {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  return `${prefix}:${uuid || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+};
+const mutationIdFor = (record = {}, prefix = 'mutation', { useRecordId = false } = {}) => {
+  const explicit = String(record?.mutationId || record?.clientMutationId || (useRecordId ? record?.id : '') || '').trim();
+  if (explicit) return explicit.startsWith(`${prefix}:`) ? explicit : `${prefix}:${explicit}`;
+  if (record && typeof record === 'object') {
+    const existing = transientMutationIds.get(record);
+    if (existing) return existing;
+    const created = createMutationId(prefix);
+    transientMutationIds.set(record, created);
+    return created;
+  }
+  return createMutationId(prefix);
+};
 const assertOk = async (response, fallback) => {
   const payload = await parseJson(response);
   if (!response.ok) {
@@ -33,6 +51,7 @@ export const sendChatMessageApi = async (message = {}) => {
     method: 'POST',
     headers: { 'Content-Type':'application/json' },
     body: JSON.stringify({
+      mutationId:mutationIdFor(message,'chat',{useRecordId:true}),
       text:message.text || '',
       recipient:message.recipient || 'global',
       caseId:message.caseId || '',
@@ -90,6 +109,7 @@ export const createNotificationApi = async (notification = {}) => {
     method:'POST',
     headers:{ 'Content-Type':'application/json' },
     body:JSON.stringify({
+      mutationId:mutationIdFor(notification,'notification'),
       targetRole:notification.targetRole || '',
       targetUser:notification.targetUser || '',
       title:notification.title || notification.text || '',

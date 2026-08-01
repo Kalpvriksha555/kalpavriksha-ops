@@ -7,13 +7,18 @@ const server = fs.readFileSync(new URL('../../backend/src/server.js', import.met
 const repository = fs.readFileSync(new URL('../../backend/src/repositories/postgresStateRepository.js', import.meta.url), 'utf8');
 
 test('presence heartbeat is coalesced and does not clone or persist the complete state per beat', () => {
-  const start = server.indexOf("if (safeAction === 'heartbeat')");
-  const end = server.indexOf('const d = db();', start);
+  const routeStart = server.indexOf("app.post('/api/presence'");
+  const routeEnd = server.indexOf("app.post('/api/state'", routeStart);
+  assert.ok(routeStart > 0 && routeEnd > routeStart);
+  const route = server.slice(routeStart, routeEnd);
+  const start = route.indexOf("if (safeAction === 'heartbeat')");
+  const end = route.indexOf('snapshotPresenceGenerations.set', start);
   assert.ok(start > 0 && end > start);
-  const branch = server.slice(start, end);
-  assert.match(branch, /replacePresenceSliceInMemory\(presenceState\)/);
+  const branch = route.slice(start, end);
+  assert.match(route, /selectiveDb\(\{[\s\S]*collections:\['users','attendanceLogs'\][\s\S]*collectionRowIds/);
+  assert.match(route, /replacePresenceSliceInMemory\(presenceState\)/);
   assert.match(branch, /schedulePresenceFlush\(\)/);
-  assert.doesNotMatch(branch, /\bdb\(\)/);
+  assert.doesNotMatch(branch, /db\(\)/);
   assert.doesNotMatch(branch, /await save\(/);
 });
 
@@ -29,13 +34,14 @@ test('presence persistence is delayed, coalesced and excluded from full revision
 });
 
 test('hot task and file paths sync only their changed relational collections', () => {
-  assert.match(server, /reason:'file_upload',[\s\S]*collections:\['files'\]/);
-  assert.match(server, /reason:existing \? 'task_update' : 'task_create',[\s\S]*collections:\['cases','audit'\]/);
-  assert.match(repository, /syncRelationalParts\(client, preparedWrite\.writeParts, metadata\.collections, preparedWrite\.rowSelections\)/);
+  assert.match(server, /reason:'file_upload',[\s\S]*collections,[\s\S]*collectionRowIds/);
+  assert.match(server, /reason:existing \? 'task_update' : 'task_create',[\s\S]*takeSnapshotOwnership:true,[\s\S]*collections/);
+  assert.match(repository, /syncRelationalParts\(client, preparedWrite\.writeParts, metadata\.collections, preparedWrite\.rowSelections, preparedWrite\.rowDeletions/);
   assert.match(repository, /Unknown relational collection selection/);
-  assert.match(repository, /const committedState = selectedCollections \? recomposeState\(committedParts\) : normalized/);
+  assert.match(repository, /prepareFastSelectedRelationalWrite/);
+  assert.match(repository, /committedState = selectedCollections \? recomposeState\(committedParts\) : normalized/);
   assert.match(server, /collectionRowIds:\{[\s\S]*cases:\[String\(saved\.id \|\| saved\.caseId\)\]/);
-  assert.match(server, /collectionRowIds:\{ files:\[String\(file\.id\)\] \}/);
+  assert.match(server, /collectionRowIds=\{files:\[String\(file\.id\)\]\}/);
   assert.match(repository, /JSON\.stringify\(committedState\)/);
 });
 
@@ -47,7 +53,7 @@ test('foreground writes block background heartbeat flush from taking queue prior
 
 
 test('durable presence actions mark the exact generation included in their snapshot', () => {
-  assert.match(server, /presenceMutationGeneration \+= 1;\s*snapshotPresenceGenerations\.set\(d, presenceMutationGeneration\);/);
+  assert.match(server, /replacePresenceSliceInMemory\(presenceState\);[\s\S]*snapshotPresenceGenerations\.set\(presenceState, presenceMutationGeneration\);/);
 });
 
 
