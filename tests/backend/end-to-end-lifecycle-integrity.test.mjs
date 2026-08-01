@@ -207,6 +207,6 @@ test('deployment opts into clean-install, environment, and backup gates before d
   const deploy=fs.readFileSync(new URL('../../scripts/deploy-1.9.24-vps.sh',import.meta.url),'utf8');
   const matrix=fs.readFileSync(new URL('../../scripts/full-release-verifier-matrix.mjs',import.meta.url),'utf8');
   assert.match(deploy,/KALPA_VERIFY_INCLUDE_DEPLOYMENT_GATES=true/);
-  for (const id of ['clean-install','production-environment','backup-create','backup-verify','backup-status']) assert.match(matrix,new RegExp(`id:'${id}'`));
+  for (const id of ['clean-install','production-environment','production-integrity-audit','backup-create','backup-verify','backup-status']) assert.match(matrix,new RegExp(`id:'${id}'`));
   assert.ok(deploy.indexOf('npm run verify:matrix') < deploy.indexOf('Stopping application writes'));
 });

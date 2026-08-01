@@ -8,6 +8,8 @@
     "db:health": "node scripts/db-health.mjs",
     "db:migrate": "node scripts/db-migrate.mjs",
     "db:integrity": "node scripts/db-integrity.mjs",
+    "db:integrity:audit": "node scripts/db-integrity-audit.mjs",
+    "db:integrity:reconcile": "node scripts/db-integrity-reconcile.mjs",
     "backup:create": "node scripts/backup-create.mjs",
     "backup:verify": "node scripts/backup-verify.mjs",
     "backup:status": "node scripts/backup-status.mjs",

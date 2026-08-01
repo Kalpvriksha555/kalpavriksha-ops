@@ -32,6 +32,8 @@
     "verify:authorization": "node scripts/phase-4-authorization-check.mjs",
     "verify:database": "node scripts/phase-5-database-integrity-check.mjs",
     "db:migrate": "npm run db:migrate --prefix backend",
+    "db:integrity:audit": "npm run db:integrity:audit --prefix backend",
+    "db:integrity:reconcile": "npm run db:integrity:reconcile --prefix backend",
     "verify:files": "node scripts/phase-6-file-storage-check.mjs",
     "verify:reliability": "node scripts/phase-7-reliability-check.mjs",
     "backup:create": "npm run backup:create --prefix backend",

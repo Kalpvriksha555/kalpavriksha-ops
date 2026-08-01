@@ -6,6 +6,9 @@ STAGE="${KALPA_STAGE_ROOT:-/var/www/kalpavriksha-release-1.9.24}"
 ENV_FILE="${KALPA_ENV_FILE:-/etc/kalpavriksha/backend.env}"
 PM2_NAME="${KALPA_PM2_NAME:-kalpvriksha-backend}"
 WORK="${KALPA_DEPLOY_WORK:-/root/kalpavriksha-deploy-$(date +%Y%m%d-%H%M%S)}"
+ROLLBACK_ROOT="$WORK/previous-runtime"
+ROLLBACK_CWD="$ROLLBACK_ROOT/backend"
+ROLLBACK_SCRIPT=""
 
 EXPECTED_ROOT_VERSION="1.9.24-overall-stability-data-safety"
 EXPECTED_BACKEND_VERSION="2.9.24-overall-stability-data-safety"
@@ -39,7 +42,8 @@ pre_deployment_failure() {
   trap - ERR INT TERM
   echo
   echo "PRE-DEPLOYMENT VERIFICATION FAILED WITH CODE $rc"
-  echo "The live backend was not stopped and production data was not modified."
+  echo "The live backend was not stopped and operational business data was not modified."
+  echo "A verified backup record may have been created by the pre-deployment matrix."
   echo "Review every failing gate reported above before retrying."
   exit "$rc"
 }
@@ -48,7 +52,7 @@ trap pre_deployment_failure ERR INT TERM
 log "Checking production paths and tools"
 test -d "$LIVE/.git" || fail "Git repository missing at $LIVE"
 test -s "$ENV_FILE" || fail "Environment file missing at $ENV_FILE"
-for command_name in git node npm pm2 curl; do
+for command_name in git node npm pm2 curl python3 tar; do
   command -v "$command_name" >/dev/null || fail "$command_name is missing"
 done
 
@@ -87,6 +91,25 @@ process.stdin.on('end', () => {
 
 test -f "$OLD_SCRIPT" || fail "Current PM2 backend script could not be identified"
 test -d "$OLD_CWD" || fail "Current PM2 working directory could not be identified"
+
+OLD_RELATIVE_SCRIPT="$(python3 - "$OLD_CWD" "$OLD_SCRIPT" <<'PYREL'
+import os,sys
+cwd=os.path.realpath(sys.argv[1])
+script=os.path.realpath(sys.argv[2])
+rel=os.path.relpath(script,cwd)
+if rel == '..' or rel.startswith('../'):
+    raise SystemExit(2)
+print(rel)
+PYREL
+)" || fail "Current PM2 script is outside its working directory and cannot be snapshotted safely"
+
+log "Capturing an immutable rollback runtime before staging"
+rm -rf "$ROLLBACK_ROOT"
+mkdir -p "$ROLLBACK_CWD"
+cp -a "$OLD_CWD/." "$ROLLBACK_CWD/"
+ROLLBACK_SCRIPT="$ROLLBACK_CWD/$OLD_RELATIVE_SCRIPT"
+test -f "$ROLLBACK_SCRIPT" || fail "Rollback backend script snapshot is missing"
+node --check "$ROLLBACK_SCRIPT"
 
 log "Fetching the latest GitHub main release"
 git -C "$LIVE" fetch origin main
@@ -148,6 +171,15 @@ grep -q "acquireLease:true" "$STAGE/backend/src/server.js" || \
 grep -q "FILE_STORAGE_GC_GRACE_MS" "$STAGE/backend/src/server.js" || \
   fail "GitHub main does not contain grace-period file garbage collection"
 
+grep -q "safeCountMetadataDrift" "$STAGE/backend/scripts/db-integrity-audit.mjs" || \
+  fail "GitHub main does not contain count-only relational integrity classification"
+
+grep -q "RECONCILE COUNT METADATA ONLY" "$STAGE/backend/scripts/db-integrity-reconcile.mjs" || \
+  fail "GitHub main does not contain verified count-only metadata reconciliation"
+
+grep -q "mergeVerifiedPhysicalCounts" "$STAGE/backend/src/repositories/postgresStateRepository.js" || \
+  fail "GitHub main does not verify metadata counts against transactional physical rows"
+
 log "Auditing release source ordering and syntax"
 
 bash -n "$STAGE/scripts/deploy-1.9.24-vps.sh"
@@ -164,6 +196,10 @@ const app = fs.readFileSync(path.join(root, 'frontend/src/App.jsx'), 'utf8');
 const matrix = fs.readFileSync(path.join(root, 'scripts/full-release-verifier-matrix.mjs'), 'utf8');
 const fileStorage = fs.readFileSync(path.join(root, 'backend/src/services/fileStorageService.js'), 'utf8');
 const fileVerifier = fs.readFileSync(path.join(root, 'scripts/phase-6-file-storage-check.mjs'), 'utf8');
+const repository = fs.readFileSync(path.join(root, 'backend/src/repositories/postgresStateRepository.js'), 'utf8');
+const integrityAudit = fs.readFileSync(path.join(root, 'backend/scripts/db-integrity-audit.mjs'), 'utf8');
+const integrityReconcile = fs.readFileSync(path.join(root, 'backend/scripts/db-integrity-reconcile.mjs'), 'utf8');
+const deploy = fs.readFileSync(path.join(root, 'scripts/deploy-1.9.24-vps.sh'), 'utf8');
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 
 const assertBefore = (block, first, second, label) => {
@@ -230,7 +266,7 @@ const requiredMatrixMarkers = [
   'frontend-tests', 'backend-tests', 'finance', 'authentication',
   'authorization', 'database', 'files', 'reliability', 'release',
   'frontend-ux', 'integration', 'build', 'clean-install',
-  'production-environment', 'backup-create', 'backup-verify', 'backup-status'
+  'production-environment', 'production-integrity-audit', 'backup-create', 'backup-verify', 'backup-status'
 ];
 for (const marker of requiredMatrixMarkers) {
   if (!matrix.includes(`id:'${marker}'`)) throw new Error(`Full verifier matrix is missing ${marker}.`);
@@ -256,8 +292,22 @@ if (gcBlock.indexOf('activeFileStorageKeys(readDb())') < 0 || gcBlock.indexOf('f
 if (gcBlock.indexOf('activeFileStorageKeys(readDb())') > gcBlock.indexOf('fileStorage.softDelete(key')) {
   throw new Error('File garbage collection must recheck active references before moving an object.');
 }
+for (const marker of ['auditRelationalIntegrityMetadata', 'reconcileRelationalIntegrityMetadata', 'mergeVerifiedPhysicalCounts', 'RELATIONAL_SHADOW_DIVERGENCE']) {
+  if (!repository.includes(marker)) throw new Error(`Relational integrity hardening marker is missing: ${marker}`);
+}
+if (!integrityAudit.includes('SAFE_COUNT_METADATA_DRIFT') || !integrityAudit.includes('UNSAFE_INTEGRITY_DRIFT')) throw new Error('Production integrity audit does not classify safe and unsafe drift.');
+for (const marker of ['RECONCILE COUNT METADATA ONLY', 'verifyManifest', 'safeCountMetadataDrift', 'recent verified full backup']) {
+  if (!integrityReconcile.includes(marker)) throw new Error(`Integrity reconciliation safeguard is missing: ${marker}`);
+}
+const migrateIndex=deploy.indexOf('npm run db:migrate --prefix backend');
+const reconcileIndex=deploy.indexOf('npm run db:integrity:reconcile --prefix backend');
+const strictIntegrityIndex=deploy.indexOf('npm run db:integrity --prefix backend');
+if (migrateIndex < 0 || reconcileIndex < 0 || strictIntegrityIndex < 0 || !(migrateIndex < reconcileIndex && reconcileIndex < strictIntegrityIndex)) {
+  throw new Error('Deployment must migrate, reconcile verified count-only metadata drift, then run strict integrity.');
+}
+if (!deploy.includes('ROLLBACK_SCRIPT="$ROLLBACK_CWD/$OLD_RELATIVE_SCRIPT"')) throw new Error('Deployment does not snapshot an immutable rollback runtime.');
 
-console.log('Release authorization, idempotency, file-GC safety, and full-matrix source audit passed.');
+console.log('Release authorization, idempotency, file-GC, relational-integrity, rollback, and full-matrix source audit passed.');
 NODE
 
 while IFS= read -r -d '' source_file; do
@@ -298,7 +348,12 @@ rollback_to_previous() {
   else
     rm -f "$RELEASE_CERTIFICATE_PATH"
   fi
-  pm2 start "$OLD_SCRIPT" --name "$PM2_NAME" --cwd "$OLD_CWD" --time --update-env || true
+  pm2 start "$ROLLBACK_SCRIPT" --name "$PM2_NAME" --cwd "$ROLLBACK_CWD" --time --update-env || true
+  if wait_for_health "/api/health/live" "$WORK/rollback-live-health.json"; then
+    wait_for_health "/api/health/ready" "$WORK/rollback-ready-health.json" || true
+  else
+    echo "WARNING: rollback runtime did not pass the liveness check; inspect PM2 logs immediately." >&2
+  fi
   pm2 save || true
   pm2 logs "$PM2_NAME" --lines 100 --nostream || true
   exit "$rc"
@@ -312,8 +367,13 @@ cd "$STAGE"
 log "Applying database migrations"
 npm run db:migrate --prefix backend
 
-log "Checking relational database integrity"
-npm run db:integrity --prefix backend
+log "Reconciling only verified count-only relational metadata drift"
+KALPA_INTEGRITY_RECONCILE_CONFIRM="RECONCILE COUNT METADATA ONLY" \
+KALPA_INTEGRITY_RECONCILE_COLLECTIONS="files,performanceRecords" \
+npm run db:integrity:reconcile --prefix backend | tee "$WORK/relational-integrity-reconciliation.json"
+
+log "Checking strict relational database integrity after reconciliation"
+npm run db:integrity --prefix backend | tee "$WORK/relational-integrity-after-reconciliation.json"
 
 log "Certifying the exact production release"
 rm -f "$RELEASE_CERTIFICATE_PATH"

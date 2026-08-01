@@ -1061,7 +1061,55 @@ async function readRelationalParts(client) {
 }
 
 function compareCounts(expected = {}, actual = {}) {
-  return Object.keys(expected).filter(key => Number(expected[key] || 0) !== Number(actual[key] || 0));
+  return [...new Set([...Object.keys(expected || {}), ...Object.keys(actual || {})])]
+    .filter(key => Number(expected?.[key] || 0) !== Number(actual?.[key] || 0));
+}
+
+const PHYSICAL_COUNT_TABLES = {
+  users:'ops_users',
+  cases:'ops_cases',
+  payments:'ops_payments',
+  performanceRecords:'ops_performance_records',
+  notifications:'ops_notifications',
+  teamChat:'ops_chat_messages',
+  whatsappInbox:'ops_whatsapp_inbox',
+  audit:'ops_audit_events',
+  attendanceLogs:'ops_attendance_logs',
+  files:'ops_files',
+  deletedProjectIds:'ops_deleted_projects',
+  chatReads:'ops_chat_reads',
+  misc:'ops_misc_state'
+};
+
+async function readPhysicalEntityCounts(client, selectedCollections = null) {
+  const selected = selectedCollectionSet(selectedCollections);
+  const keys = selected?.size
+    ? [...selected].filter(key => Object.prototype.hasOwnProperty.call(PHYSICAL_COUNT_TABLES, key))
+    : Object.keys(PHYSICAL_COUNT_TABLES);
+  if (!keys.length) return {};
+  const sql = `SELECT ${keys.map(key => `(SELECT count(*)::int FROM ${PHYSICAL_COUNT_TABLES[key]}) AS "${key}"`).join(',')}`;
+  const result = await client.query(sql);
+  return Object.fromEntries(keys.map(key => [key, Number(result.rows[0]?.[key] || 0)]));
+}
+
+export function mergeVerifiedPhysicalCounts({ metadataCounts = {}, calculatedCounts = {}, physicalCounts = {}, selectedCollections = null } = {}) {
+  const selected = selectedCollectionSet(selectedCollections);
+  const checkedKeys = selected?.size ? [...selected] : Object.keys(PHYSICAL_COUNT_TABLES);
+  const mismatches = checkedKeys
+    .filter(key => Object.prototype.hasOwnProperty.call(physicalCounts, key))
+    .filter(key => Number(calculatedCounts?.[key] || 0) !== Number(physicalCounts?.[key] || 0));
+  if (mismatches.length) {
+    const error = new Error(`Relational shadow diverged from physical rows for: ${mismatches.join(', ')}. The write was rolled back before integrity metadata changed.`);
+    error.code = 'RELATIONAL_SHADOW_DIVERGENCE';
+    error.collections = mismatches;
+    throw error;
+  }
+  const merged = selected?.size ? { ...(metadataCounts || {}) } : {};
+  for (const key of Object.keys(PHYSICAL_COUNT_TABLES)) {
+    if (Object.prototype.hasOwnProperty.call(physicalCounts, key)) merged[key] = Number(physicalCounts[key] || 0);
+    else if (!selected?.size) merged[key] = Number(calculatedCounts?.[key] || 0);
+  }
+  return merged;
 }
 
 export function verifyPersistedRelationalSnapshot(parts = {}, metadata = {}) {
@@ -1194,7 +1242,7 @@ export async function persistRelationalState(pool, {
     if (metadata.allowLegacyOrphans === true) {
       await client.query("SELECT set_config('kalpa.allow_legacy_orphans','on',true)");
     }
-    const current = await client.query('SELECT state_version FROM app_state_metadata WHERE key=$1 FOR UPDATE', ['main']);
+    const current = await client.query('SELECT state_version,entity_counts FROM app_state_metadata WHERE key=$1 FOR UPDATE', ['main']);
     const currentVersion = Number(current.rows[0]?.state_version || 0);
     if (currentVersion !== Number(expectedVersion)) {
       const error = new Error(`State changed on the server while this update was being saved. Expected version ${expectedVersion}, current version ${currentVersion}. Refresh and retry.`);
@@ -1240,6 +1288,20 @@ export async function persistRelationalState(pool, {
     const hash = stateSnapshotHash(committedState, { cacheTopLevel:true });
 
     await syncRelationalParts(client, preparedWrite.writeParts, metadata.collections, preparedWrite.rowSelections, preparedWrite.rowDeletions || new Map());
+    // Entity counts are part of the integrity boundary and must describe the
+    // rows that PostgreSQL actually committed. Older live processes could
+    // calculate file/performance counts from a normalized shadow and silently
+    // reintroduce count-only drift even while the canonical snapshot hash was
+    // still correct. Recheck only the collections touched by a selective write
+    // (all collections for a full write), fail closed on any shadow divergence,
+    // and preserve the already verified counts of unrelated tables.
+    const physicalCounts = await readPhysicalEntityCounts(client, selectedCollections ? [...selectedCollections] : null);
+    counts = mergeVerifiedPhysicalCounts({
+      metadataCounts:current.rows[0]?.entity_counts || {},
+      calculatedCounts:counts,
+      physicalCounts,
+      selectedCollections:selectedCollections ? [...selectedCollections] : null
+    });
     const financeEvents = Array.isArray(metadata.financeEvents)
       ? metadata.financeEvents
       : (metadata.financeEvent ? [metadata.financeEvent] : []);
@@ -1311,6 +1373,132 @@ export async function persistRelationalState(pool, {
       committedStateOwned: Boolean(fastSelectedWrite),
       fastSelectedWrite: Boolean(fastSelectedWrite),
       revisionSnapshotWritten:shouldWriteRevisionSnapshot
+    };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+
+export async function auditRelationalIntegrityMetadata(pool, { lock = false } = {}) {
+  const client = await pool.connect();
+  try {
+    await client.query(lock ? 'BEGIN' : 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    if (lock) {
+      await client.query("SET LOCAL lock_timeout = '15s'");
+      await client.query("SET LOCAL statement_timeout = '120s'");
+      await client.query('SELECT pg_advisory_xact_lock($1)', [ADVISORY_LOCK_ID]);
+    }
+    const metadata = await client.query(`SELECT * FROM app_state_metadata WHERE key=$1${lock ? ' FOR UPDATE' : ''}`, ['main']);
+    if (!metadata.rows.length) {
+      const error = new Error('Relational state metadata is missing.');
+      error.code = 'RELATIONAL_METADATA_MISSING';
+      throw error;
+    }
+    const parts = await readRelationalParts(client);
+    const persistedState = recomposeState(parts);
+    const actualCounts = entityCounts(parts);
+    const actualHash = stateSnapshotHash(persistedState);
+    const row = metadata.rows[0];
+    const expectedCounts = row.entity_counts || {};
+    const expectedHash = String(row.snapshot_hash || '');
+    const countMismatches = compareCounts(expectedCounts, actualCounts);
+    const hashMatches = Boolean(expectedHash) && expectedHash === actualHash;
+    const healthy = countMismatches.length === 0 && hashMatches;
+    const safeCountMetadataDrift = countMismatches.length > 0 && hashMatches;
+    await client.query('COMMIT');
+    return {
+      healthy,
+      safeCountMetadataDrift,
+      stateVersion:Number(row.state_version || 0),
+      expectedCounts,
+      actualCounts,
+      countMismatches,
+      expectedHash,
+      actualHash,
+      hashMatches,
+      source:row.source || '',
+      updatedAt:row.updated_at || null
+    };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function reconcileRelationalIntegrityMetadata(pool, { allowedCollections = ['files','performanceRecords'], actor = 'deployment-integrity-reconciler', backupManifest = '' } = {}) {
+  const allowed = new Set((allowedCollections || []).map(value => String(value || '').trim()).filter(Boolean));
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout = '15s'");
+    await client.query("SET LOCAL statement_timeout = '120s'");
+    await client.query('SELECT pg_advisory_xact_lock($1)', [ADVISORY_LOCK_ID]);
+    const metadata = await client.query('SELECT * FROM app_state_metadata WHERE key=$1 FOR UPDATE', ['main']);
+    if (!metadata.rows.length) {
+      const error = new Error('Relational state metadata is missing.');
+      error.code = 'RELATIONAL_METADATA_MISSING';
+      throw error;
+    }
+    const parts = await readRelationalParts(client);
+    const persistedState = recomposeState(parts);
+    const actualCounts = entityCounts(parts);
+    const actualHash = stateSnapshotHash(persistedState);
+    const row = metadata.rows[0];
+    const expectedCounts = row.entity_counts || {};
+    const expectedHash = String(row.snapshot_hash || '');
+    const countMismatches = compareCounts(expectedCounts, actualCounts);
+    if (!countMismatches.length && expectedHash === actualHash) {
+      await client.query('COMMIT');
+      return { ok:true, reconciled:false, reason:'already-healthy', stateVersion:Number(row.state_version || 0), counts:actualCounts, snapshotHash:actualHash };
+    }
+    if (!expectedHash || expectedHash !== actualHash) {
+      const error = new Error('Integrity metadata reconciliation refused because the canonical physical-row hash does not match the stored snapshot hash. Restore or investigate the verified backup instead of rewriting metadata.');
+      error.code = 'RELATIONAL_HASH_MISMATCH';
+      error.expectedHash = expectedHash;
+      error.actualHash = actualHash;
+      throw error;
+    }
+    const disallowed = countMismatches.filter(key => !allowed.has(key));
+    if (disallowed.length) {
+      const error = new Error(`Integrity metadata reconciliation refused for unapproved collections: ${disallowed.join(', ')}.`);
+      error.code = 'RELATIONAL_COUNT_DRIFT_NOT_ALLOWED';
+      error.collections = disallowed;
+      throw error;
+    }
+    await client.query(
+      `UPDATE app_state_metadata
+          SET entity_counts=$2::jsonb,source='relational_count_metadata_reconciled',updated_at=now()
+        WHERE key=$1`,
+      ['main', JSON.stringify(actualCounts)]
+    );
+    await client.query(
+      `INSERT INTO operational_events(event_type,severity,actor,details)
+       VALUES('RELATIONAL_COUNT_METADATA_RECONCILED','WARN',$1,$2::jsonb)`,
+      [String(actor || 'deployment-integrity-reconciler'), JSON.stringify({
+        stateVersion:Number(row.state_version || 0),
+        countMismatches,
+        beforeCounts:expectedCounts,
+        afterCounts:actualCounts,
+        snapshotHash:actualHash,
+        backupManifest:String(backupManifest || '')
+      })]
+    );
+    await client.query('COMMIT');
+    return {
+      ok:true,
+      reconciled:true,
+      stateVersion:Number(row.state_version || 0),
+      countMismatches,
+      beforeCounts:expectedCounts,
+      counts:actualCounts,
+      snapshotHash:actualHash,
+      backupManifest:String(backupManifest || '')
     };
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
