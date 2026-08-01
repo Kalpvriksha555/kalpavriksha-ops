@@ -18,8 +18,9 @@ const pool = new pg.Pool({
 try {
   await runRelationalMigrations(pool);
   const audit = await auditRelationalIntegrityMetadata(pool);
-  const status = audit.healthy ? 'HEALTHY' : audit.safeCountMetadataDrift ? 'SAFE_COUNT_METADATA_DRIFT' : 'UNSAFE_INTEGRITY_DRIFT';
-  const ok = audit.healthy || audit.safeCountMetadataDrift;
+  const allowLegacy = String(process.env.KALPA_ALLOW_LEGACY_SHADOW_REBASELINE || '').trim().toLowerCase() === 'true';
+  const status = audit.healthy ? 'HEALTHY' : audit.safeCountMetadataDrift ? 'SAFE_COUNT_METADATA_DRIFT' : audit.legacyShadowRebaselineSafe ? 'LEGACY_SHADOW_REBASELINE_REQUIRED' : 'UNSAFE_INTEGRITY_DRIFT';
+  const ok = audit.healthy || audit.safeCountMetadataDrift || (allowLegacy && audit.legacyShadowRebaselineSafe);
   console.log(JSON.stringify({ ok, status, ...audit }, null, 2));
   if (!ok) process.exitCode = 1;
 } catch (error) {

@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
   auditRelationalIntegrityMetadata,
+  classifyLegacyShadowIntegrityDrift,
   mergeVerifiedPhysicalCounts,
   reconcileRelationalIntegrityMetadata,
+  rebaselineLegacyShadowIntegrity,
   stateSnapshotHash
 } from '../../backend/src/repositories/postgresStateRepository.js';
 
@@ -106,18 +108,69 @@ test('reconciliation updates only entity-count metadata and records an auditable
 test('deployment reconciles only hash-verified count metadata after backup and before strict integrity',()=>{
   const deploy=fs.readFileSync(new URL('../../scripts/deploy-1.9.24-vps.sh',import.meta.url),'utf8');
   const matrix=fs.readFileSync(new URL('../../scripts/full-release-verifier-matrix.mjs',import.meta.url),'utf8');
-  const reconcile=fs.readFileSync(new URL('../../backend/scripts/db-integrity-reconcile.mjs',import.meta.url),'utf8');
+  const repairScript=fs.readFileSync(new URL('../../backend/scripts/db-integrity-repair.mjs',import.meta.url),'utf8');
   const backendPkg=JSON.parse(fs.readFileSync(new URL('../../backend/package.json',import.meta.url),'utf8'));
   assert.match(matrix,/id:'production-integrity-audit'/);
-  assert.match(reconcile,/RECONCILE COUNT METADATA ONLY/);
-  assert.match(reconcile,/verifyManifest\(manifestPath, \{ verifyContents:true \}\)/);
-  assert.match(reconcile,/before\.safeCountMetadataDrift/);
-  assert.match(reconcile,/recent verified full backup/);
+  assert.match(repairScript,/REPAIR VERIFIED LEGACY INTEGRITY METADATA/);
+  assert.match(repairScript,/verifyManifest\(manifestPath, \{ verifyContents:true \}\)/);
+  assert.match(repairScript,/before\.legacyShadowRebaselineSafe/);
+  assert.match(repairScript,/recent verified full backup/);
   assert.equal(backendPkg.scripts['db:integrity:audit'],'node scripts/db-integrity-audit.mjs');
-  assert.equal(backendPkg.scripts['db:integrity:reconcile'],'node scripts/db-integrity-reconcile.mjs');
+  assert.equal(backendPkg.scripts['db:integrity:repair'],'node scripts/db-integrity-repair.mjs');
   const migrate=deploy.indexOf('npm run db:migrate --prefix backend');
-  const repair=deploy.indexOf('npm run db:integrity:reconcile --prefix backend');
+  const repair=deploy.indexOf('npm run db:integrity:repair --prefix backend');
   const strict=deploy.indexOf('npm run db:integrity --prefix backend');
   assert.ok(migrate>=0 && repair>migrate && strict>repair);
   assert.match(deploy,/ROLLBACK_SCRIPT="\$ROLLBACK_CWD\/\$OLD_RELATIVE_SCRIPT"/);
+});
+
+
+test('known legacy normalized-shadow drift is narrowly classified for guarded rebaseline',()=>{
+  assert.equal(classifyLegacyShadowIntegrityDrift({
+    expectedCounts:{...emptyCounts,files:1914,performanceRecords:416},
+    actualCounts:{...emptyCounts,files:1842,performanceRecords:368},
+    countMismatches:['files','performanceRecords'],
+    expectedHash:'old-hash',actualHash:'physical-hash',source:'relational'
+  }),true);
+  assert.equal(classifyLegacyShadowIntegrityDrift({
+    expectedCounts:{...emptyCounts,cases:429},actualCounts:{...emptyCounts,cases:428},
+    countMismatches:['cases'],expectedHash:'a',actualHash:'b',source:'relational'
+  }),false);
+});
+
+
+test('legacy shadow rebaseline changes only metadata, revision evidence, and audit event',async()=>{
+  const queries=[];
+  const metadata={
+    state_version:437,
+    entity_counts:{...emptyCounts,files:72,performanceRecords:48},
+    snapshot_hash:'legacy-normalized-shadow-hash',
+    source:'relational',
+    updated_at:new Date().toISOString()
+  };
+  const client={
+    async query(sql,params=[]){
+      const text=String(sql); queries.push({text,params});
+      if(text.includes('FROM app_state_metadata')) return {rows:[metadata]};
+      if(text.includes('FROM ops_deleted_projects')) return {rows:[]};
+      if(text.includes('FROM ops_misc_state')) return {rows:[]};
+      if(text.startsWith('SELECT ') && text.includes(' FROM ops_')) return {rows:[]};
+      return {rows:[]};
+    },
+    release(){}
+  };
+  const result=await rebaselineLegacyShadowIntegrity({async connect(){return client;}},{backupManifest:'/verified/full.manifest.json'});
+  assert.equal(result.rebaselined,true);
+  assert.equal(result.previousStateVersion,437);
+  assert.equal(result.stateVersion,438);
+  assert.deepEqual(result.countMismatches.sort(),['files','performanceRecords']);
+  const revision=queries.find(item=>item.text.includes('INSERT INTO state_revisions'));
+  assert.ok(revision);
+  const update=queries.find(item=>item.text.includes('UPDATE app_state_metadata'));
+  assert.ok(update);
+  assert.match(update.text,/state_version=\$2/);
+  assert.match(update.text,/snapshot_hash=\$3/);
+  assert.equal(update.params[1],438);
+  const event=queries.find(item=>item.text.includes('RELATIONAL_LEGACY_SHADOW_REBASELINED'));
+  assert.ok(event);
 });

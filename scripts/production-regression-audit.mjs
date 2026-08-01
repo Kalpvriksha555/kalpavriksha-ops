@@ -141,9 +141,7 @@ requireInFile('backend/src/repositories/postgresStateRepository.js', /finance_re
 requireFile('backend/scripts/july30-recovery-lib.mjs');
 requireFile('backend/scripts/july30-recovery.mjs');
 requireFile('backend/scripts/july30-finalize.mjs');
-requireFile('scripts/deploy-july30-safe-vps.sh');
-requireFile('scripts/Run-July30-Safe-Deploy.ps1');
-requireFile('scripts/Run-July30-Final-Merge.ps1');
+requireFile('scripts/deploy-1.9.24-vps.sh');
 requireInFile('backend/scripts/july30-recovery-lib.mjs', /expectedFreshCount\s*=\s*DEFAULT_EXPECTED_FRESH_COUNT/, 'July 30 recovery freshness gate is missing.');
 requireInFile('backend/scripts/july30-recovery.mjs', /attendancePreserved/, 'July 30 recovery attendance preservation check is missing.');
 requireInFile('backend/scripts/july30-finalize.mjs', /activeFinancePreserved/, 'Final merge must preserve active finance fields.');
@@ -152,10 +150,10 @@ requireInFile('backend/src/repositories/postgresStateRepository.js', /rowsRequir
 requireInFile('backend/src/repositories/postgresStateRepository.js', /kalpa\.allow_legacy_orphans/, 'Final cutover must preserve audited legacy orphan references without weakening normal writes.');
 requireInFile('backend/src/server.js', /applyStandaloneAuthOperations/, 'Credential migration must not rewrite the complete operational state.');
 requireInFile('backend/scripts/july30-finalize.mjs', /allowLegacyOrphans:\s*true/, 'The audited final merge must explicitly enable legacy-orphan preservation.');
-requireInFile('scripts/deploy-july30-safe-vps.sh', /read-only recovery preflight/, 'Deployment must preflight live recovery before downtime.');
-requireInFile('scripts/deploy-july30-safe-vps.sh', /recovery-applied-commit/, 'Deployment must checkpoint an already verified recovery transaction.');
-requireInFile('scripts/deploy-july30-safe-vps.sh', /frontend\/dist\.next/, 'Deployment must atomically publish the verified frontend build.');
-requireInFile('scripts/deploy-july30-safe-vps.sh', /kalpavriksha-database-backup\.timer/, 'Deployment must enable frequent verified database backups.');
+requireInFile('scripts/deploy-1.9.24-vps.sh', /KALPA_VERIFY_INCLUDE_DEPLOYMENT_GATES=true/, 'Deployment must run production integrity and backup preflight before downtime.');
+requireInFile('scripts/deploy-1.9.24-vps.sh', /db:integrity:repair/, 'Deployment must perform guarded legacy integrity repair after backup and downtime.');
+requireInFile('scripts/deploy-1.9.24-vps.sh', /frontend\/dist\.next/, 'Deployment must atomically publish the verified frontend build.');
+requireInFile('scripts/deploy-1.9.24-vps.sh', /ROLLBACK_SCRIPT="\$ROLLBACK_CWD\/\$OLD_RELATIVE_SCRIPT"/, 'Deployment must retain an immutable rollback runtime.');
 requireInFile('backend/scripts/finance-recovery-apply.mjs', /targetStateVersion/, 'Finance recovery must bind to the exact live state version.');
 requireInFile('backend/src/services/releaseCertificationService.js', /APPLY FINANCE RECOVERY/, 'Finance recovery must require exact confirmation.');
 

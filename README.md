@@ -78,7 +78,7 @@ Read before deployment:
 - `TEAM_TRANSPARENCY_SPEED_FIX.md`
 - `TEAM_TRANSPARENCY_SPEED_VERIFICATION.md`
 
-All development phases are complete. Do not deploy over the live system until the current PostgreSQL database and private files are backed up, the missing finance values are recovered selectively from an isolated verified source, and this exact source tree passes the release-certificate gate on the deployment machine.
+Before production deployment, use `scripts/deploy-1.9.24-vps.sh`. It runs the complete source, clean-install, environment, production-integrity and verified-backup gates before downtime. A narrowly recognized legacy files/performance metadata drift is repaired only after the verified full backup and while writes are stopped; any other hash or collection drift still fails closed.
 
 
 ## Reliability commands
@@ -106,4 +106,17 @@ Finance recovery remains a separate operator-controlled process:
 ```bash
 npm run finance-recovery:plan -- --source-database-url "<isolated-old-backup-db>" --output "/root/finance-recovery-plan.json"
 npm run finance-recovery:apply -- --plan "/root/finance-recovery-plan.json" --confirmation "APPLY FINANCE RECOVERY <plan-id>"
+```
+
+
+## VPS deployment
+
+Do not run obsolete July 30 deployment scripts. Push this source tree to `main`, then fetch and execute the deployment script without resetting the live checkout first:
+
+```bash
+cd /var/www/kalpavriksha-ops
+git fetch origin main
+git show origin/main:scripts/deploy-1.9.24-vps.sh > /root/deploy-1.9.24-vps.sh
+chmod +x /root/deploy-1.9.24-vps.sh
+bash /root/deploy-1.9.24-vps.sh
 ```

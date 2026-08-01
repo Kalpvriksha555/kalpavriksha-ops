@@ -22,7 +22,8 @@
     "july30-final:apply": "node scripts/july30-finalize.mjs --mode=apply",
     "release:record": "node scripts/release-record.mjs",
     "dev:watch": "node --watch scripts/start-json-dev.mjs",
-    "dev:probe": "node scripts/local-runtime-probe.mjs"
+    "dev:probe": "node scripts/local-runtime-probe.mjs",
+    "db:integrity:repair": "node scripts/db-integrity-repair.mjs"
   },
   "dependencies": {
     "cors": "2.8.6",

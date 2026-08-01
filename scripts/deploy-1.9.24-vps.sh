@@ -174,8 +174,8 @@ grep -q "FILE_STORAGE_GC_GRACE_MS" "$STAGE/backend/src/server.js" || \
 grep -q "safeCountMetadataDrift" "$STAGE/backend/scripts/db-integrity-audit.mjs" || \
   fail "GitHub main does not contain count-only relational integrity classification"
 
-grep -q "RECONCILE COUNT METADATA ONLY" "$STAGE/backend/scripts/db-integrity-reconcile.mjs" || \
-  fail "GitHub main does not contain verified count-only metadata reconciliation"
+grep -q "REPAIR VERIFIED LEGACY INTEGRITY METADATA" "$STAGE/backend/scripts/db-integrity-repair.mjs" || \
+  fail "GitHub main does not contain guarded legacy integrity repair"
 
 grep -q "mergeVerifiedPhysicalCounts" "$STAGE/backend/src/repositories/postgresStateRepository.js" || \
   fail "GitHub main does not verify metadata counts against transactional physical rows"
@@ -198,7 +198,7 @@ const fileStorage = fs.readFileSync(path.join(root, 'backend/src/services/fileSt
 const fileVerifier = fs.readFileSync(path.join(root, 'scripts/phase-6-file-storage-check.mjs'), 'utf8');
 const repository = fs.readFileSync(path.join(root, 'backend/src/repositories/postgresStateRepository.js'), 'utf8');
 const integrityAudit = fs.readFileSync(path.join(root, 'backend/scripts/db-integrity-audit.mjs'), 'utf8');
-const integrityReconcile = fs.readFileSync(path.join(root, 'backend/scripts/db-integrity-reconcile.mjs'), 'utf8');
+const integrityRepair = fs.readFileSync(path.join(root, 'backend/scripts/db-integrity-repair.mjs'), 'utf8');
 const deploy = fs.readFileSync(path.join(root, 'scripts/deploy-1.9.24-vps.sh'), 'utf8');
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 
@@ -295,15 +295,15 @@ if (gcBlock.indexOf('activeFileStorageKeys(readDb())') > gcBlock.indexOf('fileSt
 for (const marker of ['auditRelationalIntegrityMetadata', 'reconcileRelationalIntegrityMetadata', 'mergeVerifiedPhysicalCounts', 'RELATIONAL_SHADOW_DIVERGENCE']) {
   if (!repository.includes(marker)) throw new Error(`Relational integrity hardening marker is missing: ${marker}`);
 }
-if (!integrityAudit.includes('SAFE_COUNT_METADATA_DRIFT') || !integrityAudit.includes('UNSAFE_INTEGRITY_DRIFT')) throw new Error('Production integrity audit does not classify safe and unsafe drift.');
-for (const marker of ['RECONCILE COUNT METADATA ONLY', 'verifyManifest', 'safeCountMetadataDrift', 'recent verified full backup']) {
-  if (!integrityReconcile.includes(marker)) throw new Error(`Integrity reconciliation safeguard is missing: ${marker}`);
+if (!integrityAudit.includes('LEGACY_SHADOW_REBASELINE_REQUIRED') || !integrityAudit.includes('UNSAFE_INTEGRITY_DRIFT')) throw new Error('Production integrity audit does not classify guarded legacy shadow drift.');
+for (const marker of ['REPAIR VERIFIED LEGACY INTEGRITY METADATA', 'verifyManifest', 'legacyShadowRebaselineSafe', 'recent verified full backup']) {
+  if (!integrityRepair.includes(marker)) throw new Error(`Integrity repair safeguard is missing: ${marker}`);
 }
 const migrateIndex=deploy.indexOf('npm run db:migrate --prefix backend');
-const reconcileIndex=deploy.indexOf('npm run db:integrity:reconcile --prefix backend');
+const repairIndex=deploy.indexOf('npm run db:integrity:repair --prefix backend');
 const strictIntegrityIndex=deploy.indexOf('npm run db:integrity --prefix backend');
-if (migrateIndex < 0 || reconcileIndex < 0 || strictIntegrityIndex < 0 || !(migrateIndex < reconcileIndex && reconcileIndex < strictIntegrityIndex)) {
-  throw new Error('Deployment must migrate, reconcile verified count-only metadata drift, then run strict integrity.');
+if (migrateIndex < 0 || repairIndex < 0 || strictIntegrityIndex < 0 || !(migrateIndex < repairIndex && repairIndex < strictIntegrityIndex)) {
+  throw new Error('Deployment must migrate, perform guarded integrity repair, then run strict integrity.');
 }
 if (!deploy.includes('ROLLBACK_SCRIPT="$ROLLBACK_CWD/$OLD_RELATIVE_SCRIPT"')) throw new Error('Deployment does not snapshot an immutable rollback runtime.');
 
@@ -367,12 +367,11 @@ cd "$STAGE"
 log "Applying database migrations"
 npm run db:migrate --prefix backend
 
-log "Reconciling only verified count-only relational metadata drift"
-KALPA_INTEGRITY_RECONCILE_CONFIRM="RECONCILE COUNT METADATA ONLY" \
-KALPA_INTEGRITY_RECONCILE_COLLECTIONS="files,performanceRecords" \
-npm run db:integrity:reconcile --prefix backend | tee "$WORK/relational-integrity-reconciliation.json"
+log "Repairing only verified legacy relational integrity metadata"
+KALPA_INTEGRITY_REPAIR_CONFIRM="REPAIR VERIFIED LEGACY INTEGRITY METADATA" \
+npm run db:integrity:repair --prefix backend | tee "$WORK/relational-integrity-repair.json"
 
-log "Checking strict relational database integrity after reconciliation"
+log "Checking strict relational database integrity after repair"
 npm run db:integrity --prefix backend | tee "$WORK/relational-integrity-after-reconciliation.json"
 
 log "Certifying the exact production release"

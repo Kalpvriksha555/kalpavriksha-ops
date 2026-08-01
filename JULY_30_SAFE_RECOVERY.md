@@ -1,3 +1,7 @@
+# Archived historical recovery note
+
+> Do not execute the old July 30 deployment launchers. They have been removed. Use `scripts/deploy-1.9.24-vps.sh` for the current release. The content below is retained only as historical recovery context.
+
 # July 30 Safe Recovery
 
 This release fixes the stale-snapshot deployment failure that hid July 30 operations.
@@ -34,7 +38,7 @@ Run from Windows PowerShell:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-& "D:\kalpavriksha-repaired\scripts\Run-July30-Safe-Deploy.ps1"
+# Historical command removed; do not run.
 ```
 
 The script prompts for VPS authentication, deploys only the verified Git commit, downloads pre/post recovery backups to `D:\Kalpavriksha-Recovery-Backups`, fast-forwards GitHub `main`, and aligns the normal VPS checkout only after health and data checks pass.

@@ -667,6 +667,26 @@ function entityCounts(parts = {}) {
   };
 }
 
+export function classifyLegacyShadowIntegrityDrift({
+  expectedCounts = {},
+  actualCounts = {},
+  countMismatches = [],
+  expectedHash = '',
+  actualHash = '',
+  source = ''
+} = {}) {
+  const allowed = new Set(['files', 'performanceRecords']);
+  const mismatches = (countMismatches || []).map(value => String(value || '').trim()).filter(Boolean);
+  if (!mismatches.length || mismatches.some(key => !allowed.has(key))) return false;
+  if (!expectedHash || !actualHash || expectedHash === actualHash) return false;
+  if (!String(source || '').startsWith('relational')) return false;
+  return mismatches.every(key => {
+    const expected = Number(expectedCounts?.[key] || 0);
+    const actual = Number(actualCounts?.[key] || 0);
+    return Number.isFinite(expected) && Number.isFinite(actual) && expected > actual;
+  });
+}
+
 function rowTimestamp(payload = {}) {
   return timestampValue(payload.updatedAt || payload.updated_at || payload.createdAt || payload.created_at) || new Date().toISOString();
 }
@@ -1409,10 +1429,14 @@ export async function auditRelationalIntegrityMetadata(pool, { lock = false } = 
     const hashMatches = Boolean(expectedHash) && expectedHash === actualHash;
     const healthy = countMismatches.length === 0 && hashMatches;
     const safeCountMetadataDrift = countMismatches.length > 0 && hashMatches;
+    const legacyShadowRebaselineSafe = classifyLegacyShadowIntegrityDrift({
+      expectedCounts, actualCounts, countMismatches, expectedHash, actualHash, source:row.source || ''
+    });
     await client.query('COMMIT');
     return {
       healthy,
       safeCountMetadataDrift,
+      legacyShadowRebaselineSafe,
       stateVersion:Number(row.state_version || 0),
       expectedCounts,
       actualCounts,
@@ -1499,6 +1523,76 @@ export async function reconcileRelationalIntegrityMetadata(pool, { allowedCollec
       counts:actualCounts,
       snapshotHash:actualHash,
       backupManifest:String(backupManifest || '')
+    };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function rebaselineLegacyShadowIntegrity(pool, { actor = 'deployment-integrity-rebaseliner', backupManifest = '' } = {}) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout = '15s'");
+    await client.query("SET LOCAL statement_timeout = '120s'");
+    await client.query('SELECT pg_advisory_xact_lock($1)', [ADVISORY_LOCK_ID]);
+    const metadata = await client.query('SELECT * FROM app_state_metadata WHERE key=$1 FOR UPDATE', ['main']);
+    if (!metadata.rows.length) {
+      const error = new Error('Relational state metadata is missing.');
+      error.code = 'RELATIONAL_METADATA_MISSING';
+      throw error;
+    }
+    const parts = await readRelationalParts(client);
+    const persistedState = recomposeState(parts);
+    const actualCounts = entityCounts(parts);
+    const actualHash = stateSnapshotHash(persistedState);
+    const row = metadata.rows[0];
+    const expectedCounts = row.entity_counts || {};
+    const expectedHash = String(row.snapshot_hash || '');
+    const countMismatches = compareCounts(expectedCounts, actualCounts);
+    if (!countMismatches.length && expectedHash === actualHash) {
+      await client.query('COMMIT');
+      return { ok:true, rebaselined:false, reason:'already-healthy', stateVersion:Number(row.state_version || 0), counts:actualCounts, snapshotHash:actualHash };
+    }
+    const safe = classifyLegacyShadowIntegrityDrift({
+      expectedCounts, actualCounts, countMismatches, expectedHash, actualHash, source:row.source || ''
+    });
+    if (!safe) {
+      const error = new Error('Legacy shadow integrity rebaseline refused because the drift is not limited to the known files/performance normalization defect.');
+      error.code = 'UNSAFE_INTEGRITY_DRIFT';
+      error.details = { expectedCounts, actualCounts, countMismatches, expectedHash, actualHash, source:row.source || '' };
+      throw error;
+    }
+    const currentVersion = Number(row.state_version || 0);
+    const nextVersion = currentVersion + 1;
+    await client.query(
+      `INSERT INTO state_revisions(state_version,actor,reason,snapshot_hash,entity_counts,snapshot)
+       VALUES($1,$2,'legacy_shadow_integrity_rebaseline',$3,$4::jsonb,$5::jsonb)`,
+      [nextVersion, String(actor || 'deployment-integrity-rebaseliner'), actualHash, JSON.stringify(actualCounts), JSON.stringify(persistedState)]
+    );
+    await client.query(
+      `UPDATE app_state_metadata
+          SET state_version=$2,snapshot_hash=$3,entity_counts=$4::jsonb,source='relational_legacy_shadow_rebaseline',updated_at=now()
+        WHERE key=$1`,
+      ['main', nextVersion, actualHash, JSON.stringify(actualCounts)]
+    );
+    await client.query(
+      `INSERT INTO operational_events(event_type,severity,actor,details)
+       VALUES('RELATIONAL_LEGACY_SHADOW_REBASELINED','WARN',$1,$2::jsonb)`,
+      [String(actor || 'deployment-integrity-rebaseliner'), JSON.stringify({
+        previousStateVersion:currentVersion, stateVersion:nextVersion, countMismatches,
+        beforeCounts:expectedCounts, afterCounts:actualCounts, expectedHash, snapshotHash:actualHash,
+        backupManifest:String(backupManifest || '')
+      })]
+    );
+    await client.query('COMMIT');
+    return {
+      ok:true, rebaselined:true, previousStateVersion:currentVersion, stateVersion:nextVersion,
+      countMismatches, beforeCounts:expectedCounts, counts:actualCounts, previousSnapshotHash:expectedHash,
+      snapshotHash:actualHash, backupManifest:String(backupManifest || '')
     };
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
