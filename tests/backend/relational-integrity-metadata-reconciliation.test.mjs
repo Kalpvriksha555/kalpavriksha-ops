@@ -210,6 +210,26 @@ test('same-count hash drift is repairable only when verified revision difference
   assert.equal(safe.safe,true);
   assert.equal(safe.addedAuditRows,1);
 
+  const staleRevisionCountMetadata = analyzeOperationalSameCountHashDrift({
+    expectedCounts:counts,
+    actualCounts:counts,
+    countMismatches:[],
+    expectedHash:'stale-metadata-hash',
+    actualHash:stateSnapshotHash(currentState),
+    source:'relational',
+    currentState,
+    currentVersion:441,
+    revisionState,
+    revisionVersion:438,
+    revisionHash:stateSnapshotHash(revisionState),
+    revisionCounts:{ ...revisionCounts, audit:999, performanceRecords:41 },
+    revisionCreatedAt:'2026-08-01T19:35:26.611Z',
+    nowMs
+  });
+  assert.equal(staleRevisionCountMetadata.safe,true);
+  assert.deepEqual(staleRevisionCountMetadata.revisionCountMetadataMismatches.sort(),['audit','performanceRecords']);
+  assert.equal(staleRevisionCountMetadata.verifiedRevisionCounts.audit,1);
+
   const financeRevision = structuredClone(revisionState);
   financeRevision.cases = [{ id:'case-1', caseId:'KV-1', status:'Completed', client:'Client', financeVersion:1, ledger:{ amountIn:0 }, history:[], timeline:[], paymentAuditTrail:[] }];
   financeRevision.payments = [{ id:'pay-1', source:'INLINE_PAYMENT_STATUS', caseId:'case-1', paymentAmountIn:0 }];

@@ -14,8 +14,8 @@ Validated from the automatic-payment-ledger baseline on 2 August 2026.
 - Regression guard
 - Production regression audit
 - 74 frontend tests
-- 134 backend tests
-- 208 combined tests
+- 135 backend tests
+- 209 combined tests
 - Phase 5 relational schema/integrity verification across 16 tables
 - Phase 9 frontend/UX verification
 - 74 frontend/backend contract checks across 83 backend routes

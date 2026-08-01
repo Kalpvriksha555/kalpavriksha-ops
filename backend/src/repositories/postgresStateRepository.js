@@ -851,7 +851,13 @@ export function analyzeOperationalSameCountHashDrift({
   if (!revisionHash || verifiedRevisionHash !== String(revisionHash)) return refuse('revision-hash-invalid');
   const baselineParts = decomposeState(revisionState);
   const currentParts = decomposeState(currentState);
-  if (compareCounts(revisionCounts || {}, entityCounts(baselineParts)).length) return refuse('revision-counts-invalid');
+  // A revision snapshot is authenticated by its canonical snapshot hash. Older
+  // writers could leave the auxiliary entity_counts column stale even when the
+  // snapshot itself was complete and hash-valid. Derive the trusted counts from
+  // that verified snapshot instead of rejecting safe operational drift solely
+  // because redundant count metadata is stale.
+  const verifiedRevisionCounts = entityCounts(baselineParts);
+  const revisionCountMetadataMismatches = compareCounts(revisionCounts || {}, verifiedRevisionCounts);
   if (compareCounts(expectedCounts || {}, actualCounts || {}).length) return refuse('metadata-counts-do-not-match-physical');
 
   const immutableCollections = [
@@ -882,6 +888,8 @@ export function analyzeOperationalSameCountHashDrift({
     revisionVersion:revision,
     currentVersion:current,
     versionGap:current - revision,
+    revisionCountMetadataMismatches,
+    verifiedRevisionCounts,
     addedAuditRows,
     financeCaseRows:financeCases.changedCaseIds,
     changedCollections:[

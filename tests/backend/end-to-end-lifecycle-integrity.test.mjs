@@ -233,3 +233,19 @@ test('final deployment verification uses public health and authenticated databas
   assert.match(finalBlock,/npm run db:integrity --prefix backend/);
   assert.doesNotMatch(finalBlock,/curl -fsS .*api\/db\/health/);
 });
+
+
+test('monthly performance hot deploy updates only its runtime delta without the full release matrix',()=>{
+  const deploy=fs.readFileSync(new URL('../../scripts/deploy-monthly-performance-only-vps.sh',import.meta.url),'utf8');
+  assert.match(deploy,/backend\/src\/server\.js/);
+  assert.match(deploy,/backend\/src\/repositories\/postgresStateRepository\.js/);
+  assert.match(deploy,/npm ci --prefix "\$STAGE\/frontend"/);
+  assert.match(deploy,/monthly-finance-reports-ledger\.test\.mjs/);
+  assert.match(deploy,/session-performance-hardening\.test\.mjs/);
+  assert.match(deploy,/db-integrity-repair\.mjs/);
+  assert.match(deploy,/api\/health\/ready/);
+  assert.doesNotMatch(deploy,/verify:matrix/);
+  assert.doesNotMatch(deploy,/db:migrate/);
+  assert.doesNotMatch(deploy,/backup:create/);
+  assert.doesNotMatch(deploy,/npm ci --prefix backend/);
+});
