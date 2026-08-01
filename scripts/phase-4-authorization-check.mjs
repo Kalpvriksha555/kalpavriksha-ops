@@ -149,8 +149,20 @@ try {
   assert((d1State.payload.projects || []).length === 1 && d1State.payload.projects[0].id === 'AUTHZ-TASK-1', 'Designer received tasks outside their assignment.');
   assert(!Object.hasOwn(d1State.payload.projects[0], 'paymentAmountIn') && !Object.hasOwn(d1State.payload, 'payments'), 'Designer received finance data.');
 
+  // Deliberately omit expectedTaskVersion here. Authorization must run first:
+  // an unrelated Designer must receive 403 without learning whether the task
+  // exists or which optimistic-concurrency version it currently has.
   const spoofedOtherUpdate = await request('/api/state/projects', { method:'POST', session:designerOne, headers:{ 'X-User-Role':'ADMIN', 'X-User-Name':'Phase 4 Admin' }, body:{ currentUserRole:'ADMIN', project:{ id:'AUTHZ-TASK-2', caseId:'AUTHZ-TASK-2', status:'Completed', assignedTo:'Designer One' } } });
-  assert(spoofedOtherUpdate.response.status === 403, 'Designer modified another Designer’s task by spoofing a role.');
+  assert(
+    spoofedOtherUpdate.response.status === 403 && spoofedOtherUpdate.payload?.code === 'TASK_UPDATE_FORBIDDEN',
+    `Designer anti-spoofing check returned ${spoofedOtherUpdate.response.status}: ${JSON.stringify(spoofedOtherUpdate.payload)}`
+  );
+
+  const spoofedBroadStateUpdate = await request('/api/state', { method:'POST', session:designerOne, headers:{ 'X-User-Role':'ADMIN', 'X-User-Name':'Phase 4 Admin' }, body:{ projects:[{ id:'AUTHZ-TASK-2', caseId:'AUTHZ-TASK-2', status:'Completed', assignedTo:'Designer One', currentUserRole:'ADMIN' }] } });
+  assert(
+    spoofedBroadStateUpdate.response.status === 403 && spoofedBroadStateUpdate.payload?.code === 'TASK_UPDATE_FORBIDDEN',
+    `Legacy state anti-spoofing check returned ${spoofedBroadStateUpdate.response.status}: ${JSON.stringify(spoofedBroadStateUpdate.payload)}`
+  );
 
   const ownUpdate = await request('/api/state/projects', { method:'POST', session:designerOne, body:{ expectedTaskVersion:taskOne.taskVersion, project:{ id:'AUTHZ-TASK-1', caseId:'AUTHZ-TASK-1', status:'Drafting', assignedTo:'Designer Two', customerName:'Tampered', paymentAmountIn:0, paymentTrackingStatus:'Not Updated' } } });
   assert(ownUpdate.response.ok, 'Designer could not update their assigned task.');

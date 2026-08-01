@@ -2177,16 +2177,21 @@ function statusKey(value = '') {
   return String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
-function authorizedProjectUpdate(existing = {}, incoming = {}, req = {}) {
-  const actor = requestActor(req);
-  const role = actor.role;
-  if (!existing || !existing.id) return incoming;
+function assertProjectUpdateAuthorized(existing = {}, req = {}) {
+  if (!existing || !existing.id) return;
   if (!canMutateCase(req.auth?.user || {}, existing, 'update')) {
     const error = new Error('You cannot modify this task.');
     error.statusCode = 403;
     error.code = 'TASK_UPDATE_FORBIDDEN';
     throw error;
   }
+}
+
+function authorizedProjectUpdate(existing = {}, incoming = {}, req = {}) {
+  const actor = requestActor(req);
+  const role = actor.role;
+  if (!existing || !existing.id) return incoming;
+  assertProjectUpdateAuthorized(existing, req);
 
   if (role === 'ADMIN' || role === 'MANAGER') {
     let next = preserveFinanceFields(existing, { ...existing, ...(incoming || {}) });
@@ -4541,6 +4546,9 @@ app.post('/api/state/projects', async (req, res) => {
 
     let safeIncoming;
     if (existing) {
+      // Authorization must run before optimistic-concurrency validation so an
+      // unrelated user cannot probe whether a task exists or learn its version.
+      assertProjectUpdateAuthorized(existing, req);
       assertExpectedTaskVersion(existing, incoming, req.body || {});
       safeIncoming = authorizedProjectUpdate(existing, incoming, req);
       assertTaskLifecycleTransition(existing, safeIncoming, actor);
@@ -4732,6 +4740,9 @@ app.post('/api/state', async (req,res)=>{
       if (!incoming.id && !incoming.caseId) continue;
       const existing = findCaseByAnyId(d.cases || [], incoming.id || incoming.caseId) || findCaseByAnyId(d.cases || [], incoming.caseId || incoming.id);
       if (existing) {
+        // Keep the legacy broad-state path aligned with the dedicated task API:
+        // reject unauthorized callers before exposing any task-version detail.
+        assertProjectUpdateAuthorized(existing,req);
         assertExpectedTaskVersion(existing,incoming,incoming);
         const authorized=authorizedProjectUpdate(existing,incoming,req);
         assertTaskLifecycleTransition(existing,authorized,actor);

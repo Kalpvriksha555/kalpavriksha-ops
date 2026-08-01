@@ -34,6 +34,17 @@ wait_for_health() {
   return 1
 }
 
+pre_deployment_failure() {
+  local rc=$?
+  trap - ERR INT TERM
+  echo
+  echo "PRE-DEPLOYMENT VERIFICATION FAILED WITH CODE $rc"
+  echo "The live backend was not stopped and production data was not modified."
+  echo "Review the first failing verification above before retrying."
+  exit "$rc"
+}
+trap pre_deployment_failure ERR INT TERM
+
 log "Checking production paths and tools"
 test -d "$LIVE/.git" || fail "Git repository missing at $LIVE"
 test -s "$ENV_FILE" || fail "Environment file missing at $ENV_FILE"
@@ -116,6 +127,68 @@ grep -q "expectedTaskVersion:managerCreated.payload.project.taskVersion" "$STAGE
 grep -q "status:'Assigned'" "$STAGE/scripts/phase-4-authorization-check.mjs" || \
   fail "GitHub main does not contain the authorization verifier lifecycle-safe assignment correction"
 
+grep -q "function assertProjectUpdateAuthorized" "$STAGE/backend/src/server.js" || \
+  fail "GitHub main does not contain authorization-before-version task protection"
+
+grep -q "spoofedBroadStateUpdate.payload?.code === 'TASK_UPDATE_FORBIDDEN'" "$STAGE/scripts/phase-4-authorization-check.mjs" || \
+  fail "GitHub main does not contain both authorization-precedence runtime probes"
+
+log "Auditing release source ordering and syntax"
+
+bash -n "$STAGE/scripts/deploy-1.9.24-vps.sh"
+
+node --input-type=module - "$STAGE" <<'NODE'
+import fs from 'node:fs';
+import path from 'node:path';
+
+const root = process.argv[2];
+const server = fs.readFileSync(path.join(root, 'backend/src/server.js'), 'utf8');
+const verifier = fs.readFileSync(path.join(root, 'scripts/phase-4-authorization-check.mjs'), 'utf8');
+
+const assertBefore = (block, first, second, label) => {
+  const firstIndex = block.indexOf(first);
+  const secondIndex = block.indexOf(second);
+  if (firstIndex < 0 || secondIndex < 0 || firstIndex >= secondIndex) {
+    throw new Error(`${label}: authorization must appear before task-version validation.`);
+  }
+};
+
+const dedicatedStart = server.indexOf("app.post('/api/state/projects'");
+const dedicatedEnd = server.indexOf("app.delete('/api/state/projects", dedicatedStart);
+if (dedicatedStart < 0 || dedicatedEnd < 0) throw new Error('Dedicated task route could not be located.');
+assertBefore(
+  server.slice(dedicatedStart, dedicatedEnd),
+  'assertProjectUpdateAuthorized(existing, req)',
+  'assertExpectedTaskVersion(existing, incoming, req.body || {})',
+  'Dedicated task route'
+);
+
+const broadStart = server.indexOf("app.post('/api/state', async");
+const broadEnd = server.indexOf("app.post('/api/notifications", broadStart);
+if (broadStart < 0 || broadEnd < 0) throw new Error('Legacy broad-state route could not be located.');
+assertBefore(
+  server.slice(broadStart, broadEnd),
+  'assertProjectUpdateAuthorized(existing,req)',
+  'assertExpectedTaskVersion(existing,incoming,incoming)',
+  'Legacy broad-state route'
+);
+
+for (const marker of [
+  'Deliberately omit expectedTaskVersion here',
+  "spoofedOtherUpdate.payload?.code === 'TASK_UPDATE_FORBIDDEN'",
+  "spoofedBroadStateUpdate.payload?.code === 'TASK_UPDATE_FORBIDDEN'"
+]) {
+  if (!verifier.includes(marker)) throw new Error(`Authorization verifier marker is missing: ${marker}`);
+}
+
+console.log('Release authorization-precedence source audit passed.');
+NODE
+
+while IFS= read -r -d '' source_file; do
+  node --check "$source_file" >/dev/null
+done < <(find "$STAGE/scripts" "$STAGE/backend/src" "$STAGE/backend/scripts" "$STAGE/tests" \
+  -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) -print0)
+
 log "Installing clean staging dependencies"
 cd "$STAGE"
 rm -rf node_modules backend/node_modules frontend/node_modules frontend/dist .release release-certification.json
@@ -128,6 +201,17 @@ npm run verify
 log "Running isolated clean-install verification"
 npm run release:clean-install
 
+log "Validating the production environment before any downtime"
+node --input-type=module - <<'NODE'
+import { validateProductionEnvironment } from './backend/src/services/releaseCertificationService.js';
+const result = validateProductionEnvironment(process.env);
+if (!result.ok) {
+  for (const item of result.errors) console.error(`${item.id}: ${item.message}`);
+  process.exit(1);
+}
+console.log('Production environment validation passed.');
+NODE
+
 log "Creating and verifying the mandatory pre-deployment backup"
 npm run backup:create >"$WORK/pre-deployment-backup.json"
 npm run backup:verify >"$WORK/pre-deployment-backup-verification.json"
@@ -139,6 +223,8 @@ if [ -f "$RELEASE_CERTIFICATE_PATH" ]; then
   cp "$RELEASE_CERTIFICATE_PATH" "$CERTIFICATE_BACKUP"
   HAD_OLD_CERTIFICATE=1
 fi
+
+trap - ERR INT TERM
 
 rollback_to_previous() {
   local rc=$?

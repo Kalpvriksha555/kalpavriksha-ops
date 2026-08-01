@@ -138,5 +138,30 @@ test('authorization verifier supplies finance context, task versions, and a life
   assert.match(verifier,/expectedTaskVersion:managerCreated\.payload\.project\.taskVersion/);
   assert.match(verifier,/status:'Assigned'/);
   assert.match(verifier,/paymentTrackingStatus === 'Pending'/);
+  assert.match(verifier,/Deliberately omit expectedTaskVersion here/);
+  assert.match(verifier,/spoofedOtherUpdate\.payload\?\.code === 'TASK_UPDATE_FORBIDDEN'/);
+  assert.match(verifier,/spoofedBroadStateUpdate\.payload\?\.code === 'TASK_UPDATE_FORBIDDEN'/);
 });
 
+
+
+test('task authorization precedes optimistic concurrency in every existing-task write path',()=>{
+  assert.match(server,/function assertProjectUpdateAuthorized\(existing = \{\}, req = \{\}\)/);
+  assert.match(server,/error\.code = 'TASK_UPDATE_FORBIDDEN'/);
+
+  const dedicatedStart=server.indexOf("app.post('/api/state/projects'");
+  const dedicatedEnd=server.indexOf("app.delete('/api/state/projects",dedicatedStart);
+  const dedicated=server.slice(dedicatedStart,dedicatedEnd);
+  const dedicatedAuth=dedicated.indexOf('assertProjectUpdateAuthorized(existing, req)');
+  const dedicatedVersion=dedicated.indexOf('assertExpectedTaskVersion(existing, incoming, req.body || {})');
+  assert.ok(dedicatedAuth >= 0 && dedicatedVersion >= 0 && dedicatedAuth < dedicatedVersion,
+    'Dedicated task writes must reject unauthorized callers before checking task versions.');
+
+  const broadStart=server.indexOf("app.post('/api/state',");
+  const broadEnd=server.indexOf("app.get('/api/health",broadStart);
+  const broad=server.slice(broadStart,broadEnd > broadStart ? broadEnd : undefined);
+  const broadAuth=broad.indexOf('assertProjectUpdateAuthorized(existing,req)');
+  const broadVersion=broad.indexOf('assertExpectedTaskVersion(existing,incoming,incoming)');
+  assert.ok(broadAuth >= 0 && broadVersion >= 0 && broadAuth < broadVersion,
+    'Legacy broad-state writes must reject unauthorized callers before checking task versions.');
+});
