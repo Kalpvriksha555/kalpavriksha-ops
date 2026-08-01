@@ -1,6 +1,6 @@
 {
   "name": "kalpvriksha-designs-frontend",
-  "version": "2.9.14-team-transparency-speed",
+  "version": "2.9.15-monthly-finance-ledger-speed",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",

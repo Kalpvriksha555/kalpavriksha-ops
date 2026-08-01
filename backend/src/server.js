@@ -1921,13 +1921,47 @@ function findCaseByAnyId(cases = [], id = '') {
     .filter(Boolean)
     .some(value => String(value).trim() === target));
 }
+const FINANCE_ACCOUNTING_MONTH_PATTERN = /^(\d{4})-(0[1-9]|1[0-2])$/;
+function normalizeFinanceAccountingPeriod(value, fallback = now()) {
+  const raw = String(value || '').trim();
+  const direct = raw.slice(0, 7);
+  if (FINANCE_ACCOUNTING_MONTH_PATTERN.test(direct)) return direct;
+  const fallbackRaw = String(fallback || '').trim();
+  const fallbackDirect = fallbackRaw.slice(0, 7);
+  const candidate = value || fallback;
+  const timestamp = candidate instanceof Date ? candidate.getTime() : new Date(candidate).getTime();
+  if (Number.isFinite(timestamp) && timestamp > 0) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone:'Asia/Kolkata',
+        year:'numeric',
+        month:'2-digit'
+      }).formatToParts(new Date(timestamp));
+      const year = parts.find(part => part.type === 'year')?.value;
+      const month = parts.find(part => part.type === 'month')?.value;
+      const monthKey = year && month ? `${year}-${month}` : '';
+      if (FINANCE_ACCOUNTING_MONTH_PATTERN.test(monthKey)) return monthKey;
+    } catch {}
+  }
+  return FINANCE_ACCOUNTING_MONTH_PATTERN.test(fallbackDirect) ? fallbackDirect : '';
+}
+function nonNegativeFinanceNumber(value, fallback = 0) {
+  if (value === undefined || value === null || value === '') return Math.max(0, Number(fallback) || 0);
+  const cleaned = typeof value === 'string' ? value.replace(/[^0-9.-]/g, '') : value;
+  const numeric = Number(cleaned);
+  return Number.isFinite(numeric) ? Math.max(0, numeric) : Math.max(0, Number(fallback) || 0);
+}
+function hasOwnFinanceValue(body = {}, ...keys) {
+  return keys.some(key => Object.prototype.hasOwnProperty.call(body || {}, key));
+}
 function upsertInlinePaymentLedger(d, c, status, body = {}) {
   d.payments ||= [];
   c.ledger ||= {};
   c.history ||= [];
+  c.paymentAuditTrail ||= [];
+
   const nowIso = now();
   const by = body.by || body.updatedBy || 'Admin';
-  const amount = getCasePaymentAmount(c, body.amount ?? body.amountIn ?? body.paymentAmountIn);
   const caseKey = String(c.id || c.caseId || '').trim();
   const caseNo = c.caseId || c.displayId || c.originalTaskId || c.id || '';
   const existing = d.payments.find(p => p.source === 'INLINE_PAYMENT_STATUS'
@@ -1935,131 +1969,151 @@ function upsertInlinePaymentLedger(d, c, status, body = {}) {
     && String(p.ledgerStatus || 'ACTIVE') === 'ACTIVE');
 
   const previousPaymentStatus = normalizePaymentTrackingStatus(c.paymentTrackingStatus || c.paymentStatus || c.paymentReceived || c.ledger?.status || '');
-  const previousAmountIn = Number(c.ledger?.amountIn ?? c.paymentAmountIn ?? 0) || 0;
+  const previousAmountIn = nonNegativeFinanceNumber(c.ledger?.amountIn ?? c.paymentAmountIn, 0);
+  const previousExpenses = nonNegativeFinanceNumber(c.ledger?.expenses, 0);
+  const previousRefund = nonNegativeFinanceNumber(c.ledger?.refund ?? c.refundAmount, 0);
+  const hasExplicitAmount = hasOwnFinanceValue(body, 'amount', 'amountIn', 'paymentAmountIn');
+  const hasExplicitExpenses = hasOwnFinanceValue(body, 'expenses');
+  const hasExplicitRefund = hasOwnFinanceValue(body, 'refund', 'refundAmount');
+  const explicitAmount = body.amount ?? body.amountIn ?? body.paymentAmountIn;
+  const amount = hasExplicitAmount ? nonNegativeFinanceNumber(explicitAmount, previousAmountIn) : previousAmountIn;
+  const expenses = hasExplicitExpenses ? nonNegativeFinanceNumber(body.expenses, previousExpenses) : previousExpenses;
+  const refund = hasExplicitRefund ? nonNegativeFinanceNumber(body.refund ?? body.refundAmount, previousRefund) : previousRefund;
+  const paymentDate = String(body.paymentDate || body.date || c.paymentDate || c.ledger?.date || nowIso.slice(0, 10)).trim();
+  const accountingPeriod = normalizeFinanceAccountingPeriod(body.accountingPeriod || paymentDate, nowIso);
+
   if (status === 'Paid' && amount <= 0) {
     const err = new Error('Amount received is required before marking payment as Paid.');
     err.statusCode = 400;
     throw err;
   }
-  const computedStatus = status === 'Paid' ? deriveServerPaymentStatus({ ...c, paymentAmountIn: amount, ledger: { ...(c.ledger || {}), amountIn: amount } }, status) : deriveServerPaymentStatus(c, status);
+
+  const computedStatus = deriveServerPaymentStatus({
+    ...c,
+    paymentAmountIn:amount,
+    ledger:{ ...(c.ledger || {}), amountIn:amount }
+  }, status);
+  const receiptStatus = amount > 0 ? (computedStatus === 'Paid' ? 'YES' : 'PARTIAL') : (computedStatus === 'Pending' ? 'PARTIAL' : 'NO');
+
   c.financeVersion = Number(c.financeVersion || 0) + 1;
+  c.financeAccountingPeriod = accountingPeriod;
   c.paymentTrackingStatus = computedStatus;
   c.paymentTrackingUpdatedAt = Date.now();
   c.paymentTrackingUpdatedBy = by;
+  c.paymentStatus = amount > 0 ? receiptStatus : (computedStatus === 'Pending' ? 'PENDING' : 'NOT_UPDATED');
+  c.paymentReceived = receiptStatus;
+  c.paymentAmountIn = amount;
+  c.refundAmount = refund;
+  c.paymentDate = paymentDate;
+  c.paymentTime = body.paymentTime || c.paymentTime || new Date().toTimeString().slice(0, 5);
+  c.payerName = body.payerName || body.receivedFrom || c.payerName || '';
+  c.transactionId = body.transactionId || body.txnId || c.transactionId || '';
   c.ledger = {
     ...c.ledger,
-    status: computedStatus,
-    paymentStatus: computedStatus,
-    updatedAt: Date.now(),
-    updatedBy: by,
-    financeVersion: c.financeVersion,
+    amountIn:amount,
+    expenses,
+    refund,
+    date:paymentDate,
+    accountingPeriod,
+    mode:body.mode || c.ledger?.mode || '',
+    txnId:body.transactionId || body.txnId || c.ledger?.txnId || c.transactionId || '',
+    receivedFrom:body.payerName || body.receivedFrom || c.ledger?.receivedFrom || c.payerName || c.customerName || '',
+    status:computedStatus,
+    paymentStatus:computedStatus,
+    updatedAt:Date.now(),
+    updatedBy:by,
+    financeVersion:c.financeVersion,
+    autoFilledFromPaymentStatus:amount > 0,
+    financeLedgerLinked:amount > 0,
+    financeLedgerId:existing?.id || c.ledger?.financeLedgerId || (amount > 0 ? nanoid(8) : c.ledger?.financeLedgerId)
   };
 
-  if (amount > 0) {
-    const receiptStatus = computedStatus === 'Paid' ? 'YES' : 'PARTIAL';
-    c.paymentAuditTrail ||= [];
-    c.paymentAuditTrail.unshift({
-      id: nanoid(8),
-      at: nowIso,
-      by,
-      action: 'Payment status updated',
-      oldStatus: previousPaymentStatus,
-      newStatus: computedStatus,
-      oldAmount: previousAmountIn,
-      newAmount: amount,
-      note: body.note || (computedStatus === 'Paid' ? 'Admin recorded full payment from inline payment control' : 'Admin recorded a partial payment from inline payment control')
-    });
-    c.paymentStatus = receiptStatus;
-    c.paymentReceived = receiptStatus;
-    c.paymentAmountIn = amount;
-    c.paymentDate = body.paymentDate || c.paymentDate || nowIso.slice(0, 10);
-    c.paymentTime = body.paymentTime || c.paymentTime || new Date().toTimeString().slice(0, 5);
-    c.payerName = body.payerName || body.receivedFrom || c.payerName || '';
-    c.transactionId = body.transactionId || body.txnId || c.transactionId || '';
-    c.ledger.amountIn = amount;
-    c.ledger.date = body.paymentDate || body.date || c.ledger.date || c.paymentDate;
-    c.ledger.mode = body.mode || c.ledger.mode || '';
-    c.ledger.txnId = body.transactionId || body.txnId || c.ledger.txnId || c.transactionId || '';
-    c.ledger.receivedFrom = body.payerName || body.receivedFrom || c.ledger.receivedFrom || c.payerName || c.customerName || '';
-    c.ledger.autoFilledFromPaymentStatus = true;
-    c.ledger.financeLedgerLinked = true;
-    c.ledger.financeLedgerId = existing?.id || c.ledger.financeLedgerId || nanoid(8);
+  const auditNote = body.note || (amount > 0
+    ? (computedStatus === 'Paid' ? 'Admin recorded full payment from inline payment control' : 'Admin recorded a partial payment from inline payment control')
+    : `Payment status changed to ${computedStatus}`);
+  c.paymentAuditTrail.unshift({
+    id:nanoid(8),
+    at:nowIso,
+    paymentDate,
+    accountingPeriod,
+    by,
+    action:'Payment status updated',
+    oldStatus:previousPaymentStatus,
+    newStatus:computedStatus,
+    oldAmount:previousAmountIn,
+    newAmount:amount,
+    oldExpenses:previousExpenses,
+    newExpenses:expenses,
+    oldRefund:previousRefund,
+    newRefund:refund,
+    note:auditNote
+  });
 
+  if (amount > 0) {
+    const paymentValues = {
+      caseNo,
+      location:c.location || c.city || '',
+      customerName:c.customerName || '',
+      bankerName:c.bankerName || '',
+      bank:c.client || c.bank || c.bankName || '',
+      branch:c.branch || c.branchName || '',
+      paymentReceived:receiptStatus,
+      paymentAmountIn:amount,
+      expenses,
+      refundAmount:refund,
+      paymentDate,
+      accountingPeriod,
+      paymentTime:c.paymentTime,
+      payerName:c.payerName,
+      transactionId:c.transactionId,
+      mode:c.ledger.mode || '',
+      ledgerStatus:'ACTIVE',
+      updatedAt:nowIso,
+      updatedBy:by,
+      note:auditNote
+    };
     if (existing) {
-      Object.assign(existing, {
-        caseNo,
-        location: c.location || c.city || '',
-        customerName: c.customerName || '',
-        bank: c.client || c.bank || c.bankName || '',
-        branch: c.branch || c.branchName || '',
-        paymentReceived: receiptStatus,
-        paymentAmountIn: amount,
-        paymentDate: c.paymentDate,
-        paymentTime: c.paymentTime,
-        payerName: c.payerName,
-        transactionId: c.transactionId,
-        mode: c.ledger.mode || '',
-        ledgerStatus: 'ACTIVE',
-        updatedAt: nowIso,
-        updatedBy: by,
-        note: body.note || (computedStatus === 'Paid' ? 'Full payment recorded from inline status' : 'Partial payment recorded from inline status'),
-      });
+      Object.assign(existing, paymentValues);
     } else {
       d.payments.unshift({
-        id: c.ledger.financeLedgerId,
-        source: 'INLINE_PAYMENT_STATUS',
-        caseId: caseKey,
-        caseNo,
-        location: c.location || c.city || '',
-        customerName: c.customerName || '',
-        bankerName: c.bankerName || '',
-        bank: c.client || c.bank || c.bankName || '',
-        branch: c.branch || c.branchName || '',
-        paymentReceived: 'YES',
-        paymentAmountIn: amount,
-        refundAmount: 0,
-        paymentDate: c.paymentDate,
-        paymentTime: c.paymentTime,
-        payerName: body.payerName || c.customerName || '',
-        transactionId: body.transactionId || '',
-        mode: body.mode || 'Inline status',
-        note: body.note || 'Auto-created after admin marked payment as Paid',
-        ledgerStatus: 'ACTIVE',
-        createdAt: nowIso,
-        createdBy: by,
-        updatedAt: nowIso,
-        updatedBy: by,
+        id:c.ledger.financeLedgerId,
+        source:'INLINE_PAYMENT_STATUS',
+        caseId:caseKey,
+        ...paymentValues,
+        createdAt:nowIso,
+        createdBy:by
       });
     }
-    c.history.unshift({ at: nowIso, by, action: `Payment marked Paid and ₹${Number(amount || 0).toLocaleString('en-IN')} added to Finance Ledger` });
-  } else {
-    c.paymentAuditTrail ||= [];
-    c.paymentAuditTrail.unshift({
-      id: nanoid(8),
-      at: nowIso,
-      by,
-      action: 'Payment status updated',
-      oldStatus: previousPaymentStatus,
-      newStatus: computedStatus,
-      oldAmount: previousAmountIn,
-      newAmount: previousAmountIn,
-      note: existing ? `Previous paid ledger entry marked reversed because status changed to ${computedStatus}` : `Payment status changed to ${computedStatus}`
-    });
-    c.paymentStatus = computedStatus === 'Pending' ? 'PENDING' : 'NOT_UPDATED';
-    c.paymentReceived = computedStatus === 'Pending' ? 'PARTIAL' : 'NO';
+  } else if (existing) {
+    existing.ledgerStatus = 'REVERSED';
+    existing.reversedAt = nowIso;
+    existing.reversedBy = by;
+    existing.reversalReason = `Payment status changed to ${computedStatus}`;
+    existing.updatedAt = nowIso;
+    existing.updatedBy = by;
+    existing.accountingPeriod = accountingPeriod;
     c.ledger.financeLedgerLinked = false;
-    if (existing) {
-      existing.ledgerStatus = 'REVERSED';
-      existing.reversedAt = nowIso;
-      existing.reversedBy = by;
-      existing.reversalReason = `Payment status changed to ${computedStatus}`;
-      existing.updatedAt = nowIso;
-      existing.updatedBy = by;
-    }
-    c.history.unshift({ at: nowIso, by, action: `Payment status changed to ${computedStatus}${existing ? '; previous paid ledger entry marked reversed' : ''}` });
   }
-  addCaseTimelineEvent(c,{type:'payment_updated',by,title:`Payment ${computedStatus}`,remarks:amount > 0 ? `Amount received: ₹${Number(amount || 0).toLocaleString('en-IN')}` : ''});
-  addAudit(d, by, `Inline payment status changed to ${computedStatus}`, caseNo);
+
+  const amountMovement = amount - previousAmountIn;
+  const expenseMovement = expenses - previousExpenses;
+  const refundMovement = refund - previousRefund;
+  const movementParts = [];
+  if (amountMovement) movementParts.push(`received ${amountMovement > 0 ? '+' : '-'}₹${Math.abs(amountMovement).toLocaleString('en-IN')}`);
+  if (expenseMovement) movementParts.push(`expenses ${expenseMovement > 0 ? '+' : '-'}₹${Math.abs(expenseMovement).toLocaleString('en-IN')}`);
+  if (refundMovement) movementParts.push(`refund ${refundMovement > 0 ? '+' : '-'}₹${Math.abs(refundMovement).toLocaleString('en-IN')}`);
+  c.history.unshift({
+    at:nowIso,
+    by,
+    action:`Finance updated for ${accountingPeriod}: ${computedStatus}${movementParts.length ? ` (${movementParts.join(', ')})` : ''}`
+  });
+  addCaseTimelineEvent(c, {
+    type:'payment_updated',
+    by,
+    title:`Payment ${computedStatus}`,
+    remarks:`Accounting month ${accountingPeriod}${movementParts.length ? ` • ${movementParts.join(', ')}` : ''}`
+  });
+  addAudit(d, by, `Finance updated for ${accountingPeriod}: ${computedStatus}`, caseNo);
   return c;
 }
 
@@ -4157,12 +4211,11 @@ app.post('/api/state/projects/:id/payment-status', async (req, res) => {
     updated.syncVersion = Date.now();
     const nextSnapshot = buildFinanceSnapshot(updated);
     const auditEntry=d.audit?.[0];
-    const paymentIds=(d.payments || [])
-      .filter(item=>String(item.caseId || '')===String(updated.id || updated.caseId || req.params.id))
-      .map(item=>String(item.id || '')).filter(Boolean);
+    const changedPaymentId=String(updated.ledger?.financeLedgerId || '').trim();
+    const changedPayment=changedPaymentId ? (d.payments || []).find(item=>String(item.id || '')===changedPaymentId) : null;
     const collections=['cases','audit'];
     const collectionRowIds={cases:[String(updated.id || updated.caseId)],audit:auditEntry?.id ? [String(auditEntry.id)] : []};
-    if (paymentIds.length) { collections.push('payments'); collectionRowIds.payments=paymentIds; }
+    if (changedPayment) { collections.push('payments'); collectionRowIds.payments=[changedPaymentId]; }
     const persistence = await save(d, {
       actor:actor.name,
       reason:'finance_payment_status_update',
@@ -4177,7 +4230,7 @@ app.post('/api/state/projects/:id/payment-status', async (req, res) => {
         nextSnapshot
       }
     });
-    res.json({ ok:true, project:updated, case:updated, payments:d.payments || [], financeVersion:updated.financeVersion, persistence });
+    res.json({ ok:true, project:updated, case:updated, payment:changedPayment || null, financeVersion:updated.financeVersion, persistence });
   } catch (e) {
     res.status(e.statusCode || 500).json({ ok:false, code:e.code || '', error:e.message || 'Payment status update failed' });
   }
@@ -4191,26 +4244,107 @@ app.post('/api/cases/:id/payment', async (req,res)=>{
     if(!c) return res.status(404).json({ok:false,error:'Case not found'});
     assertExpectedFinanceVersion(c, req.body || {});
     const previousSnapshot = buildFinanceSnapshot(c);
+    const previousStatus = normalizePaymentTrackingStatus(c.paymentTrackingStatus || c.paymentStatus || c.paymentReceived || c.ledger?.status || '');
+    const previousAmount = nonNegativeFinanceNumber(c.ledger?.amountIn ?? c.paymentAmountIn, 0);
+    const previousExpenses = nonNegativeFinanceNumber(c.ledger?.expenses, 0);
+    const previousRefund = nonNegativeFinanceNumber(c.ledger?.refund ?? c.refundAmount, 0);
     const received=String(req.body.paymentReceived||'').toUpperCase();
     if(!['YES','NO','PARTIAL','REFUND'].includes(received)) return res.status(400).json({ok:false,error:'paymentReceived is mandatory: YES, NO, PARTIAL or REFUND'});
     const nowIso = now();
     const actor = requestActor(req);
-    const p={id:nanoid(8),caseId:c.id,caseNo:c.caseId,location:c.city || c.location || '',bankerName:c.bankerName,bank:c.bank || c.client || '',branch:c.branch,paymentReceived:received,paymentAmountIn:numericValue(req.body.paymentAmountIn,'Payment amount',{min:0,max:100_000_000,fallback:0}),refundAmount:numericValue(req.body.refundAmount,'Refund amount',{min:0,max:100_000_000,fallback:0}),paymentDate:textValue(req.body.paymentDate||nowIso.slice(0,10),'Payment date',20),paymentTime:textValue(req.body.paymentTime||new Date().toTimeString().slice(0,5),'Payment time',20),payerName:textValue(req.body.payerName||'','Payer name',200),transactionId:textValue(req.body.transactionId||'','Transaction ID',200),mode:textValue(req.body.mode||'','Payment mode',100),note:textValue(req.body.note||'','Payment note',MAX_TIMELINE_TEXT_LENGTH),createdAt:nowIso,createdBy:actor.name,updatedAt:nowIso,updatedBy:actor.name};
+    const paymentDate=textValue(req.body.paymentDate||nowIso.slice(0,10),'Payment date',20);
+    const accountingPeriod=normalizeFinanceAccountingPeriod(req.body.accountingPeriod || paymentDate, nowIso);
+    const paymentAmount=numericValue(req.body.paymentAmountIn,'Payment amount',{min:0,max:100_000_000,fallback:0});
+    const expenses=hasOwnFinanceValue(req.body,'expenses')
+      ? numericValue(req.body.expenses,'Expenses',{min:0,max:100_000_000,fallback:previousExpenses})
+      : previousExpenses;
+    const refund=hasOwnFinanceValue(req.body,'refundAmount','refund')
+      ? numericValue(req.body.refundAmount ?? req.body.refund,'Refund amount',{min:0,max:100_000_000,fallback:previousRefund})
+      : previousRefund;
+    const p={
+      id:nanoid(8),
+      caseId:c.id,
+      caseNo:c.caseId,
+      location:c.city || c.location || '',
+      bankerName:c.bankerName,
+      bank:c.bank || c.client || '',
+      branch:c.branch,
+      paymentReceived:received,
+      paymentAmountIn:paymentAmount,
+      expenses,
+      refundAmount:refund,
+      paymentDate,
+      accountingPeriod,
+      paymentTime:textValue(req.body.paymentTime||new Date().toTimeString().slice(0,5),'Payment time',20),
+      payerName:textValue(req.body.payerName||'','Payer name',200),
+      transactionId:textValue(req.body.transactionId||'','Transaction ID',200),
+      mode:textValue(req.body.mode||'','Payment mode',100),
+      note:textValue(req.body.note||'','Payment note',MAX_TIMELINE_TEXT_LENGTH),
+      createdAt:nowIso,
+      createdBy:actor.name,
+      updatedAt:nowIso,
+      updatedBy:actor.name
+    };
     d.payments = mergePaymentRecords(d.payments || [], [p]);
     c.financeVersion = Number(c.financeVersion || 0) + 1;
-    Object.assign(c,{paymentTrackingStatus:normalizePaymentTrackingStatus(received),paymentTrackingUpdatedAt:Date.now(),paymentTrackingUpdatedBy:p.createdBy,paymentStatus:received,paymentReceived:received,paymentAmountIn:p.paymentAmountIn,refundAmount:p.refundAmount,payerName:p.payerName,transactionId:p.transactionId,paymentDate:p.paymentDate,paymentTime:p.paymentTime,ledger:{...(c.ledger || {}),amountIn:p.paymentAmountIn,date:p.paymentDate,mode:p.mode,txnId:p.transactionId,status:normalizePaymentTrackingStatus(received),updatedAt:Date.now(),updatedBy:p.createdBy,financeVersion:c.financeVersion}});
+    const nextTrackingStatus=normalizePaymentTrackingStatus(received);
+    Object.assign(c,{
+      financeAccountingPeriod:accountingPeriod,
+      paymentTrackingStatus:nextTrackingStatus,
+      paymentTrackingUpdatedAt:Date.now(),
+      paymentTrackingUpdatedBy:p.createdBy,
+      paymentStatus:received,
+      paymentReceived:received,
+      paymentAmountIn:p.paymentAmountIn,
+      refundAmount:p.refundAmount,
+      payerName:p.payerName,
+      transactionId:p.transactionId,
+      paymentDate:p.paymentDate,
+      paymentTime:p.paymentTime,
+      ledger:{
+        ...(c.ledger || {}),
+        amountIn:p.paymentAmountIn,
+        expenses:p.expenses,
+        refund:p.refundAmount,
+        date:p.paymentDate,
+        accountingPeriod,
+        mode:p.mode,
+        txnId:p.transactionId,
+        status:nextTrackingStatus,
+        paymentStatus:nextTrackingStatus,
+        updatedAt:Date.now(),
+        updatedBy:p.createdBy,
+        financeVersion:c.financeVersion
+      }
+    });
     c.paymentAuditTrail ||= [];
-    c.paymentAuditTrail.unshift({id:nanoid(8),at:nowIso,by:p.createdBy,action:'Payment ledger updated',newStatus:c.paymentTrackingStatus,newAmount:p.paymentAmountIn,refundAmount:p.refundAmount,note:p.note});
+    c.paymentAuditTrail.unshift({
+      id:nanoid(8),
+      at:nowIso,
+      paymentDate:p.paymentDate,
+      accountingPeriod,
+      by:p.createdBy,
+      action:'Payment ledger updated',
+      oldStatus:previousStatus,
+      newStatus:c.paymentTrackingStatus,
+      oldAmount:previousAmount,
+      newAmount:p.paymentAmountIn,
+      oldExpenses:previousExpenses,
+      newExpenses:p.expenses,
+      oldRefund:previousRefund,
+      newRefund:p.refundAmount,
+      note:p.note
+    });
     c.history ||= [];
-    c.history.unshift({at:nowIso,by:p.createdBy,action:`Payment ledger updated: ${received}`});
-    const auditEntry=addAudit(d,p.createdBy,'Payment ledger updated',c.caseId);
+    c.history.unshift({at:nowIso,by:p.createdBy,action:`Payment ledger updated for ${accountingPeriod}: ${received}`});
+    const auditEntry=addAudit(d,p.createdBy,`Payment ledger updated for ${accountingPeriod}`,c.caseId);
     const nextSnapshot = buildFinanceSnapshot(c);
     const persistence = await save(d, {
       actor:p.createdBy,
       reason:'finance_payment_ledger_update',
       collections:['cases','payments','audit'],
       collectionRowIds:{cases:[String(c.id || c.caseId)],payments:[String(p.id)],audit:[String(auditEntry.id)]},
-      financeEvent:{caseId:String(c.id || c.caseId),caseNo:c.caseId || c.id || '',action:`Payment ledger updated: ${received}`,actor:p.createdBy,previousSnapshot,nextSnapshot}
+      financeEvent:{caseId:String(c.id || c.caseId),caseNo:c.caseId || c.id || '',action:`Payment ledger updated for ${accountingPeriod}: ${received}`,actor:p.createdBy,previousSnapshot,nextSnapshot}
     });
     res.json({ok:true,payment:p,project:c,case:c,financeVersion:c.financeVersion,persistence});
   } catch (e) {

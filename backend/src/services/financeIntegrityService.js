@@ -14,7 +14,8 @@ export const FINANCE_FIELDS = Object.freeze([
   'transactionId',
   'paymentDate',
   'paymentTime',
-  'paymentAuditTrail'
+  'paymentAuditTrail',
+  'financeAccountingPeriod'
 ]);
 
 export const toTimestamp = (value) => {

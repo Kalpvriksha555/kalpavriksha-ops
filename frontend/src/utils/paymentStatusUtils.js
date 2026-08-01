@@ -1,3 +1,5 @@
+import { getCurrentAccountingMonthKey, normalizeAccountingMonthKey } from './accountingPeriodUtils.js';
+
 export const PAYMENT_TRACKING_OPTIONS = ['Not Updated', 'Pending', 'Paid'];
 
 const normalizePaymentValue = (value = '') => String(value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -85,6 +87,7 @@ export const buildPaymentTrackingUpdate = (project = {}, status = 'Not Updated',
   const cleanedEnteredAmount = typeof enteredAmount === 'string' ? enteredAmount.replace(/[^0-9.-]/g, '') : enteredAmount;
   const enteredNumeric = Number(cleanedEnteredAmount);
   const today = new Date(now).toISOString().slice(0, 10);
+  const accountingPeriod = normalizeAccountingMonthKey(paymentDetails.accountingPeriod || paymentDetails.paymentDate || paymentDetails.date || existingLedger.accountingPeriod || existingLedger.date || project.financeAccountingPeriod || project.paymentDate, getCurrentAccountingMonthKey(now));
 
   let nextLedger = {
     ...existingLedger,
@@ -99,6 +102,7 @@ export const buildPaymentTrackingUpdate = (project = {}, status = 'Not Updated',
       ...nextLedger,
       amountIn: amountToSave,
       date: paymentDetails.paymentDate || paymentDetails.date || existingLedger.date || today,
+      accountingPeriod,
       mode: paymentDetails.mode || existingLedger.mode || '',
       receivedFrom: paymentDetails.receivedFrom || paymentDetails.payerName || existingLedger.receivedFrom || project.customerName || project.client || '',
       txnId: paymentDetails.txnId || paymentDetails.transactionId || existingLedger.txnId || '',
@@ -111,6 +115,7 @@ export const buildPaymentTrackingUpdate = (project = {}, status = 'Not Updated',
       ...nextLedger,
       status: normalizedStatus,
       paymentStatus: normalizedStatus,
+      accountingPeriod,
     };
   }
 
@@ -127,6 +132,11 @@ export const buildPaymentTrackingUpdate = (project = {}, status = 'Not Updated',
     newStatus: computedStatus,
     oldAmount: existingAmountIn,
     newAmount: nextAmountIn,
+    accountingPeriod,
+    oldExpenses: Math.max(0, Number(existingLedger.expenses) || 0),
+    newExpenses: Math.max(0, Number(nextLedger.expenses) || 0),
+    oldRefund: Math.max(0, Number(existingLedger.refund ?? project.refundAmount) || 0),
+    newRefund: Math.max(0, Number(nextLedger.refund ?? project.refundAmount) || 0),
     note: paymentDetails.note || (computedStatus === 'Paid'
       ? `Payment saved and ₹${Number(nextAmountIn || 0).toLocaleString('en-IN')} linked to Finance Ledger.`
       : `Payment status calculated as ${computedStatus}.`)
@@ -134,6 +144,7 @@ export const buildPaymentTrackingUpdate = (project = {}, status = 'Not Updated',
 
   return {
     ...draft,
+    financeAccountingPeriod: accountingPeriod,
     paymentTrackingStatus: computedStatus,
     paymentTrackingUpdatedAt: now,
     paymentTrackingUpdatedBy: user?.name || 'Admin',

@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { FeedbackHost } from './components/ui/FeedbackHost.jsx';
 import { notifyUser, requestConfirmation, requestInput } from './services/uiFeedback.js';
 import { useAdaptiveWorkspaceSync } from './hooks/useAdaptiveWorkspaceSync.js';
 import { formatLastSeenDateTime, formatCallDuration, formatDateKey, formatDateTime, formatDuration, formatMinutes } from './utils/date';
+import { buildProjectMonthlyFinanceEntry, compareAccountingMonths, formatAccountingMonthLabel, getAvailableFinanceMonthKeys, getCurrentAccountingMonthKey, getFinanceEventMonthKey, getPreviousAccountingMonthKey, getProjectCreatedMonthKey, getProjectFinanceMonthKey, normalizeAccountingMonthKey } from './utils/accountingPeriodUtils.js';
 import { formatTaskId, allProjectDocs, getCompletedDocuments, getLatestCompletedFileName, getTaskDescription, getEstimateDetails, getCompletedFileBadge } from './utils/taskDisplayUtils';
 import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass, buildPaymentTrackingUpdate, getPaymentEstimateAmount, getPaymentReceivedAmount, derivePaymentTrackingStatusFromData } from './features/finance';
 import { getBreakMinutesFromLog, getTaskBusySince, getUserActiveTasks, getUserLastCompletedAt, getUserFreeSince, getUserBusySince, getDraftingElapsedMs, getTotalLoggedInMinutesFromLog, getActiveMinutesFromLog, getAttendanceActiveTaskMinutes, buildAttendanceAccrual, deriveAttendanceSession, getAttendanceFirstLoginLabel, buildAttendanceEngineV3 } from './features/attendance';
@@ -96,7 +97,7 @@ const sanitizeProjectsForCache = (projects) => (Array.isArray(projects) ? projec
 const FINANCE_COMPARE_FIELDS = Object.freeze([
   'ledger','financeVersion','paymentTrackingStatus','paymentTrackingUpdatedAt','paymentTrackingUpdatedBy',
   'paymentStatus','paymentReceived','paymentAmountIn','refundAmount','payerName','transactionId',
-  'paymentDate','paymentTime','paymentAuditTrail'
+  'paymentDate','paymentTime','paymentAuditTrail','financeAccountingPeriod'
 ]);
 
 const financeSignature = (project = {}) => JSON.stringify(Object.fromEntries(
@@ -1680,6 +1681,7 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
     return 'bg-slate-400';
   };
 
+
   const handleExport = () => {
     const headers = ["Name", "Role", "Date", "First Login", "Status", "Last Seen", "Logged-in Time", "Productive Time", "Idle Time", "Break Time", "Productivity %", "Alert", "Source"];
     const rows = attendanceRows.map(log => [
@@ -1809,18 +1811,21 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
 };
 
 const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceViewState }) => {
-  const [localFinanceViewState, setLocalFinanceViewState] = useState({ activeTab: 'transactions', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
+  const [localFinanceViewState, setLocalFinanceViewState] = useState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
   const effectiveFinanceViewState = financeViewState || localFinanceViewState;
   const updateFinanceViewState = (patch) => {
-    const update = (previous = {}) => ({ activeTab: 'transactions', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [], ...previous, ...patch });
+    const update = (previous = {}) => ({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [], ...previous, ...patch });
     if (typeof setFinanceViewState === 'function') setFinanceViewState(update);
     else setLocalFinanceViewState(update);
   };
   const activeTab = effectiveFinanceViewState.activeTab || 'transactions';
+  const selectedMonth = normalizeAccountingMonthKey(effectiveFinanceViewState.selectedMonth, getCurrentAccountingMonthKey());
+  const selectedMonthLabel = formatAccountingMonthLabel(selectedMonth);
   const selectedLocations = Array.isArray(effectiveFinanceViewState.selectedLocations) ? effectiveFinanceViewState.selectedLocations : [];
   const selectedClients = Array.isArray(effectiveFinanceViewState.selectedClients) ? effectiveFinanceViewState.selectedClients : [];
   const selectedPaymentStatuses = Array.isArray(effectiveFinanceViewState.selectedPaymentStatuses) ? effectiveFinanceViewState.selectedPaymentStatuses : [];
   const setActiveTab = (value) => updateFinanceViewState({ activeTab: value });
+  const setSelectedMonth = (value) => updateFinanceViewState({ selectedMonth: normalizeAccountingMonthKey(value, selectedMonth), selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
   const setSelectedLocations = (value) => updateFinanceViewState({ selectedLocations: value });
   const setSelectedClients = (value) => updateFinanceViewState({ selectedClients: value });
   const setSelectedPaymentStatuses = (value) => updateFinanceViewState({ selectedPaymentStatuses: value });
@@ -1853,102 +1858,194 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
     }
   };
   
-  // Finance must account for every real task. Missing finance fields are explicitly "Not Updated".
-  const baseLedgerProjects = projects.filter(p => !isRevisionWorkItem(p) && !p.excludeFromLedger && !p.isFinanceExcluded && (p.id || p.caseId));
-  const allLocations = [...new Set(baseLedgerProjects.map(p => getCanonicalLocationName(p.location || p.city)).filter(Boolean))].sort();
-  const availableClients = [...new Set(baseLedgerProjects.map(p => getCanonicalBankName(p.client || p.bankName || p.bank)).filter(Boolean))].sort();
+  // Finance is always period-scoped. Expensive ledger derivation is memoized
+  // and audit/month summaries are built only when their tab is opened.
+  const baseLedgerProjects = useMemo(() => (Array.isArray(projects) ? projects : [])
+    .filter(project => !isRevisionWorkItem(project) && !project.excludeFromLedger && !project.isFinanceExcluded && (project.id || project.caseId)), [projects]);
 
-  const ledgerProjects = baseLedgerProjects.filter(p => {
-      if (selectedLocations.length > 0 && !selectedLocations.includes(getCanonicalLocationName(p.location || p.city))) return false;
-      if (selectedClients.length > 0 && !selectedClients.includes(getCanonicalBankName(p.client || p.bankName || p.bank))) return false;
-      if (selectedPaymentStatuses.length > 0 && !selectedPaymentStatuses.includes(deriveLedgerPaymentStatus(p))) return false;
-      return true;
-  }).sort((a,b) => ((b.ledger?.updatedAt || b.completedAt || b.createdAt) || 0) - ((a.ledger?.updatedAt || a.completedAt || a.createdAt) || 0));
+  const financeEntryCache = useMemo(() => new WeakMap(), [baseLedgerProjects]);
+  const entryForMonth = useCallback((project = {}, monthKey = selectedMonth) => {
+    let projectCache = financeEntryCache.get(project);
+    if (!projectCache) {
+      projectCache = new Map();
+      financeEntryCache.set(project, projectCache);
+    }
+    const normalizedMonth = normalizeAccountingMonthKey(monthKey, selectedMonth);
+    if (!projectCache.has(normalizedMonth)) projectCache.set(normalizedMonth, buildProjectMonthlyFinanceEntry(project, normalizedMonth));
+    return projectCache.get(normalizedMonth);
+  }, [financeEntryCache, selectedMonth]);
 
-  const statusCounts = baseLedgerProjects.reduce((acc, p) => {
-    const status = deriveLedgerPaymentStatus(p);
+  const periodEntryById = useMemo(() => new Map(baseLedgerProjects.map(project => [
+    String(project.id || project.caseId), entryForMonth(project, selectedMonth)
+  ])), [baseLedgerProjects, entryForMonth, selectedMonth]);
+  const periodEntryFor = useCallback((project = {}) => periodEntryById.get(String(project.id || project.caseId))
+    || entryForMonth(project, selectedMonth), [periodEntryById, entryForMonth, selectedMonth]);
+
+  const periodBaseProjects = useMemo(() => baseLedgerProjects.filter(project => periodEntryFor(project).hasActivity), [baseLedgerProjects, periodEntryFor]);
+  const allLocations = useMemo(() => [...new Set(periodBaseProjects.map(project => getCanonicalLocationName(project.location || project.city)).filter(Boolean))].sort(), [periodBaseProjects]);
+  const availableClients = useMemo(() => [...new Set(periodBaseProjects.map(project => getCanonicalBankName(project.client || project.bankName || project.bank)).filter(Boolean))].sort(), [periodBaseProjects]);
+  const selectedLocationsKey = selectedLocations.join('|');
+  const selectedClientsKey = selectedClients.join('|');
+  const selectedPaymentStatusesKey = selectedPaymentStatuses.join('|');
+  const matchesLocationAndClient = useCallback((project = {}) => {
+    if (selectedLocations.length > 0 && !selectedLocations.includes(getCanonicalLocationName(project.location || project.city))) return false;
+    if (selectedClients.length > 0 && !selectedClients.includes(getCanonicalBankName(project.client || project.bankName || project.bank))) return false;
+    return true;
+  }, [selectedLocationsKey, selectedClientsKey]);
+
+  const ledgerProjects = useMemo(() => periodBaseProjects.filter(project => {
+    if (!matchesLocationAndClient(project)) return false;
+    if (selectedPaymentStatuses.length > 0 && !selectedPaymentStatuses.includes(periodEntryFor(project).statusAtClose)) return false;
+    return true;
+  }).sort((left, right) => periodEntryFor(right).activityAt - periodEntryFor(left).activityAt), [periodBaseProjects, matchesLocationAndClient, selectedPaymentStatusesKey, periodEntryFor]);
+
+  const statusCounts = useMemo(() => periodBaseProjects.reduce((acc, project) => {
+    const status = periodEntryFor(project).statusAtClose;
     acc[status] = (acc[status] || 0) + 1;
     acc.All += 1;
     return acc;
-  }, { All: 0, 'Not Updated': 0, Pending: 0, 'Partially Paid': 0, Paid: 0, Overpaid: 0 });
+  }, { All:0, 'Not Updated':0, Pending:0, 'Partially Paid':0, Paid:0, Overpaid:0 }), [periodBaseProjects, periodEntryFor]);
 
-  const totalCost = ledgerProjects.reduce((sum, p) => sum + getPaymentEstimateAmount(p), 0);
-  const totalReceived = ledgerProjects.reduce((sum, p) => sum + getPaymentReceivedAmount(p), 0);
-  const totalExpenses = ledgerProjects.reduce((sum, p) => sum + (Number(p.ledger?.expenses) || 0), 0);
-  const totalRefund = ledgerProjects.reduce((sum, p) => sum + (Number(p.ledger?.refund) || 0), 0);
+  const financeTotals = useMemo(() => ledgerProjects.reduce((totals, project) => {
+    const entry = periodEntryFor(project);
+    totals.cost += entry.estimate;
+    totals.received += entry.received;
+    totals.expenses += entry.expenses;
+    totals.refund += entry.refund;
+    totals.pending += entry.pendingAtClose;
+    return totals;
+  }, { cost:0, received:0, expenses:0, refund:0, pending:0 }), [ledgerProjects, periodEntryFor]);
+  const totalCost = financeTotals.cost;
+  const totalReceived = financeTotals.received;
+  const totalExpenses = financeTotals.expenses;
+  const totalRefund = financeTotals.refund;
+  const totalPending = financeTotals.pending;
   const netRevenue = totalReceived - totalExpenses - totalRefund;
-  const totalPending = ledgerProjects.reduce((sum, p) => sum + Math.max(0, getPaymentEstimateAmount(p) - getPaymentReceivedAmount(p)), 0);
 
-  const paymentAuditEvents = ledgerProjects.flatMap(p => {
-    const explicitAudit = Array.isArray(p.paymentAuditTrail) ? p.paymentAuditTrail : [];
-    const ledgerAudit = Array.isArray(p.ledger?.auditTrail) ? p.ledger.auditTrail : [];
-    const historyAudit = (Array.isArray(p.history) ? p.history : [])
-      .filter(h => /payment|ledger|paid|pending|refund|received/i.test(String(h.action || h.text || '')))
-      .map(h => ({
-        id: h.id || `${p.id}-${h.at || h.time || Math.random()}`,
-        at: h.at || h.time || p.ledger?.updatedAt || p.paymentTrackingUpdatedAt || p.updatedAt,
-        by: h.by || h.user || h.updatedBy || p.paymentTrackingUpdatedBy || p.ledger?.updatedBy || 'Admin',
-        action: h.action || h.text || 'Payment activity',
-        note: h.note || '',
+  const previousMonthKey = getPreviousAccountingMonthKey(selectedMonth);
+  const carryForwardProjects = useMemo(() => baseLedgerProjects.filter(project => {
+    if (!matchesLocationAndClient(project)) return false;
+    const projectMonth = getProjectFinanceMonthKey(project);
+    const createdMonth = getProjectCreatedMonthKey(project);
+    const hadPriorFinanceEvent = (Array.isArray(project.paymentAuditTrail) ? project.paymentAuditTrail : [])
+      .some(event => compareAccountingMonths(getFinanceEventMonthKey(event, project), selectedMonth) < 0);
+    const existedBeforePeriod = (projectMonth && compareAccountingMonths(projectMonth, selectedMonth) < 0)
+      || (createdMonth && compareAccountingMonths(createdMonth, selectedMonth) < 0)
+      || hadPriorFinanceEvent;
+    if (!existedBeforePeriod) return false;
+    const priorClose = entryForMonth(project, previousMonthKey);
+    return priorClose.pendingAtClose > 0 && ['Pending', 'Partially Paid'].includes(priorClose.statusAtClose);
+  }), [baseLedgerProjects, matchesLocationAndClient, selectedMonth, previousMonthKey, entryForMonth]);
+  const carryForwardPending = useMemo(() => carryForwardProjects.reduce((sum, project) => sum + entryForMonth(project, previousMonthKey).pendingAtClose, 0), [carryForwardProjects, entryForMonth, previousMonthKey]);
+
+  const paymentAuditEvents = useMemo(() => {
+    if (activeTab !== 'audit') return [];
+    return baseLedgerProjects.filter(matchesLocationAndClient).flatMap(project => {
+      const explicitAudit = Array.isArray(project.paymentAuditTrail) ? project.paymentAuditTrail : [];
+      const ledgerAudit = Array.isArray(project.ledger?.auditTrail) ? project.ledger.auditTrail : [];
+      const historyAudit = (Array.isArray(project.history) ? project.history : [])
+        .filter(event => /payment|ledger|paid|pending|refund|received/i.test(String(event.action || event.text || '')))
+        .map((event, index) => ({
+          id:event.id || `${project.id || project.caseId}-${event.at || event.time || 'history'}-${index}`,
+          at:event.at || event.time || project.ledger?.updatedAt || project.paymentTrackingUpdatedAt || project.updatedAt,
+          by:event.by || event.user || event.updatedBy || project.paymentTrackingUpdatedBy || project.ledger?.updatedBy || 'Admin',
+          action:event.action || event.text || 'Payment activity',
+          note:event.note || ''
+        }));
+      const datedEvents = [...explicitAudit, ...ledgerAudit, ...historyAudit]
+        .filter(event => getFinanceEventMonthKey(event, project) === selectedMonth);
+      const entry = periodEntryFor(project);
+      const synthesized = datedEvents.length === 0 && getProjectFinanceMonthKey(project) === selectedMonth
+        && (project.ledger?.updatedAt || project.paymentTrackingUpdatedAt || project.ledger?.date || project.paymentDate) ? [{
+          id:`${project.id || project.caseId}-current-payment-state-${selectedMonth}`,
+          at:project.ledger?.updatedAt || project.paymentTrackingUpdatedAt || project.ledger?.date || project.paymentDate,
+          by:project.paymentTrackingUpdatedBy || project.ledger?.updatedBy || 'Admin',
+          action:'Current payment state', oldStatus:'', newStatus:entry.statusAtClose, oldAmount:'', newAmount:entry.closingReceived,
+          accountingPeriod:selectedMonth, note:`Latest saved payment/ledger state assigned to ${selectedMonthLabel}`
+        }] : [];
+      return [...datedEvents, ...synthesized].map(event => ({
+        ...event,
+        taskId:project.id || project.caseId,
+        customerName:getCustomerDisplayName(project),
+        bank:project.client || project.bank || '',
+        status:event.newStatus || entry.statusAtClose,
+        amount:event.newAmount ?? event.amount ?? entry.received
       }));
-    const synthesized = (p.ledger?.updatedAt || p.paymentTrackingUpdatedAt) ? [{
-      id: `${p.id}-current-payment-state`,
-      at: p.ledger?.updatedAt || p.paymentTrackingUpdatedAt,
-      by: p.paymentTrackingUpdatedBy || p.ledger?.updatedBy || 'Admin',
-      action: 'Current payment state',
-      oldStatus: '',
-      newStatus: deriveLedgerPaymentStatus(p),
-      oldAmount: '',
-      newAmount: Number(p.ledger?.amountIn) || 0,
-      note: 'Latest saved payment/ledger state for this task'
-    }] : [];
-    return [...explicitAudit, ...ledgerAudit, ...historyAudit, ...synthesized].map(event => ({
-      ...event,
-      taskId: p.id,
-      customerName: getCustomerDisplayName(p),
-      bank: p.client || '',
-      status: event.newStatus || deriveLedgerPaymentStatus(p),
-      amount: event.newAmount ?? event.amount ?? Number(p.ledger?.amountIn || 0),
-    }));
-  }).sort((a, b) => (new Date(b.at || 0).getTime() || 0) - (new Date(a.at || 0).getTime() || 0));
+    }).filter(event => selectedPaymentStatuses.length === 0 || selectedPaymentStatuses.includes(String(event.status || 'Not Updated')))
+      .sort((left, right) => (new Date(right.at || 0).getTime() || 0) - (new Date(left.at || 0).getTime() || 0));
+  }, [activeTab, baseLedgerProjects, matchesLocationAndClient, selectedMonth, selectedMonthLabel, selectedPaymentStatusesKey, periodEntryFor]);
 
-  const monthlyStats = {};
-  const clientStats = {};
-  const customerStats = {};
-
-  ledgerProjects.forEach(p => {
-    const dateStr = p.ledger?.date ? p.ledger.date : (p.completedAt || p.createdAt);
-    let monthKey = 'Unknown';
-    if (dateStr) {
-        try { monthKey = new Date(dateStr).toLocaleString('default', { month: 'long', year: 'numeric' }); } catch(e){}
+  const availableMonthKeys = useMemo(() => activeTab === 'monthly'
+    ? getAvailableFinanceMonthKeys(baseLedgerProjects, selectedMonth)
+    : [selectedMonth], [activeTab, baseLedgerProjects, selectedMonth]);
+  const monthlyStats = useMemo(() => {
+    if (activeTab !== 'monthly') return {};
+    const stats = {};
+    for (const monthKey of availableMonthKeys) {
+      for (const project of baseLedgerProjects) {
+        if (!matchesLocationAndClient(project)) continue;
+        const entry = entryForMonth(project, monthKey);
+        if (!entry.hasActivity) continue;
+        if (selectedPaymentStatuses.length > 0 && !selectedPaymentStatuses.includes(entry.statusAtClose)) continue;
+        if (!stats[monthKey]) stats[monthKey] = { revenue:0, cost:0, expense:0, refund:0, count:0 };
+        stats[monthKey].revenue += entry.received;
+        stats[monthKey].cost += entry.estimate;
+        stats[monthKey].expense += entry.expenses;
+        stats[monthKey].refund += entry.refund;
+        stats[monthKey].count += 1;
+      }
     }
-    
-    const clientKey = p.client || 'Unknown Client';
-    const custKey = p.customerName ? `${p.customerName} (${p.client})` : p.client;
+    return stats;
+  }, [activeTab, availableMonthKeys, baseLedgerProjects, matchesLocationAndClient, selectedPaymentStatusesKey, entryForMonth]);
 
-    const est = Number(p.estimate) || 0;
-    const rec = Number(p.ledger?.amountIn) || 0;
-    const exp = Number(p.ledger?.expenses) || 0;
-    const ref = Number(p.ledger?.refund) || 0;
-    const pen = est - rec;
+  const clientStats = useMemo(() => {
+    if (activeTab !== 'clients') return {};
+    return ledgerProjects.reduce((stats, project) => {
+      const entry = periodEntryFor(project);
+      const key = getCanonicalBankName(project.client || project.bankName || project.bank) || 'Unknown Client';
+      if (!stats[key]) stats[key] = { revenue:0, cost:0, expense:0, refund:0, pending:0, count:0 };
+      stats[key].revenue += entry.received; stats[key].cost += entry.estimate; stats[key].expense += entry.expenses;
+      stats[key].refund += entry.refund; stats[key].pending += entry.pendingAtClose; stats[key].count += 1;
+      return stats;
+    }, {});
+  }, [activeTab, ledgerProjects, periodEntryFor]);
 
-    if (!monthlyStats[monthKey]) monthlyStats[monthKey] = { revenue: 0, cost: 0, expense: 0, refund: 0, count: 0 };
-    monthlyStats[monthKey].revenue += rec; monthlyStats[monthKey].cost += est; monthlyStats[monthKey].expense += exp; monthlyStats[monthKey].refund += ref; monthlyStats[monthKey].count += 1;
+  const customerStats = useMemo(() => {
+    if (activeTab !== 'customers') return {};
+    return ledgerProjects.reduce((stats, project) => {
+      const entry = periodEntryFor(project);
+      const clientKey = getCanonicalBankName(project.client || project.bankName || project.bank) || 'Unknown Client';
+      const key = `${getCustomerDisplayName(project) || 'Unknown Customer'} (${clientKey})`;
+      if (!stats[key]) stats[key] = { revenue:0, cost:0, pending:0, count:0 };
+      stats[key].revenue += entry.received; stats[key].cost += entry.estimate;
+      stats[key].pending += entry.pendingAtClose; stats[key].count += 1;
+      return stats;
+    }, {});
+  }, [activeTab, ledgerProjects, periodEntryFor]);
 
-    if (!clientStats[clientKey]) clientStats[clientKey] = { revenue: 0, cost: 0, expense: 0, refund: 0, count: 0 };
-    clientStats[clientKey].revenue += rec; clientStats[clientKey].cost += est; clientStats[clientKey].expense += exp; clientStats[clientKey].refund += ref; clientStats[clientKey].count += 1;
-
-    if (!customerStats[custKey]) customerStats[custKey] = { revenue: 0, cost: 0, pending: 0, count: 0 };
-    customerStats[custKey].revenue += rec; customerStats[custKey].cost += est; customerStats[custKey].count += 1; customerStats[custKey].pending += pen;
-  });
+  const [ledgerPage, setLedgerPage] = useState(1);
+  const ledgerPageSize = 50;
+  const visibleLedgerProjects = useMemo(() => activeTab === 'pending'
+    ? ledgerProjects.filter(project => ['Pending', 'Partially Paid'].includes(periodEntryFor(project).statusAtClose))
+    : ledgerProjects, [activeTab, ledgerProjects, periodEntryFor]);
+  const pagedLedgerProjects = useMemo(() => visibleLedgerProjects.slice((ledgerPage - 1) * ledgerPageSize, ledgerPage * ledgerPageSize), [visibleLedgerProjects, ledgerPage]);
+  const pagedPaymentAuditEvents = useMemo(() => paymentAuditEvents.slice((ledgerPage - 1) * ledgerPageSize, ledgerPage * ledgerPageSize), [paymentAuditEvents, ledgerPage]);
+  const paginatedLength = activeTab === 'audit' ? paymentAuditEvents.length
+    : (['transactions', 'pending', 'report'].includes(activeTab) ? visibleLedgerProjects.length : 0);
+  const ledgerPageCount = Math.max(1, Math.ceil(paginatedLength / ledgerPageSize));
+  useEffect(() => { setLedgerPage(1); }, [activeTab, selectedMonth, selectedLocationsKey, selectedClientsKey, selectedPaymentStatusesKey]);
+  useEffect(() => { if (ledgerPage > ledgerPageCount) setLedgerPage(ledgerPageCount); }, [ledgerPage, ledgerPageCount]);
 
   const handleExport = () => {
-    const headers = ["Task ID", "Created Date", "Client", "Customer", "Location", "Payment Status", "Cost (Est)", "Received", "Actual Expenses", "Refund", "Pending"];
-    const rows = ledgerProjects.map(p => [
-      p.id, p.createdAt ? new Date(p.createdAt).toLocaleDateString() : '-',
-      p.client, p.customerName || '', p.location || '', deriveLedgerPaymentStatus(p), getPaymentEstimateAmount(p), getPaymentReceivedAmount(p), Number(p.ledger?.expenses)||0, Number(p.ledger?.refund)||0, Math.max(0, getPaymentEstimateAmount(p) - getPaymentReceivedAmount(p))
-    ]);
-    exportToCSV(headers, rows, "Financial_Ledger.csv");
+    const headers = ["Accounting Month", "Task ID", "Finance Activity", "Created Date", "Client", "Customer", "Location", "Status at Month Close", "Cost (Est)", "Received in Month", "Expenses in Month", "Refunds in Month", "Pending at Month Close"];
+    const rows = ledgerProjects.map(project => {
+      const entry = periodEntryFor(project);
+      return [
+        selectedMonth, project.id || project.caseId, entry.activityAt ? new Date(entry.activityAt).toLocaleString('en-IN') : '-', project.createdAt ? new Date(project.createdAt).toLocaleDateString('en-IN') : '-',
+        project.client || project.bank || '', getCustomerDisplayName(project), project.location || project.city || '', entry.statusAtClose, entry.estimate, entry.received, entry.expenses, entry.refund, entry.pendingAtClose
+      ];
+    });
+    exportToCSV(headers, rows, `Financial_Ledger_${selectedMonth}.csv`);
   };
 
   return (
@@ -1956,7 +2053,12 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
       <div className="flex flex-col xl:flex-row justify-between xl:items-end gap-4">
         <div>
            <h2 className="text-3xl font-extrabold text-slate-800 tracking-tight">Financial Ledger</h2>
-           <div className="flex flex-wrap gap-3 mt-4">
+           <p className="mt-2 text-sm font-bold text-slate-500">Every total, table and export is isolated to one accounting month. Previous months never merge into {selectedMonthLabel}.</p>
+           <div className="flex flex-wrap items-end gap-3 mt-4">
+              <label className="bg-white border-2 border-indigo-100 rounded-xl px-3 py-2 shadow-sm">
+                <span className="block text-[10px] font-black uppercase tracking-widest text-indigo-500 mb-1">Accounting Month</span>
+                <input type="month" value={selectedMonth} max={getCurrentAccountingMonthKey()} onChange={(event) => setSelectedMonth(event.target.value)} className="font-black text-slate-800 outline-none bg-transparent" aria-label="Finance accounting month" />
+              </label>
               <MultiSelectCheckbox label="Filter by Area/City" options={allLocations} selectedValues={selectedLocations} onChange={setSelectedLocations} allLabel="All Areas" />
               <MultiSelectCheckbox label="Filter by Bank" options={availableClients} selectedValues={selectedClients} onChange={setSelectedClients} allLabel="All Banks" />
               <MultiSelectCheckbox label="Payment Status" options={financePaymentStatuses} selectedValues={selectedPaymentStatuses} onChange={setSelectedPaymentStatuses} allLabel={'All Statuses (' + statusCounts.All + ')'} />
@@ -1966,7 +2068,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
           <div className="flex flex-wrap bg-slate-100 p-1.5 rounded-xl border border-slate-200">
             <button type="button" onClick={() => setActiveTab('transactions')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'transactions' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><FileText className="w-4 h-4 mr-1.5" /> All Logs</button>
             <button type="button" onClick={() => setActiveTab('pending')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'pending' ? 'bg-red-50 text-red-600 shadow-sm border border-red-100' : 'text-slate-500 hover:text-slate-700'}`}><Clock className="w-4 h-4 mr-1.5" /> Pending</button>
-            <button type="button" onClick={() => setActiveTab('monthly')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'monthly' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><List className="w-4 h-4 mr-1.5" /> Monthly</button>
+            <button type="button" onClick={() => setActiveTab('monthly')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'monthly' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><List className="w-4 h-4 mr-1.5" /> Month Summary</button>
             <button type="button" onClick={() => setActiveTab('clients')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'clients' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Briefcase className="w-4 h-4 mr-1.5" /> Banks</button>
             <button type="button" onClick={() => setActiveTab('customers')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'customers' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><User className="w-4 h-4 mr-1.5" /> Customers</button>
             <button type="button" onClick={() => setActiveTab('report')} className={`px-4 py-2 text-sm font-bold rounded-lg transition-all flex items-center ${activeTab === 'report' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><BarChart3 className="w-4 h-4 mr-1.5" /> Report</button>
@@ -1978,35 +2080,45 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
 
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-5">
         <div className="bg-emerald-50 p-6 rounded-3xl border-2 border-emerald-100 shadow-sm">
-          <p className="text-xs text-emerald-600 font-extrabold uppercase tracking-widest">Gross Received</p>
+          <p className="text-xs text-emerald-600 font-extrabold uppercase tracking-widest">{selectedMonthLabel} Received</p>
           <p className="text-3xl font-black text-emerald-700 mt-2">₹{totalReceived.toLocaleString()}</p>
         </div>
         <div className="bg-amber-50 p-6 rounded-3xl border-2 border-amber-100 shadow-sm">
-          <p className="text-xs text-amber-600 font-extrabold uppercase tracking-widest">Actual Expenses</p>
+          <p className="text-xs text-amber-600 font-extrabold uppercase tracking-widest">{selectedMonthLabel} Expenses</p>
           <p className="text-3xl font-black text-amber-700 mt-2">₹{totalExpenses.toLocaleString()}</p>
         </div>
         <div className="bg-red-50 p-6 rounded-3xl border-2 border-red-100 shadow-sm">
-          <p className="text-xs text-red-600 font-extrabold uppercase tracking-widest">Total Refunds</p>
+          <p className="text-xs text-red-600 font-extrabold uppercase tracking-widest">{selectedMonthLabel} Refunds</p>
           <p className="text-3xl font-black text-red-700 mt-2">₹{totalRefund.toLocaleString()}</p>
         </div>
         <button type="button" onClick={() => setActiveTab('pending')} className="text-left bg-orange-50 p-6 rounded-3xl border-2 border-orange-100 shadow-sm hover:bg-orange-100 transition-colors">
-          <p className="text-xs text-orange-600 font-extrabold uppercase tracking-widest">Pending Payments</p>
+          <p className="text-xs text-orange-600 font-extrabold uppercase tracking-widest">{selectedMonthLabel} Pending</p>
           <p className="text-3xl font-black text-orange-700 mt-2">₹{totalPending.toLocaleString()}</p>
           <p className="text-[11px] font-bold text-orange-500 mt-2">Click to open pending payments</p>
         </button>
         <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-6 rounded-3xl shadow-lg text-white relative overflow-hidden">
           <div className="absolute -right-6 -top-6 w-24 h-24 bg-white/10 rounded-full blur-2xl"></div>
-          <p className="text-xs text-indigo-300 font-extrabold uppercase tracking-widest">True Net Profit</p>
+          <p className="text-xs text-indigo-300 font-extrabold uppercase tracking-widest">{selectedMonthLabel} Net Profit</p>
           <p className="text-3xl font-black text-white mt-2">₹{netRevenue.toLocaleString()}</p>
         </div>
       </div>
+
+      {carryForwardProjects.length > 0 && (
+        <div className="bg-blue-50 border-2 border-blue-100 rounded-2xl px-5 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <div>
+            <p className="font-black text-blue-800">Previous-month outstanding is kept separate</p>
+            <p className="text-sm font-bold text-blue-600">₹{carryForwardPending.toLocaleString()} across {carryForwardProjects.length} older task{carryForwardProjects.length === 1 ? '' : 's'} is excluded from every {selectedMonthLabel} total.</p>
+          </div>
+          <span className="shrink-0 text-xs font-black uppercase tracking-widest text-blue-700 bg-white border border-blue-200 rounded-xl px-3 py-2">Carry-forward only</span>
+        </div>
+      )}
 
       <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           {activeTab === 'pending' && (
             <div className="p-5 bg-red-50 border-b border-red-100">
-              <h3 className="text-lg font-black text-red-700">Pending Payments</h3>
-              <p className="text-sm font-bold text-red-500">Only tasks with outstanding balance are shown here.</p>
+              <h3 className="text-lg font-black text-red-700">{selectedMonthLabel} Pending Payments</h3>
+              <p className="text-sm font-bold text-red-500">Only outstanding balances assigned to this accounting month are shown. Older balances stay in carry-forward and are not mixed.</p>
             </div>
           )}
           {(activeTab === 'transactions' || activeTab === 'pending') && (
@@ -2017,20 +2129,21 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Task ID & Client</th>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-center">Status</th>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Cost (Est)</th>
-                  <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Received</th>
-                  <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Expenses</th>
-                  <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Pending</th>
+                  <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Received in Month</th>
+                  <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Expenses in Month</th>
+                  <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Pending at Close</th>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-center">Receipt</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {ledgerProjects.filter(p => activeTab === 'pending' ? ['Pending', 'Partially Paid'].includes(deriveLedgerPaymentStatus(p)) : true).map(p => {
-                  const est = getPaymentEstimateAmount(p);
-                  const rec = getPaymentReceivedAmount(p);
-                  const exp = Number(p.ledger?.expenses) || 0;
-                  const status = deriveLedgerPaymentStatus(p);
-                  const pen = Math.max(0, est - rec);
-                  const updateDate = p.ledger?.updatedAt ? new Date(p.ledger.updatedAt) : null;
+                {pagedLedgerProjects.map(p => {
+                  const entry = periodEntryFor(p);
+                  const est = entry.estimate;
+                  const rec = entry.received;
+                  const exp = entry.expenses;
+                  const status = entry.statusAtClose;
+                  const pen = entry.pendingAtClose;
+                  const updateDate = entry.activityAt ? new Date(entry.activityAt) : null;
                   
                   return (
                     <tr key={p.id} className="hover:bg-slate-50 transition-colors">
@@ -2046,7 +2159,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
                         <p className="font-medium text-slate-500 text-xs mt-0.5">{getCustomerDisplayName(p)}</p>
                       </td>
                       <td className="px-6 py-5 text-center">
-                        <span className={`inline-flex items-center justify-center px-2.5 py-1 rounded-full border text-[11px] font-black ${getLedgerPaymentBadgeClass(deriveLedgerPaymentStatus(p))}`}>{deriveLedgerPaymentStatus(p)}</span>
+                        <span className={`inline-flex items-center justify-center px-2.5 py-1 rounded-full border text-[11px] font-black ${getLedgerPaymentBadgeClass(status)}`}>{status}</span>
                       </td>
                       <td className="px-6 py-5 text-right font-bold text-slate-600">₹{est.toLocaleString()}</td>
                       <td className="px-6 py-5 text-right font-bold text-emerald-600">₹{rec.toLocaleString()}</td>
@@ -2064,8 +2177,8 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
                     </tr>
                   )
                 })}
-                {ledgerProjects.filter(p => activeTab === 'pending' ? ['Pending', 'Partially Paid'].includes(deriveLedgerPaymentStatus(p)) : true).length === 0 && (
-                   <tr><td colSpan="8" className="text-center py-10 text-slate-500 font-medium">No records found for this view.</td></tr>
+                {visibleLedgerProjects.length === 0 && (
+                   <tr><td colSpan="8" className="text-center py-10 text-slate-500 font-medium">No records found for {selectedMonthLabel}.</td></tr>
                 )}
               </tbody>
             </table>
@@ -2077,19 +2190,24 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
                 <tr>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Month / Year</th>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-center">Tasks</th>
-                  <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Received</th>
-                  <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Expenses</th>
+                  <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Received in Month</th>
+                  <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Expenses in Month</th>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Refunds</th>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right text-indigo-600">Net Profit</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {Object.keys(monthlyStats).map(month => {
+                {Object.keys(monthlyStats).sort((a, b) => compareAccountingMonths(b, a)).map(month => {
                   const data = monthlyStats[month];
                   const net = data.revenue - data.expense - data.refund;
                   return (
-                    <tr key={month} className="hover:bg-slate-50">
-                      <td className="px-6 py-5 font-bold text-slate-800">{month}</td>
+                    <tr key={month} className={month === selectedMonth ? 'bg-indigo-50/60' : 'hover:bg-slate-50'}>
+                      <td className="px-6 py-5 font-bold text-slate-800">
+                        <button type="button" onClick={() => { setSelectedMonth(month); setActiveTab('transactions'); }} className="text-left hover:text-indigo-600">
+                          {formatAccountingMonthLabel(month)}
+                          {month === selectedMonth && <span className="ml-2 text-[10px] font-black uppercase tracking-widest text-indigo-600">Selected</span>}
+                        </button>
+                      </td>
                       <td className="px-6 py-5 text-center">
                         <span className="bg-slate-100 text-slate-600 px-3 py-1.5 rounded-lg text-xs font-black">{data.count}</span>
                       </td>
@@ -2100,6 +2218,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
                     </tr>
                   )
                 })}
+                {Object.keys(monthlyStats).length === 0 && <tr><td colSpan="6" className="px-6 py-10 text-center font-bold text-slate-400">No monthly finance records are available.</td></tr>}
               </tbody>
             </table>
           )}
@@ -2133,6 +2252,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
                     </tr>
                   )
                 })}
+                {Object.keys(clientStats).length === 0 && <tr><td colSpan="6" className="px-6 py-10 text-center font-bold text-slate-400">No bank finance data for {selectedMonthLabel}.</td></tr>}
               </tbody>
             </table>
           )}
@@ -2144,8 +2264,8 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs">Customer Name</th>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-center">Tasks</th>
                   <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Cost (Est)</th>
-                  <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Received</th>
-                  <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right text-red-600">Total Pending</th>
+                  <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right">Received in Month</th>
+                  <th className="px-6 py-5 font-bold uppercase tracking-wider text-xs text-right text-red-600">Pending at Close</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -2165,6 +2285,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
                     </tr>
                   )
                 })}
+                {Object.keys(customerStats).length === 0 && <tr><td colSpan="5" className="px-6 py-10 text-center font-bold text-slate-400">No customer finance data for {selectedMonthLabel}.</td></tr>}
               </tbody>
             </table>
           )}
@@ -2174,19 +2295,19 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
             <div className="p-5 space-y-5">
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                 <div className="bg-slate-50 rounded-2xl p-4 border border-slate-100">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Filtered Records</p>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{selectedMonthLabel} Records</p>
                   <p className="text-2xl font-black text-slate-800">{ledgerProjects.length}</p>
                 </div>
                 <div className="bg-emerald-50 rounded-2xl p-4 border border-emerald-100">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-emerald-600">Filtered Received</p>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-emerald-600">{selectedMonthLabel} Received</p>
                   <p className="text-2xl font-black text-emerald-700">₹{totalReceived.toLocaleString()}</p>
                 </div>
                 <div className="bg-orange-50 rounded-2xl p-4 border border-orange-100">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-orange-600">Filtered Pending</p>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-orange-600">{selectedMonthLabel} Pending</p>
                   <p className="text-2xl font-black text-orange-700">₹{totalPending.toLocaleString()}</p>
                 </div>
                 <div className="bg-indigo-50 rounded-2xl p-4 border border-indigo-100">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Filtered Net</p>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">{selectedMonthLabel} Net</p>
                   <p className="text-2xl font-black text-indigo-700">₹{netRevenue.toLocaleString()}</p>
                 </div>
               </div>
@@ -2197,15 +2318,16 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
                     <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs">Bank / Customer</th>
                     <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs text-center">Payment Status</th>
                     <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs text-right">Estimate</th>
-                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs text-right">Received</th>
-                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs text-right">Pending</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs text-right">Received in Month</th>
+                    <th className="px-4 py-4 font-bold uppercase tracking-wider text-xs text-right">Pending at Close</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {ledgerProjects.map(p => {
-                    const est = Number(p.estimate) || 0;
-                    const rec = Number(p.ledger?.amountIn) || 0;
-                    const status = deriveLedgerPaymentStatus(p);
+                  {pagedLedgerProjects.map(p => {
+                    const entry = periodEntryFor(p);
+                    const est = entry.estimate;
+                    const rec = entry.received;
+                    const status = entry.statusAtClose;
                     return (
                       <tr key={`report-${p.id}`} className="hover:bg-slate-50">
                         <td className="px-4 py-4 font-black text-slate-800">{p.id}</td>
@@ -2218,11 +2340,11 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
                         </td>
                         <td className="px-4 py-4 text-right font-bold text-slate-600">₹{est.toLocaleString()}</td>
                         <td className="px-4 py-4 text-right font-bold text-emerald-600">₹{rec.toLocaleString()}</td>
-                        <td className="px-4 py-4 text-right font-black text-red-600">₹{Math.max(0, est - rec).toLocaleString()}</td>
+                        <td className="px-4 py-4 text-right font-black text-red-600">₹{entry.pendingAtClose.toLocaleString()}</td>
                       </tr>
                     );
                   })}
-                  {ledgerProjects.length === 0 && <tr><td colSpan="6" className="text-center py-10 text-slate-500 font-medium">No report records found for the selected finance filters.</td></tr>}
+                  {ledgerProjects.length === 0 && <tr><td colSpan="6" className="text-center py-10 text-slate-500 font-medium">No report records found for {selectedMonthLabel} and the selected finance filters.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -2231,8 +2353,8 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
           {activeTab === 'audit' && (
             <div className="p-5 space-y-5">
               <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-4">
-                <h3 className="text-lg font-black text-indigo-800">Payment Audit Trail</h3>
-                <p className="text-sm font-bold text-indigo-500 mt-1">Admin-only history of payment and ledger changes. Archive and Operations logic is not affected by this view.</p>
+                <h3 className="text-lg font-black text-indigo-800">{selectedMonthLabel} Payment Audit Trail</h3>
+                <p className="text-sm font-bold text-indigo-500 mt-1">Only payment and ledger changes dated inside this accounting month are shown. Other months remain separate.</p>
               </div>
               <table className="w-full text-left text-sm whitespace-nowrap">
                 <thead className="bg-slate-50 text-slate-500 border-b-2 border-slate-100">
@@ -2246,7 +2368,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {paymentAuditEvents.map(event => (
+                  {pagedPaymentAuditEvents.map(event => (
                     <tr key={`${event.taskId}-${event.id || event.at}`} className="hover:bg-slate-50">
                       <td className="px-4 py-4 font-bold text-slate-700">{event.at ? formatDateTime(event.at) : '-'}</td>
                       <td className="px-4 py-4">
@@ -2265,6 +2387,17 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
                   {paymentAuditEvents.length === 0 && <tr><td colSpan="6" className="text-center py-10 text-slate-500 font-medium">No payment audit entries found for the selected finance filters.</td></tr>}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {(['transactions', 'pending', 'report', 'audit'].includes(activeTab) && ledgerPageCount > 1) && (
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 px-5 py-4 border-t border-slate-100 bg-slate-50">
+              <p className="text-xs font-bold text-slate-500">Showing {((ledgerPage - 1) * ledgerPageSize) + 1}-{Math.min(ledgerPage * ledgerPageSize, paginatedLength)} of {paginatedLength}</p>
+              <div className="flex items-center gap-2">
+                <button type="button" disabled={ledgerPage <= 1} onClick={() => setLedgerPage(page => Math.max(1, page - 1))} className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs font-black text-slate-600 disabled:opacity-40">Previous</button>
+                <span className="px-3 py-2 rounded-lg bg-indigo-50 text-indigo-700 text-xs font-black">Page {ledgerPage} of {ledgerPageCount}</span>
+                <button type="button" disabled={ledgerPage >= ledgerPageCount} onClick={() => setLedgerPage(page => Math.min(ledgerPageCount, page + 1))} className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs font-black text-slate-600 disabled:opacity-40">Next</button>
+              </div>
             </div>
           )}
 
@@ -3062,8 +3195,10 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const updateLedger = (field, value) => {
     if (!showFinancials) return;
     const now = Date.now();
-    const nextLedger = { ...(project.ledger || {}), [field]: value, updatedAt: now, updatedBy: user?.name || 'Admin' };
-    const draftProject = { ...project, ledger: nextLedger };
+    const nextLedgerDate = field === 'date' ? value : (project.ledger?.date || project.paymentDate || new Date(now).toISOString().slice(0, 10));
+    const accountingPeriod = normalizeAccountingMonthKey(nextLedgerDate, getCurrentAccountingMonthKey(now));
+    const nextLedger = { ...(project.ledger || {}), [field]: value, date:nextLedgerDate, accountingPeriod, updatedAt: now, updatedBy: user?.name || 'Admin' };
+    const draftProject = { ...project, financeAccountingPeriod:accountingPeriod, ledger: nextLedger };
     const computedStatus = derivePaymentTrackingStatusFromData(draftProject);
     const amountIn = getPaymentReceivedAmount(draftProject);
     const updatedProject = {
@@ -4032,7 +4167,7 @@ function AppShell() {
   const [activeTab, setActiveTab] = useState('command');
   const [selectedProject, setSelectedProject] = useState(null);
   const [archiveViewState, setArchiveViewState] = useState({ filterMonth: 'All', filterDate: '', selectedBanks: [], selectedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0 });
-  const [financeViewState, setFinanceViewState] = useState({ activeTab: 'transactions', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
+  const [financeViewState, setFinanceViewState] = useState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
   const [taskDetailReturnTab, setTaskDetailReturnTab] = useState('board');
   const taskDetailReturnPositionRef = useRef({ windowY: 0, tab: 'board' });
   const previousTabRef = useRef('command');
@@ -4924,10 +5059,13 @@ function AppShell() {
           details: {
             amountIn: getPaymentReceivedAmount(updatedProject),
             paymentDate: updatedProject.ledger?.date || updatedProject.paymentDate || '',
+            accountingPeriod: updatedProject.financeAccountingPeriod || updatedProject.ledger?.accountingPeriod || normalizeAccountingMonthKey(updatedProject.ledger?.date || updatedProject.paymentDate, getCurrentAccountingMonthKey()),
             paymentTime: updatedProject.paymentTime || '',
             mode: updatedProject.ledger?.mode || '',
             transactionId: updatedProject.ledger?.txnId || updatedProject.transactionId || '',
             payerName: updatedProject.ledger?.receivedFrom || updatedProject.payerName || '',
+            expenses: Number(updatedProject.ledger?.expenses) || 0,
+            refund: Number(updatedProject.ledger?.refund ?? updatedProject.refundAmount) || 0,
             note: updatedProject.paymentAuditTrail?.[0]?.note || ''
           }
         });

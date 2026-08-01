@@ -5,6 +5,7 @@ import { ONLINE_STALE_MS } from '../../config/appConfig';
 import { absoluteApiUrl } from '../../services/fileService';
 import { getStatusColor } from '../../services/taskService';
 import { formatDateKey, formatDuration, formatLastSeenDateTime, formatMinutes } from '../../utils/date';
+import { buildProjectMonthlyFinanceEntry, formatAccountingMonthLabel, getAccountingMonthEndTimestamp, getCurrentAccountingMonthKey, getProjectCompletedMonthKey, getProjectCreatedMonthKey, hasRevisionInAccountingMonth, normalizeAccountingMonthKey } from '../../utils/accountingPeriodUtils.js';
 import { formatTaskId, getEstimateDetails, getLatestCompletedFileName, getTaskDescription } from '../../utils/taskDisplayUtils';
 import { getTaskBusySince, getUserActiveTasks, getUserBusySince, getUserFreeSince, getUserLastCompletedAt, getUserDraftingTask, getDraftingElapsedMs } from '../../utils/presenceAttendanceUtils';
 import { authFetch } from '../../services/authService';
@@ -1670,48 +1671,74 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
 };
 
 export const ReportsAnalyticsView = ({ projects = [], users = [], currentUser = null }) => {
-  const [range, setRange] = useState('month');
-  const now = Date.now();
-  const rangeMs = range === 'week' ? 7 * 86400000 : range === 'quarter' ? 90 * 86400000 : 30 * 86400000;
-  const scoped = (projects || []).filter(p => (toMs(p.createdAt) || now) >= now - rangeMs || (toMs(p.completedAt) || 0) >= now - rangeMs);
-  const completed = scoped.filter(isProjectCompleted);
-  const pending = scoped.filter(isIncompleteProject);
-  const revisions = scoped.filter(p => (p.subTasks || p.revisions || []).length > 0 || hasActiveRevision(p));
-  const financeScoped = scoped.filter(p => getEstimateAmount(p) > 0 || getReceivedAmount(p) > 0 || p.ledger?.updatedAt || p.paymentTrackingUpdatedAt || getPaymentStatus(p));
-  const paymentPending = financeScoped.filter(isFinancePending);
-  const paymentReceived = financeScoped.filter(isFinanceReceived);
-  const paymentAging = paymentPending.reduce((acc, p) => {
-    const age = getProjectAgeHours(p);
+  const [selectedMonth, setSelectedMonth] = useState(getCurrentAccountingMonthKey());
+  const accountingMonth = normalizeAccountingMonthKey(selectedMonth, getCurrentAccountingMonthKey());
+  const accountingMonthLabel = formatAccountingMonthLabel(accountingMonth);
+  const projectList = useMemo(() => Array.isArray(projects) ? projects : [], [projects]);
+
+  // Reports use exact calendar-month event buckets instead of rolling 30/90-day
+  // windows. A case created last month and completed this month contributes only
+  // to this month's completion metric, never to this month's new workload.
+  const createdScoped = useMemo(() => projectList.filter(project => getProjectCreatedMonthKey(project) === accountingMonth), [projectList, accountingMonth]);
+  const completed = useMemo(() => projectList.filter(project => isProjectCompleted(project) && getProjectCompletedMonthKey(project) === accountingMonth), [projectList, accountingMonth]);
+  const pending = useMemo(() => createdScoped.filter(isIncompleteProject), [createdScoped]);
+  const revisions = useMemo(() => projectList.filter(project => hasRevisionInAccountingMonth(project, accountingMonth)), [projectList, accountingMonth]);
+  const financeEntries = useMemo(() => projectList.map(project => ({ project, entry:buildProjectMonthlyFinanceEntry(project, accountingMonth) })).filter(item => item.entry.hasActivity), [projectList, accountingMonth]);
+  const paymentPending = financeEntries.filter(({ entry }) => ['Pending', 'Partially Paid'].includes(entry.statusAtClose));
+  const paymentReceived = financeEntries.filter(({ entry }) => entry.received !== 0);
+  const reportAsOfMs = Math.min(Date.now(), getAccountingMonthEndTimestamp(accountingMonth) || Date.now());
+  const paymentAging = paymentPending.reduce((acc, { project, entry }) => {
+    const age = getProjectAgeHours({ ...project, paymentTrackingUpdatedAt:entry.activityAt || project.paymentTrackingUpdatedAt }, reportAsOfMs);
     const bucket = age <= 48 ? '0-2 days' : age <= 168 ? '3-7 days' : age <= 360 ? '8-15 days' : '15+ days';
     acc[bucket] = (acc[bucket] || 0) + 1;
     return acc;
   }, {});
-  const bankRows = topRowsFromCount(countBy(scoped, getBankName));
-  const branchRows = topRowsFromCount(countBy(scoped, getBranchName));
-  const caseTypeRows = topRowsFromCount(countBy(scoped, p => p.type || p.caseType || 'Case'));
-  const slaPct = getSlaCompliancePct(scoped);
-  const pendingAmount = paymentPending.reduce((s,p)=>s+getEstimateAmount(p),0);
-  const receivedAmount = paymentReceived.reduce((s,p)=>s+Math.max(getReceivedAmount(p), getEstimateAmount(p)),0);
+  const bankRows = topRowsFromCount(countBy(createdScoped, getBankName));
+  const branchRows = topRowsFromCount(countBy(createdScoped, getBranchName));
+  const caseTypeRows = topRowsFromCount(countBy(createdScoped, project => project.type || project.caseType || 'Case'));
+  const slaBase = completed.length > 0 ? completed : createdScoped;
+  const slaPct = getSlaCompliancePct(slaBase);
+  const pendingAmount = paymentPending.reduce((sum, { entry }) => sum + entry.pendingAtClose, 0);
+  const receivedAmount = paymentReceived.reduce((sum, { entry }) => sum + entry.received, 0);
+  const expenseAmount = financeEntries.reduce((sum, { entry }) => sum + entry.expenses, 0);
+  const refundAmount = financeEntries.reduce((sum, { entry }) => sum + entry.refund, 0);
+  const netAmount = receivedAmount - expenseAmount - refundAmount;
   const summaryRows = [
-    ['Operations workload', scoped.length], ['Completed', completed.length], ['Pending', pending.length], ['Revision cases', revisions.length], ['Payment pending cases', paymentPending.length], ['Pending payment amount', pendingAmount], ['Payment received amount', receivedAmount], ['SLA compliance', `${slaPct}%`]
+    ['Accounting month', accountingMonthLabel],
+    ['New workload', createdScoped.length],
+    ['Completed during month', completed.length],
+    ['New-month cases still pending', pending.length],
+    ['Revision activity', revisions.length],
+    ['Payment pending cases in month', paymentPending.length],
+    ['Pending at month close', pendingAmount],
+    ['Received in month', receivedAmount],
+    ['Expenses in month', expenseAmount],
+    ['Refunds in month', refundAmount],
+    ['Net in month', netAmount],
+    ['SLA compliance', `${slaPct}%`]
   ];
-  const exportSummary = () => exportToCSV(['Business Metric', 'Value'], summaryRows, `Business_Reports_${range}.csv`);
-  const exportWorkload = () => exportToCSV(['Report', 'Name', 'Value'], [
-    ...bankRows.map(([name, count]) => ['Bank workload', name, count]),
-    ...branchRows.map(([name, count]) => ['Branch workload', name, count]),
-    ...caseTypeRows.map(([name, count]) => ['Case type', name, count]),
-    ...topRowsFromCount(paymentAging, 10).map(([name, count]) => ['Payment aging', name, count])
-  ], `Business_Workload_${range}.csv`);
+  const exportSummary = () => exportToCSV(['Business Metric', 'Value'], summaryRows, `Business_Reports_${accountingMonth}.csv`);
+  const exportWorkload = () => exportToCSV(['Accounting Month', 'Report', 'Name', 'Value'], [
+    ...bankRows.map(([name, count]) => [accountingMonth, 'New workload by bank', name, count]),
+    ...branchRows.map(([name, count]) => [accountingMonth, 'New workload by branch', name, count]),
+    ...caseTypeRows.map(([name, count]) => [accountingMonth, 'New workload by case type', name, count]),
+    ...topRowsFromCount(paymentAging, 10).map(([name, count]) => [accountingMonth, 'Selected-month payment aging', name, count])
+  ], `Business_Workload_${accountingMonth}.csv`);
   const StatCard = ({ label, value, hint }) => (<div className="bg-white rounded-3xl border-2 border-slate-100 p-5 shadow-sm"><p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</p><p className="text-3xl font-black text-slate-800 mt-2">{value}</p>{hint && <p className="text-xs font-bold text-slate-400 mt-1">{hint}</p>}</div>);
-  const SimpleTable = ({ title, columns, rows, empty = 'No data yet.' }) => (<div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden"><div className="p-4 border-b border-slate-100"><h2 className="font-black text-slate-800 text-lg">{title}</h2></div><div className="overflow-x-auto"><table className="w-full text-left text-sm whitespace-nowrap"><thead className="bg-slate-50 text-slate-500"><tr>{columns.map(c => <th key={c} className="px-4 py-3 text-[10px] font-black uppercase tracking-widest">{c}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row, idx) => <tr key={idx} className="hover:bg-slate-50">{row.map((cell, i) => <td key={i} className="px-4 py-3 font-bold text-slate-700">{cell}</td>)}</tr>)}{rows.length === 0 && <tr><td colSpan={columns.length} className="px-4 py-8 text-center text-slate-400 font-bold">{empty}</td></tr>}</tbody></table></div></div>);
+  const SimpleTable = ({ title, columns, rows, empty = 'No data yet.' }) => (<div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden"><div className="p-4 border-b border-slate-100"><h2 className="font-black text-slate-800 text-lg">{title}</h2><p className="text-xs font-bold text-slate-400 mt-1">{accountingMonthLabel} only</p></div><div className="overflow-x-auto"><table className="w-full text-left text-sm whitespace-nowrap"><thead className="bg-slate-50 text-slate-500"><tr>{columns.map(c => <th key={c} className="px-4 py-3 text-[10px] font-black uppercase tracking-widest">{c}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row, idx) => <tr key={idx} className="hover:bg-slate-50">{row.map((cell, i) => <td key={i} className="px-4 py-3 font-bold text-slate-700">{cell}</td>)}</tr>)}{rows.length === 0 && <tr><td colSpan={columns.length} className="px-4 py-8 text-center text-slate-400 font-bold">{empty}</td></tr>}</tbody></table></div></div>);
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in duration-200">
       <div className="flex flex-col lg:flex-row justify-between lg:items-end gap-4">
-        <div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Reports</h1><p className="text-slate-500 font-medium mt-2 max-w-4xl">Bank, branch, case type, payment aging, finance and SLA summaries.</p></div>
-        <div className="flex flex-wrap gap-3"><select value={range} onChange={e => setRange(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none"><option value="week">Last 7 days</option><option value="month">Last 30 days</option><option value="quarter">Last 90 days</option></select><button type="button" onClick={exportSummary} className="bg-emerald-100 text-emerald-700 font-bold px-4 py-2.5 rounded-xl"><Download className="w-4 h-4 inline mr-2"/>Export Summary</button><button type="button" onClick={exportWorkload} className="bg-indigo-100 text-indigo-700 font-bold px-4 py-2.5 rounded-xl"><Download className="w-4 h-4 inline mr-2"/>Export Reports</button></div>
+        <div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Reports</h1><p className="text-slate-500 font-medium mt-2 max-w-4xl">Every report is isolated to one exact calendar month. New workload, completions, revisions and finance events are bucketed by their own dates so previous-month data is never mixed into {accountingMonthLabel}.</p></div>
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="bg-white border-2 border-indigo-100 rounded-xl px-3 py-2 shadow-sm"><span className="block text-[10px] font-black uppercase tracking-widest text-indigo-500 mb-1">Report Month</span><input type="month" value={accountingMonth} max={getCurrentAccountingMonthKey()} onChange={event => setSelectedMonth(event.target.value)} className="font-black text-slate-800 outline-none bg-transparent" aria-label="Reports accounting month" /></label>
+          <button type="button" onClick={exportSummary} className="bg-emerald-100 text-emerald-700 font-bold px-4 py-2.5 rounded-xl"><Download className="w-4 h-4 inline mr-2"/>Export Summary</button>
+          <button type="button" onClick={exportWorkload} className="bg-indigo-100 text-indigo-700 font-bold px-4 py-2.5 rounded-xl"><Download className="w-4 h-4 inline mr-2"/>Export Reports</button>
+        </div>
       </div>
-      <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-4"><StatCard label="Workload" value={scoped.length} hint="selected period"/><StatCard label="Completed" value={completed.length} hint="closed cases"/><StatCard label="Pending" value={pending.length} hint="open work"/><StatCard label="Revisions" value={revisions.length} hint="case trend"/><StatCard label="Pending Pay" value={paymentPending.length} hint={`₹${pendingAmount.toLocaleString()}`}/><StatCard label="Received" value={`₹${receivedAmount.toLocaleString()}`} hint="finance"/><StatCard label="SLA" value={`${slaPct}%`} hint="8-hour target"/></div>
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-5"><SimpleTable title="Bank Report" columns={['Bank', 'Cases']} rows={bankRows}/><SimpleTable title="Branch Report" columns={['Branch', 'Cases']} rows={branchRows}/><SimpleTable title="Case Type Report" columns={['Case Type', 'Cases']} rows={caseTypeRows}/><SimpleTable title="Payment Aging Report" columns={['Age', 'Pending Cases']} rows={topRowsFromCount(paymentAging, 10)}/></div>
+      <div className="bg-indigo-50 border-2 border-indigo-100 rounded-2xl px-5 py-4"><p className="font-black text-indigo-800">Active reporting period: {accountingMonthLabel}</p><p className="text-sm font-bold text-indigo-600 mt-1">No rolling 30-day or 90-day window is used. Changing the month replaces the complete report period.</p></div>
+      <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-4"><StatCard label="New Workload" value={createdScoped.length} hint="created this month"/><StatCard label="Completed" value={completed.length} hint="completed this month"/><StatCard label="Pending" value={pending.length} hint="this month's new cases"/><StatCard label="Revisions" value={revisions.length} hint="activity this month"/><StatCard label="Pending Pay" value={paymentPending.length} hint={`₹${pendingAmount.toLocaleString()}`}/><StatCard label="Received" value={`₹${receivedAmount.toLocaleString()}`} hint="this month only"/><StatCard label="Net" value={`₹${netAmount.toLocaleString()}`} hint="after expense/refund"/><StatCard label="SLA" value={`${slaPct}%`} hint="selected-month cohort"/></div>
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-5"><SimpleTable title="Bank Report" columns={['Bank', 'New Cases']} rows={bankRows} empty={`No new bank cases in ${accountingMonthLabel}.`}/><SimpleTable title="Branch Report" columns={['Branch', 'New Cases']} rows={branchRows} empty={`No new branch cases in ${accountingMonthLabel}.`}/><SimpleTable title="Case Type Report" columns={['Case Type', 'New Cases']} rows={caseTypeRows} empty={`No new case types in ${accountingMonthLabel}.`}/><SimpleTable title="Payment Aging Report" columns={['Age', 'Pending Cases']} rows={topRowsFromCount(paymentAging, 10)} empty={`No selected-month pending payments in ${accountingMonthLabel}.`}/></div>
     </div>
   );
 };

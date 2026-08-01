@@ -29,7 +29,7 @@ export const getPriorityColor = (priority, dueDate) => {
 const FINANCE_FIELDS = Object.freeze([
   'ledger','financeVersion','paymentTrackingStatus','paymentTrackingUpdatedAt','paymentTrackingUpdatedBy',
   'paymentStatus','paymentReceived','paymentAmountIn','refundAmount','payerName','transactionId',
-  'paymentDate','paymentTime','paymentAuditTrail'
+  'paymentDate','paymentTime','paymentAuditTrail','financeAccountingPeriod'
 ]);
 
 const toTime = (value) => {
