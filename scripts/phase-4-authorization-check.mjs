@@ -137,10 +137,10 @@ try {
     assert(created.payload.project.createdBy === 'Phase 4 Admin', 'Server did not derive the task creator from the authenticated session.');
     return created.payload.project;
   };
-  await makeTask('AUTHZ-TASK-1', designerOneUser);
+  const taskOne = await makeTask('AUTHZ-TASK-1', designerOneUser);
   await makeTask('AUTHZ-TASK-2', designerTwoUser);
 
-  const finance = await request('/api/state/projects/AUTHZ-TASK-1/payment-status', { method:'POST', session:admin, body:{ paymentTrackingStatus:'Paid', expectedFinanceVersion:0, amountIn:5000, paymentDate:'2026-07-30', mode:'UPI', transactionId:'AUTHZ-FIN-1', by:'Spoofed Actor' } });
+  const finance = await request('/api/state/projects/AUTHZ-TASK-1/payment-status', { method:'POST', session:admin, body:{ paymentTrackingStatus:'Paid', expectedFinanceVersion:0, expectedAmount:9000, amountIn:5000, paymentDate:'2026-07-30', mode:'UPI', transactionId:'AUTHZ-FIN-1', by:'Spoofed Actor' } });
   assert(finance.response.ok && finance.payload.project?.paymentAmountIn === 5000 && finance.payload.project?.paymentTrackingStatus === 'Pending', `Partial finance update failed: ${finance.response.status} ${JSON.stringify(finance.payload)}`);
   assert(finance.payload.project.paymentTrackingUpdatedBy === 'Phase 4 Admin', 'Finance actor was accepted from the client instead of the session.');
 
@@ -152,7 +152,7 @@ try {
   const spoofedOtherUpdate = await request('/api/state/projects', { method:'POST', session:designerOne, headers:{ 'X-User-Role':'ADMIN', 'X-User-Name':'Phase 4 Admin' }, body:{ currentUserRole:'ADMIN', project:{ id:'AUTHZ-TASK-2', caseId:'AUTHZ-TASK-2', status:'Completed', assignedTo:'Designer One' } } });
   assert(spoofedOtherUpdate.response.status === 403, 'Designer modified another Designer’s task by spoofing a role.');
 
-  const ownUpdate = await request('/api/state/projects', { method:'POST', session:designerOne, body:{ project:{ id:'AUTHZ-TASK-1', caseId:'AUTHZ-TASK-1', status:'Drafting', assignedTo:'Designer Two', customerName:'Tampered', paymentAmountIn:0, paymentTrackingStatus:'Not Updated' } } });
+  const ownUpdate = await request('/api/state/projects', { method:'POST', session:designerOne, body:{ expectedTaskVersion:taskOne.taskVersion, project:{ id:'AUTHZ-TASK-1', caseId:'AUTHZ-TASK-1', status:'Drafting', assignedTo:'Designer Two', customerName:'Tampered', paymentAmountIn:0, paymentTrackingStatus:'Not Updated' } } });
   assert(ownUpdate.response.ok, 'Designer could not update their assigned task.');
   assert(ownUpdate.payload.project.status === 'Drafting', 'Allowed Designer status change was not saved.');
   assert(ownUpdate.payload.project.assignedTo === 'Designer One' && ownUpdate.payload.project.customerName === 'AUTHZ-TASK-1', 'Designer changed protected task fields.');
@@ -167,12 +167,12 @@ try {
   const managerFinance = await request('/api/state/projects/AUTHZ-TASK-1/payment-status', { method:'POST', session:manager, body:{ paymentTrackingStatus:'Pending', expectedFinanceVersion:1 } });
   assert(managerFinance.response.status === 403, 'Manager changed finance data.');
 
-  const managerUpdate = await request('/api/state/projects', { method:'POST', session:manager, body:{ project:{ id:'AUTHZ-TASK-1', caseId:'AUTHZ-TASK-1', assignedTo:'Designer Two', assigneeName:'Designer Two', assigneeId:designerTwoUser.id, status:'Internal Review' } } });
+  const managerUpdate = await request('/api/state/projects', { method:'POST', session:manager, body:{ expectedTaskVersion:ownUpdate.payload.project.taskVersion, project:{ id:'AUTHZ-TASK-1', caseId:'AUTHZ-TASK-1', assignedTo:'Designer Two', assigneeName:'Designer Two', assigneeId:designerTwoUser.id, status:'Assigned' } } });
   assert(managerUpdate.response.ok && managerUpdate.payload.project.assignedTo === 'Designer Two', 'Manager could not perform an operational assignment update.');
   assert(!Object.hasOwn(managerUpdate.payload.project, 'paymentAmountIn'), 'Manager received finance data.');
   const managerCreated = await request('/api/state/projects', { method:'POST', session:manager, body:{ project:{ id:'AUTHZ-MANAGER-RECENT', caseId:'AUTHZ-MANAGER-RECENT', customerName:'Manager recent task', assignedTo:'Designer Two', assigneeName:'Designer Two', assigneeId:designerTwoUser.id, status:'Lead Received' } } });
   assert(managerCreated.response.ok && managerCreated.payload.project.createdBy === 'Phase 4 Manager', 'Manager could not create a recent task.');
-  const managerRecentEdit = await request('/api/state/projects', { method:'POST', session:manager, body:{ project:{ ...managerCreated.payload.project, customerName:'Manager edited recent task', priority:'High' } } });
+  const managerRecentEdit = await request('/api/state/projects', { method:'POST', session:manager, body:{ expectedTaskVersion:managerCreated.payload.project.taskVersion, project:{ ...managerCreated.payload.project, customerName:'Manager edited recent task', priority:'High' } } });
   assert(managerRecentEdit.response.ok && managerRecentEdit.payload.project.customerName === 'Manager edited recent task' && managerRecentEdit.payload.project.priority === 'High', 'Manager could not edit a recently created task.');
   const managerRecentDelete = await request('/api/state/projects/AUTHZ-MANAGER-RECENT', { method:'DELETE', session:manager });
   assert(managerRecentDelete.response.ok && managerRecentDelete.payload.deleted === 1, 'Manager could not permanently delete a recently created task.');

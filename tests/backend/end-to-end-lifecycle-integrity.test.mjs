@@ -128,3 +128,15 @@ test('finance durability verifier supplies the required optimistic task version'
   assert.match(verifier,/expectedTaskVersion: createdTaskVersion/);
   assert.match(verifier,/Operational edit was rejected during stale-finance protection verification/);
 });
+
+test('authorization verifier supplies finance context, task versions, and a lifecycle-safe assignment status',()=>{
+  const verifier=fs.readFileSync(new URL('../../scripts/phase-4-authorization-check.mjs',import.meta.url),'utf8');
+  assert.match(verifier,/const taskOne = await makeTask\('AUTHZ-TASK-1'/);
+  assert.match(verifier,/expectedAmount:9000, amountIn:5000/);
+  assert.match(verifier,/expectedTaskVersion:taskOne\.taskVersion/);
+  assert.match(verifier,/expectedTaskVersion:ownUpdate\.payload\.project\.taskVersion/);
+  assert.match(verifier,/expectedTaskVersion:managerCreated\.payload\.project\.taskVersion/);
+  assert.match(verifier,/status:'Assigned'/);
+  assert.match(verifier,/paymentTrackingStatus === 'Pending'/);
+});
+

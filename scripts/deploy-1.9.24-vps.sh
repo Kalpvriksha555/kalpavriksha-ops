@@ -101,6 +101,21 @@ test "$BACKEND_VERSION" = "$EXPECTED_BACKEND_VERSION" || fail "GitHub main conta
 grep -q "expectedTaskVersion: createdTaskVersion" "$STAGE/scripts/phase-2-finance-durability-check.mjs" || \
   fail "GitHub main does not contain the finance verifier task-version correction"
 
+grep -q "expectedAmount:9000, amountIn:5000" "$STAGE/scripts/phase-4-authorization-check.mjs" || \
+  fail "GitHub main does not contain the authorization verifier finance-context correction"
+
+grep -q "expectedTaskVersion:taskOne.taskVersion" "$STAGE/scripts/phase-4-authorization-check.mjs" || \
+  fail "GitHub main does not contain the authorization verifier first task-version correction"
+
+grep -q "expectedTaskVersion:ownUpdate.payload.project.taskVersion" "$STAGE/scripts/phase-4-authorization-check.mjs" || \
+  fail "GitHub main does not contain the authorization verifier follow-up task-version correction"
+
+grep -q "expectedTaskVersion:managerCreated.payload.project.taskVersion" "$STAGE/scripts/phase-4-authorization-check.mjs" || \
+  fail "GitHub main does not contain the authorization verifier manager-edit task-version correction"
+
+grep -q "status:'Assigned'" "$STAGE/scripts/phase-4-authorization-check.mjs" || \
+  fail "GitHub main does not contain the authorization verifier lifecycle-safe assignment correction"
+
 log "Installing clean staging dependencies"
 cd "$STAGE"
 rm -rf node_modules backend/node_modules frontend/node_modules frontend/dist .release release-certification.json
