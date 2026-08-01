@@ -6,6 +6,9 @@ const app = fs.readFileSync(new URL('../../frontend/src/App.jsx', import.meta.ur
 const auth = fs.readFileSync(new URL('../../frontend/src/services/authService.js', import.meta.url), 'utf8');
 const tasks = fs.readFileSync(new URL('../../frontend/src/services/taskService.js', import.meta.url), 'utf8');
 const dashboard = fs.readFileSync(new URL('../../frontend/src/components/command-centre/CommandCentreView.jsx', import.meta.url), 'utf8');
+const productivityStart = dashboard.indexOf('export const ProductivityDashboard');
+const productivityEnd = dashboard.indexOf('export const ReportsAnalyticsView', productivityStart);
+const productivityDashboard = dashboard.slice(productivityStart, productivityEnd);
 
 test('refresh does not restore authentication or persist CSRF credentials', () => {
   assert.match(app, /clearBrowserSessionApi\(\)/);
@@ -61,6 +64,12 @@ test('performance analytics offers exact monthly and overall scopes with admin b
   assert.match(dashboard, /type="month" value=\{performanceMonth\}/);
   assert.match(dashboard, /\/api\/performance\/baseline\/\$\{encodeURIComponent\(user\.id\)\}/);
   assert.match(dashboard, /role="switch" aria-checked=\{baselineEnabled\}/);
+  assert.match(dashboard, /isPerformanceCompletionInScope/);
+  assert.match(dashboard, /getPerformanceWorkStartAt/);
+  assert.match(dashboard, /Monthly scores only work assigned and completed within the same calendar month/);
+  assert.match(productivityDashboard, /Team Performance Cards[\s\S]*<div className="p-4 grid grid-cols-1 lg:grid-cols-2 gap-4">/);
+  assert.doesNotMatch(productivityDashboard, /Team Performance Cards[\s\S]{0,500}max-h-\[520px\]/);
+  assert.match(dashboard, /No active work in \$\{performanceMonthLabel\}/);
   assert.match(app, /currentUser=\{currentUser\}/);
 });
 

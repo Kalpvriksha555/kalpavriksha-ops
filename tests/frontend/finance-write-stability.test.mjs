@@ -63,9 +63,18 @@ test('payment receipt uses private file upload instead of embedding base64 in th
   assert.match(detail, /isUploadingLedgerReceipt/);
 });
 
-test('automatic finance saving flushes before navigation and still protects failed drafts', () => {
-  assert.match(detail, /beforeunload/);
-  assert.match(detail, /Saving payment changes before leaving/);
-  assert.match(detail, /Payment details could not be saved automatically/);
-  assert.match(detail, /onClick=\{handleTaskBack\}/);
+test('payment navigation never waits for finance and completes queued saves in the background', () => {
+  assert.doesNotMatch(detail, /beforeunload/);
+  assert.match(detail, /ledgerNavigationDetachedRef/);
+  assert.match(detail, /finishFinanceInBackground/);
+  assert.match(detail, /handleSaveLedger\(\{ reason:'background-navigation' \}\)/);
+  assert.match(detail, /onBack\(\);\s*void Promise\.resolve\(\)\.then\(finishFinanceInBackground\);/);
+  assert.doesNotMatch(detail, /Discard finance changes/);
+  assert.match(saveLedgerBlock, /backgroundFinanceRef:ledgerNavigationDetachedRef/);
+  assert.match(updateProjectBlock, /const isBackgroundFinance = \(\) => options\?\.backgroundFinance === true \|\| options\?\.backgroundFinanceRef\?\.current === true/);
+  assert.match(updateProjectBlock, /if \(!isBackgroundFinance\(\)\)/);
+  assert.match(updateProjectBlock, /setSelectedProject\(current => current && String\(current\.id \|\| current\.caseId\) === financeTaskKey \? updatedProject : current\)/);
+  assert.match(updateProjectBlock, /if \(previousProject && !financeOnly && !isBackgroundFinance\(\)\)/);
+  assert.doesNotMatch(updateProjectBlock, /if \(previousProject && !options\?\.backgroundFinance\)/);
+  assert.doesNotMatch(updateProjectBlock, /applyProjectSnapshot\(\[previousProject\][\s\S]{0,160}if \(!options\?\.backgroundFinance\)/);
 });

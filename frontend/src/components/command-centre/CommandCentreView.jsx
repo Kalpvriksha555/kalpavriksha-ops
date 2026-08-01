@@ -425,6 +425,22 @@ const isPerformanceEventInScope = (eventAt, scope, monthKey, baselineAt = 0) => 
   return normalizeAccountingMonthKey(timestamp) === monthKey;
 };
 
+const getPerformanceWorkStartAt = (item = {}) => toMs(
+  item.assignedAt
+    || item.startedAt
+    || item.createdAt
+    || item.taskDate
+    || item.receivedAt
+);
+
+const isPerformanceCompletionInScope = (item = {}, completionAt = 0, scope = 'month', monthKey = '', baselineAt = 0) => {
+  if (!isPerformanceEventInScope(completionAt, scope, monthKey, baselineAt)) return false;
+  if (scope === 'month' || baselineAt) {
+    return isPerformanceEventInScope(getPerformanceWorkStartAt(item), scope, monthKey, baselineAt);
+  }
+  return true;
+};
+
 const createPerformanceRecord = (project = {}) => {
   if (!project || !isAnalyticsCompletedProject(project) || isRevisionOnlyWorkItem(project)) return null;
   const userName = getPerformanceOwnerName(project);
@@ -1352,14 +1368,16 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
       performanceMonth,
       baselineAt
     ));
-    const analyticsCompleted = allAssigned.filter(project => isAnalyticsCompletedProject(project) && isPerformanceEventInScope(
+    const analyticsCompleted = allAssigned.filter(project => isAnalyticsCompletedProject(project) && isPerformanceCompletionInScope(
+      project,
       getExplicitPerformanceCompletionAt(project),
       scope,
       performanceMonth,
       baselineAt
     ));
     const completed = analyticsCompleted.filter(isProjectCompleted);
-    const completedRecords = getMemberRecords(u.name).filter(record => isPerformanceEventInScope(
+    const completedRecords = getMemberRecords(u.name).filter(record => isPerformanceCompletionInScope(
+      record,
       record.completionEventAt || record.completedAt,
       scope,
       performanceMonth,
@@ -1558,7 +1576,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
           <button type="button" onClick={exportPerformance} className="bg-indigo-600 text-white font-bold px-4 py-2.5 rounded-xl shadow-sm"><Download className="w-4 h-4 inline mr-2"/>Export</button>
         </div>
       </div>
-      <div className="rounded-2xl border border-indigo-100 bg-indigo-50 px-4 py-3"><p className="text-sm font-black text-indigo-800">Showing: {scopeLabel}</p><p className="text-xs font-bold text-indigo-600 mt-1">Monthly uses one exact calendar month. Overall uses all valid records after any Admin-set personal baseline.</p></div>
+      <div className="rounded-2xl border border-indigo-100 bg-indigo-50 px-4 py-3"><p className="text-sm font-black text-indigo-800">Showing: {scopeLabel}</p><p className="text-xs font-bold text-indigo-600 mt-1">Monthly scores only work assigned and completed within the same calendar month. Overall uses all valid records after any Admin-set personal baseline.</p></div>
       <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-4">
         <StatCard label="Assigned" value={totals.assigned} hint={scope === 'month' ? 'assigned in month' : 'since baseline'} />
         <StatCard label="Completed" value={totals.completed} hint={scope === 'month' ? 'completed in month' : 'since baseline'} />
@@ -1583,7 +1601,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
             <h2 className="font-black text-slate-800 text-lg flex items-center"><Users className="w-5 h-5 mr-2 text-indigo-500" /> Team Performance Cards</h2>
             <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Completion • case type • quality</span>
           </div>
-          <div className="p-4 grid grid-cols-1 lg:grid-cols-2 gap-4 max-h-[520px] overflow-y-auto custom-scrollbar">
+          <div className="p-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
             {memberRows.map(row => {
               const loadLimit = Number(row.user.dailyLimit || row.user.taskLimit || 10) || 10;
               const loadPct = Math.min(100, Math.round((row.activeCount / loadLimit) * 100));
@@ -1640,7 +1658,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Current work</p>
-                        <p className="text-sm font-black text-slate-800 truncate">{currentTask ? (formatTaskId(currentTask.id || currentTask.caseId) || makeTaskDisplayName(currentTask)) : live.detail}</p>
+                        <p className="text-sm font-black text-slate-800 truncate">{currentTask ? (formatTaskId(currentTask.id || currentTask.caseId) || makeTaskDisplayName(currentTask)) : (scope === 'month' ? `No active work in ${performanceMonthLabel}` : 'No active work in scope')}</p>
                       </div>
                       <Badge colorClass={live.badgeClass}>{live.label}</Badge>
                     </div>

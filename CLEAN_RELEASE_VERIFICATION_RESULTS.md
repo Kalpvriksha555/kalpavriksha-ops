@@ -23,6 +23,11 @@ Validated from the automatic-payment-ledger baseline on 2 August 2026.
 - Reversible Admin-only Manager/Designer score baselines
 - Corrected monthly report creation cohort and carried-forward completions
 - Selected-row physical PostgreSQL verification before integrity metadata commit
+- Strict monthly performance cohort: work must begin and complete inside the selected month
+- Carried-forward completions excluded from monthly scores, averages and leaderboard ranking
+- Team Performance Cards use normal page scrolling without a fixed-height inner scrollbar
+- Payment Back/navigation is immediate while queued finance saves continue in the background
+- Background finance completion cannot reopen the task or restore an older task snapshot
 
 ## Production integrity handling
 

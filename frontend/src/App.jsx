@@ -2652,6 +2652,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   const ledgerSavePromiseRef = useRef(null);
   const ledgerQueuedSaveRef = useRef(false);
   const ledgerAutosaveBlockedSignatureRef = useRef('');
+  const ledgerNavigationDetachedRef = useRef(false);
   const latestProjectRef = useRef(project);
 
   useEffect(() => {
@@ -2740,16 +2741,6 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   const canRevertTask = (canManage || canDesignerRevertOwnTask) && project.status !== 'Lead Received';
   const showFinancials = user.role === ROLES.ADMIN;
   const activeDraftingForUser = (usersProjects = []) => (usersProjects || []).find(p => samePerson(p.assignedTo, project.assignedTo || user.name) && p.status === 'Drafting' && String(p.id) !== String(project.id));
-
-  useEffect(() => {
-    if (!ledgerDirty && !isSavingLedger) return undefined;
-    const warnUnsavedFinance = (event) => {
-      event.preventDefault();
-      event.returnValue = '';
-    };
-    window.addEventListener('beforeunload', warnUnsavedFinance);
-    return () => window.removeEventListener('beforeunload', warnUnsavedFinance);
-  }, [ledgerDirty, isSavingLedger]);
 
   const handleSaveCaseEdit = (event) => {
     event.preventDefault();
@@ -3622,12 +3613,15 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     ledgerQueuedSaveRef.current = false;
     setIsSavingLedger(true);
     setLedgerSaveState('saving');
-    setLedgerSaveMessage(reason === 'navigation' ? 'Saving payment changes before leaving…' : 'Saving automatically…');
+    const backgroundFinance = ledgerNavigationDetachedRef.current || reason === 'background-navigation';
+    setLedgerSaveMessage(backgroundFinance ? 'Saving payment changes in the background…' : 'Saving automatically…');
 
     const savePromise = (async () => {
       try {
         const confirmed = await onUpdateProject(updatedProject, baseProject, {
           financeOnly:true,
+          backgroundFinance,
+          backgroundFinanceRef:ledgerNavigationDetachedRef,
           financeMutationId
         });
         if (!confirmed) {
@@ -3702,22 +3696,33 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     }
   };
 
-  const handleTaskBack = async () => {
+  const handleTaskBack = () => {
+    ledgerNavigationDetachedRef.current = true;
     if (ledgerAutosaveTimerRef.current) {
       clearTimeout(ledgerAutosaveTimerRef.current);
       ledgerAutosaveTimerRef.current = null;
     }
 
-    let attempts = 0;
-    while ((ledgerDirtyRef.current || ledgerSavePromiseRef.current) && attempts < 2) {
-      attempts += 1;
-      ledgerAutosaveBlockedSignatureRef.current = '';
-      const saved = await handleSaveLedger({ reason:'navigation' });
-      if (!saved) break;
-    }
+    const finishFinanceInBackground = async () => {
+      try {
+        if (ledgerSavePromiseRef.current) await ledgerSavePromiseRef.current;
+        let attempts = 0;
+        while (ledgerDirtyRef.current && attempts < 2) {
+          attempts += 1;
+          ledgerAutosaveBlockedSignatureRef.current = '';
+          const saved = await handleSaveLedger({ reason:'background-navigation' });
+          if (!saved) break;
+        }
+        if (ledgerDirtyRef.current) {
+          notifyUser('Payment changes are still pending. Open this task again to retry; confirmed finance data was not overwritten.');
+        }
+      } catch (error) {
+        notifyUser(error?.message || 'Payment changes could not finish saving in the background.');
+      }
+    };
 
-    if (ledgerDirtyRef.current && !(await requestConfirmation('Payment details could not be saved automatically. Leave this task and discard them?', { title:'Discard finance changes?', tone:'danger', confirmLabel:'Discard changes' }))) return;
     onBack();
+    void Promise.resolve().then(finishFinanceInBackground);
   };
   
   const handlePrintReceipt = () => {
@@ -5671,6 +5676,7 @@ function AppShell() {
     updatedProject = normalizeProjectRecord({ ...updatedProject, updatedAt: Date.now(), syncVersion: Date.now() });
 
     const financeChanged = previousProject && financeSignature(previousProject) !== financeSignature(updatedProject);
+    const isBackgroundFinance = () => options?.backgroundFinance === true || options?.backgroundFinanceRef?.current === true;
     if (financeChanged && currentUser?.role === ROLES.ADMIN && USE_BACKEND_STATE && backendStateReady && isDbReady) {
       const financeTaskKey = String(updatedProject.id || updatedProject.caseId || '').trim();
       if (financeSaveInFlightRef.current.has(financeTaskKey)) {
@@ -5708,7 +5714,9 @@ function AppShell() {
         updatedProject = normalizeProjectRecord(financeOnly ? { ...updatedProject, ...confirmed } : applyConfirmedFinance(updatedProject, confirmed));
 
         if (financeOnly) {
-          setSelectedProject(updatedProject);
+          if (!isBackgroundFinance()) {
+            setSelectedProject(current => current && String(current.id || current.caseId) === financeTaskKey ? updatedProject : current);
+          }
           setProjects(prev => {
             const next = filterDeletedProjects(mergeProjectsByFreshness(prev || [], [updatedProject]));
             persistAndBroadcastProjects(next);
@@ -5722,9 +5730,9 @@ function AppShell() {
           ? 'Finance changed on another screen. Your entry was not overwritten. Refresh this task and save again.'
           : (error?.message || 'Finance could not be saved to the server. No local finance change was accepted.');
         notifyUser(message);
-        if (previousProject) {
+        if (previousProject && !financeOnly && !isBackgroundFinance()) {
           applyProjectSnapshot([previousProject], { source: 'finance-save-reverted' });
-          setSelectedProject(previousProject);
+          setSelectedProject(current => current && String(current.id || current.caseId) === financeTaskKey ? previousProject : current);
         }
         return null;
       } finally {

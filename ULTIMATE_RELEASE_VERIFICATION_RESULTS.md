@@ -12,3 +12,4 @@ Current source verification targets:
 - verified full PostgreSQL/private-file backup before any integrity repair
 
 The production integrity audit recognizes only three non-destructive repair classes: canonical-hash-preserving approved count drift; the documented legacy normalized-shadow drift limited to `files` and `performanceRecords`; and equal-count operational hash drift independently proven against a recent valid revision and limited to live presence, current-day attendance, append-only audit, or narrowly validated finance-only case/payment changes. All other mismatches fail closed.
+This revision also enforces a strict same-month work cohort for monthly analytics, removes the nested Team Performance Cards scrollbar, and makes payment-ledger navigation non-blocking while queued idempotent finance saves continue in the background.

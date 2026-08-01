@@ -3736,6 +3736,14 @@ function performanceEventMatchesScope(eventAt = 0, config = performanceScopeConf
   return timestamp >= nowMs - performanceRangeMs(config.range);
 }
 
+function performanceWorkAndCompletionMatchScope(workStartedAt = 0, completionAt = 0, config = performanceScopeConfig(), baselineAt = 0, nowMs = Date.now()) {
+  if (!performanceEventMatchesScope(completionAt, config, baselineAt, nowMs)) return false;
+  if (config.scope === 'month' || baselineAt) {
+    return performanceEventMatchesScope(workStartedAt, config, baselineAt, nowMs);
+  }
+  return true;
+}
+
 function latestPerformanceDocumentTime(c = {}) {
   const lists = [c.completedFiles, c.documents, c.files, c.uploads, c.attachments].filter(Array.isArray);
   let latest = 0;
@@ -3818,7 +3826,13 @@ function leaderboardAggregateStats(d = readDb(), options = {}) {
     const member = memberByCanonical.get(canonical);
     if (!member) return false;
     const baseline = performanceBaselineDetails(member);
-    return performanceEventMatchesScope(recordScopeCompletionAt(record, config), config, baseline.at, nowMs);
+    return performanceWorkAndCompletionMatchScope(
+      parseDateMs(record.assignedAt || record.startedAt || record.createdAt),
+      recordScopeCompletionAt(record, config),
+      config,
+      baseline.at,
+      nowMs
+    );
   });
   const scopedSummary = buildPerformanceSummary(scopedRecords, d.users || []);
   const summaryByName = new Map((scopedSummary.users || []).map(row => [String(row.userName || '').trim().toLowerCase(), row]));
@@ -3843,12 +3857,13 @@ function leaderboardAggregateStats(d = readDb(), options = {}) {
       row.assignedCount += 1;
       if (!completed) row.activeCount += 1;
     }
-    if (completed && performanceEventMatchesScope(completedAt, config, baseline.at, nowMs)) row.completedCount += 1;
+    const completedInScope = completed && performanceWorkAndCompletionMatchScope(createdAt, completedAt, config, baseline.at, nowMs);
+    if (completedInScope) row.completedCount += 1;
     if (perfRevisionCount(c) > 0) {
       const revisionAt = performanceCaseRevisionAt(c) || (completed ? completedAt : 0);
       if (performanceEventMatchesScope(revisionAt, config, baseline.at, nowMs)) row.revisionCases += 1;
     }
-    if (completed && completedAt && (!baseline.at || completedAt >= baseline.at) && serverTodayKey(completedAt) === todayKey) row.completedToday += 1;
+    if (completedInScope && completedAt && serverTodayKey(completedAt) === todayKey) row.completedToday += 1;
   }
 
   const aggregates = approvedMembers

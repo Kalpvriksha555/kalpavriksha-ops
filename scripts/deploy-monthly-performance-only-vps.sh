@@ -110,6 +110,7 @@ bash -n "$STAGE/scripts/deploy-monthly-performance-only-vps.sh"
 (
   cd "$STAGE"
   node --test \
+    tests/frontend/finance-write-stability.test.mjs \
     tests/frontend/monthly-finance-reports-ledger.test.mjs \
     tests/frontend/session-performance.test.mjs \
     tests/backend/session-performance-hardening.test.mjs \

@@ -104,10 +104,14 @@ test('performance leaderboard supports exact calendar months, overall scope, and
   assert.match(server, /collections:\['users','audit'\]/);
 });
 
-test('monthly performance excludes ambiguous updatedAt-only completion dates', () => {
+test('monthly performance excludes ambiguous and carried-forward completions', () => {
   assert.match(server, /completionEventAt:completionEventAt\|\|0/);
   assert.match(server, /if \(config\.scope === 'month'\) return explicit/);
   assert.match(server, /performanceCaseCompletedAt/);
+  assert.match(server, /function performanceWorkAndCompletionMatchScope/);
+  assert.match(server, /config\.scope === 'month' \|\| baselineAt/);
+  assert.match(server, /parseDateMs\(record\.assignedAt \|\| record\.startedAt \|\| record\.createdAt\)/);
+  assert.match(server, /const completedInScope = completed && performanceWorkAndCompletionMatchScope\(createdAt, completedAt/);
   assert.doesNotMatch(server.slice(server.indexOf('function performanceCaseCompletedAt'), server.indexOf('function performanceCaseRevisionAt')), /updatedAt/);
 });
 
