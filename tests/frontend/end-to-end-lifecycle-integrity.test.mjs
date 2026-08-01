@@ -16,9 +16,14 @@ test('case edits preserve the immutable database ID and change only the display 
   assert.doesNotMatch(block,/supersedesTaskId:/);
 });
 
-test('task saves carry optimistic concurrency and idempotency metadata',()=>{
+test('task saves carry optimistic concurrency and client-owned idempotency metadata',()=>{
   assert.match(taskService,/expectedTaskVersion/);
   assert.match(taskService,/mutationId/);
+  assert.match(taskService,/normalizedTask\.clientMutationId/);
+  assert.doesNotMatch(taskService,/mutationId \|\| normalizedTask\.lastTaskMutationId/);
+  const pendingStart=app.indexOf('const rememberPendingCreatedProject');
+  const pendingEnd=app.indexOf('const markPendingCreatedAttempt',pendingStart);
+  assert.doesNotMatch(app.slice(pendingStart,pendingEnd),/project\.lastTaskMutationId/);
   assert.match(app,/TASK_VERSION_CONFLICT/);
   assert.match(app,/createTaskMutationId/);
   assert.match(app,/expectedTaskVersion/);

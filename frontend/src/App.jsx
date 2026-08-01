@@ -180,7 +180,7 @@ const rememberPendingCreatedProject = (project, options = {}) => {
     const raw=JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
     const key=String(project.id);
     const previous=raw[key] || {};
-    const mutationId=String(options.mutationId || previous.mutationId || project.lastTaskMutationId || createTaskMutationId(options.operation === 'create' ? 'create' : 'update')).trim();
+    const mutationId=String(options.mutationId || previous.mutationId || createTaskMutationId(options.operation === 'create' ? 'create' : 'update')).trim();
     raw[key]={
       project:sanitizeProjectForCache(project),
       actorId:String(options.actorId || previous.actorId || '').trim().toLowerCase(),

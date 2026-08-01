@@ -138,7 +138,7 @@ try {
     return created.payload.project;
   };
   const taskOne = await makeTask('AUTHZ-TASK-1', designerOneUser);
-  await makeTask('AUTHZ-TASK-2', designerTwoUser);
+  const taskTwo = await makeTask('AUTHZ-TASK-2', designerTwoUser);
 
   const finance = await request('/api/state/projects/AUTHZ-TASK-1/payment-status', { method:'POST', session:admin, body:{ paymentTrackingStatus:'Paid', expectedFinanceVersion:0, expectedAmount:9000, amountIn:5000, paymentDate:'2026-07-30', mode:'UPI', transactionId:'AUTHZ-FIN-1', by:'Spoofed Actor' } });
   assert(finance.response.ok && finance.payload.project?.paymentAmountIn === 5000 && finance.payload.project?.paymentTrackingStatus === 'Pending', `Partial finance update failed: ${finance.response.status} ${JSON.stringify(finance.payload)}`);
@@ -164,6 +164,21 @@ try {
     `Legacy state anti-spoofing check returned ${spoofedBroadStateUpdate.response.status}: ${JSON.stringify(spoofedBroadStateUpdate.payload)}`
   );
 
+  // Even a correct mutation ID must not bypass task authorization. This guards
+  // the idempotent replay path from becoming a task-existence/data oracle.
+  const spoofedIdempotentReplay = await request('/api/state/projects', {
+    method:'POST',
+    session:designerOne,
+    body:{
+      mutationId:taskTwo.lastTaskMutationId,
+      project:{ id:'AUTHZ-TASK-2', caseId:'AUTHZ-TASK-2' }
+    }
+  });
+  assert(
+    spoofedIdempotentReplay.response.status === 403 && spoofedIdempotentReplay.payload?.code === 'TASK_UPDATE_FORBIDDEN',
+    `Unauthorized idempotent replay returned ${spoofedIdempotentReplay.response.status}: ${JSON.stringify(spoofedIdempotentReplay.payload)}`
+  );
+
   const ownUpdate = await request('/api/state/projects', { method:'POST', session:designerOne, body:{ expectedTaskVersion:taskOne.taskVersion, project:{ id:'AUTHZ-TASK-1', caseId:'AUTHZ-TASK-1', status:'Drafting', assignedTo:'Designer Two', customerName:'Tampered', paymentAmountIn:0, paymentTrackingStatus:'Not Updated' } } });
   assert(ownUpdate.response.ok, 'Designer could not update their assigned task.');
   assert(ownUpdate.payload.project.status === 'Drafting', 'Allowed Designer status change was not saved.');
@@ -182,15 +197,26 @@ try {
   const managerUpdate = await request('/api/state/projects', { method:'POST', session:manager, body:{ expectedTaskVersion:ownUpdate.payload.project.taskVersion, project:{ id:'AUTHZ-TASK-1', caseId:'AUTHZ-TASK-1', assignedTo:'Designer Two', assigneeName:'Designer Two', assigneeId:designerTwoUser.id, status:'Assigned' } } });
   assert(managerUpdate.response.ok && managerUpdate.payload.project.assignedTo === 'Designer Two', 'Manager could not perform an operational assignment update.');
   assert(!Object.hasOwn(managerUpdate.payload.project, 'paymentAmountIn'), 'Manager received finance data.');
-  const managerCreated = await request('/api/state/projects', { method:'POST', session:manager, body:{ project:{ id:'AUTHZ-MANAGER-RECENT', caseId:'AUTHZ-MANAGER-RECENT', customerName:'Manager recent task', assignedTo:'Designer Two', assigneeName:'Designer Two', assigneeId:designerTwoUser.id, status:'Lead Received' } } });
-  assert(managerCreated.response.ok && managerCreated.payload.project.createdBy === 'Phase 4 Manager', 'Manager could not create a recent task.');
-  const managerRecentEdit = await request('/api/state/projects', { method:'POST', session:manager, body:{ expectedTaskVersion:managerCreated.payload.project.taskVersion, project:{ ...managerCreated.payload.project, customerName:'Manager edited recent task', priority:'High' } } });
-  assert(managerRecentEdit.response.ok && managerRecentEdit.payload.project.customerName === 'Manager edited recent task' && managerRecentEdit.payload.project.priority === 'High', 'Manager could not edit a recently created task.');
+  const managerCreated = await request('/api/state/projects', { method:'POST', session:manager, body:{ mutationId:'phase4-manager-recent-create', project:{ id:'AUTHZ-MANAGER-RECENT', caseId:'AUTHZ-MANAGER-RECENT', customerName:'Manager recent task', assignedTo:'Designer Two', assigneeName:'Designer Two', assigneeId:designerTwoUser.id, status:'Lead Received' } } });
+  assert(managerCreated.response.ok && managerCreated.payload.project.createdBy === 'Phase 4 Manager', `Manager could not create a recent task: ${managerCreated.response.status} ${JSON.stringify(managerCreated.payload)}`);
+  const managerRecentEdit = await request('/api/state/projects', { method:'POST', session:manager, body:{ mutationId:'phase4-manager-recent-edit', expectedTaskVersion:managerCreated.payload.project.taskVersion, project:{ id:'AUTHZ-MANAGER-RECENT', caseId:'AUTHZ-MANAGER-RECENT', customerName:'Manager edited recent task', priority:'High' } } });
+  assert(managerRecentEdit.response.ok && managerRecentEdit.payload.project.customerName === 'Manager edited recent task' && managerRecentEdit.payload.project.priority === 'High', `Manager could not edit a recently created task: ${managerRecentEdit.response.status} ${JSON.stringify(managerRecentEdit.payload)}`);
+
+  // A normal caller may echo a server task object. Its server-owned
+  // lastTaskMutationId must never make a genuinely new edit look idempotent.
+  const managerEchoEdit = await request('/api/state/projects', { method:'POST', session:manager, body:{ expectedTaskVersion:managerRecentEdit.payload.project.taskVersion, project:{ ...managerRecentEdit.payload.project, priority:'Urgent' } } });
+  assert(
+    managerEchoEdit.response.ok
+      && managerEchoEdit.payload.project.priority === 'Urgent'
+      && Number(managerEchoEdit.payload.project.taskVersion) === Number(managerRecentEdit.payload.project.taskVersion) + 1
+      && managerEchoEdit.payload.project.lastTaskMutationId !== managerRecentEdit.payload.project.lastTaskMutationId,
+    `Server-owned mutation metadata suppressed a genuine Manager edit: ${managerEchoEdit.response.status} ${JSON.stringify(managerEchoEdit.payload)}`
+  );
   const managerRecentDelete = await request('/api/state/projects/AUTHZ-MANAGER-RECENT', { method:'DELETE', session:manager });
   assert(managerRecentDelete.response.ok && managerRecentDelete.payload.deleted === 1, 'Manager could not permanently delete a recently created task.');
   const managerAfterDelete = await request('/api/state', { session:manager });
   assert(!(managerAfterDelete.payload.projects || []).some(task => task.id === 'AUTHZ-MANAGER-RECENT'), 'Manager-deleted recent task remained visible.');
-  const staleManagerRecreate = await request('/api/state/projects', { method:'POST', session:manager, body:{ project:managerRecentEdit.payload.project } });
+  const staleManagerRecreate = await request('/api/state/projects', { method:'POST', session:manager, body:{ project:managerEchoEdit.payload.project } });
   assert(staleManagerRecreate.response.status === 409 && staleManagerRecreate.payload.code === 'PROJECT_DELETED', 'A stale client recreated the Manager-deleted task.');
 
   const d1AfterReassign = await request('/api/state', { session:designerOne });

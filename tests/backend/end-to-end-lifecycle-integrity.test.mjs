@@ -4,12 +4,18 @@ import fs from 'node:fs';
 
 const server=fs.readFileSync(new URL('../../backend/src/server.js',import.meta.url),'utf8');
 
-test('task route uses immutable IDs, version checks, and idempotent mutation confirmation',()=>{
+test('task route uses immutable IDs, version checks, and explicit idempotent mutation confirmation',()=>{
   assert.match(server,/next\.id = existing\.id/);
   assert.match(server,/assertExpectedTaskVersion\(existing, incoming, req\.body \|\| \{\}\)/);
   assert.match(server,/existing\.lastTaskMutationId/);
   assert.match(server,/idempotent:true/);
   assert.match(server,/safeIncoming\.taskVersion = nextTaskVersion\(existing\)/);
+  const mutationStart=server.indexOf('function taskMutationId');
+  const mutationEnd=server.indexOf('function completedTaskDocuments',mutationStart);
+  const mutationBlock=server.slice(mutationStart,mutationEnd);
+  assert.match(mutationBlock,/body\.mutationId/);
+  assert.match(mutationBlock,/incoming\.clientMutationId/);
+  assert.doesNotMatch(mutationBlock,/lastTaskMutationId/);
 });
 
 test('lifecycle cannot enter review or completion without a stored final deliverable',()=>{
@@ -136,6 +142,9 @@ test('authorization verifier supplies finance context, task versions, and a life
   assert.match(verifier,/expectedTaskVersion:taskOne\.taskVersion/);
   assert.match(verifier,/expectedTaskVersion:ownUpdate\.payload\.project\.taskVersion/);
   assert.match(verifier,/expectedTaskVersion:managerCreated\.payload\.project\.taskVersion/);
+  assert.match(verifier,/spoofedIdempotentReplay/);
+  assert.match(verifier,/managerEchoEdit/);
+  assert.match(verifier,/lastTaskMutationId !== managerRecentEdit\.payload\.project\.lastTaskMutationId/);
   assert.match(verifier,/status:'Assigned'/);
   assert.match(verifier,/paymentTrackingStatus === 'Pending'/);
   assert.match(verifier,/Deliberately omit expectedTaskVersion here/);
@@ -153,9 +162,11 @@ test('task authorization precedes optimistic concurrency in every existing-task 
   const dedicatedEnd=server.indexOf("app.delete('/api/state/projects",dedicatedStart);
   const dedicated=server.slice(dedicatedStart,dedicatedEnd);
   const dedicatedAuth=dedicated.indexOf('assertProjectUpdateAuthorized(existing, req)');
+  const dedicatedReplay=dedicated.indexOf("existing.lastTaskMutationId || '') === mutationId");
   const dedicatedVersion=dedicated.indexOf('assertExpectedTaskVersion(existing, incoming, req.body || {})');
-  assert.ok(dedicatedAuth >= 0 && dedicatedVersion >= 0 && dedicatedAuth < dedicatedVersion,
-    'Dedicated task writes must reject unauthorized callers before checking task versions.');
+  assert.ok(dedicatedAuth >= 0 && dedicatedReplay >= 0 && dedicatedVersion >= 0
+      && dedicatedAuth < dedicatedReplay && dedicatedReplay < dedicatedVersion,
+    'Dedicated task writes must authorize before idempotent replay and version checks.');
 
   const broadStart=server.indexOf("app.post('/api/state',");
   const broadEnd=server.indexOf("app.get('/api/health",broadStart);
@@ -164,4 +175,20 @@ test('task authorization precedes optimistic concurrency in every existing-task 
   const broadVersion=broad.indexOf('assertExpectedTaskVersion(existing,incoming,incoming)');
   assert.ok(broadAuth >= 0 && broadVersion >= 0 && broadAuth < broadVersion,
     'Legacy broad-state writes must reject unauthorized callers before checking task versions.');
+});
+
+
+test('full release verifier matrix runs every gate and aggregates all failures',()=>{
+  const matrix=fs.readFileSync(new URL('../../scripts/full-release-verifier-matrix.mjs',import.meta.url),'utf8');
+  const pkg=JSON.parse(fs.readFileSync(new URL('../../package.json',import.meta.url),'utf8'));
+  for (const marker of [
+    'security-package-audit','doctor','regression-guard','production-audit',
+    'frontend-tests','backend-tests','finance','authentication','authorization',
+    'database','files','reliability','release','frontend-ux','integration','build'
+  ]) assert.match(matrix,new RegExp(`id:'${marker}'`));
+  assert.match(matrix,/for \(const step of steps\) results\.push\(await runStep\(step\)\)/);
+  assert.match(matrix,/const failures = results\.filter\(item => item\.status !== 'PASS'\)/);
+  assert.match(matrix,/FULL RELEASE VERIFIER MATRIX/);
+  assert.match(matrix,/os\.tmpdir\(\)/);
+  assert.equal(pkg.scripts['verify:matrix'],'node scripts/full-release-verifier-matrix.mjs');
 });

@@ -52,7 +52,8 @@
     "verify:frontend-ux": "node scripts/phase-9-frontend-ux-check.mjs",
     "test:backend": "node --test tests/backend/*.test.mjs",
     "verify:integration": "node scripts/frontend-backend-contract-check.mjs",
-    "verify:live-stack": "node scripts/live-stack-check.mjs"
+    "verify:live-stack": "node scripts/live-stack-check.mjs",
+    "verify:matrix": "node scripts/full-release-verifier-matrix.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "6.0.3",

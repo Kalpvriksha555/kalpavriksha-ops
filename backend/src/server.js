@@ -2327,7 +2327,13 @@ function assertExpectedTaskVersion(existing = {}, incoming = {}, body = {}) {
 }
 
 function taskMutationId(body = {}, incoming = {}) {
-  return String(body.mutationId || incoming.lastTaskMutationId || '').trim().slice(0, 200);
+  const supplied = [
+    body.mutationId,
+    body.clientMutationId,
+    incoming.mutationId,
+    incoming.clientMutationId
+  ].find(value => String(value || '').trim());
+  return String(supplied || '').trim().slice(0, 200);
 }
 
 function completedTaskDocuments(record = {}) {
@@ -4539,16 +4545,17 @@ app.post('/api/state/projects', async (req, res) => {
 
     const existing = findCaseByAnyId(d.cases || [], projectId) || findCaseByAnyId(d.cases || [], incoming.caseId || '');
     const mutationId = taskMutationId(req.body || {}, incoming);
-    if (existing && mutationId && String(existing.lastTaskMutationId || '') === mutationId) {
-      const visibleExisting = sanitizeCasesForRole([existing], actor.role)[0] || existing;
-      return res.json({ ok:true, idempotent:true, project:visibleExisting, case:visibleExisting, deletedProjectIds:d.deletedProjectIds || [], counts:{ cases:(d.cases || []).length } });
-    }
 
     let safeIncoming;
     if (existing) {
-      // Authorization must run before optimistic-concurrency validation so an
-      // unrelated user cannot probe whether a task exists or learn its version.
+      // Authorization must run before both idempotent-replay and optimistic-
+      // concurrency checks. An unrelated user must not be able to confirm a
+      // task or receive its redacted row merely by guessing a mutation ID.
       assertProjectUpdateAuthorized(existing, req);
+      if (mutationId && String(existing.lastTaskMutationId || '') === mutationId) {
+        const visibleExisting = sanitizeCasesForRole([existing], actor.role)[0];
+        return res.json({ ok:true, idempotent:true, project:visibleExisting, case:visibleExisting, deletedProjectIds:d.deletedProjectIds || [], counts:{ cases:(d.cases || []).length } });
+      }
       assertExpectedTaskVersion(existing, incoming, req.body || {});
       safeIncoming = authorizedProjectUpdate(existing, incoming, req);
       assertTaskLifecycleTransition(existing, safeIncoming, actor);

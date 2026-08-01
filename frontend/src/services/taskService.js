@@ -185,7 +185,7 @@ export const createTaskApi = async ({ apiBase, headers = {}, task, expectedTaskV
   let res;
   const normalizedTask=normalizeTaskRecord(task);
   const expected=expectedTaskVersion ?? normalizedTask.taskVersion ?? 0;
-  const stableMutationId=String(mutationId || normalizedTask.lastTaskMutationId || '').trim();
+  const stableMutationId=String(mutationId || normalizedTask.mutationId || normalizedTask.clientMutationId || '').trim();
   try {
     res = await authFetch(`${apiBase}/api/state/projects`, {
       method: 'POST',

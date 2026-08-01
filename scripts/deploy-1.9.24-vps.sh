@@ -124,6 +124,12 @@ grep -q "expectedTaskVersion:ownUpdate.payload.project.taskVersion" "$STAGE/scri
 grep -q "expectedTaskVersion:managerCreated.payload.project.taskVersion" "$STAGE/scripts/phase-4-authorization-check.mjs" || \
   fail "GitHub main does not contain the authorization verifier manager-edit task-version correction"
 
+grep -q "spoofedIdempotentReplay" "$STAGE/scripts/phase-4-authorization-check.mjs" || \
+  fail "GitHub main does not contain the authorization-before-idempotency runtime probe"
+
+grep -q "managerEchoEdit" "$STAGE/scripts/phase-4-authorization-check.mjs" || \
+  fail "GitHub main does not contain the server-mutation-metadata replay regression probe"
+
 grep -q "status:'Assigned'" "$STAGE/scripts/phase-4-authorization-check.mjs" || \
   fail "GitHub main does not contain the authorization verifier lifecycle-safe assignment correction"
 
@@ -144,6 +150,10 @@ import path from 'node:path';
 const root = process.argv[2];
 const server = fs.readFileSync(path.join(root, 'backend/src/server.js'), 'utf8');
 const verifier = fs.readFileSync(path.join(root, 'scripts/phase-4-authorization-check.mjs'), 'utf8');
+const taskService = fs.readFileSync(path.join(root, 'frontend/src/services/taskService.js'), 'utf8');
+const app = fs.readFileSync(path.join(root, 'frontend/src/App.jsx'), 'utf8');
+const matrix = fs.readFileSync(path.join(root, 'scripts/full-release-verifier-matrix.mjs'), 'utf8');
+const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 
 const assertBefore = (block, first, second, label) => {
   const firstIndex = block.indexOf(first);
@@ -156,11 +166,18 @@ const assertBefore = (block, first, second, label) => {
 const dedicatedStart = server.indexOf("app.post('/api/state/projects'");
 const dedicatedEnd = server.indexOf("app.delete('/api/state/projects", dedicatedStart);
 if (dedicatedStart < 0 || dedicatedEnd < 0) throw new Error('Dedicated task route could not be located.');
+const dedicatedBlock = server.slice(dedicatedStart, dedicatedEnd);
 assertBefore(
-  server.slice(dedicatedStart, dedicatedEnd),
+  dedicatedBlock,
   'assertProjectUpdateAuthorized(existing, req)',
+  "existing.lastTaskMutationId || '') === mutationId",
+  'Dedicated task idempotency route'
+);
+assertBefore(
+  dedicatedBlock,
+  "existing.lastTaskMutationId || '') === mutationId",
   'assertExpectedTaskVersion(existing, incoming, req.body || {})',
-  'Dedicated task route'
+  'Dedicated task version route'
 );
 
 const broadStart = server.indexOf("app.post('/api/state', async");
@@ -176,12 +193,41 @@ assertBefore(
 for (const marker of [
   'Deliberately omit expectedTaskVersion here',
   "spoofedOtherUpdate.payload?.code === 'TASK_UPDATE_FORBIDDEN'",
-  "spoofedBroadStateUpdate.payload?.code === 'TASK_UPDATE_FORBIDDEN'"
+  "spoofedBroadStateUpdate.payload?.code === 'TASK_UPDATE_FORBIDDEN'",
+  'spoofedIdempotentReplay',
+  'managerEchoEdit'
 ]) {
   if (!verifier.includes(marker)) throw new Error(`Authorization verifier marker is missing: ${marker}`);
 }
 
-console.log('Release authorization-precedence source audit passed.');
+
+const mutationStart = server.indexOf('function taskMutationId');
+const mutationEnd = server.indexOf('function completedTaskDocuments', mutationStart);
+if (mutationStart < 0 || mutationEnd < 0) throw new Error('Task mutation helper could not be located.');
+const mutationBlock = server.slice(mutationStart, mutationEnd);
+if (mutationBlock.includes('lastTaskMutationId')) throw new Error('Server-owned lastTaskMutationId is still accepted as a client mutation ID.');
+if (!mutationBlock.includes('body.mutationId') || !mutationBlock.includes('incoming.clientMutationId')) throw new Error('Explicit client mutation-ID inputs are missing.');
+if (taskService.includes("mutationId || normalizedTask.lastTaskMutationId")) throw new Error('Frontend task API still recycles server-owned mutation metadata.');
+const pendingStart = app.indexOf('const rememberPendingCreatedProject');
+const pendingEnd = app.indexOf('const markPendingCreatedAttempt', pendingStart);
+if (pendingStart < 0 || pendingEnd < 0) throw new Error('Durable task outbox helper could not be located.');
+if (app.slice(pendingStart, pendingEnd).includes('project.lastTaskMutationId')) throw new Error('Durable task outbox still inherits a server-owned mutation ID.');
+
+
+const requiredMatrixMarkers = [
+  'security-package-audit', 'doctor', 'regression-guard', 'production-audit',
+  'frontend-tests', 'backend-tests', 'finance', 'authentication',
+  'authorization', 'database', 'files', 'reliability', 'release',
+  'frontend-ux', 'integration', 'build'
+];
+for (const marker of requiredMatrixMarkers) {
+  if (!matrix.includes(`id:'${marker}'`)) throw new Error(`Full verifier matrix is missing ${marker}.`);
+}
+if (!matrix.includes('for (const step of steps) results.push(await runStep(step))')) throw new Error('Full verifier matrix is not configured to continue through all gates.');
+if (!matrix.includes("const failures = results.filter(item => item.status !== 'PASS')")) throw new Error('Full verifier matrix does not aggregate failures.');
+if (pkg.scripts?.['verify:matrix'] !== 'node scripts/full-release-verifier-matrix.mjs') throw new Error('verify:matrix package command is missing or changed.');
+
+console.log('Release authorization, idempotency, mutation-ownership, and full-matrix source audit passed.');
 NODE
 
 while IFS= read -r -d '' source_file; do
@@ -195,8 +241,8 @@ rm -rf node_modules backend/node_modules frontend/node_modules frontend/dist .re
 npm ci --include=dev --no-audit --no-fund
 npm ci --prefix frontend --include=dev --no-audit --no-fund
 
-log "Running the complete verification suite"
-npm run verify
+log "Running the complete verification matrix (all failures are collected before aborting)"
+KALPA_VERIFY_MATRIX_REPORT="$WORK/full-verifier-matrix.json" npm run verify:matrix
 
 log "Running isolated clean-install verification"
 npm run release:clean-install
