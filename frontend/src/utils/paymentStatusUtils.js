@@ -1,4 +1,4 @@
-import { getCurrentAccountingMonthKey, normalizeAccountingMonthKey } from './accountingPeriodUtils.js';
+import { getCurrentAccountingMonthKey, getIndiaDateKey, getProjectFinanceMonthKey, normalizeAccountingMonthKey } from './accountingPeriodUtils.js';
 
 export const PAYMENT_TRACKING_OPTIONS = ['Not Updated', 'Pending', 'Paid'];
 
@@ -86,8 +86,18 @@ export const buildPaymentTrackingUpdate = (project = {}, status = 'Not Updated',
   const enteredAmount = paymentDetails.amountIn ?? paymentDetails.amount ?? paymentDetails.paymentAmountIn;
   const cleanedEnteredAmount = typeof enteredAmount === 'string' ? enteredAmount.replace(/[^0-9.-]/g, '') : enteredAmount;
   const enteredNumeric = Number(cleanedEnteredAmount);
-  const today = new Date(now).toISOString().slice(0, 10);
-  const accountingPeriod = normalizeAccountingMonthKey(paymentDetails.accountingPeriod || paymentDetails.paymentDate || paymentDetails.date || existingLedger.accountingPeriod || existingLedger.date || project.financeAccountingPeriod || project.paymentDate, getCurrentAccountingMonthKey(now));
+  const today = getIndiaDateKey(now);
+  const accountingPeriod = normalizeAccountingMonthKey(
+    getProjectFinanceMonthKey(project)
+      || paymentDetails.accountingPeriod
+      || paymentDetails.paymentDate
+      || paymentDetails.date
+      || existingLedger.accountingPeriod
+      || existingLedger.date
+      || project.financeAccountingPeriod
+      || project.paymentDate,
+    getCurrentAccountingMonthKey(now)
+  );
 
   let nextLedger = {
     ...existingLedger,

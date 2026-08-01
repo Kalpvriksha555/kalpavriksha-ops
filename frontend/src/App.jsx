@@ -3,7 +3,7 @@ import { FeedbackHost } from './components/ui/FeedbackHost.jsx';
 import { notifyUser, requestConfirmation, requestInput } from './services/uiFeedback.js';
 import { useAdaptiveWorkspaceSync } from './hooks/useAdaptiveWorkspaceSync.js';
 import { formatLastSeenDateTime, formatCallDuration, formatDateKey, formatDateTime, formatDuration, formatMinutes } from './utils/date';
-import { buildProjectMonthlyFinanceEntry, compareAccountingMonths, formatAccountingMonthLabel, getAvailableFinanceMonthKeys, getCurrentAccountingMonthKey, getFinanceEventMonthKey, getPreviousAccountingMonthKey, getProjectCreatedMonthKey, getProjectFinanceMonthKey, normalizeAccountingMonthKey } from './utils/accountingPeriodUtils.js';
+import { buildProjectMonthlyFinanceEntry, compareAccountingMonths, formatAccountingMonthLabel, getAvailableFinanceMonthKeys, getCurrentAccountingMonthKey, getFinanceEventMonthKey, getIndiaDateKey, getPreviousAccountingMonthKey, getProjectCreatedMonthKey, getProjectFinanceMonthKey, getTaskDateTimestamp, normalizeAccountingMonthKey, normalizeTaskDateKey } from './utils/accountingPeriodUtils.js';
 import { formatTaskId, allProjectDocs, getCompletedDocuments, getLatestCompletedFileName, getTaskDescription, getEstimateDetails, getCompletedFileBadge } from './utils/taskDisplayUtils';
 import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass, buildPaymentTrackingUpdate, getPaymentEstimateAmount, getPaymentReceivedAmount, derivePaymentTrackingStatusFromData } from './features/finance';
 import { getBreakMinutesFromLog, getTaskBusySince, getUserActiveTasks, getUserLastCompletedAt, getUserFreeSince, getUserBusySince, getDraftingElapsedMs, getTotalLoggedInMinutesFromLog, getActiveMinutesFromLog, getAttendanceActiveTaskMinutes, buildAttendanceAccrual, deriveAttendanceSession, getAttendanceFirstLoginLabel, buildAttendanceEngineV3 } from './features/attendance';
@@ -1810,6 +1810,11 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
   );
 };
 
+const finiteLedgerAmount = (value) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+};
+
 const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceViewState }) => {
   const [localFinanceViewState, setLocalFinanceViewState] = useState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
   const effectiveFinanceViewState = financeViewState || localFinanceViewState;
@@ -1908,11 +1913,11 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
 
   const financeTotals = useMemo(() => ledgerProjects.reduce((totals, project) => {
     const entry = periodEntryFor(project);
-    totals.cost += entry.estimate;
-    totals.received += entry.received;
-    totals.expenses += entry.expenses;
-    totals.refund += entry.refund;
-    totals.pending += entry.pendingAtClose;
+    totals.cost += finiteLedgerAmount(entry.estimate);
+    totals.received += finiteLedgerAmount(entry.received);
+    totals.expenses += finiteLedgerAmount(entry.expenses);
+    totals.refund += finiteLedgerAmount(entry.refund);
+    totals.pending += finiteLedgerAmount(entry.pendingAtClose);
     return totals;
   }, { cost:0, received:0, expenses:0, refund:0, pending:0 }), [ledgerProjects, periodEntryFor]);
   const totalCost = financeTotals.cost;
@@ -2138,11 +2143,11 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
               <tbody className="divide-y divide-slate-100">
                 {pagedLedgerProjects.map(p => {
                   const entry = periodEntryFor(p);
-                  const est = entry.estimate;
-                  const rec = entry.received;
-                  const exp = entry.expenses;
+                  const est = finiteLedgerAmount(entry.estimate);
+                  const rec = finiteLedgerAmount(entry.received);
+                  const exp = finiteLedgerAmount(entry.expenses);
                   const status = entry.statusAtClose;
-                  const pen = entry.pendingAtClose;
+                  const pen = finiteLedgerAmount(entry.pendingAtClose);
                   const updateDate = entry.activityAt ? new Date(entry.activityAt) : null;
                   
                   return (
@@ -2325,8 +2330,8 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
                 <tbody className="divide-y divide-slate-100">
                   {pagedLedgerProjects.map(p => {
                     const entry = periodEntryFor(p);
-                    const est = entry.estimate;
-                    const rec = entry.received;
+                    const est = finiteLedgerAmount(entry.estimate);
+                    const rec = finiteLedgerAmount(entry.received);
                     const status = entry.statusAtClose;
                     return (
                       <tr key={`report-${p.id}`} className="hover:bg-slate-50">
@@ -3195,8 +3200,8 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, users, project
   const updateLedger = (field, value) => {
     if (!showFinancials) return;
     const now = Date.now();
-    const nextLedgerDate = field === 'date' ? value : (project.ledger?.date || project.paymentDate || new Date(now).toISOString().slice(0, 10));
-    const accountingPeriod = normalizeAccountingMonthKey(nextLedgerDate, getCurrentAccountingMonthKey(now));
+    const nextLedgerDate = field === 'date' ? value : (project.ledger?.date || project.paymentDate || getIndiaDateKey(now));
+    const accountingPeriod = normalizeAccountingMonthKey(getProjectFinanceMonthKey(project), getCurrentAccountingMonthKey(now));
     const nextLedger = { ...(project.ledger || {}), [field]: value, date:nextLedgerDate, accountingPeriod, updatedAt: now, updatedBy: user?.name || 'Admin' };
     const draftProject = { ...project, financeAccountingPeriod:accountingPeriod, ledger: nextLedger };
     const computedStatus = derivePaymentTrackingStatusFromData(draftProject);
@@ -5059,7 +5064,7 @@ function AppShell() {
           details: {
             amountIn: getPaymentReceivedAmount(updatedProject),
             paymentDate: updatedProject.ledger?.date || updatedProject.paymentDate || '',
-            accountingPeriod: updatedProject.financeAccountingPeriod || updatedProject.ledger?.accountingPeriod || normalizeAccountingMonthKey(updatedProject.ledger?.date || updatedProject.paymentDate, getCurrentAccountingMonthKey()),
+            accountingPeriod: getProjectFinanceMonthKey(updatedProject) || updatedProject.financeAccountingPeriod || updatedProject.ledger?.accountingPeriod || normalizeAccountingMonthKey(updatedProject.ledger?.date || updatedProject.paymentDate, getCurrentAccountingMonthKey()),
             paymentTime: updatedProject.paymentTime || '',
             mode: updatedProject.ledger?.mode || '',
             transactionId: updatedProject.ledger?.txnId || updatedProject.transactionId || '',
@@ -5217,8 +5222,9 @@ function AppShell() {
         notifyUser('Please enter a valid received amount before marking payment as Paid.');
         return;
       }
-      const today = new Date().toISOString().slice(0, 10);
-      const paymentDate = await requestInput('Enter payment date (YYYY-MM-DD):', { title: 'Payment date', inputType: 'date', defaultValue: project.ledger?.date || project.paymentDate || today });
+      const today = getIndiaDateKey();
+      const financeMonthLabel = formatAccountingMonthLabel(getProjectFinanceMonthKey(project) || getCurrentAccountingMonthKey());
+      const paymentDate = await requestInput(`Enter the actual payment date. This update will remain in ${financeMonthLabel} finance because it belongs to the task's creation month.`, { title: `Payment date • ${financeMonthLabel}`, inputType: 'date', defaultValue: project.ledger?.date || project.paymentDate || today });
       if (paymentDate === null || !String(paymentDate).trim()) return;
       const mode = await requestInput('Enter payment mode (Cash / UPI / Bank Transfer / Cheque):', { title: 'Payment mode', defaultValue: project.ledger?.mode || '', placeholder: 'Cash, UPI, Bank Transfer or Cheque' });
       if (mode === null || !String(mode).trim()) return;
@@ -6115,7 +6121,15 @@ function AppShell() {
                const docs = [];
 
                const assignedTo = fd.get('assignedTo');
-               const createdStamp = Date.now();
+               const recordedStamp = Date.now();
+               const todayTaskDate = getIndiaDateKey(recordedStamp);
+               const taskDate = normalizeTaskDateKey(fd.get('taskDate'), todayTaskDate);
+               if (taskDate > todayTaskDate) {
+                 throw new Error('Task date cannot be in the future.');
+               }
+               const createdStamp = getTaskDateTimestamp(taskDate, recordedStamp);
+               const taskAccountingPeriod = normalizeAccountingMonthKey(taskDate, getCurrentAccountingMonthKey(recordedStamp));
+               const isBackdated = taskDate !== todayTaskDate;
                const newP = {
                  id: taskId,
                  taskName: [taskType, customerName, location].filter(Boolean).join(' • '),
@@ -6125,14 +6139,31 @@ function AppShell() {
                  location,
                  type: taskType,
                  description: fd.get('description') || '',
-                 priority: fd.get('priority'), assignedTo, assignedBy: assignedTo !== 'Unassigned' ? currentUser.name : '', assignedAt: assignedTo !== 'Unassigned' ? createdStamp : null, assignmentVersion: assignedTo !== 'Unassigned' ? createdStamp : null,
+                 priority: fd.get('priority'), assignedTo, assignedBy: assignedTo !== 'Unassigned' ? currentUser.name : '', assignedAt: assignedTo !== 'Unassigned' ? recordedStamp : null, assignmentVersion: assignedTo !== 'Unassigned' ? recordedStamp : null,
                  dueDate: fd.get('dueDate') || null,
                  estimateDetails: fd.get('estimateDetails') || '', estimate: fd.get('estimate') || 0,
-                 status: 'Lead Received', createdAt: createdStamp, updatedAt: createdStamp, syncVersion: createdStamp, createdBy: currentUser.name,
+                 status: 'Lead Received',
+                 taskDate,
+                 taskAccountingPeriod,
+                 createdAt: createdStamp,
+                 recordedAt: recordedStamp,
+                 updatedAt: recordedStamp,
+                 syncVersion: recordedStamp,
+                 createdBy: currentUser.name,
                  ownership: { createdBy: currentUser.name, assignedBy: assignedTo !== 'Unassigned' ? currentUser.name : '', assignedTo },
-                 reassignmentHistory: assignedTo !== 'Unassigned' ? [{ from: 'Unassigned', to: assignedTo, by: currentUser.name, time: new Date(createdStamp).toLocaleString() }] : [],
-                 documents: docs, timeline: [{id: createdStamp, text: 'Case Created', time: new Date(createdStamp).toLocaleString()}],
-                 subTasks: [], notes: [], ledger: {}, reportSent: false
+                 reassignmentHistory: assignedTo !== 'Unassigned' ? [{ from: 'Unassigned', to: assignedTo, by: currentUser.name, time: new Date(recordedStamp).toLocaleString() }] : [],
+                 documents: docs,
+                 timeline: [{
+                   id: recordedStamp,
+                   text: isBackdated ? `Case Created for ${taskDate} (backdated entry)` : 'Case Created',
+                   time: new Date(recordedStamp).toLocaleString(),
+                   at: createdStamp,
+                   recordedAt: recordedStamp
+                 }],
+                 subTasks: [],
+                 notes: [],
+                 ledger: { accountingPeriod: taskAccountingPeriod },
+                 reportSent: false
                };
                
                if (docs.length > 0) {
@@ -6148,7 +6179,7 @@ function AppShell() {
                const nextProjects = filterDeletedProjects(mergeProjectsByFreshness((projects || []).filter(p => String(p.id) !== String(newP.id)), [newP, ...getRecentCreatedProjects(), ...getPendingCreatedProjects()]));
                persistAndBroadcastProjects(nextProjects);
                setProjects(() => nextProjects);
-               setSelectedBoardDate(formatDateKey(newP.createdAt));
+               setSelectedBoardDate(taskDate);
                setActiveTab('board');
                if (!USE_BACKEND_STATE) { try { window.localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(filterDeletedProjects(nextProjects)))); } catch(e) {} }
                let confirmedProject = newP;
@@ -6247,6 +6278,11 @@ function AppShell() {
                  <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Bank Name</label><input required name="client" className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none transition-colors font-bold text-slate-800" placeholder="SBI Home Loans"/></div>
                  <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Customer Name</label><input required name="customerName" className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none transition-colors font-bold text-slate-800" placeholder="Rajesh Kumar"/></div>
                  <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Location</label><input required name="location" className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none transition-colors font-bold text-slate-800" placeholder="Varanasi"/></div>
+                 <div>
+                   <label className="text-xs font-black text-indigo-600 uppercase tracking-widest block mb-2">Task Date</label>
+                   <input type="date" name="taskDate" defaultValue={getIndiaDateKey()} max={getIndiaDateKey()} className="w-full border-2 border-indigo-100 rounded-xl p-3.5 bg-indigo-50/60 focus:bg-white focus:border-indigo-500 outline-none transition-colors font-bold text-slate-800 cursor-pointer" />
+                   <p className="text-[10px] font-bold text-slate-400 mt-1.5">Defaults to today. Choose an earlier date only for a missed entry.</p>
+                 </div>
                </div>
 
                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">

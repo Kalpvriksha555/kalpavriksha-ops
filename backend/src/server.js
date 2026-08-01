@@ -1769,6 +1769,9 @@ function authorizedProjectUpdate(existing = {}, incoming = {}, req = {}) {
     next.id = existing.id;
     next.caseId = incoming.caseId || existing.caseId;
     next.createdAt = existing.createdAt;
+    next.taskDate = existing.taskDate || normalizeTaskDate(existing.createdAt);
+    next.taskAccountingPeriod = existing.taskAccountingPeriod || getCaseTaskAccountingPeriod(existing);
+    next.recordedAt = existing.recordedAt || existing.createdAt;
     next.createdBy = existing.createdBy || existing.creatorName || actor.name;
     next.creatorName = existing.creatorName || existing.createdBy || actor.name;
     next.createdByRole = existing.createdByRole || actor.role;
@@ -1945,6 +1948,58 @@ function normalizeFinanceAccountingPeriod(value, fallback = now()) {
   }
   return FINANCE_ACCOUNTING_MONTH_PATTERN.test(fallbackDirect) ? fallbackDirect : '';
 }
+const TASK_DATE_PATTERN = /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+function indiaDateKey(value = Date.now()) {
+  const timestamp = value instanceof Date ? value.getTime() : new Date(value).getTime();
+  const safeTimestamp = Number.isFinite(timestamp) && timestamp > 0 ? timestamp : Date.now();
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone:'Asia/Kolkata',
+      year:'numeric',
+      month:'2-digit',
+      day:'2-digit'
+    }).formatToParts(new Date(safeTimestamp));
+    const year = parts.find(part => part.type === 'year')?.value;
+    const month = parts.find(part => part.type === 'month')?.value;
+    const day = parts.find(part => part.type === 'day')?.value;
+    return year && month && day ? `${year}-${month}-${day}` : '';
+  } catch {
+    return new Date(safeTimestamp).toISOString().slice(0, 10);
+  }
+}
+function normalizeTaskDate(value, fallback = Date.now()) {
+  const fallbackKey = indiaDateKey(fallback);
+  const raw = String(value || '').trim().slice(0, 10);
+  if (TASK_DATE_PATTERN.test(raw)) {
+    const parsed = new Date(`${raw}T12:00:00+05:30`);
+    if (Number.isFinite(parsed.getTime()) && indiaDateKey(parsed) === raw) return raw;
+    return fallbackKey;
+  }
+  const numeric = Number(value);
+  const timestamp = Number.isFinite(numeric) && numeric > 0
+    ? (numeric < 10_000_000_000 ? numeric * 1000 : numeric)
+    : new Date(value || 0).getTime();
+  if (Number.isFinite(timestamp) && timestamp > 0) return indiaDateKey(timestamp);
+  return fallbackKey;
+}
+function taskDateTimestamp(taskDate, recordedAt = Date.now()) {
+  const nowMs = Number(recordedAt) || Date.now();
+  const today = indiaDateKey(nowMs);
+  const normalized = normalizeTaskDate(taskDate, nowMs);
+  if (normalized === today) return nowMs;
+  const timestamp = new Date(`${normalized}T12:00:00+05:30`).getTime();
+  return Number.isFinite(timestamp) ? timestamp : nowMs;
+}
+function getCaseTaskAccountingPeriod(c = {}, fallback = now()) {
+  const explicitTaskMonth = normalizeFinanceAccountingPeriod(c.taskAccountingPeriod, '');
+  if (explicitTaskMonth) return explicitTaskMonth;
+  const taskDateSource = c.taskDate || c.operationalDate || c.createdAt || c.createdOn || c.loggedAt || c.date;
+  if (taskDateSource) {
+    return normalizeFinanceAccountingPeriod(normalizeTaskDate(taskDateSource, fallback), fallback);
+  }
+  return normalizeFinanceAccountingPeriod(c.financeAccountingPeriod || c.ledger?.accountingPeriod, fallback);
+}
+
 function nonNegativeFinanceNumber(value, fallback = 0) {
   if (value === undefined || value === null || value === '') return Math.max(0, Number(fallback) || 0);
   const cleaned = typeof value === 'string' ? value.replace(/[^0-9.-]/g, '') : value;
@@ -1979,8 +2034,8 @@ function upsertInlinePaymentLedger(d, c, status, body = {}) {
   const amount = hasExplicitAmount ? nonNegativeFinanceNumber(explicitAmount, previousAmountIn) : previousAmountIn;
   const expenses = hasExplicitExpenses ? nonNegativeFinanceNumber(body.expenses, previousExpenses) : previousExpenses;
   const refund = hasExplicitRefund ? nonNegativeFinanceNumber(body.refund ?? body.refundAmount, previousRefund) : previousRefund;
-  const paymentDate = String(body.paymentDate || body.date || c.paymentDate || c.ledger?.date || nowIso.slice(0, 10)).trim();
-  const accountingPeriod = normalizeFinanceAccountingPeriod(body.accountingPeriod || paymentDate, nowIso);
+  const paymentDate = String(body.paymentDate || body.date || c.paymentDate || c.ledger?.date || indiaDateKey(nowIso)).trim();
+  const accountingPeriod = getCaseTaskAccountingPeriod(c, body.accountingPeriod || paymentDate || nowIso);
 
   if (status === 'Paid' && amount <= 0) {
     const err = new Error('Amount received is required before marking payment as Paid.');
@@ -3812,11 +3867,23 @@ app.post('/api/state/projects', async (req, res) => {
     } else {
       if (!hasCapability(req.auth?.user || {}, 'task:create')) return authorizationDenied(req, res, 'TASK_CREATE_FORBIDDEN', 'Only Admins and Managers can create tasks.');
       safeIncoming = preserveFinanceFields({}, structuredClone(incoming));
+      const recordedAt = Date.now();
+      const todayTaskDate = indiaDateKey(recordedAt);
+      const requestedTaskDate = normalizeTaskDate(incoming.taskDate || incoming.operationalDate || incoming.createdAt, recordedAt);
+      if (requestedTaskDate > todayTaskDate) {
+        const error = new Error('Task date cannot be in the future.');
+        error.statusCode = 400;
+        error.code = 'TASK_DATE_IN_FUTURE';
+        throw error;
+      }
       safeIncoming.id = projectId;
       safeIncoming.caseId = incoming.caseId || projectId;
-      safeIncoming.createdAt = incoming.createdAt || Date.now();
-      safeIncoming.updatedAt = Date.now();
-      safeIncoming.syncVersion = Date.now();
+      safeIncoming.taskDate = requestedTaskDate;
+      safeIncoming.taskAccountingPeriod = normalizeFinanceAccountingPeriod(requestedTaskDate, recordedAt);
+      safeIncoming.createdAt = taskDateTimestamp(requestedTaskDate, recordedAt);
+      safeIncoming.recordedAt = recordedAt;
+      safeIncoming.updatedAt = recordedAt;
+      safeIncoming.syncVersion = recordedAt;
       safeIncoming.createdBy = actor.name;
       safeIncoming.creatorName = actor.name;
       safeIncoming.createdByRole = actor.role;
@@ -3991,7 +4058,17 @@ app.post('/api/cases', requireAnyRole('ADMIN','MANAGER'), uploadAny, async (req,
     let assignee = (d.users || []).find(user => String(user.id || '') === String(body.assigneeId || ''));
     if (!assignee) assignee = leastBusy(d);
     const manager = sanitizePresenceUsers(d.users).find(user => normalizeRole(user.role) === 'Manager');
-    const createdAt = now();
+    const recordedAt = Date.now();
+    const todayTaskDate = indiaDateKey(recordedAt);
+    const taskDate = normalizeTaskDate(body.taskDate || body.operationalDate || recordedAt, recordedAt);
+    if (taskDate > todayTaskDate) {
+      const error = new Error('Task date cannot be in the future.');
+      error.statusCode = 400;
+      error.code = 'TASK_DATE_IN_FUTURE';
+      throw error;
+    }
+    const createdAt = taskDateTimestamp(taskDate, recordedAt);
+    const taskAccountingPeriod = normalizeFinanceAccountingPeriod(taskDate, recordedAt);
     const serviceType = serviceTypes.includes(String(body.serviceType || '')) ? String(body.serviceType) : 'Other';
     const priority = ['Normal','High','Urgent'].includes(String(body.priority || '')) ? String(body.priority) : 'Normal';
     const city = textValue(body.city || 'Lucknow', 'City', 120, { required:true });
@@ -4023,17 +4100,20 @@ app.post('/api/cases', requireAnyRole('ADMIN','MANAGER'), uploadAny, async (req,
       assignmentVersion:Date.now(),
       managerId:manager?.id,
       managerName:manager?.name,
+      taskDate,
+      taskAccountingPeriod,
       createdAt,
-      updatedAt:Date.now(),
-      syncVersion:Date.now(),
+      recordedAt,
+      updatedAt:recordedAt,
+      syncVersion:recordedAt,
       startedAt:null,
       completedAt:null,
       dueAt:textValue(body.dueAt || '', 'Due date', 100),
       paymentStatus:'PENDING',
-      documents:[], comments:[], revisions:[], history:[{at:createdAt,by:actor.name,action:'Lead created and task assigned'}], timeline:[],
+      documents:[], comments:[], revisions:[], history:[{at:recordedAt,effectiveAt:createdAt,by:actor.name,action:taskDate === todayTaskDate ? 'Lead created and task assigned' : `Backdated lead created for ${taskDate} and task assigned`}], timeline:[],
       ownership:{ createdBy:actor.name, assignedBy:actor.name, assignedTo:assignee?.name || 'Unassigned' }
     };
-    addCaseTimelineEvent(c, { type:'created', by:actor.name, at:createdAt, title:'Case Created', remarks:`${c.caseId} created for ${c.customerName}` });
+    addCaseTimelineEvent(c, { type:'created', by:actor.name, at:createdAt, recordedAt, title:taskDate === todayTaskDate ? 'Case Created' : `Case Created for ${taskDate}`, remarks:`${c.caseId} created for ${c.customerName}${taskDate === todayTaskDate ? '' : ' as a backdated entry'}` });
     if (assignee) addCaseTimelineEvent(c, { type:'assigned', by:actor.name, at:createdAt, title:`Assigned to ${assignee.name}`, remarks:'Initial smart assignment' });
     preparedUploads=await prepareSecureUploads(req, 'SOURCE');
     for (const file of req.files || []) c.documents.push(addFileRegistryEntry(d, docPayload(file, actor.name, actor.role, 'SOURCE', c.id)));
@@ -4252,8 +4332,8 @@ app.post('/api/cases/:id/payment', async (req,res)=>{
     if(!['YES','NO','PARTIAL','REFUND'].includes(received)) return res.status(400).json({ok:false,error:'paymentReceived is mandatory: YES, NO, PARTIAL or REFUND'});
     const nowIso = now();
     const actor = requestActor(req);
-    const paymentDate=textValue(req.body.paymentDate||nowIso.slice(0,10),'Payment date',20);
-    const accountingPeriod=normalizeFinanceAccountingPeriod(req.body.accountingPeriod || paymentDate, nowIso);
+    const paymentDate=textValue(req.body.paymentDate||indiaDateKey(nowIso),'Payment date',20);
+    const accountingPeriod=getCaseTaskAccountingPeriod(c, req.body.accountingPeriod || paymentDate || nowIso);
     const paymentAmount=numericValue(req.body.paymentAmountIn,'Payment amount',{min:0,max:100_000_000,fallback:0});
     const expenses=hasOwnFinanceValue(req.body,'expenses')
       ? numericValue(req.body.expenses,'Expenses',{min:0,max:100_000_000,fallback:previousExpenses})

@@ -1698,10 +1698,14 @@ export const ReportsAnalyticsView = ({ projects = [], users = [], currentUser = 
   const caseTypeRows = topRowsFromCount(countBy(createdScoped, project => project.type || project.caseType || 'Case'));
   const slaBase = completed.length > 0 ? completed : createdScoped;
   const slaPct = getSlaCompliancePct(slaBase);
-  const pendingAmount = paymentPending.reduce((sum, { entry }) => sum + entry.pendingAtClose, 0);
-  const receivedAmount = paymentReceived.reduce((sum, { entry }) => sum + entry.received, 0);
-  const expenseAmount = financeEntries.reduce((sum, { entry }) => sum + entry.expenses, 0);
-  const refundAmount = financeEntries.reduce((sum, { entry }) => sum + entry.refund, 0);
+  const finiteFinanceAmount = (value) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : 0;
+  };
+  const pendingAmount = paymentPending.reduce((sum, { entry }) => sum + finiteFinanceAmount(entry.pendingAtClose), 0);
+  const receivedAmount = paymentReceived.reduce((sum, { entry }) => sum + finiteFinanceAmount(entry.received), 0);
+  const expenseAmount = financeEntries.reduce((sum, { entry }) => sum + finiteFinanceAmount(entry.expenses), 0);
+  const refundAmount = financeEntries.reduce((sum, { entry }) => sum + finiteFinanceAmount(entry.refund), 0);
   const netAmount = receivedAmount - expenseAmount - refundAmount;
   const summaryRows = [
     ['Accounting month', accountingMonthLabel],

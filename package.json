@@ -1,6 +1,6 @@
 {
   "name": "kalpavriksha-designs-ops",
-  "version": "1.9.15-monthly-finance-ledger-speed",
+  "version": "1.9.16-task-date-finance-period",
   "type": "module",
   "scripts": {
     "dev": "node scripts/start-all.mjs",
