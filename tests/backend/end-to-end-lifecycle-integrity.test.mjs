@@ -121,3 +121,10 @@ test('designers cannot restart or upload over completed work until a manager reo
   assert.match(finalRoute,/isRevision=requestedRevision \|\| statusKey\(c\.status\)==='REOPENEDFORREVISION'/);
   assert.match(finalRoute,/assertTaskLifecycleTransition\(previousCase,c,actor\)/);
 });
+
+test('finance durability verifier supplies the required optimistic task version',()=>{
+  const verifier=fs.readFileSync(new URL('../../scripts/phase-2-finance-durability-check.mjs',import.meta.url),'utf8');
+  assert.match(verifier,/const createdTaskVersion = Number\(created\.payload\?\.project\?\.taskVersion \|\| 0\)/);
+  assert.match(verifier,/expectedTaskVersion: createdTaskVersion/);
+  assert.match(verifier,/Operational edit was rejected during stale-finance protection verification/);
+});

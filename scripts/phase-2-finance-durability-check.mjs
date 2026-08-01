@@ -88,7 +88,8 @@ try {
     method: 'POST',
     body: JSON.stringify({ currentUserRole: 'ADMIN', project: { id: 'P2-FIN-01', caseId: 'P2-FIN-01', customerName: 'Durability test', estimate: 5000, updatedAt: 1000, syncVersion: 1000 } })
   });
-  if (!created.response.ok || Number(created.payload?.persistence?.stateVersion || 0) < 1) throw new Error('Project creation did not receive persistence confirmation.');
+  const createdTaskVersion = Number(created.payload?.project?.taskVersion || 0);
+  if (!created.response.ok || Number(created.payload?.persistence?.stateVersion || 0) < 1 || createdTaskVersion < 1) throw new Error('Project creation did not receive persistence and task-version confirmation.');
 
   const finance = await request('/api/state/projects/P2-FIN-01/payment-status', {
     method: 'POST',
@@ -98,9 +99,10 @@ try {
 
   const stale = await request('/api/state/projects', {
     method: 'POST',
-    body: JSON.stringify({ currentUserRole: 'ADMIN', project: { id: 'P2-FIN-01', caseId: 'P2-FIN-01', customerName: 'Newer operational edit', updatedAt: 9999999999999, syncVersion: 9999999999999, paymentTrackingStatus: 'Not Updated', paymentTrackingUpdatedAt: 10, paymentAmountIn: 0, ledger: { status: 'Not Updated', updatedAt: 10 } } })
+    body: JSON.stringify({ currentUserRole: 'ADMIN', expectedTaskVersion: createdTaskVersion, project: { id: 'P2-FIN-01', caseId: 'P2-FIN-01', customerName: 'Newer operational edit', updatedAt: 9999999999999, syncVersion: 9999999999999, paymentTrackingStatus: 'Not Updated', paymentTrackingUpdatedAt: 10, paymentAmountIn: 0, ledger: { status: 'Not Updated', updatedAt: 10 } } })
   });
-  if (!stale.response.ok || stale.payload?.project?.paymentAmountIn !== 5000 || stale.payload?.project?.paymentTrackingStatus !== 'Paid') throw new Error('Stale operational edit overwrote finance fields.');
+  if (!stale.response.ok) throw new Error(`Operational edit was rejected during stale-finance protection verification: ${stale.payload?.code || stale.response.status} ${stale.payload?.error || ''}`.trim());
+  if (stale.payload?.project?.paymentAmountIn !== 5000 || stale.payload?.project?.paymentTrackingStatus !== 'Paid') throw new Error('Stale operational edit overwrote finance fields.');
 
   const conflict = await request('/api/state/projects/P2-FIN-01/payment-status', {
     method: 'POST',
