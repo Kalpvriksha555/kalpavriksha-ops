@@ -1,44 +1,68 @@
-# Clean Release Verification Results
+# Kalpavriksha 1.9.24 Upload/Preview Safe Deployment Verification
 
-Validated from the automatic-payment-ledger baseline on 2 August 2026.
+Date: 2 August 2026
 
-## Passed
+## Verified locally from source
 
-- ZIP/source packaging audit
-- JSON parsing and package-lock consistency
-- JavaScript syntax across scripts, backend, tests and services
-- JSX parsing for the modified frontend entry point and Command Centre
-- Bash syntax across deployment scripts
 - Security package audit
 - Project doctor
 - Regression guard
 - Production regression audit
-- 74 frontend tests
-- 136 backend tests
-- 210 combined tests
+- JavaScript syntax across backend, scripts and tests
+- JavaScript/JSX parse validation across 55 frontend source files
+- Deployment Bash syntax
+- 131 frontend tests
+- 178 backend tests
+- 309 combined tests
 - Phase 5 relational schema/integrity verification across 16 tables
 - Phase 9 frontend/UX verification
-- 74 frontend/backend contract checks across 83 backend routes
-- Exact calendar-month Performance Analytics and leaderboard scope
-- Reversible Admin-only Manager/Designer score baselines
-- Corrected monthly report creation cohort and carried-forward completions
-- Selected-row physical PostgreSQL verification before integrity metadata commit
-- Strict monthly performance cohort: work must begin and complete inside the selected month
-- Carried-forward completions excluded from monthly scores, averages and leaderboard ranking
-- Team Performance Cards use normal page scrolling without a fixed-height inner scrollbar
-- Payment Back/navigation is immediate while queued finance saves continue in the background
-- Background finance completion cannot reopen the task or restore an older task snapshot
+- 76 frontend/backend contract checks across 84 backend routes
 
-## Production integrity handling
+## Confirmed protections
 
-The guarded repair accepts only three non-destructive evidence classes:
+- Canonical 100 MB / 20-file upload policy across task, new-task, revision, receipt and chat flows
+- Mirrored, cross-tab serialized, actor/target-scoped upload retry identity retained until authoritative confirmation
+- No silent eviction of unresolved upload identities
+- Progress, speed, ETA, cancellation, partial-success retention and failed-file retry
+- Background new-task source uploads that do not block unrelated work
+- Chat message-only retry after successful binary upload
+- Strict profile-photo, receipt, MIME/signature and active-content validation
+- Corrupted content-addressed object detection and atomic repair
+- Shared accessible file viewer with bounded text/legacy data and streamed PDF/image/media preview
+- Fail-closed private URL normalization and profile-photo tracker blocking
+- Actor-scoped, collision-resistant downloaded-file cache without render-time storage work
+- Memory-bounded large/legacy-browser downloads
+- Truthful WhatsApp Web preparation and explicit delivery confirmation
+- Unicode-safe filenames, safe disposition, no-store, nosniff, CSP and range delivery
+- Targeted rollback-protected latest-changes deployment
 
-1. Canonical-hash-preserving count metadata drift limited to approved collections.
-2. The documented legacy normalized-shadow condition limited to `files` and `performanceRecords` where stored counts exceed physical counts.
-3. Equal-count operational hash drift proven against a recent independently valid revision and limited to live presence, current-day attendance, append-only audit, or narrowly verified finance-only case/payment edits.
+## Runtime preflight enforced on the VPS
 
-Every repair requires a recent verified full PostgreSQL/private-files backup, runs while writes are stopped, changes no operational rows, creates a new canonical revision, records an operational event, and then requires strict integrity to pass. Any unsupported difference remains blocked.
+`scripts/deploy-upload-preview-irregularity-closure-only-vps.sh` makes the following mandatory before any live runtime file is replaced:
 
-## Environment limitation
+1. Exact target-commit and syntax validation.
+2. Targeted upload, preview, profile/cache, request-backpressure, authorization and file-lifecycle tests.
+3. Phase 4 authorization verification.
+4. Phase 6 private-file storage runtime verification.
+5. Phase 9 UX and frontend/backend contract verification.
+6. Clean frontend dependency installation and production build.
 
-A clean `npm ci` could not be completed in the packaging environment because its internal npm mirror returned HTTP 404 for public packages. Package-lock consistency and all source-level checks passed. The VPS deployment performs an isolated clean installation and production build before downtime.
+Only after all checks pass does it briefly stop PM2 and replace `backend/src/server.js`, `backend/src/services/fileStorageService.js` and `frontend/dist`, with rollback protection.
+
+## Packaging-environment limitation
+
+The packaging environment's internal npm mirror returned HTTP 404 for Vite 8.1.4. Therefore a dependency-backed production frontend build is not claimed as locally executed. The dedicated VPS deployment script makes the clean install and production build mandatory before downtime. All dependency-free source, unit, security, database, UX and contract checks passed.
+
+## Deployment failure-proofing evidence
+
+- Exclusive `flock` prevents concurrent cutovers.
+- Git fetch is retried and the exact current `origin/main` commit is pinned.
+- Root/backend versions, runtime closure and installed backend dependency versions are verified before downtime.
+- Production database/private-storage variables are removed from the isolated verifier environment.
+- Frontend dependency preparation is offline-first and retained under an exact package-lock hash.
+- Built HTML and every local asset are validated before any live change.
+- Both backend files and the complete frontend are backed up and hash-verified before PM2 stops.
+- The cutover flag precedes the first file move; every partial-switch failure restores all three runtime components.
+- PM2 path, working directory, readiness, liveness and process generation are checked after restart.
+- Same-target reruns are successful no-ops; preflight-only mode performs no cutover.
+- Successful release evidence is JSON-validated and atomically recorded with the pinned commit and runtime hashes.
