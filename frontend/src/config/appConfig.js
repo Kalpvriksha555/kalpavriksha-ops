@@ -6,10 +6,12 @@ const allowExternalDevelopmentApi = String(import.meta.env.VITE_ALLOW_EXTERNAL_D
 // port, and prevents an old VITE_API_URL shell variable from accidentally
 // sending local test actions to production.
 export const API_BASE = import.meta.env.PROD
-  ? configuredApiBase
+  // Production requests stay on the frontend origin and are forwarded by
+  // Vercel. This avoids making every user's ISP route directly to the VPS.
+  ? ''
   : (allowExternalDevelopmentApi ? configuredApiBase : '');
 
-if (import.meta.env.PROD && !API_BASE) {
+if (import.meta.env.PROD && !configuredApiBase) {
   throw new Error('Production build requires VITE_API_URL (or VITE_API_BASE).');
 }
 
