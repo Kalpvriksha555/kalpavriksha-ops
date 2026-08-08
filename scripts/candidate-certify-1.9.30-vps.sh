@@ -12,6 +12,9 @@ LOG_FILE="$RUN_ROOT/certification.log"
 RESULT_FILE="$RUN_ROOT/result.json"
 CERTIFIED_COMMIT_FILE="${KALPA_CERTIFIED_COMMIT_FILE:-/root/kalpavriksha-certified-candidate.commit}"
 CERTIFIED_RESULT_FILE="${KALPA_CERTIFIED_RESULT_FILE:-/root/kalpavriksha-certified-candidate.result.json}"
+CERT_PG_HOST="${KALPA_CERT_PG_HOST:-${PGHOST:-/var/run/postgresql}}"
+CERT_PG_PORT="${KALPA_CERT_PG_PORT:-${PGPORT:-5432}}"
+CERT_DB_TCP_HOST="${KALPA_CERT_DB_TCP_HOST:-127.0.0.1}"
 
 EXPECTED_ROOT_VERSION="1.9.30-runtime-persistence-recovery"
 EXPECTED_BACKEND_VERSION="2.9.30-runtime-persistence-recovery"
@@ -19,6 +22,7 @@ EXPECTED_FRONTEND_VERSION="2.9.30-runtime-persistence-recovery"
 CREATE_MAX_SECONDS="${KALPA_CERT_CREATE_MAX_SECONDS:-5}"
 UPLOAD_MAX_SECONDS="${KALPA_CERT_UPLOAD_MAX_SECONDS:-20}"
 DOWNLOAD_MAX_SECONDS="${KALPA_CERT_DOWNLOAD_MAX_SECONDS:-10}"
+CERT_PORT="${KALPA_CERT_PORT:-18080}"
 MIN_FREE_KB="${KALPA_CERT_MIN_FREE_KB:-8388608}" # 8 GiB
 
 mkdir -p "$RUN_ROOT"
@@ -55,7 +59,7 @@ flock -n 8 || fail "Another candidate certification is already running."
 [[ -f "$RELEASE_ROOT/RELEASE_FILE_MANIFEST.sha256" ]] || fail "Release manifest is missing."
 [[ -s "$ENV_FILE" ]] || fail "Production environment file is missing; it is needed only to take a read-only database snapshot."
 
-for tool in git node npm curl python3 sha256sum flock runuser tee; do
+for tool in git node npm curl python3 sha256sum flock runuser tee ss awk grep seq tail chown chmod; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool is required."
 done
 PG_DUMP="$(command_path pg_dump)" || fail "pg_dump is required."
@@ -73,6 +77,9 @@ COMMIT="$(git rev-parse HEAD)"
 REMOTE_COMMIT="$(git ls-remote origin refs/heads/main | awk 'NR==1 {print $1}')"
 [[ -n "$REMOTE_COMMIT" ]] || fail "Could not resolve GitHub main."
 [[ "$COMMIT" == "$REMOTE_COMMIT" ]] || fail "Candidate commit $COMMIT is not the current GitHub main $REMOTE_COMMIT."
+[[ -z "$(git -c core.fileMode=false status --porcelain --untracked-files=no)" ]] || fail "Candidate tracked source is not clean before certification."
+[[ "$CERT_PG_PORT" =~ ^[0-9]+$ ]] || fail "Candidate PostgreSQL port is invalid: $CERT_PG_PORT"
+if ss -ltnH | awk '{print $4}' | grep -Eq "(^|:|\])${CERT_PORT}$"; then fail "Candidate backend port ${CERT_PORT} is already occupied."; fi
 
 ROOT_VERSION="$(node -e "process.stdout.write(require('./package.json').version)")"
 BACKEND_VERSION="$(node -e "process.stdout.write(require('./backend/package.json').version)")"
@@ -149,10 +156,10 @@ print('KvCert!'+secrets.token_hex(12)+'Aa9')
 PY
 )"
 SANDBOX="$RUN_ROOT/runtime"
-DUMP_FILE="$RUN_ROOT/production-snapshot.dump"
+SNAPSHOT_DIR="${KALPA_CERT_SNAPSHOT_DIR:-/var/tmp/kalpavriksha-candidate-snapshot-${CERT_SUFFIX}}"
+DUMP_FILE="$SNAPSHOT_DIR/production-snapshot.dump"
 COOKIE_JAR="$RUN_ROOT/cookies.txt"
 BACKEND_LOG="$RUN_ROOT/candidate-backend.log"
-CERT_PORT="${KALPA_CERT_PORT:-18080}"
 BACKEND_PID=""
 DB_CREATED=0
 ROLE_CREATED=0
@@ -168,27 +175,37 @@ cleanup_runtime() {
     kill -9 "$BACKEND_PID" 2>/dev/null || true
   fi
   if [[ "$DB_CREATED" == "1" ]]; then
-    runuser -u postgres -- "$DROPDB" --if-exists "$CERT_DB" >/dev/null 2>&1 || true
+    runuser -u postgres -- "$DROPDB" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" --if-exists "$CERT_DB" >/dev/null 2>&1 || true
   fi
   if [[ "$ROLE_CREATED" == "1" ]]; then
-    runuser -u postgres -- "$PSQL" -d postgres -v ON_ERROR_STOP=1 -c "DROP ROLE IF EXISTS \"$CERT_ROLE\";" >/dev/null 2>&1 || true
+    runuser -u postgres -- "$PSQL" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" -d postgres -v ON_ERROR_STOP=1 -c "DROP ROLE IF EXISTS \"$CERT_ROLE\";" >/dev/null 2>&1 || true
   fi
+  rm -rf "$SNAPSHOT_DIR" >/dev/null 2>&1 || true
 }
-trap cleanup_runtime EXIT INT TERM ERR
+trap cleanup_runtime EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-runuser -u postgres -- "$PSQL" -d postgres -Atqc 'SELECT 1' >/dev/null || fail "Local PostgreSQL superuser access is unavailable."
-runuser -u postgres -- "$PSQL" -d postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE \"$CERT_ROLE\" LOGIN PASSWORD '$CERT_DB_PASSWORD';" >/dev/null
+runuser -u postgres -- "$PSQL" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" -d postgres -Atqc 'SELECT 1' >/dev/null || fail "Local PostgreSQL superuser access is unavailable at $CERT_PG_HOST:$CERT_PG_PORT."
+runuser -u postgres -- "$PSQL" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" -d postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE \"$CERT_ROLE\" LOGIN PASSWORD '$CERT_DB_PASSWORD';" >/dev/null
 ROLE_CREATED=1
-runuser -u postgres -- "$CREATEDB" -O "$CERT_ROLE" "$CERT_DB"
+runuser -u postgres -- "$CREATEDB" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" -O "$CERT_ROLE" "$CERT_DB"
 DB_CREATED=1
 
 log "Taking a read-only transaction-consistent snapshot of the live PostgreSQL database"
+mkdir -p "$SNAPSHOT_DIR"
+chown postgres:postgres "$SNAPSHOT_DIR"
+chmod 0700 "$SNAPSHOT_DIR"
 "$PG_DUMP" --format=custom --no-owner --no-privileges --file="$DUMP_FILE" "$PROD_DATABASE_URL"
 [[ -s "$DUMP_FILE" ]] || fail "Production database snapshot is empty."
+chown postgres:postgres "$DUMP_FILE"
+chmod 0600 "$DUMP_FILE"
 
 log "Restoring the snapshot only into disposable database $CERT_DB"
-runuser -u postgres -- "$PG_RESTORE" --dbname="$CERT_DB" --role="$CERT_ROLE" --no-owner --no-privileges "$DUMP_FILE"
-CERT_DATABASE_URL="postgresql://${CERT_ROLE}:${CERT_DB_PASSWORD}@127.0.0.1:5432/${CERT_DB}"
+runuser -u postgres -- "$PG_RESTORE" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" --dbname="$CERT_DB" --role="$CERT_ROLE" --no-owner --no-privileges "$DUMP_FILE"
+CERT_DATABASE_URL="postgresql://${CERT_ROLE}:${CERT_DB_PASSWORD}@${CERT_DB_TCP_HOST}:${CERT_PG_PORT}/${CERT_DB}"
+PGPASSWORD="$CERT_DB_PASSWORD" "$PSQL" -h "$CERT_DB_TCP_HOST" -p "$CERT_PG_PORT" -U "$CERT_ROLE" -d "$CERT_DB" -Atqc 'SELECT 1' >/dev/null || fail "Disposable database role cannot authenticate over TCP."
+rm -f "$DUMP_FILE"
 
 # Remove only authentication credentials/sessions from the disposable clone so
 # a known certification administrator can be bootstrapped without knowing any
@@ -249,7 +266,7 @@ python3 - "$RUN_ROOT/login-request.json" "$CERT_ADMIN_USERNAME" "$CERT_ADMIN_PAS
 import json,sys
 json.dump({'username':sys.argv[2],'password':sys.argv[3]},open(sys.argv[1],'w'))
 PY
-curl -fsS -c "$COOKIE_JAR" -H 'Content-Type: application/json' --data-binary "@$RUN_ROOT/login-request.json" \
+curl -fsS --connect-timeout 2 --max-time 15 -c "$COOKIE_JAR" -H 'Content-Type: application/json' --data-binary "@$RUN_ROOT/login-request.json" \
   "http://127.0.0.1:${CERT_PORT}/api/auth/login" >"$RUN_ROOT/login-response.json"
 CSRF_TOKEN="$(python3 - "$RUN_ROOT/login-response.json" <<'PY'
 import json,sys
@@ -410,7 +427,7 @@ PY
 )" || fail "Upload did not resolve the stale optimistic ID to the correct canonical case."
 
 log "E2E step 5/6: prove the file is attached only to the canonical task and not the collided older task"
-curl -fsS -b "$COOKIE_JAR" "http://127.0.0.1:${CERT_PORT}/api/state?performance=false" >"$RUN_ROOT/state-after-upload.json"
+curl -fsS --connect-timeout 2 --max-time 30 -b "$COOKIE_JAR" "http://127.0.0.1:${CERT_PORT}/api/state?performance=false" >"$RUN_ROOT/state-after-upload.json"
 python3 - "$RUN_ROOT/state-after-upload.json" "$CANONICAL_A" "$CANONICAL_B" "$FILE_ID" <<'PY'
 import json,sys
 p=json.load(open(sys.argv[1])); a,b,fid=sys.argv[2:5]
@@ -487,7 +504,7 @@ printf '%s\n' "$LOG_FILE" >"/root/kalpavriksha-certified-candidate.logpath"
 
 # Cleanup the disposable runtime now; the certification result remains.
 cleanup_runtime
-trap - EXIT INT TERM ERR
+trap - EXIT INT TERM
 
 cat "$RESULT_FILE"
 echo

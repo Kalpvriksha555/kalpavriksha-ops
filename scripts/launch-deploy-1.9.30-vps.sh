@@ -10,7 +10,8 @@ LAST_UNIT_FILE="${KALPA_DEPLOY_LAST_UNIT_FILE:-/root/kalpavriksha-deploy-last-un
 CERTIFIED_COMMIT_FILE="${KALPA_CERTIFIED_COMMIT_FILE:-/root/kalpavriksha-certified-candidate.commit}"
 CERTIFIED_RESULT_FILE="${KALPA_CERTIFIED_RESULT_FILE:-/root/kalpavriksha-certified-candidate.result.json}"
 
-[[ -x "$DEPLOY_SCRIPT" ]] || { echo "Deployment script is missing or not executable: $DEPLOY_SCRIPT" >&2; exit 1; }
+[[ -f "$DEPLOY_SCRIPT" ]] || { echo "Deployment script is missing: $DEPLOY_SCRIPT" >&2; exit 1; }
+bash -n "$DEPLOY_SCRIPT" || { echo "Deployment script failed Bash syntax validation: $DEPLOY_SCRIPT" >&2; exit 1; }
 command -v systemd-run >/dev/null || { echo "systemd-run is required for SSH-independent deployment." >&2; exit 1; }
 command -v git >/dev/null || { echo "git is required to prove the certified candidate commit." >&2; exit 1; }
 command -v python3 >/dev/null || { echo "python3 is required to verify the candidate certification receipt." >&2; exit 1; }

@@ -8,6 +8,8 @@ ENV_FILE="${KALPA_ENV_FILE:-/etc/kalpavriksha/backend.env}"
 PM2_NAME="${KALPA_PM2_NAME:-kalpvriksha-backend}"
 PORT="${PORT:-8080}"
 DEPLOY_LOCK="${KALPA_DEPLOY_LOCK:-/run/lock/kalpavriksha-production-deploy.lock}"
+CERTIFIED_COMMIT_FILE="${KALPA_CERTIFIED_COMMIT_FILE:-/root/kalpavriksha-certified-candidate.commit}"
+CERTIFIED_RESULT_FILE="${KALPA_CERTIFIED_RESULT_FILE:-/root/kalpavriksha-certified-candidate.result.json}"
 BACKUP_TIMER_UNITS=(kalpavriksha-backup.timer kalpavriksha-database-backup.timer)
 ACTIVE_BACKUP_TIMERS=()
 BACKUP_TIMERS_PAUSED=0
@@ -189,9 +191,30 @@ log "Validating release paths and required tools"
 [[ "$RELEASE_ROOT" != "$LIVE" ]] || fail "Extract the release outside the live path before deployment."
 [[ -d "$LIVE" ]] || fail "Live application directory is missing: $LIVE"
 [[ -s "$ENV_FILE" ]] || fail "Production environment file is missing: $ENV_FILE"
-for command_name in git node npm pm2 curl rsync python3 tar sha256sum sed grep find flock; do
+for command_name in git node npm pm2 curl rsync python3 tar sha256sum sed grep find flock tr seq realpath bash; do
   command -v "$command_name" >/dev/null || fail "$command_name is missing"
 done
+
+log "Re-verifying exact isolated candidate authorization inside the deployment script"
+[[ -d "$RELEASE_ROOT/.git" ]] || fail "Deployment release root must remain the exact certified Git checkout."
+[[ -s "$CERTIFIED_COMMIT_FILE" ]] || fail "Candidate certification commit receipt is missing."
+[[ -s "$CERTIFIED_RESULT_FILE" ]] || fail "Candidate certification result receipt is missing."
+CURRENT_COMMIT="$(git -C "$RELEASE_ROOT" rev-parse HEAD)"
+CERTIFIED_COMMIT="$(tr -d '[:space:]' < "$CERTIFIED_COMMIT_FILE")"
+[[ "$CURRENT_COMMIT" == "$CERTIFIED_COMMIT" ]] || fail "Release commit $CURRENT_COMMIT is not the certified commit $CERTIFIED_COMMIT."
+[[ -z "$(git -C "$RELEASE_ROOT" -c core.fileMode=false status --porcelain --untracked-files=no)" ]] || fail "Certified release has tracked source changes; refusing deployment."
+python3 - "$CERTIFIED_RESULT_FILE" "$CURRENT_COMMIT" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1])); commit=sys.argv[2]
+if p.get('ok') is not True or p.get('status')!='CERTIFIED_FOR_GUARDED_DEPLOYMENT' or str(p.get('commit') or '')!=commit:
+    raise SystemExit('candidate certification receipt does not authorize this exact commit')
+e=p.get('e2e') or {}
+for key in ('downloadHashMatched','staleOptimisticIdResolvedToCanonicalTask','wrongTaskAttachmentPrevented'):
+    if e.get(key) is not True:
+        raise SystemExit(f'candidate receipt is missing required E2E proof: {key}')
+PY
+REMOTE_COMMIT="$(git -C "$RELEASE_ROOT" ls-remote origin refs/heads/main | awk 'NR==1 {print $1}')"
+[[ "$REMOTE_COMMIT" == "$CURRENT_COMMIT" ]] || fail "GitHub main moved after certification. Re-certification is required."
 
 ROOT_VERSION="$(node -e "console.log(require(process.argv[1]).version)" "$RELEASE_ROOT/package.json")"
 BACKEND_VERSION="$(node -e "console.log(require(process.argv[1]).version)" "$RELEASE_ROOT/backend/package.json")"
@@ -284,12 +307,9 @@ find "$RELEASE_ROOT" -type f -name 'server.js.before-presence-failsafe-*' -delet
 rm -rf "$RELEASE_ROOT/node_modules" "$RELEASE_ROOT/backend/node_modules" "$RELEASE_ROOT/frontend/node_modules" \
   "$RELEASE_ROOT/frontend/dist" "$RELEASE_ROOT/.release" "$RELEASE_ROOT/release-certification.json"
 
-log "Creating local immutable release tracking for ZIP-origin verification"
-rm -rf "$RELEASE_ROOT/.git"
-git -C "$RELEASE_ROOT" init -q
-git -C "$RELEASE_ROOT" add -A
-git -C "$RELEASE_ROOT" -c user.name='Kalpavriksha Release' -c user.email='release@localhost' \
-  commit -qm "Kalpavriksha 1.9.30 verified ZIP release"
+log "Preserving the exact certified GitHub commit as the immutable release identity"
+[[ "$(git -C "$RELEASE_ROOT" rev-parse HEAD)" == "$CURRENT_COMMIT" ]] || fail "Release Git identity changed unexpectedly."
+[[ -z "$(git -C "$RELEASE_ROOT" -c core.fileMode=false status --porcelain --untracked-files=no)" ]] || fail "Tracked release source changed before dependency installation."
 
 log "Installing isolated release dependencies"
 cd "$RELEASE_ROOT"
@@ -307,6 +327,8 @@ node --check backend/scripts/backup-create.mjs
 
 log "Running clean-install verification against the exact source tree"
 npm run release:clean-install
+[[ -z "$(git -C "$RELEASE_ROOT" -c core.fileMode=false status --porcelain --untracked-files=no)" ]] || fail "Verification modified tracked source; deployment is blocked."
+[[ "$(git -C "$RELEASE_ROOT" rev-parse HEAD)" == "$CURRENT_COMMIT" ]] || fail "Certified Git commit changed during verification."
 
 log "Pausing automatic backup timers and waiting for any in-flight backup"
 pause_backup_timers

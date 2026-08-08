@@ -32,3 +32,18 @@ test('candidate certification measures server-side create, upload and download l
   assert.match(script,/4 MiB source upload/);
   assert.match(script,/4 MiB file download/);
 });
+
+
+test('candidate certification uses a configurable temporary PostgreSQL boundary and fail-safe cleanup',()=>{
+  assert.match(script,/KALPA_CERT_PG_HOST/);
+  assert.match(script,/KALPA_CERT_PG_PORT/);
+  assert.match(script,/KALPA_CERT_DB_TCP_HOST/);
+  assert.match(script,/git -c core\.fileMode=false status --porcelain --untracked-files=no/);
+  assert.match(script,/SNAPSHOT_DIR=.*\/var\/tmp\/kalpavriksha-candidate-snapshot/);
+  assert.match(script,/chown postgres:postgres "\$DUMP_FILE"/);
+  assert.match(script,/chmod 0600 "\$DUMP_FILE"/);
+  assert.match(script,/runuser -u postgres -- "\$PG_RESTORE" -h "\$CERT_PG_HOST" -p "\$CERT_PG_PORT"/);
+  assert.match(script,/PGPASSWORD="\$CERT_DB_PASSWORD" "\$PSQL" -h "\$CERT_DB_TCP_HOST"/);
+  assert.match(script,/trap cleanup_runtime EXIT/);
+  assert.doesNotMatch(script,/trap cleanup_runtime EXIT INT TERM ERR/);
+});
