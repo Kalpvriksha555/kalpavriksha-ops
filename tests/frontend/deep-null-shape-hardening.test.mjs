@@ -144,6 +144,12 @@ test('release verify executes an actual signed-out React runtime bootstrap after
   assert.match(runtimeVerifier, /viteServer\.ssrLoadModule\('\/src\/App\.jsx'\)/);
   assert.match(runtimeVerifier, /Object\.defineProperty\(globalThis, key/);
   assert.doesNotMatch(runtimeVerifier, /Object\.assign\(globalThis/);
+  assert.match(runtimeVerifier, /createRequire\(path\.join\(frontendRoot, 'package\.json'\)\)/);
+  assert.match(runtimeVerifier, /importFrontendDependency\('react'\)/);
+  assert.match(runtimeVerifier, /importFrontendDependency\('react-dom\/server'\)/);
+  assert.match(runtimeVerifier, /resolve: \{ dedupe: \['react', 'react-dom'\] \}/);
+  assert.doesNotMatch(runtimeVerifier, /\bimport\('react'\)/);
+  assert.doesNotMatch(runtimeVerifier, /\bimport\('react-dom\/server'\)/);
   assert.match(runtimeVerifier, /ReactDOMServer\.renderToString/);
   assert.match(runtimeVerifier, /fatal error boundary/);
 });

@@ -2788,7 +2788,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
   );
 };
 
-const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjectConfirmed, users, projects = [], onDeleteTask }) => {
+const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjectConfirmed, onPrepareProjectForUpload, users, projects = [], onDeleteTask }) => {
   const [newSubTask, setNewSubTask] = useState('');
   const [newNote, setNewNote] = useState('');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -3369,6 +3369,24 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     );
   };
 
+  const prepareProjectUploadTarget = async (candidate = project) => {
+    const fallback = candidate && typeof candidate === 'object' ? candidate : {};
+    if (typeof onPrepareProjectForUpload !== 'function') {
+      return { project:fallback, taskMutationId:String(fallback?.lastTaskMutationId || '') };
+    }
+    const prepared = await onPrepareProjectForUpload(fallback);
+    const confirmed = prepared?.project || prepared?.case || fallback;
+    if (!confirmed?.id && !confirmed?.caseId) {
+      const error = new Error('This task is still waiting for server confirmation. The file was not sent.');
+      error.code = 'TASK_SERVER_CONFIRMATION_PENDING';
+      throw error;
+    }
+    return {
+      project:confirmed,
+      taskMutationId:String(prepared?.taskMutationId || confirmed?.lastTaskMutationId || '')
+    };
+  };
+
   const handleFileUpload = async (type, e) => {
     const files=Array.from(e?.target?.files || []);
     if (!files.length) return;
@@ -3388,6 +3406,10 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
 
     try {
       let latestConfirmed=latestProjectRef.current || project;
+      const preparedTarget=await prepareProjectUploadTarget(latestConfirmed);
+      latestConfirmed=preparedTarget.project;
+      const taskMutationId=preparedTarget.taskMutationId;
+      latestProjectRef.current=latestConfirmed;
       let fallbackProject=null;
       for (let index=0; index<files.length; index+=1) {
         const file=files[index];
@@ -3402,7 +3424,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
           const speedBps=loadedBytes > 0 ? loadedBytes/elapsedSeconds : 0;
           const remainingBytes=Math.max(0,totalUploadBytes-loadedBytes);
           updateFileTransfer({transferType:type,progress:Math.max(1,Math.min(99,aggregatePct)),loaded:loadedBytes,total:totalUploadBytes,speedBps,etaSeconds:speedBps > 0 && remainingBytes > 0 ? Math.ceil(remainingBytes/speedBps) : 0,message:totalFiles > 1 ? `Uploading ${index + 1} of ${totalFiles} • ${safePct}%` : `${safePct}% uploaded`});
-        });
+        }, { actorId:user.id, actorUsername:user.username, taskMutationId });
         if (uploadedDoc?._serverCase) {
           latestConfirmed=uploadedDoc._serverCase;
           acceptServerProject(latestConfirmed);
@@ -3449,13 +3471,16 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     fileTransferGenerationRef.current=generation;
     updateFileTransfer({ active: true, phase: 'uploading', label: attachmentType === 'revision' ? 'Uploading revision attachment' : 'Uploading attachment', fileName: files[0]?.name || 'attachment', transferType: attachmentType, progress: 1, loaded: 0, total: files.reduce((sum, f) => sum + Number(f.size || 0), 0), speedBps: 0, etaSeconds: 0, startedAt: Date.now(), message: 'Upload started. Please wait.' });
     try {
+      const preparedTarget = await prepareProjectUploadTarget(latestProjectRef.current || project);
+      const confirmedUploadProject = preparedTarget.project;
+      latestProjectRef.current = confirmedUploadProject;
       const uploadedDocs = [];
       for (const file of files) {
-        const uploadedDoc = await uploadProjectFile(file, project.id, attachmentType, user.name, (info) => {
+        const uploadedDoc = await uploadProjectFile(file, confirmedUploadProject.id || confirmedUploadProject.caseId, attachmentType, user.name, (info) => {
           const meta = normalizeTransferProgress(info);
           const safePct = Math.max(1, Math.min(99, Number(meta.percent) || 1));
           updateFileTransfer({ active: true, phase: 'uploading', label: attachmentType === 'revision' ? 'Uploading revision attachment' : 'Uploading attachment', fileName: file.name, transferType: attachmentType, progress: safePct, loaded: meta.loaded || 0, total: meta.total || Number(file.size || 0), speedBps: meta.speedBps || 0, etaSeconds: meta.etaSeconds || 0, message: `${safePct}% uploaded` });
-        });
+        }, { actorId:user.id, actorUsername:user.username, taskMutationId:preparedTarget.taskMutationId });
         if (uploadedDoc?._serverCase) acceptServerProject(uploadedDoc._serverCase);
         const cleanUploadedDoc={...uploadedDoc};
         delete cleanUploadedDoc._serverCase;
@@ -3554,7 +3579,10 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     setIsUploadingLedgerReceipt(true);
     setLedgerSaveMessage('Uploading payment receipt…');
     try {
-      const uploaded = await uploadProjectFile(file, project.id || project.caseId, 'payment-receipt', user.name, { actorId:user.id, actorUsername:user.username });
+      const preparedTarget = await prepareProjectUploadTarget(latestProjectRef.current || project);
+      const confirmedUploadProject = preparedTarget.project;
+      latestProjectRef.current = confirmedUploadProject;
+      const uploaded = await uploadProjectFile(file, confirmedUploadProject.id || confirmedUploadProject.caseId, 'payment-receipt', user.name, { actorId:user.id, actorUsername:user.username, taskMutationId:preparedTarget.taskMutationId });
       const receipt={...uploaded};
       delete receipt._serverCase;
       delete receipt._persistence;
@@ -5152,10 +5180,65 @@ function AppShell() {
           localStorage.setItem('kalpa_projects', JSON.stringify(compact));
         } catch(e) {}
       }
-      if (updateSelected) setSelectedProject(sel => sel ? (stable.find(project => String(project.id) === String(sel.id)) || sel) : sel);
+      if (updateSelected) setSelectedProject(sel => {
+        if (!sel) return sel;
+        const sameIdentity=stable.find(project => String(project.id) === String(sel.id));
+        if (sameIdentity) return sameIdentity;
+        const selectedIds=[sel?.id,sel?.caseId,sel?.displayId].map(value=>String(value || '')).filter(Boolean);
+        if (selectedIds.some(value=>replacementIds.has(value))) {
+          const canonicalIncoming=incoming.find(project=>project?.id || project?.caseId);
+          if (canonicalIncoming) return stable.find(project=>String(project.id)===String(canonicalIncoming.id)) || canonicalIncoming;
+        }
+        return sel;
+      });
       return stable;
     });
   }, [USE_BACKEND_STATE, currentUser?.id, currentUser?.username, currentUser?.name]);
+
+  const prepareProjectForUpload = useCallback(async (candidate = {}) => {
+    const safeCandidate = candidate && typeof candidate === 'object' ? candidate : {};
+    if (!USE_BACKEND_STATE) return { project:safeCandidate, taskMutationId:String(safeCandidate?.lastTaskMutationId || '') };
+    if (!backendStateReady || !isDbReady) {
+      const error = new Error('This task is still connecting to the production database. The file was not sent. Please wait a moment and retry.');
+      error.code = 'TASK_SERVER_CONFIRMATION_PENDING';
+      throw error;
+    }
+    const actorKey = operationalActorKey(currentUser);
+    const pendingCreate = getPendingCreatedRecords(actorKey).find(record => {
+      const operation = String(record?.operation || '').trim().toLowerCase();
+      return operation === 'create' && projectIdentityMatches(record?.project || {}, safeCandidate);
+    });
+    if (!pendingCreate) return { project:safeCandidate, taskMutationId:String(safeCandidate?.lastTaskMutationId || '') };
+    const pendingProject = pendingCreate.project || safeCandidate;
+    try {
+      markPendingCreatedAttempt(pendingProject.id);
+      const data = await createTaskApi({
+        apiBase:API_BASE,
+        headers:jsonFinanceSafeHeaders,
+        task:sanitizeProjectForCache(pendingProject),
+        expectedTaskVersion:Number(pendingCreate.expectedTaskVersion ?? pendingProject.taskVersion ?? 0),
+        mutationId:pendingCreate.mutationId,
+        operation:'create'
+      });
+      const confirmed = data?.project || data?.case;
+      if (!confirmed?.id && !confirmed?.caseId) {
+        const error = new Error('The server did not confirm the task identity. The file was not sent.');
+        error.code = 'TASK_SERVER_CONFIRMATION_PENDING';
+        throw error;
+      }
+      forgetPendingCreatedProjects(pendingProject.id,pendingProject.caseId,pendingProject.displayId);
+      const replaceIds = projectIdentityMatches(confirmed,pendingProject) ? [] : [pendingProject.id,pendingProject.caseId,pendingProject.displayId];
+      if (replaceIds.length) forgetRecentCreatedProjects(replaceIds);
+      rememberRecentCreatedProject(confirmed);
+      applyProjectSnapshot([confirmed], { source:'pre-upload-task-confirmed', replaceIds });
+      return { project:confirmed, taskMutationId:String(confirmed?.lastTaskMutationId || pendingCreate.mutationId || '') };
+    } catch (error) {
+      const wrapped = new Error(`This task is still waiting for server confirmation. The file was not sent. ${error?.message || 'Please retry shortly.'}`);
+      wrapped.code = error?.code || 'TASK_SERVER_CONFIRMATION_PENDING';
+      wrapped.cause = error;
+      throw wrapped;
+    }
+  }, [USE_BACKEND_STATE, backendStateReady, isDbReady, currentUser?.id, currentUser?.username, currentUser?.name, jsonFinanceSafeHeaders, applyProjectSnapshot]);
 
   const runCreatedTaskSourceUploads = useCallback(async (confirmedTask, files = [], uploadOverride = null) => {
     const pendingFiles = Array.from(files || []).filter(Boolean);
@@ -5178,7 +5261,8 @@ function AppShell() {
           : await uploadProjectFile(file, latestConfirmed.id || latestConfirmed.caseId, 'source', currentUser.name, {
               signal:controller.signal,
               actorId:currentUser.id,
-              actorUsername:currentUser.username
+              actorUsername:currentUser.username,
+              taskMutationId:String(latestConfirmed?.lastTaskMutationId || '')
             });
         confirmedFiles.push(file);
         if (uploaded?._serverCase) {
@@ -6866,7 +6950,7 @@ function AppShell() {
         <AppErrorBoundary key={`workspace:${activeTab}:${selectedProject?.id || selectedProject?.caseId || 'none'}`}>
         <React.Suspense fallback={<PageLoadingScreen title="Loading workspace" subtitle="Preparing this section…" />}>
         {selectedProject ? (
-          <TaskDetailView project={selectedProject} user={currentUser} onBack={closeTaskDetail} onUpdateProject={handleUpdateProject} onServerProjectConfirmed={(confirmedProject) => applyProjectSnapshot([confirmedProject], { source:'task-detail-server-confirmed' })} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} />
+          <TaskDetailView project={selectedProject} user={currentUser} onBack={closeTaskDetail} onUpdateProject={handleUpdateProject} onServerProjectConfirmed={(confirmedProject) => applyProjectSnapshot([confirmedProject], { source:'task-detail-server-confirmed' })} onPrepareProjectForUpload={prepareProjectForUpload} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} />
         ) : activeTab === 'command' ? (
           <CommandCentreView projects={projects} users={activeUsers} attendanceLogs={attendanceLogs} currentUser={currentUser} onOpenPerformance={() => setActiveTab('productivity')} onSelectProject={(p) => openTaskDetail(p, 'command')} onNavigate={(target) => { if (target === 'newCase') { setShowNewLead(true); return; } if (target === 'notifications') { setShowNotifs(true); return; } setActiveTab(target); }} />
         ) : activeTab === 'productivity' ? (

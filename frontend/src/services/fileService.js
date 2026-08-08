@@ -466,7 +466,10 @@ const uploadWithXhr = (url, form, onProgress, signal) => new Promise((resolve, r
     let payload = null;
     try { payload = raw ? JSON.parse(raw) : null; } catch { payload = null; }
     if (xhr.status >= 200 && xhr.status < 300) return finish(resolve, payload || {});
-    finish(reject, new Error(payload?.error || payload?.message || raw || `Upload failed (${xhr.status})`));
+    const error = makeFileError(payload?.code || `UPLOAD_HTTP_${xhr.status}`, payload?.error || payload?.message || raw || `Upload failed (${xhr.status})`);
+    error.status = xhr.status;
+    error.payload = payload;
+    finish(reject, error);
   };
   xhr.onerror = () => finish(reject, new Error('Upload failed. Please check internet connection and try again.'));
   xhr.ontimeout = () => finish(reject, new Error('Upload timed out. Please try again on a stable connection.'));
@@ -511,6 +514,7 @@ export const uploadProjectFile = async (file, projectId, type, uploadedBy, onPro
   form.append('projectId', projectId || '');
   form.append('type', normalizedType);
   appendUploadMutationId(form, mutation, mutationId);
+  if (options?.taskMutationId) form.append('taskMutationId', String(options.taskMutationId));
   if (normalizedType === 'chat') {
     if (options?.chatScope) form.append('chatScope', String(options?.chatScope));
     if (options?.recipientId) form.append('recipientId', String(options?.recipientId));

@@ -42,4 +42,3 @@ Set-ExecutionPolicy -Scope Process Bypass
 ```
 
 The script prompts for VPS authentication, deploys only the verified Git commit, downloads pre/post recovery backups to `D:\Kalpavriksha-Recovery-Backups`, fast-forwards GitHub `main`, and aligns the normal VPS checkout only after health and data checks pass.
-

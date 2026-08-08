@@ -6003,6 +6003,7 @@ app.post('/api/files/upload', uploadAny, async (req, res) => {
     const purpose=storedFilePurpose(type);
     if (!purpose) { cleanupRequestTempUploads(req); return res.status(400).json({ok:false,code:'FILE_PURPOSE_INVALID',error:'Invalid file purpose.'}); }
     const projectId=textValue(req.body.projectId || req.body.caseId || '', 'Project id', 200);
+    const taskMutationId=textValue(req.body.taskMutationId || req.body.projectMutationId || '', 'Task mutation id', 200);
     const uploadMutationId=textValue(req.body.mutationId || req.body.uploadMutationId || '', 'Upload mutation id', 200);
     const uploadedById=String(actor.id || '').trim();
     const requestedChatScope=type === 'chat' && String(req.body.chatScope || 'PRIVATE').toUpperCase() === 'GLOBAL' ? 'GLOBAL' : (type === 'chat' ? 'PRIVATE' : '');
@@ -6010,10 +6011,26 @@ app.post('/api/files/upload', uploadAny, async (req, res) => {
       .map(value=>String(value || '').trim().toLowerCase()).filter(Boolean).filter((value,index,list)=>list.indexOf(value)===index).sort() : [];
     const requestedVoiceNote=type === 'chat' && ['true','1','yes'].includes(String(req.body.isVoiceNote || '').toLowerCase());
     rollbackCaseId=projectId;
+    let resolvedProjectId=projectId;
 
+    const findUploadTarget=(state)=>{
+      // A pending create can be committed under a different canonical task ID
+      // when the optimistic browser ID collides with an existing task. When the
+      // create mutation identity is available it is the stronger, unambiguous
+      // reference and must win before the stale optimistic ID is considered.
+      // Otherwise a stale ID that now belongs to another task could receive the
+      // attachment even though the file belongs to the newly created task.
+      if (taskMutationId) {
+        const byMutation=(state.cases || []).find(record=>String(record?.lastTaskMutationId || '')===taskMutationId) || null;
+        if (byMutation) return byMutation;
+      }
+      if (!projectId) return null;
+      return findCaseByAnyId(state.cases || [],projectId);
+    };
     const authorizeUpload=(state)=>{
-      const record=projectId ? findCaseByAnyId(state.cases || [],projectId) : null;
+      const record=findUploadTarget(state);
       if (projectId && !record) { const error=new Error('The target task was not found.'); error.statusCode=404; error.code='CASE_NOT_FOUND'; throw error; }
+      if (record) { resolvedProjectId=String(record.id || record.caseId || projectId); rollbackCaseId=resolvedProjectId; }
       if (type === 'source' && !['ADMIN','MANAGER'].includes(actor.role)) { const error=new Error('Only Admins and Managers can upload source files.'); error.statusCode=403; error.code='SOURCE_UPLOAD_FORBIDDEN'; throw error; }
       if (type === 'payment-receipt' && actor.role !== 'ADMIN') { const error=new Error('Only an Admin can upload payment receipts.'); error.statusCode=403; error.code='PAYMENT_RECEIPT_FORBIDDEN'; throw error; }
       if (record && !['source','payment-receipt'].includes(type) && !canMutateCase(req.auth?.user || {},record,type === 'completed' ? 'upload-final' : 'upload-working')) { const error=new Error('You cannot upload files to this task.'); error.statusCode=403; error.code='FILE_UPLOAD_FORBIDDEN'; throw error; }
@@ -6022,8 +6039,8 @@ app.post('/api/files/upload', uploadAny, async (req, res) => {
     };
     const findCommittedUpload=(state={})=>{
       if (!uploadMutationId) return null;
-      const targetRecord=projectId ? findCaseByAnyId(state.cases || [],projectId) : null;
-      const targetIds=new Set(targetRecord ? getCaseIdentitySet(targetRecord) : [String(projectId || '')]);
+      const targetRecord=projectId ? findUploadTarget(state) : null;
+      const targetIds=new Set(targetRecord ? getCaseIdentitySet(targetRecord) : [String(resolvedProjectId || projectId || '')]);
       return (state.files || []).find(item=>{
         const sameActor=uploadedById ? String(item?.uploadedById || '') === uploadedById : normalizeUsername(item?.uploadedByUsername || item?.uploadedBy || '') === normalizeUsername(actor.username || actor.name || '');
         const storedParticipants=[...(item?.chatParticipants || [])].map(value=>String(value || '').toLowerCase()).sort();
@@ -6035,9 +6052,9 @@ app.post('/api/files/upload', uploadAny, async (req, res) => {
       }) || null;
     };
     const idempotentUploadResponse=(state,existingFile)=>{
-      const linkedCase=projectId ? findCaseByAnyId(state.cases || [],projectId) : null;
+      const linkedCase=projectId ? findUploadTarget(state) : null;
       const visibleCase=linkedCase ? (sanitizeCasesForRole([linkedCase],actor.role)[0] || linkedCase) : null;
-      return {ok:true,idempotent:true,file:existingFile,project:visibleCase,case:visibleCase,persistence:{mode:'idempotent',persisted:true}};
+      return {ok:true,idempotent:true,file:existingFile,project:visibleCase,case:visibleCase,requestedProjectId:projectId,resolvedProjectId,persistence:{mode:'idempotent',persisted:true}};
     };
 
     const initialState=readDb();
@@ -6050,7 +6067,7 @@ app.post('/api/files/upload', uploadAny, async (req, res) => {
       if (!(detected === 'application/pdf' || detected.startsWith('image/'))) throw new FileValidationError('PAYMENT_RECEIPT_TYPE_INVALID','Payment receipts must be a PDF or supported image file.',400);
     }
 
-    const uploadSnapshot=taskDb(projectId,{files:true});
+    const uploadSnapshot=taskDb(resolvedProjectId,{files:true});
     const d=uploadSnapshot.snapshot;
     const caseRecord=authorizeUpload(d);
     const concurrentUpload=findCommittedUpload(d);
@@ -6059,7 +6076,7 @@ app.post('/api/files/upload', uploadAny, async (req, res) => {
       preparedUploads=[]; cleanupRequestTempUploads(req);
       return res.status(200).json(idempotentUploadResponse(d,concurrentUpload));
     }
-    const file=docPayload(req.file,actor.name,actor.role,purpose,projectId);
+    const file=docPayload(req.file,actor.name,actor.role,purpose,resolvedProjectId);
     file.uploadMutationId=uploadMutationId || nanoid(16);
     file.uploadedById=actor.id;
     file.uploadedByUsername=actor.username;
@@ -6083,9 +6100,9 @@ app.post('/api/files/upload', uploadAny, async (req, res) => {
     if (updatedCase) { collections.push('cases'); collectionRowIds.cases=[String(updatedCase.id || updatedCase.caseId)]; }
     const persistence=await save(d,{actor:actor.name,reason:'file_upload',skipRevisionSnapshot:true,periodicRevisionSnapshot:true,takeSnapshotOwnership:true,collections,collectionRowIds});
     persistenceCommitted=true;
-    await recordFileStorageEvent({fileId:file.id,caseId:projectId,action:'FILE_UPLOADED',actor:actor.name,storageKey:file.storageKey,sha256:file.sha256,details:{purpose,name:file.name}});
+    await recordFileStorageEvent({fileId:file.id,caseId:resolvedProjectId,action:'FILE_UPLOADED',actor:actor.name,storageKey:file.storageKey,sha256:file.sha256,details:{purpose,name:file.name,requestedProjectId:projectId}});
     const visibleCase=updatedCase ? (sanitizeCasesForRole([updatedCase],actor.role)[0] || updatedCase) : null;
-    res.status(201).json({ok:true,file,project:visibleCase,case:visibleCase,persistence});
+    res.status(201).json({ok:true,file,project:visibleCase,case:visibleCase,requestedProjectId:projectId,resolvedProjectId,persistence});
   } catch (error) {
     cleanupRequestTempUploads(req);
     if (!persistenceCommitted) rollbackPreparedUploads(preparedUploads,{reason:'FILE_REGISTRY_PERSISTENCE_FAILED',actor:rollbackActor,caseId:rollbackCaseId});

@@ -1,8 +1,16 @@
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const frontendRoot = path.join(root, 'frontend');
+const frontendRequire = createRequire(path.join(frontendRoot, 'package.json'));
+
+const importFrontendDependency = async (specifier) => {
+  const resolved = frontendRequire.resolve(specifier);
+  const namespace = await import(pathToFileURL(resolved).href);
+  return { resolved, module: namespace.default || namespace };
+};
 
 const memoryStorage = () => {
   const values = new Map();
@@ -77,17 +85,28 @@ process.env.VITE_API_URL ||= 'https://ops.kalpvriksha.co.in';
 process.env.VITE_API_BASE ||= process.env.VITE_API_URL;
 
 let viteServer;
+let reactResolved = '';
+let reactDomServerResolved = '';
 try {
-  const [{ createServer }, React, ReactDOMServer] = await Promise.all([
+  const [{ createServer }, frontendReact, frontendReactDOMServer] = await Promise.all([
     import('vite'),
-    import('react'),
-    import('react-dom/server'),
+    importFrontendDependency('react'),
+    importFrontendDependency('react-dom/server'),
   ]);
+  reactResolved = frontendReact.resolved;
+  reactDomServerResolved = frontendReactDOMServer.resolved;
+  const React = frontendReact.module;
+  const ReactDOMServer = frontendReactDOMServer.module;
 
+  // The verifier must use the same React installation as the frontend SSR module graph.
+  // Root and frontend dependencies are intentionally installed separately during release
+  // verification; mixing root react-dom with frontend React produces a false invalid-hook
+  // failure even though the browser bundle itself is healthy.
   viteServer = await createServer({
     root: frontendRoot,
     mode: 'production',
     appType: 'custom',
+    resolve: { dedupe: ['react', 'react-dom'] },
     server: { middlewareMode: true },
     logLevel: 'error',
   });
@@ -104,9 +123,18 @@ try {
     throw new Error('Signed-out App bootstrap did not render an authentication surface.');
   }
 
-  console.log(JSON.stringify({ ok: true, check: 'frontend-runtime-bootstrap', renderedBytes: Buffer.byteLength(html) }, null, 2));
+  console.log(JSON.stringify({
+    ok: true,
+    check: 'frontend-runtime-bootstrap',
+    renderedBytes: Buffer.byteLength(html),
+    reactResolved: path.relative(root, reactResolved),
+    reactDomServerResolved: path.relative(root, reactDomServerResolved),
+  }, null, 2));
 } catch (error) {
   console.error('Frontend runtime bootstrap verification failed.');
+  if (reactResolved || reactDomServerResolved) {
+    console.error(`React renderer resolution: react=${reactResolved || 'unresolved'} react-dom/server=${reactDomServerResolved || 'unresolved'}`);
+  }
   console.error(error?.stack || error?.message || error);
   process.exitCode = 1;
 } finally {

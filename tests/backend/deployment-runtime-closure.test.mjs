@@ -89,4 +89,3 @@ test('final deployment verification uses CLI database integrity and public healt
   assert.doesNotMatch(finalBlock, /curl[^\n]*\/api\/db\/health/);
   assert.match(server, /app\.get\('\/api\/db\/health', requireAdminSession/);
 });
-

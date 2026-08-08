@@ -38,12 +38,16 @@ test('current deployment remains fail-closed, rollback-capable and verification 
   assert.match(deploy, /post-deployment-backup/);
 });
 
-test('current launcher is SSH-independent and protected from overlapping deployments', () => {
+test('current launcher is SSH-independent, overlap-protected and requires exact isolated candidate certification', () => {
   assert.match(launcher, /deploy-1\.9\.30-vps\.sh/);
   assert.match(launcher, /kalpavriksha-deploy-1930/);
   assert.match(launcher, /flock -n 7/);
   assert.match(launcher, /systemd-run/);
   assert.match(launcher, /kalpavriksha-deploy-last-unit/);
+  assert.match(launcher, /kalpavriksha-certified-candidate\.commit/);
+  assert.match(launcher, /CERTIFIED_FOR_GUARDED_DEPLOYMENT/);
+  assert.match(launcher, /wrongTaskAttachmentPrevented/);
+  assert.match(launcher, /GitHub main moved after candidate certification/);
 });
 
 test('obsolete two-file runtime hotfix entrypoints are not packaged as current deployers', () => {

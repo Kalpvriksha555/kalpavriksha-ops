@@ -29,16 +29,16 @@ test('all operational upload purposes are accepted and task files are linked ato
     for (const marker of ["source:'SOURCE'","working:'WORKING'","completed:'FINAL'","revision:'REVISION'","discussion:'DISCUSSION'","'payment-receipt':'PAYMENT_RECEIPT'","chat:'CHAT'"]) assert.ok(server.includes(marker), `missing upload purpose ${marker}`);
   assert.match(server,/attachStoredFileToCase/);
   assert.match(server,/collections\.push\('cases'\)/);
-  assert.match(server,/res\.status\(201\)\.json\(\{ok:true,file,project:visibleCase,case:visibleCase,persistence\}\)/);
+  assert.match(server,/res\.status\(201\)\.json\(\{ok:true,file,project:visibleCase,case:visibleCase,requestedProjectId:projectId,resolvedProjectId,persistence\}\)/);
 });
 
 test('long uploads reauthorise a fresh task immediately before persistence',()=>{
   const start=server.indexOf("app.post('/api/files/upload'");
   const end=server.indexOf("app.get('/api/files/:id'",start);
   const block=server.slice(start,end);
-  assert.ok(block.indexOf('prepareSecureUploads') < block.indexOf('taskDb(projectId'));
+  assert.ok(block.indexOf('prepareSecureUploads') < block.indexOf('taskDb(resolvedProjectId'));
   assert.match(block,/const initialState=readDb\(\);\s*authorizeUpload\(initialState\)/);
-  assert.match(block,/const uploadSnapshot=taskDb\(projectId,\{files:true\}\);\s*const d=uploadSnapshot\.snapshot;\s*const caseRecord=authorizeUpload\(d\)/);
+  assert.match(block,/const uploadSnapshot=taskDb\(resolvedProjectId,\{files:true\}\);\s*const d=uploadSnapshot\.snapshot;\s*const caseRecord=authorizeUpload\(d\)/);
 });
 
 test('hot task, upload, and delete paths avoid cloning unrelated workspace collections',()=>{
