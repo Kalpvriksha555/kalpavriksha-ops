@@ -199,9 +199,10 @@ PGPASSWORD="$CERT_DB_PASSWORD" "$PSQL" -h "$CERT_DB_TCP_HOST" -p "$CERT_PG_PORT"
 log "Creating the disposable schema from this exact release's migrations"
 DATABASE_URL="$CERT_DATABASE_URL" DB_SSL=false npm run db:migrate --prefix backend >/dev/null
 
-# Clone only the authoritative relational-state tables needed to reproduce the
-# real production state/version/hash boundary. This deliberately excludes
-# Supabase-owned schemas/extensions and production authentication credentials.
+# The real data restore runs as the temporary PostgreSQL superuser, but every
+# destination relational table must remain owned by the disposable application
+# role created above.  Fail before reading production rows if migration
+# ownership is not exactly what the candidate backend will use.
 RELATIONAL_SNAPSHOT_TABLES=(
   app_state_metadata
   ops_users
@@ -221,6 +222,12 @@ RELATIONAL_SNAPSHOT_TABLES=(
 )
 TABLE_LIST_SQL="$(printf "'%s'," "${RELATIONAL_SNAPSHOT_TABLES[@]}")"
 TABLE_LIST_SQL="${TABLE_LIST_SQL%,}"
+OWNED_COUNT="$(PGPASSWORD="$CERT_DB_PASSWORD" "$PSQL" -h "$CERT_DB_TCP_HOST" -p "$CERT_PG_PORT" -U "$CERT_ROLE" -d "$CERT_DB" -X -A -t -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname='public' AND tablename IN (${TABLE_LIST_SQL}) AND tableowner=current_user;")"
+[[ "$OWNED_COUNT" == "${#RELATIONAL_SNAPSHOT_TABLES[@]}" ]] || fail "Disposable migration schema is not fully owned by the candidate database role."
+
+# Clone only the authoritative relational-state tables needed to reproduce the
+# real production state/version/hash boundary. This deliberately excludes
+# Supabase-owned schemas/extensions and production authentication credentials.
 FOUND_TABLES="$("$PSQL" "$PROD_DATABASE_URL" -X -A -t -v ON_ERROR_STOP=1 -c "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname='public' AND tablename IN (${TABLE_LIST_SQL}) ORDER BY tablename;")"
 FOUND_COUNT="$(printf '%s\n' "$FOUND_TABLES" | sed '/^$/d' | wc -l | tr -d ' ')"
 [[ "$FOUND_COUNT" == "${#RELATIONAL_SNAPSHOT_TABLES[@]}" ]] || { printf 'Expected relational tables (%s):\n%s\nFound in production (%s):\n%s\n' "${#RELATIONAL_SNAPSHOT_TABLES[@]}" "${RELATIONAL_SNAPSHOT_TABLES[*]}" "$FOUND_COUNT" "$FOUND_TABLES"; fail "Production relational-state table set is incomplete."; }
@@ -234,8 +241,11 @@ for table in "${RELATIONAL_SNAPSHOT_TABLES[@]}"; do PG_DUMP_TABLE_ARGS+=(--table
 chmod 0600 "$DUMP_FILE"
 
 log "Restoring the production relational state only into disposable database $CERT_DB"
-"$PG_RESTORE" -U "$CERT_PG_SUPERUSER" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" --dbname="$CERT_DB" --disable-triggers --no-owner --no-privileges "$DUMP_FILE"
+"$PG_RESTORE" -U "$CERT_PG_SUPERUSER" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" --dbname="$CERT_DB" --data-only --disable-triggers --no-owner --no-privileges --exit-on-error "$DUMP_FILE"
 rm -f "$DUMP_FILE"
+
+RESTORED_META_COUNT="$(PGPASSWORD="$CERT_DB_PASSWORD" "$PSQL" -h "$CERT_DB_TCP_HOST" -p "$CERT_PG_PORT" -U "$CERT_ROLE" -d "$CERT_DB" -X -A -t -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app_state_metadata;")"
+[[ "$RESTORED_META_COUNT" =~ ^[0-9]+$ && "$RESTORED_META_COUNT" -ge 1 ]] || fail "Disposable role cannot read restored relational metadata."
 
 # state_revisions is the only restored canonical-state table with a serial id.
 # Align its local sequence with the restored production rows before runtime.
@@ -354,7 +364,7 @@ PY
 
 api_post_json() {
   local payload="$1" output="$2"
-  curl -sS -b "$COOKIE_JAR" \
+  curl -sS --connect-timeout 2 --max-time 15 -b "$COOKIE_JAR" \
     -H 'Content-Type: application/json' \
     -H "X-CSRF-Token: $CSRF_TOKEN" \
     --data-binary "@$payload" \
@@ -434,7 +444,7 @@ with open(p,'wb') as f:
     f.write(b'0'*(size-len(head)))
 PY
 ORIGINAL_SHA="$(sha256sum "$RUN_ROOT/candidate-upload.pdf" | awk '{print $1}')"
-UPLOAD_STATS="$(curl -sS -b "$COOKIE_JAR" \
+UPLOAD_STATS="$(curl -sS --connect-timeout 2 --max-time 30 -b "$COOKIE_JAR" \
   -H "X-CSRF-Token: $CSRF_TOKEN" \
   -F "file=@$RUN_ROOT/candidate-upload.pdf;type=application/pdf" \
   -F "projectId=$REQUESTED_ID" \
@@ -483,7 +493,7 @@ if fid not in file_ids(cb): raise SystemExit('uploaded file is missing from cano
 PY
 
 log "E2E step 6/6: download the stored file and verify exact bytes"
-DOWNLOAD_STATS="$(curl -sS -b "$COOKIE_JAR" \
+DOWNLOAD_STATS="$(curl -sS --connect-timeout 2 --max-time 20 -b "$COOKIE_JAR" \
   -o "$RUN_ROOT/downloaded.pdf" \
   -w '%{http_code} %{time_total}' \
   "http://127.0.0.1:${CERT_PORT}/api/files/${FILE_ID}/download")"

@@ -104,3 +104,13 @@ test('Linux postgres identity is used only for temporary server process ownershi
   const candidate = fs.readFileSync(new URL('../../scripts/candidate-certify-1.9.30-vps.sh', import.meta.url), 'utf8');
   assert.doesNotMatch(candidate,/runuser -u postgres --/);
 });
+
+
+test('integrated PostgreSQL preflight mirrors the real data-only restore ownership model', () => {
+  assert.match(orchestrator,/PGPASSWORD="\$PREFLIGHT_PASSWORD" "\$PSQL" -h 127\.0\.0\.1 .* -U "\$PREFLIGHT_ROLE" -d "\$PREFLIGHT_DB2" .*CREATE TABLE cert_restore_probe/);
+  assert.match(orchestrator,/"\$PG_DUMP" .*--data-only .*--table=public\.cert_restore_probe/);
+  assert.match(orchestrator,/"\$PG_RESTORE" .*--data-only .*--disable-triggers .*--exit-on-error/);
+  assert.match(orchestrator,/SELECT tableowner FROM pg_catalog.pg_tables/);
+  assert.match(orchestrator,/Preflight destination table ownership changed during data-only restore/);
+  assert.match(orchestrator,/SELECT value FROM cert_restore_probe WHERE id=1/);
+});

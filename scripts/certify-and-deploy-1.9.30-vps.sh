@@ -161,11 +161,19 @@ install -d -m 0700 "$PREFLIGHT_DIR"
 "$PSQL" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE \"$PREFLIGHT_ROLE\" LOGIN PASSWORD '$PREFLIGHT_PASSWORD';" >/dev/null
 "$CREATEDB" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -O "$PREFLIGHT_ROLE" "$PREFLIGHT_DB1"
 "$CREATEDB" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -O "$PREFLIGHT_ROLE" "$PREFLIGHT_DB2"
-"$PSQL" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d "$PREFLIGHT_DB1" -v ON_ERROR_STOP=1 -c "SET ROLE \"$PREFLIGHT_ROLE\"; CREATE TABLE cert_restore_probe(id integer PRIMARY KEY, value text NOT NULL); INSERT INTO cert_restore_probe VALUES (1,'ok');" >/dev/null
+# Mirror the real certification clone exactly: the disposable application role
+# owns the destination schema/table, while PostgreSQL superuser restores DATA
+# ONLY into that already-existing role-owned table.  This validates dump-file
+# access, restore mechanics, destination ownership, and TCP/SCRAM authentication
+# without accidentally making restored objects superuser-owned.
+PGPASSWORD="$PREFLIGHT_PASSWORD" "$PSQL" -h 127.0.0.1 -p "$LOCAL_PG_PORT" -U "$PREFLIGHT_ROLE" -d "$PREFLIGHT_DB1" -v ON_ERROR_STOP=1 -c "CREATE TABLE cert_restore_probe(id integer PRIMARY KEY, value text NOT NULL); INSERT INTO cert_restore_probe VALUES (1,'ok');" >/dev/null
+PGPASSWORD="$PREFLIGHT_PASSWORD" "$PSQL" -h 127.0.0.1 -p "$LOCAL_PG_PORT" -U "$PREFLIGHT_ROLE" -d "$PREFLIGHT_DB2" -v ON_ERROR_STOP=1 -c "CREATE TABLE cert_restore_probe(id integer PRIMARY KEY, value text NOT NULL);" >/dev/null
 PREFLIGHT_DUMP="$PREFLIGHT_DIR/restore.dump"
-"$PG_DUMP" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" --format=custom --no-owner --no-privileges --file="$PREFLIGHT_DUMP" "$PREFLIGHT_DB1"
+"$PG_DUMP" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" --format=custom --data-only --table=public.cert_restore_probe --no-owner --no-privileges --file="$PREFLIGHT_DUMP" "$PREFLIGHT_DB1"
 chmod 0600 "$PREFLIGHT_DUMP"
-"$PG_RESTORE" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" --dbname="$PREFLIGHT_DB2" --no-owner --no-privileges "$PREFLIGHT_DUMP"
+"$PG_RESTORE" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" --dbname="$PREFLIGHT_DB2" --data-only --disable-triggers --no-owner --no-privileges --exit-on-error "$PREFLIGHT_DUMP"
+PREFLIGHT_OWNER="$("$PSQL" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d "$PREFLIGHT_DB2" -X -A -t -v ON_ERROR_STOP=1 -c "SELECT tableowner FROM pg_catalog.pg_tables WHERE schemaname='public' AND tablename='cert_restore_probe';")"
+[[ "$PREFLIGHT_OWNER" == "$PREFLIGHT_ROLE" ]] || fail "Preflight destination table ownership changed during data-only restore."
 PREFLIGHT_VALUE="$(PGPASSWORD="$PREFLIGHT_PASSWORD" "$PSQL" -h 127.0.0.1 -p "$LOCAL_PG_PORT" -U "$PREFLIGHT_ROLE" -d "$PREFLIGHT_DB2" -X -A -t -v ON_ERROR_STOP=1 -c "SELECT value FROM cert_restore_probe WHERE id=1;")"
 [[ "$PREFLIGHT_VALUE" == "ok" ]] || fail "Temporary PostgreSQL restore/auth preflight failed."
 "$DROPDB" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" --if-exists "$PREFLIGHT_DB2" >/dev/null

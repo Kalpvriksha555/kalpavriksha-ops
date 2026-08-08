@@ -62,3 +62,14 @@ test('candidate clone is migration-built and copies only authoritative relationa
   assert.doesNotMatch(snapshotArray,/auth_sessions/);
   assert.match(script,/pg_get_serial_sequence\('state_revisions','id'\)/);
 });
+
+
+test('candidate restore proves destination ownership and restored-state readability before backend startup',()=>{
+  assert.match(script,/OWNED_COUNT=.*tableowner=current_user/);
+  assert.match(script,/Disposable migration schema is not fully owned by the candidate database role/);
+  assert.match(script,/--data-only --disable-triggers --no-owner --no-privileges --exit-on-error/);
+  assert.match(script,/RESTORED_META_COUNT=.*SELECT count\(\*\) FROM app_state_metadata/);
+  assert.match(script,/Disposable role cannot read restored relational metadata/);
+  assert.match(script,/--connect-timeout 2 --max-time 30/);
+  assert.match(script,/--connect-timeout 2 --max-time 20/);
+});
