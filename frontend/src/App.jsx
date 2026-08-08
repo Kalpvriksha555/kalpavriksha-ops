@@ -1499,7 +1499,7 @@ const getDocumentReadiness = (project = {}) => {
   return { score, items };
 };
 
-const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetRecovery, passwordChangeSessionUser = null, bootWarning = '' }) => {
+export const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetRecovery, passwordChangeSessionUser = null, bootWarning = '' }) => {
   const [username, setUsername] = useState(passwordChangeSessionUser?.username || '');
   const [password, setPassword] = useState('');
   const [showPass, setShowPass] = useState(false);

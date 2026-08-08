@@ -151,6 +151,10 @@ test('release verify executes an actual signed-out React runtime bootstrap after
   assert.doesNotMatch(runtimeVerifier, /\bimport\('react'\)/);
   assert.doesNotMatch(runtimeVerifier, /\bimport\('react-dom\/server'\)/);
   assert.match(runtimeVerifier, /ReactDOMServer\.renderToString/);
+  assert.match(runtimeVerifier, /Preparing secure sign-in/);
+  assert.match(runtimeVerifier, /appModule\?\.LoginScreen/);
+  assert.match(runtimeVerifier, /React\.createElement\(appModule\.LoginScreen/);
+  assert.match(runtimeVerifier, /LoginScreen runtime verification did not render authentication controls/);
   assert.match(runtimeVerifier, /fatal error boundary/);
 });
 

@@ -50,3 +50,6 @@ The live PostgreSQL database is read only during the snapshot. All candidate wri
 - GitHub `main` still equals that same commit.
 
 This prevents the operator from accidentally deploying an untested or newer commit after candidate certification.
+
+## Runtime bootstrap verifier correction
+The first server-rendered App frame intentionally shows `Preparing secure sign-in` because React effects do not run during SSR. Certification therefore verifies that secure pre-authentication frame and separately renders the exported `LoginScreen` with the same frontend React/ReactDOM dependency tree. This prevents the verifier from rejecting the intended boot state while still proving the actual login controls render without hook or null-reference failures.

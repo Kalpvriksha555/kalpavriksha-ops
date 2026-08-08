@@ -119,14 +119,35 @@ try {
   if (/Something needs attention|Cannot read properties of null|Cannot read properties of undefined/i.test(html)) {
     throw new Error('Signed-out App bootstrap rendered the fatal error boundary.');
   }
-  if (!/password|sign\s*in|login|username/i.test(html)) {
-    throw new Error('Signed-out App bootstrap did not render an authentication surface.');
+  // Effects do not run during server rendering, so the first App render is expected
+  // to show the secure-session preparation screen. Verify that real first-render
+  // state separately from the LoginScreen component that appears after boot cleanup.
+  if (!/Preparing secure sign-in|Clearing any stale browser session|password|sign\s*in|login|username/i.test(html)) {
+    throw new Error('Signed-out App bootstrap did not render the expected secure pre-authentication surface.');
+  }
+  if (typeof appModule?.LoginScreen !== 'function') {
+    throw new Error('App.jsx did not expose the LoginScreen component for runtime verification.');
+  }
+  const loginHtml = ReactDOMServer.renderToString(React.createElement(appModule.LoginScreen, {
+    onLogin: async () => ({}),
+    onChangePassword: async () => ({}),
+    onRequestRecovery: async () => ({}),
+    onResetRecovery: async () => ({}),
+  }));
+  if (!loginHtml || loginHtml.length < 200) throw new Error('LoginScreen runtime verification produced no meaningful HTML.');
+  if (/Something needs attention|Cannot read properties of null|Cannot read properties of undefined/i.test(loginHtml)) {
+    throw new Error('LoginScreen runtime verification rendered a fatal error state.');
+  }
+  if (!/password|sign\s*in|login|username/i.test(loginHtml)) {
+    throw new Error('LoginScreen runtime verification did not render authentication controls.');
   }
 
   console.log(JSON.stringify({
     ok: true,
     check: 'frontend-runtime-bootstrap',
     renderedBytes: Buffer.byteLength(html),
+    loginRenderedBytes: Buffer.byteLength(loginHtml),
+    initialSurface: /Preparing secure sign-in/i.test(html) ? 'secure-sign-in-bootstrap' : 'authentication',
     reactResolved: path.relative(root, reactResolved),
     reactDomServerResolved: path.relative(root, reactDomServerResolved),
   }, null, 2));

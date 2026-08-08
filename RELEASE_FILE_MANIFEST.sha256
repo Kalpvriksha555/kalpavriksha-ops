@@ -36,7 +36,7 @@ f58c81253f820cb4a6365e27ca84dfcd9abba256ed41ad5e9c42c383657e76b8  ./FRONTEND_RUN
 34c9d29018b62a80e772a31f67d7af6f040ad5804c623b0c3c03b96c4e84cf6d  ./GLOBAL_PERFORMANCE_ISOLATION_VERIFICATION.md
 79e553b2d48380058c0e85a9c6b732919ca3d22fd2488ecbbda90f78618e4407  ./HARDENING_ROADMAP.md
 8442022a6085c9703638d45a177c90a09f2dfafbf0fc2e2facc0b5e4183adf4e  ./INCREMENTAL_MONTHLY_PERFORMANCE_DEPLOYMENT_FIX.md
-714c594b6c889923a7c05a0c6836258138060763cef88e39f94e5575c3249f88  ./ISOLATED_CANDIDATE_CERTIFICATION_CLOSURE_2026-08-08.md
+08a031c0e092ccbada39aaf0124f9ed89f2b51dd3f662f6b180ccc0c253517f0  ./ISOLATED_CANDIDATE_CERTIFICATION_CLOSURE_2026-08-08.md
 281494c9eeb9bd18d9b4744afddb3e27c78473ad27502403a60da5599802218d  ./JULY_30_SAFE_RECOVERY.md
 7d5a600a323fc612cd53fefbbe33dacac107a91615f0133634ffa493c3b81761  ./LOCAL_CORS_HOTFIX.md
 0a029441ef0a4bb378f751e578d14737e0ae8122bf987f8edc51abc81c9efeb1  ./LOCAL_RUNTIME_STABILITY_FIX.md
@@ -179,7 +179,7 @@ a3206a28bac529d95ac512aa7980f10567f9b03a405c617e5d8ac7d44108fbf8  ./frontend/pub
 b45fa506195cfcdef406ba9f0c77b36ddc1a7c224040926ec70abc2fdea7b93a  ./frontend/public/icons.svg
 2e8964d2cf59a564feba87a926379dedd5e0b811ea493a42533aec420b56d9bf  ./frontend/public/kalpvriksha-logo.png
 d0784e1beafa687a4506b25bec2dd74a2df6fbf9d9d2c3a74f5b96576cda92dc  ./frontend/public/meeting.html
-ba111d6fa9031b559fc0dbea358090dff2303697ff88e70bde7e6ca45746eb54  ./frontend/src/App.jsx
+a6eb21b068dc871a5bc74a7e9dca48f9a9e64de6ccb0246a8772212ab7d51f9a  ./frontend/src/App.jsx
 5a86f075c1540a7081cda4970c36e1cddaf6e8ed3c9a759bef4936edf41c60b1  ./frontend/src/components/archive/HistoryArchiveView.jsx
 2a05daeaf236d3bcb319c1c1925081635d28f952602550f5111a0446cd638469  ./frontend/src/components/calculator/CalculatorView.jsx
 a612b20666af2d39b0b1677c46b1efb7e768198d5352e97b62a6ae6cbd848379  ./frontend/src/components/chat/CommunicationHub.jsx
@@ -267,7 +267,7 @@ dc4926f81922515ff50f2d114ed3eda3dfdaa601f50c1c75b698c9137a9b7415  ./scripts/depl
 77450ec09f831df087110b870cc38b19415c60f9bf656c992ac975f6d1986834  ./scripts/deploy-upload-preview-only-vps.sh
 493ee94bf252dab7553f662fa9a48fdf5b65e728232ba3fa3a15259c676d0059  ./scripts/doctor.mjs
 c6a9ee4d8e42c15fcd1d6ae07c299b3e6cdd932384f9cc61bb29991f9bb697cf  ./scripts/frontend-backend-contract-check.mjs
-fccc3052b5983d9e463763bb0c182fb53739d99391aa16602b8f8f36ee55d2c7  ./scripts/frontend-runtime-bootstrap-check.mjs
+e9a5685cd56b4533155f6aff30df55cf9c4bbc6a54b2cba8f976288cc2ef6fd4  ./scripts/frontend-runtime-bootstrap-check.mjs
 1dd87865ffbef8e8e4f6c657f82171f24e7e742894c1ad8771c377a41b98e02a  ./scripts/full-release-verifier-matrix.mjs
 94105d6380edac389d377f1366f110595a5f0a6159d5d55e83eba29b37145f3a  ./scripts/launch-deploy-1.9.26-vps.sh
 2fadc5fab7d0dd148cc8e024ded343b0205eb53b2949c417754497d75b6e0ea9  ./scripts/launch-deploy-1.9.27-vps.sh
@@ -334,10 +334,10 @@ b261daf8e93f1cc3eba05c1e0a87a5f1ec182032e4308fede3b3efbf7f2481d2  ./tests/backen
 ebb8e2fd69f570c17383d21e0a9721672f44ad612c0d8075f90a16957751e33b  ./tests/backend/whole-site-performance-guard.test.mjs
 d7795c9a077a1e25efd20dc3e443b50a7fbdba6c5d133e86967a47ca36570345  ./tests/frontend/auth-fail-closed.test.mjs
 cb59556d733f8d6208def3a1d95cf734b8eb9766a2a68bbd3616abc52395fb06  ./tests/frontend/auth-response-deadline.test.mjs
-c30e3e34a71fa89890f19af035b343b2c789fca4a6e9cc57458a80b65c1a5f3b  ./tests/frontend/browser-bootstrap-null-safety.test.mjs
+7de8ff2b64853dee71e7023753a6ca8a8fe54faadc332bc630d69611e4a73e2c  ./tests/frontend/browser-bootstrap-null-safety.test.mjs
 83c2804e7ad132ee6f0e1950bd0e49bc838635a3613d55d2e608f02e325e6757  ./tests/frontend/case-create-upload-collision.test.mjs
 3cd038139d997c1f2df671550f8eec02bab812c2d7cc8c0858b8a6a913f8e655  ./tests/frontend/core-utils.test.mjs
-61f66bbebb3086f756f5b561a4619c6fa6790f8d5776c305ddf6aadc58c12ad6  ./tests/frontend/deep-null-shape-hardening.test.mjs
+73ee0d5ec84ff0e625f735ac4cb159107fb2b5829ad2778386cd2558783c026d  ./tests/frontend/deep-null-shape-hardening.test.mjs
 783616891d75b0418207b3a664104312ce23385a3dc30538c1892016701573a0  ./tests/frontend/end-to-end-lifecycle-integrity.test.mjs
 ee2937fe761b41a56d249d2f3f11cb8508834d9fc42cf58f939ee6bf7e992f29  ./tests/frontend/file-delete-integrity.test.mjs
 f016e36426f74702cea55c7dfbf1aa8eda1065a39cc3b9dfaff6516d8522f14a  ./tests/frontend/finance-outbox-durability.test.mjs

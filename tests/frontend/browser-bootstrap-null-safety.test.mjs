@@ -27,3 +27,12 @@ test('role-scoped cache helper also tolerates null during logout transitions', (
   assert.match(appSource, /String\(user\?\.id \|\| user\?\.username \|\| ''\)/);
   assert.match(appSource, /String\(user\?\.role \|\| ''\)/);
 });
+
+test('runtime verifier distinguishes the initial secure boot screen from the post-boot login screen', () => {
+  const verifier = fs.readFileSync(path.resolve(here, '../../scripts/frontend-runtime-bootstrap-check.mjs'), 'utf8');
+  assert.match(appSource, /export const LoginScreen =/);
+  assert.match(verifier, /Preparing secure sign-in/);
+  assert.match(verifier, /React\.createElement\(appModule\.LoginScreen/);
+  assert.match(verifier, /LoginScreen runtime verification did not render authentication controls/);
+  assert.doesNotMatch(verifier, /Signed-out App bootstrap did not render an authentication surface\./);
+});
