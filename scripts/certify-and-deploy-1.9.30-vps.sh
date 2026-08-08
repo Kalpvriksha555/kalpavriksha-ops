@@ -49,7 +49,7 @@ trap 'exit 143' TERM
 [[ -d "$RELEASE_ROOT/.git" ]] || fail "Run from a fresh Git checkout."
 [[ "$(realpath -m "$RELEASE_ROOT")" != "$(realpath -m "$LIVE_ROOT")" ]] || fail "Never certify/deploy from the live source path."
 [[ -s "$ENV_FILE" ]] || fail "Production environment file is missing: $ENV_FILE"
-for tool in git curl node npm python3 awk sed grep df find sort tail sha256sum flock runuser ss apt-get apt-cache systemctl systemd-run journalctl pm2 realpath stat tr seq bash; do command -v "$tool" >/dev/null 2>&1 || fail "Required VPS command is missing: $tool"; done
+for tool in git curl node npm python3 awk sed grep df find sort tail sha256sum flock runuser ss apt-get apt-cache systemctl systemd-run journalctl pm2 realpath stat tr seq bash install head cut wc chmod chown mkdir rm mv cat cp tee sleep date; do command -v "$tool" >/dev/null 2>&1 || fail "Required VPS command is missing: $tool"; done
 
 say "Freezing the exact GitHub commit and proving the candidate is clean"
 EXPECTED_COMMIT="$(git -C "$RELEASE_ROOT" rev-parse HEAD)"
@@ -140,20 +140,38 @@ max_connections = 50
 password_encryption = 'scram-sha-256'
 PGCONF
 chown postgres:postgres "$PGDATA/postgresql.conf"; runuser -u postgres -- "$PG_CTL" -D "$PGDATA" -l "$PGROOT/postgresql.log" -w -t 60 start >/dev/null; TEMP_PG_STARTED=1
-runuser -u postgres -- "$PSQL" -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d postgres -X -A -t -v ON_ERROR_STOP=1 -c 'SELECT 1;' | grep -qx '1' || fail "Temporary PostgreSQL socket check failed."
+"$PSQL" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d postgres -X -A -t -v ON_ERROR_STOP=1 -c 'SELECT 1;' | grep -qx '1' || fail "Temporary PostgreSQL socket check failed."
 
 say "Preflighting exact dump/restore and TCP password mechanics"
-PREFLIGHT_SUFFIX="${RANDOM}${RANDOM}"; PREFLIGHT_ROLE="kv_preflight_${PREFLIGHT_SUFFIX}"; PREFLIGHT_DB1="kv_preflight_src_${PREFLIGHT_SUFFIX}"; PREFLIGHT_DB2="kv_preflight_dst_${PREFLIGHT_SUFFIX}"; PREFLIGHT_PASSWORD="$(python3 - <<'PY'
-import secrets; print(secrets.token_hex(24))
+PREFLIGHT_SUFFIX="${RANDOM}${RANDOM}"
+PREFLIGHT_ROLE="kv_preflight_${PREFLIGHT_SUFFIX}"
+PREFLIGHT_DB1="kv_preflight_src_${PREFLIGHT_SUFFIX}"
+PREFLIGHT_DB2="kv_preflight_dst_${PREFLIGHT_SUFFIX}"
+PREFLIGHT_PASSWORD="$(python3 - <<'PY'
+import secrets
+print(secrets.token_hex(24))
 PY
-)"; PREFLIGHT_DIR="$PGROOT/preflight"; mkdir -p "$PREFLIGHT_DIR"; chmod 0700 "$PREFLIGHT_DIR"
-runuser -u postgres -- "$PSQL" -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE \"$PREFLIGHT_ROLE\" LOGIN PASSWORD '$PREFLIGHT_PASSWORD';" >/dev/null
-runuser -u postgres -- "$CREATEDB" -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -O "$PREFLIGHT_ROLE" "$PREFLIGHT_DB1"; runuser -u postgres -- "$CREATEDB" -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -O "$PREFLIGHT_ROLE" "$PREFLIGHT_DB2"
-runuser -u postgres -- "$PSQL" -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d "$PREFLIGHT_DB1" -v ON_ERROR_STOP=1 -c "SET ROLE \"$PREFLIGHT_ROLE\"; CREATE TABLE cert_restore_probe(id integer PRIMARY KEY, value text NOT NULL); INSERT INTO cert_restore_probe VALUES (1,'ok');" >/dev/null
-PREFLIGHT_DUMP="$PREFLIGHT_DIR/restore.dump"; "$PG_DUMP" -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -U postgres --format=custom --no-owner --no-privileges --file="$PREFLIGHT_DUMP" "$PREFLIGHT_DB1"; chown postgres:postgres "$PREFLIGHT_DUMP"; chmod 0600 "$PREFLIGHT_DUMP"
-runuser -u postgres -- "$PG_RESTORE" -h "$PGSOCKET" -p "$LOCAL_PG_PORT" --dbname="$PREFLIGHT_DB2" --role="$PREFLIGHT_ROLE" --no-owner --no-privileges "$PREFLIGHT_DUMP"
-PREFLIGHT_VALUE="$(PGPASSWORD="$PREFLIGHT_PASSWORD" "$PSQL" -h 127.0.0.1 -p "$LOCAL_PG_PORT" -U "$PREFLIGHT_ROLE" -d "$PREFLIGHT_DB2" -X -A -t -v ON_ERROR_STOP=1 -c "SELECT value FROM cert_restore_probe WHERE id=1;")"; [[ "$PREFLIGHT_VALUE" == "ok" ]] || fail "Temporary PostgreSQL restore/auth preflight failed."
-runuser -u postgres -- "$DROPDB" -h "$PGSOCKET" -p "$LOCAL_PG_PORT" --if-exists "$PREFLIGHT_DB2" >/dev/null; runuser -u postgres -- "$DROPDB" -h "$PGSOCKET" -p "$LOCAL_PG_PORT" --if-exists "$PREFLIGHT_DB1" >/dev/null; runuser -u postgres -- "$PSQL" -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d postgres -v ON_ERROR_STOP=1 -c "DROP ROLE IF EXISTS \"$PREFLIGHT_ROLE\";" >/dev/null; rm -rf "$PREFLIGHT_DIR"
+)"
+PREFLIGHT_DIR="$PGROOT/preflight"
+install -d -m 0700 "$PREFLIGHT_DIR"
+
+# Database client commands run as root and authenticate explicitly as the
+# temporary PostgreSQL superuser. Only initdb/pg_ctl run as OS user postgres.
+# This makes dump/restore independent of Linux directory ownership.
+"$PSQL" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE \"$PREFLIGHT_ROLE\" LOGIN PASSWORD '$PREFLIGHT_PASSWORD';" >/dev/null
+"$CREATEDB" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -O "$PREFLIGHT_ROLE" "$PREFLIGHT_DB1"
+"$CREATEDB" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -O "$PREFLIGHT_ROLE" "$PREFLIGHT_DB2"
+"$PSQL" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d "$PREFLIGHT_DB1" -v ON_ERROR_STOP=1 -c "SET ROLE \"$PREFLIGHT_ROLE\"; CREATE TABLE cert_restore_probe(id integer PRIMARY KEY, value text NOT NULL); INSERT INTO cert_restore_probe VALUES (1,'ok');" >/dev/null
+PREFLIGHT_DUMP="$PREFLIGHT_DIR/restore.dump"
+"$PG_DUMP" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" --format=custom --no-owner --no-privileges --file="$PREFLIGHT_DUMP" "$PREFLIGHT_DB1"
+chmod 0600 "$PREFLIGHT_DUMP"
+"$PG_RESTORE" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" --dbname="$PREFLIGHT_DB2" --no-owner --no-privileges "$PREFLIGHT_DUMP"
+PREFLIGHT_VALUE="$(PGPASSWORD="$PREFLIGHT_PASSWORD" "$PSQL" -h 127.0.0.1 -p "$LOCAL_PG_PORT" -U "$PREFLIGHT_ROLE" -d "$PREFLIGHT_DB2" -X -A -t -v ON_ERROR_STOP=1 -c "SELECT value FROM cert_restore_probe WHERE id=1;")"
+[[ "$PREFLIGHT_VALUE" == "ok" ]] || fail "Temporary PostgreSQL restore/auth preflight failed."
+"$DROPDB" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" --if-exists "$PREFLIGHT_DB2" >/dev/null
+"$DROPDB" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" --if-exists "$PREFLIGHT_DB1" >/dev/null
+"$PSQL" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d postgres -v ON_ERROR_STOP=1 -c "DROP ROLE IF EXISTS \"$PREFLIGHT_ROLE\";" >/dev/null
+rm -rf "$PREFLIGHT_DIR"
 printf 'Database restore/auth preflight: PASS\n'
 
 say "Running isolated candidate certification; production cutover is still blocked"

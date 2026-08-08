@@ -15,6 +15,7 @@ CERTIFIED_RESULT_FILE="${KALPA_CERTIFIED_RESULT_FILE:-/root/kalpavriksha-certifi
 CERT_PG_HOST="${KALPA_CERT_PG_HOST:-${PGHOST:-/var/run/postgresql}}"
 CERT_PG_PORT="${KALPA_CERT_PG_PORT:-${PGPORT:-5432}}"
 CERT_DB_TCP_HOST="${KALPA_CERT_DB_TCP_HOST:-127.0.0.1}"
+CERT_PG_SUPERUSER="${KALPA_CERT_PG_SUPERUSER:-postgres}"
 
 EXPECTED_ROOT_VERSION="1.9.30-runtime-persistence-recovery"
 EXPECTED_BACKEND_VERSION="2.9.30-runtime-persistence-recovery"
@@ -59,7 +60,7 @@ flock -n 8 || fail "Another candidate certification is already running."
 [[ -f "$RELEASE_ROOT/RELEASE_FILE_MANIFEST.sha256" ]] || fail "Release manifest is missing."
 [[ -s "$ENV_FILE" ]] || fail "Production environment file is missing; it is needed only to take a read-only database snapshot."
 
-for tool in git node npm curl python3 sha256sum flock runuser tee ss awk grep seq tail chown chmod; do
+for tool in git node npm curl python3 sha256sum flock tee ss awk grep seq tail chmod install sed wc tr df find sort kill sleep date mkdir rm cp cat; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool is required."
 done
 PG_DUMP="$(command_path pg_dump)" || fail "pg_dump is required."
@@ -175,10 +176,10 @@ cleanup_runtime() {
     kill -9 "$BACKEND_PID" 2>/dev/null || true
   fi
   if [[ "$DB_CREATED" == "1" ]]; then
-    runuser -u postgres -- "$DROPDB" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" --if-exists "$CERT_DB" >/dev/null 2>&1 || true
+    "$DROPDB" -U "$CERT_PG_SUPERUSER" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" --if-exists "$CERT_DB" >/dev/null 2>&1 || true
   fi
   if [[ "$ROLE_CREATED" == "1" ]]; then
-    runuser -u postgres -- "$PSQL" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" -d postgres -v ON_ERROR_STOP=1 -c "DROP ROLE IF EXISTS \"$CERT_ROLE\";" >/dev/null 2>&1 || true
+    "$PSQL" -U "$CERT_PG_SUPERUSER" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" -d postgres -v ON_ERROR_STOP=1 -c "DROP ROLE IF EXISTS \"$CERT_ROLE\";" >/dev/null 2>&1 || true
   fi
   rm -rf "$SNAPSHOT_DIR" >/dev/null 2>&1 || true
 }
@@ -186,30 +187,62 @@ trap cleanup_runtime EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-runuser -u postgres -- "$PSQL" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" -d postgres -Atqc 'SELECT 1' >/dev/null || fail "Local PostgreSQL superuser access is unavailable at $CERT_PG_HOST:$CERT_PG_PORT."
-runuser -u postgres -- "$PSQL" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" -d postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE \"$CERT_ROLE\" LOGIN PASSWORD '$CERT_DB_PASSWORD';" >/dev/null
+"$PSQL" -U "$CERT_PG_SUPERUSER" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" -d postgres -Atqc 'SELECT 1' >/dev/null || fail "Temporary PostgreSQL superuser access is unavailable at $CERT_PG_HOST:$CERT_PG_PORT."
+"$PSQL" -U "$CERT_PG_SUPERUSER" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" -d postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE \"$CERT_ROLE\" LOGIN PASSWORD '$CERT_DB_PASSWORD';" >/dev/null
 ROLE_CREATED=1
-runuser -u postgres -- "$CREATEDB" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" -O "$CERT_ROLE" "$CERT_DB"
+"$CREATEDB" -U "$CERT_PG_SUPERUSER" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" -O "$CERT_ROLE" "$CERT_DB"
 DB_CREATED=1
 
-log "Taking a read-only transaction-consistent snapshot of the live PostgreSQL database"
-mkdir -p "$SNAPSHOT_DIR"
-chown postgres:postgres "$SNAPSHOT_DIR"
-chmod 0700 "$SNAPSHOT_DIR"
-"$PG_DUMP" --format=custom --no-owner --no-privileges --file="$DUMP_FILE" "$PROD_DATABASE_URL"
-[[ -s "$DUMP_FILE" ]] || fail "Production database snapshot is empty."
-chown postgres:postgres "$DUMP_FILE"
-chmod 0600 "$DUMP_FILE"
-
-log "Restoring the snapshot only into disposable database $CERT_DB"
-runuser -u postgres -- "$PG_RESTORE" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" --dbname="$CERT_DB" --role="$CERT_ROLE" --no-owner --no-privileges "$DUMP_FILE"
 CERT_DATABASE_URL="postgresql://${CERT_ROLE}:${CERT_DB_PASSWORD}@${CERT_DB_TCP_HOST}:${CERT_PG_PORT}/${CERT_DB}"
 PGPASSWORD="$CERT_DB_PASSWORD" "$PSQL" -h "$CERT_DB_TCP_HOST" -p "$CERT_PG_PORT" -U "$CERT_ROLE" -d "$CERT_DB" -Atqc 'SELECT 1' >/dev/null || fail "Disposable database role cannot authenticate over TCP."
+
+log "Creating the disposable schema from this exact release's migrations"
+DATABASE_URL="$CERT_DATABASE_URL" DB_SSL=false npm run db:migrate --prefix backend >/dev/null
+
+# Clone only the authoritative relational-state tables needed to reproduce the
+# real production state/version/hash boundary. This deliberately excludes
+# Supabase-owned schemas/extensions and production authentication credentials.
+RELATIONAL_SNAPSHOT_TABLES=(
+  app_state_metadata
+  ops_users
+  ops_cases
+  ops_payments
+  ops_notifications
+  ops_chat_messages
+  ops_attendance_logs
+  ops_audit_events
+  ops_performance_records
+  ops_whatsapp_inbox
+  ops_files
+  ops_deleted_projects
+  ops_chat_reads
+  ops_misc_state
+  state_revisions
+)
+TABLE_LIST_SQL="$(printf "'%s'," "${RELATIONAL_SNAPSHOT_TABLES[@]}")"
+TABLE_LIST_SQL="${TABLE_LIST_SQL%,}"
+FOUND_TABLES="$("$PSQL" "$PROD_DATABASE_URL" -X -A -t -v ON_ERROR_STOP=1 -c "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname='public' AND tablename IN (${TABLE_LIST_SQL}) ORDER BY tablename;")"
+FOUND_COUNT="$(printf '%s\n' "$FOUND_TABLES" | sed '/^$/d' | wc -l | tr -d ' ')"
+[[ "$FOUND_COUNT" == "${#RELATIONAL_SNAPSHOT_TABLES[@]}" ]] || { printf 'Expected relational tables (%s):\n%s\nFound in production (%s):\n%s\n' "${#RELATIONAL_SNAPSHOT_TABLES[@]}" "${RELATIONAL_SNAPSHOT_TABLES[*]}" "$FOUND_COUNT" "$FOUND_TABLES"; fail "Production relational-state table set is incomplete."; }
+
+log "Taking a read-only transaction-consistent snapshot of the 15 authoritative production relational-state tables"
+install -d -m 0700 "$SNAPSHOT_DIR"
+PG_DUMP_TABLE_ARGS=()
+for table in "${RELATIONAL_SNAPSHOT_TABLES[@]}"; do PG_DUMP_TABLE_ARGS+=(--table="public.${table}"); done
+"$PG_DUMP" --format=custom --data-only --no-owner --no-privileges "${PG_DUMP_TABLE_ARGS[@]}" --file="$DUMP_FILE" "$PROD_DATABASE_URL"
+[[ -s "$DUMP_FILE" ]] || fail "Production relational-state snapshot is empty."
+chmod 0600 "$DUMP_FILE"
+
+log "Restoring the production relational state only into disposable database $CERT_DB"
+"$PG_RESTORE" -U "$CERT_PG_SUPERUSER" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" --dbname="$CERT_DB" --disable-triggers --no-owner --no-privileges "$DUMP_FILE"
 rm -f "$DUMP_FILE"
 
-# Remove only authentication credentials/sessions from the disposable clone so
-# a known certification administrator can be bootstrapped without knowing any
-# production password. Operational production-like rows remain in the clone.
+# state_revisions is the only restored canonical-state table with a serial id.
+# Align its local sequence with the restored production rows before runtime.
+"$PSQL" -U "$CERT_PG_SUPERUSER" -h "$CERT_PG_HOST" -p "$CERT_PG_PORT" -d "$CERT_DB" -v ON_ERROR_STOP=1 -c "SELECT setval(pg_get_serial_sequence('state_revisions','id'), COALESCE((SELECT max(id) FROM state_revisions),1), EXISTS(SELECT 1 FROM state_revisions));" >/dev/null
+
+# Authentication tables were not copied from production. Keep them empty and
+# ensure no legacy monolithic state can recreate unknown production passwords.
 "$PSQL" "$CERT_DATABASE_URL" -v ON_ERROR_STOP=1 -c "TRUNCATE TABLE auth_sessions, auth_credentials RESTART IDENTITY CASCADE; DELETE FROM app_state WHERE key='main';" >/dev/null
 
 mkdir -p "$SANDBOX/files" "$SANDBOX/data" "$SANDBOX/uploads" "$SANDBOX/backups"

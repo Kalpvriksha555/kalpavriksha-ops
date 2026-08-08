@@ -86,3 +86,21 @@ test('final orchestration certifies first, removes temporary PostgreSQL, then mo
   assert.match(orchestrator, /Public API health endpoint did not become reachable/);
   assert.match(orchestrator, /Public frontend did not become reachable within five minutes/);
 });
+
+test('integrated PostgreSQL preflight is independent of root-created directory traversal by the postgres OS user', () => {
+  assert.match(orchestrator,/"\$PG_RESTORE" -U postgres -h "\$PGSOCKET" -p "\$LOCAL_PG_PORT"/);
+  assert.match(orchestrator,/"\$PSQL" -U postgres -h "\$PGSOCKET" -p "\$LOCAL_PG_PORT"/);
+  assert.match(orchestrator,/"\$CREATEDB" -U postgres -h "\$PGSOCKET" -p "\$LOCAL_PG_PORT"/);
+  assert.match(orchestrator,/"\$DROPDB" -U postgres -h "\$PGSOCKET" -p "\$LOCAL_PG_PORT"/);
+  assert.doesNotMatch(orchestrator,/runuser -u postgres -- "\$PG_RESTORE"/);
+  assert.doesNotMatch(orchestrator,/chown postgres:postgres "\$PREFLIGHT_DUMP"/);
+  assert.match(orchestrator,/Only initdb\/pg_ctl run as OS user postgres/);
+});
+
+test('Linux postgres identity is used only for temporary server process ownership, never for dump file access', () => {
+  const runuserLines = orchestrator.split('\n').filter(line => line.includes('runuser -u postgres --'));
+  assert.ok(runuserLines.length >= 2);
+  for (const line of runuserLines) assert.match(line,/\$INITDB|\$PG_CTL/);
+  const candidate = fs.readFileSync(new URL('../../scripts/candidate-certify-1.9.30-vps.sh', import.meta.url), 'utf8');
+  assert.doesNotMatch(candidate,/runuser -u postgres --/);
+});
