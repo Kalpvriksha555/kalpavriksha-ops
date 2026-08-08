@@ -114,3 +114,21 @@ test('integrated PostgreSQL preflight mirrors the real data-only restore ownersh
   assert.match(orchestrator,/Preflight destination table ownership changed during data-only restore/);
   assert.match(orchestrator,/SELECT value FROM cert_restore_probe WHERE id=1/);
 });
+
+test('runtime state normalization preserves the verified physical shadow across cold load and reload', () => {
+  const repository = fs.readFileSync(new URL('../../backend/src/repositories/postgresStateRepository.js', import.meta.url), 'utf8');
+  assert.match(repository, /export function normalizeRuntimeStateFromPersistedState/);
+  assert.match(repository, /normalizeRuntimeStateFromPersistedState\(currentPersistedState, normalizeState\)/);
+  assert.ok((repository.match(/normalizeRuntimeStateFromPersistedState\(persistedState, normalizeState\)/g) || []).length >= 2);
+  assert.doesNotMatch(repository, /const state = normalizeState\(persistedState\)/);
+  assert.doesNotMatch(repository, /const currentState = normalizeState\(currentPersistedState\)/);
+});
+
+test('integrated certification mirrors the production ICU locale instead of using C collation', () => {
+  assert.match(orchestrator, /datlocprovider/);
+  assert.match(orchestrator, /--locale-provider=icu/);
+  assert.match(orchestrator, /--icu-locale="\$PROD_LOCALE"/);
+  assert.match(orchestrator, /Temporary PostgreSQL locale does not match production/);
+  assert.match(orchestrator, /Disposable DB locale inheritance: PASS/);
+  assert.doesNotMatch(orchestrator, /--no-locale/);
+});

@@ -1659,6 +1659,23 @@ export function verifyPersistedRelationalSnapshot(parts = {}, metadata = {}) {
   return { persistedState, counts, hash };
 }
 
+/**
+ * Runtime normalization is intentionally allowed to derive/repair convenience
+ * collections (for example the file registry and performance records). Those
+ * mutations must never be applied to the verified physical PostgreSQL snapshot
+ * that backs RELATIONAL_SHADOW_HASH_DIVERGENCE checks. Keep the verified shadow
+ * byte-for-byte/count-for-count aligned with committed metadata and normalize a
+ * private clone for the in-memory runtime view.
+ */
+export function normalizeRuntimeStateFromPersistedState(persistedState, normalizeState) {
+  if (typeof normalizeState !== 'function') {
+    const error = new Error('Relational runtime normalizer is unavailable.');
+    error.code = 'RELATIONAL_RUNTIME_NORMALIZER_MISSING';
+    throw error;
+  }
+  return normalizeState(structuredClone(persistedState));
+}
+
 export async function loadRelationalState(pool, { normalizeState, seedState }) {
   await runRelationalMigrations(pool);
   const client = await pool.connect();
@@ -1667,7 +1684,7 @@ export async function loadRelationalState(pool, { normalizeState, seedState }) {
     if (!metadata.rows.length) {
       const legacy = await client.query('SELECT value,state_version,updated_at FROM app_state WHERE key=$1', ['main']);
       const rawState = legacy.rows[0]?.value || structuredClone(seedState || {});
-      const normalized = normalizeState(rawState);
+      const normalized = normalizeRuntimeStateFromPersistedState(rawState, normalizeState);
       const version = Math.max(0, Number(legacy.rows[0]?.state_version || 0));
       const parts = decomposeState(normalized);
       const counts = entityCounts(parts);
@@ -1680,7 +1697,7 @@ export async function loadRelationalState(pool, { normalizeState, seedState }) {
           await client.query('COMMIT');
           const currentParts = await readRelationalParts(client);
           const currentPersistedState = recomposeState(currentParts);
-          const currentState = normalizeState(currentPersistedState);
+          const currentState = normalizeRuntimeStateFromPersistedState(currentPersistedState, normalizeState);
           return { state:currentState, persistedState:currentPersistedState, stateVersion:Number(concurrentMetadata.rows[0].state_version || 0), source:'relational', legacyState:rawState };
         }
         await syncRelationalParts(client, parts);
@@ -1704,7 +1721,7 @@ export async function loadRelationalState(pool, { normalizeState, seedState }) {
 
     const parts = await readRelationalParts(client);
     const { persistedState } = verifyPersistedRelationalSnapshot(parts, metadata.rows[0]);
-    const state = normalizeState(persistedState);
+    const state = normalizeRuntimeStateFromPersistedState(persistedState, normalizeState);
     // The legacy app_state remains read-only during cutover, but it is still
     // the authoritative source for one-time password migration. Returning it
     // lets the API hash those legacy passwords into auth_credentials while the
@@ -1732,7 +1749,7 @@ export async function reloadRelationalState(pool, { normalizeState }) {
     // Loading rows without verification after a failed write could replace the
     // in-memory state with a partially modified or manually altered database.
     const { persistedState, counts, hash } = verifyPersistedRelationalSnapshot(parts, metadata.rows[0]);
-    const state = normalizeState(persistedState);
+    const state = normalizeRuntimeStateFromPersistedState(persistedState, normalizeState);
     return {
       state,
       persistedState,

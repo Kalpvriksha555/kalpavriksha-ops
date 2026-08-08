@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   decomposeState,
+  normalizeRuntimeStateFromPersistedState,
   RELATIONAL_MIGRATIONS,
   stateSnapshotHash,
   verifyPersistedRelationalSnapshot
@@ -128,6 +129,41 @@ test('integrity counts use physical relational rows without collapsing legacy pa
   const verified = verifyPersistedRelationalSnapshot(parts, metadata);
   assert.equal(verified.counts.performanceRecords, 2);
   assert.equal(verified.counts.files, 2);
+});
+
+
+test('runtime normalization cannot mutate the verified relational shadow used by selective writes', () => {
+  const persisted = {
+    users: [{ id:'u1', username:'admin' }],
+    cases: [{ id:'CASE-1', documents:[{ id:'FILE-EMBEDDED' }] }],
+    deletedProjectIds: [],
+    payments: [],
+    performanceRecords: [{ id:'PERF-PHYSICAL' }],
+    notifications: [],
+    teamChat: [],
+    whatsappInbox: [],
+    audit: [],
+    attendanceLogs: [],
+    files: [{ id:'FILE-PHYSICAL' }],
+    chatReads: {}
+  };
+  const before = structuredClone(persisted);
+  const beforeHash = stateSnapshotHash(persisted);
+
+  const runtime = normalizeRuntimeStateFromPersistedState(persisted, state => {
+    // Model the real server normalizer: it can derive file-registry entries and
+    // performance rows from cases. It is intentionally mutating.
+    state.files.push({ id:'FILE-EMBEDDED' });
+    state.performanceRecords.push({ id:'PERF-DERIVED' });
+    return state;
+  });
+
+  assert.equal(runtime.files.length, 2);
+  assert.equal(runtime.performanceRecords.length, 2);
+  assert.deepEqual(persisted, before);
+  assert.equal(persisted.files.length, 1);
+  assert.equal(persisted.performanceRecords.length, 1);
+  assert.equal(stateSnapshotHash(persisted), beforeHash);
 });
 
 test('legacy orphan guard permits only an unchanged existing reference', () => {

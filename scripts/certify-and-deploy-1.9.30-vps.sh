@@ -78,17 +78,21 @@ PROD_HOST="${PROD_META[0]:-}"; PROD_PORT="${PROD_META[1]:-5432}"
 case "${PROD_HOST,,}" in localhost|127.0.0.1|::1) fail "Production PostgreSQL is local; refusing isolated local clone provisioning.";; esac
 printf 'Production DB host: %s\nProduction DB port: %s\nCredentials: hidden\n' "$PROD_HOST" "$PROD_PORT"
 PSQL_CLIENT="$(command -v psql 2>/dev/null || true)"; [[ -x "$PSQL_CLIENT" ]] || PSQL_CLIENT="$(find /usr/lib/postgresql -type f -path '*/bin/psql' 2>/dev/null | sort -V | tail -n1)"; [[ -x "$PSQL_CLIENT" ]] || fail "PostgreSQL client psql is missing."
-PROD_INFO="$(PGCONNECT_TIMEOUT=10 "$PSQL_CLIENT" "$PROD_DATABASE_URL" -X -A -t -F '|' -v ON_ERROR_STOP=1 -c "SELECT current_setting('server_version_num'), pg_database_size(current_database());")" || fail "Cannot read production PostgreSQL metadata."
-PROD_VERSION_NUM="${PROD_INFO%%|*}"; PROD_DB_BYTES="${PROD_INFO#*|}"
+PROD_INFO="$(PGCONNECT_TIMEOUT=10 "$PSQL_CLIENT" "$PROD_DATABASE_URL" -X -A -t -F '|' -v ON_ERROR_STOP=1 -c "SELECT current_setting('server_version_num'),pg_database_size(current_database()),d.datlocprovider,COALESCE(to_jsonb(d)->>'datlocale',to_jsonb(d)->>'daticulocale',''),d.datcollate,d.datctype FROM pg_database d WHERE d.datname=current_database();")" || fail "Cannot read production PostgreSQL locale metadata."
+IFS='|' read -r PROD_VERSION_NUM PROD_DB_BYTES PROD_PROVIDER PROD_LOCALE PROD_COLLATE PROD_CTYPE <<<"$PROD_INFO"
 [[ "$PROD_VERSION_NUM" =~ ^[0-9]+$ && "$PROD_DB_BYTES" =~ ^[0-9]+$ ]] || fail "Production PostgreSQL metadata is malformed."
 PROD_MAJOR="$(python3 - "$PROD_VERSION_NUM" <<'PY'
 import sys; print(int(sys.argv[1])//10000)
 PY
 )"
-printf 'Production PostgreSQL major: %s\nProduction DB size: %.2f MiB\n' "$PROD_MAJOR" "$(python3 - "$PROD_DB_BYTES" <<'PY'
+printf 'Production PostgreSQL major: %s\n' "$PROD_MAJOR"
+printf 'Production locale provider: %s\nProduction ICU locale: %s\nProduction LC_COLLATE: %s\nProduction LC_CTYPE: %s\n' "$PROD_PROVIDER" "$PROD_LOCALE" "$PROD_COLLATE" "$PROD_CTYPE"
+printf 'Production DB size: %.2f MiB\n' "$(python3 - "$PROD_DB_BYTES" <<'PY'
 import sys; print(int(sys.argv[1])/1024/1024)
 PY
 )"
+[[ "$PROD_PROVIDER" == "i" ]] || fail "Certification requires the same ICU provider as verified production; got provider=$PROD_PROVIDER."
+[[ -n "$PROD_LOCALE" ]] || fail "Production ICU locale is empty."
 
 say "Checking disk and isolated ports"
 [[ "$LOCAL_PG_PORT" =~ ^[0-9]+$ && "$CERT_PORT" =~ ^[0-9]+$ ]] || fail "Certification ports must be numeric."
@@ -131,7 +135,9 @@ PGCONNECT_TIMEOUT=10 "$PG_DUMP" --schema-only --no-owner --no-privileges "$PROD_
 
 say "Starting private temporary PostgreSQL on 127.0.0.1:${LOCAL_PG_PORT}"
 mkdir -p "$PGDATA" "$PGSOCKET"; chown -R postgres:postgres "$PGROOT"; chmod 0700 "$PGDATA" "$PGSOCKET"
-runuser -u postgres -- "$INITDB" -D "$PGDATA" --encoding=UTF8 --no-locale --auth-local=trust --auth-host=scram-sha-256 >/dev/null
+"$INITDB" --help | grep -Fq -- '--locale-provider' || fail "Installed initdb does not support locale-provider selection."
+"$INITDB" --help | grep -Fq -- '--icu-locale' || fail "Installed initdb does not support ICU locale selection."
+runuser -u postgres -- "$INITDB" -D "$PGDATA" --encoding=UTF8 --locale-provider=icu --icu-locale="$PROD_LOCALE" --auth-local=trust --auth-host=scram-sha-256 >/dev/null
 cat >>"$PGDATA/postgresql.conf" <<PGCONF
 listen_addresses = '127.0.0.1'
 port = ${LOCAL_PG_PORT}
@@ -141,6 +147,20 @@ password_encryption = 'scram-sha-256'
 PGCONF
 chown postgres:postgres "$PGDATA/postgresql.conf"; runuser -u postgres -- "$PG_CTL" -D "$PGDATA" -l "$PGROOT/postgresql.log" -w -t 60 start >/dev/null; TEMP_PG_STARTED=1
 "$PSQL" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d postgres -X -A -t -v ON_ERROR_STOP=1 -c 'SELECT 1;' | grep -qx '1' || fail "Temporary PostgreSQL socket check failed."
+
+say "Proving the temporary PostgreSQL locale matches production"
+TEMP_INFO="$("$PSQL" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d postgres -X -A -t -F '|' -v ON_ERROR_STOP=1 -c "SELECT d.datlocprovider,COALESCE(to_jsonb(d)->>'datlocale',to_jsonb(d)->>'daticulocale','') FROM pg_database d WHERE d.datname=current_database();")"
+IFS='|' read -r TEMP_PROVIDER TEMP_LOCALE <<<"$TEMP_INFO"
+printf 'Production: provider=%s locale=%s\nTemporary : provider=%s locale=%s\n' "$PROD_PROVIDER" "$PROD_LOCALE" "$TEMP_PROVIDER" "$TEMP_LOCALE"
+[[ "$TEMP_PROVIDER" == "$PROD_PROVIDER" && "$TEMP_LOCALE" == "$PROD_LOCALE" ]] || fail "Temporary PostgreSQL locale does not match production."
+
+VERIFY_DB="kv_locale_verify_${RANDOM}${RANDOM}"
+"$CREATEDB" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" "$VERIFY_DB"
+VERIFY_INFO="$("$PSQL" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d "$VERIFY_DB" -X -A -t -F '|' -v ON_ERROR_STOP=1 -c "SELECT d.datlocprovider,COALESCE(to_jsonb(d)->>'datlocale',to_jsonb(d)->>'daticulocale','') FROM pg_database d WHERE d.datname=current_database();")"
+IFS='|' read -r VERIFY_PROVIDER VERIFY_LOCALE <<<"$VERIFY_INFO"
+"$DROPDB" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" --if-exists "$VERIFY_DB" >/dev/null
+[[ "$VERIFY_PROVIDER" == "$PROD_PROVIDER" && "$VERIFY_LOCALE" == "$PROD_LOCALE" ]] || fail "New disposable databases do not inherit the production ICU provider/locale."
+printf 'Disposable DB locale inheritance: PASS\n'
 
 say "Preflighting exact dump/restore and TCP password mechanics"
 PREFLIGHT_SUFFIX="${RANDOM}${RANDOM}"
