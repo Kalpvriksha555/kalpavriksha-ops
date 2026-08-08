@@ -20,7 +20,7 @@ const getViewerKey = (file = {}) => String(file?._previewKey || file?.fileId || 
 const readSessionState = (key) => {
   try {
     const saved = JSON.parse(sessionStorage.getItem(`${SESSION_KEY_PREFIX}:${key}`) || '{}');
-    if (!saved || typeof saved !== 'object') return null;
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return null;
     return saved;
   } catch { return null; }
 };

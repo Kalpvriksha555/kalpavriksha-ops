@@ -1,9 +1,9 @@
 export const NOTIFICATION_CATEGORIES = ['All', 'Task', 'Chat', 'Meeting', 'Attendance', 'System'];
 
 export const getNotificationCategory = (notification = {}) => {
-  const title = String(notification.title || '').toLowerCase();
-  const type = String(notification.type || '').toLowerCase();
-  if (notification.category) return notification.category;
+  const title = String(notification?.title || '').toLowerCase();
+  const type = String(notification?.type || '').toLowerCase();
+  if (notification?.category) return notification?.category;
   if (type === 'mention' || title.includes('mentioned') || title.includes('@')) return 'Chat';
   if (title.includes('meeting') || title.includes('call')) return 'Meeting';
   if (title.includes('attendance') || title.includes('break') || title.includes('login') || title.includes('logout')) return 'Attendance';
@@ -12,9 +12,9 @@ export const getNotificationCategory = (notification = {}) => {
 };
 
 export const getNotificationPriority = (notification = {}) => {
-  const title = String(notification.title || '').toLowerCase();
-  const type = String(notification.type || '').toLowerCase();
-  if (notification.priority) return notification.priority;
+  const title = String(notification?.title || '').toLowerCase();
+  const type = String(notification?.type || '').toLowerCase();
+  if (notification?.priority) return notification?.priority;
   if (type === 'urgent' || title.includes('urgent') || title.includes('revision')) return 'Critical';
   if (title.includes('assigned') || title.includes('completed') || title.includes('manager review')) return 'High';
   if (type === 'mention') return 'Normal';
@@ -43,7 +43,7 @@ export const isNotificationReadByUser = (notification = {}, user = {}) => {
   if (!notification || !user) return false;
   const keys = new Set(notificationUserKeys(user));
   if (!keys.size) return false;
-  return (notification.readBy || []).some(entry => {
+  return (notification?.readBy || []).some(entry => {
     const name = normalizeNotificationReadName(entry);
     return keys.has(norm(name)) || keys.has(identityKey(name));
   });
@@ -53,8 +53,8 @@ export const addNotificationReadUser = (notification = {}, user = {}) => {
   if (!notification || !user?.name) return notification;
   if (isNotificationReadByUser(notification, user)) return notification;
   return {
-    ...notification,
-    readBy: [...(notification.readBy || []), user.name],
+    ...(notification || {}),
+    readBy: [...(notification?.readBy || []), user?.name],
     readAt: Date.now()
   };
 };
@@ -63,13 +63,13 @@ const readByKey = (entry) => identityKey(normalizeNotificationReadName(entry));
 
 export const mergeNotificationRecords = (existing = {}, incoming = {}) => {
   const readMap = new Map();
-  [...(existing.readBy || []), ...(incoming.readBy || [])].forEach(entry => {
+  [...(existing?.readBy || []), ...(incoming?.readBy || [])].forEach(entry => {
     const key = readByKey(entry);
     if (key) readMap.set(key, entry);
   });
-  const existingUpdated = Number(existing.updatedAt || existing.readAt || 0);
-  const incomingUpdated = Number(incoming.updatedAt || incoming.readAt || 0);
-  const base = incomingUpdated >= existingUpdated ? { ...existing, ...incoming } : { ...incoming, ...existing };
+  const existingUpdated = Number(existing?.updatedAt || existing?.readAt || 0);
+  const incomingUpdated = Number(incoming?.updatedAt || incoming?.readAt || 0);
+  const base = incomingUpdated >= existingUpdated ? { ...(existing || {}), ...incoming } : { ...(incoming || {}), ...existing };
   return { ...base, readBy: Array.from(readMap.values()) };
 };
 
@@ -97,32 +97,32 @@ const notificationTargetMatchesUser = (targetUser = '', user = {}) => {
 };
 
 const isChatLikeNotification = (notification = {}) => {
-  const category = norm(notification.category);
-  const type = norm(notification.type);
-  const title = norm(notification.title || notification.message || notification.text);
+  const category = norm(notification?.category);
+  const type = norm(notification?.type);
+  const title = norm(notification?.title || notification?.message || notification?.text);
   return category === 'chat' || ['chat', 'message', 'mention'].includes(type) || /new message|chat message|mentioned|@all/.test(title);
 };
 
 const isBroadcastChatNotification = (notification = {}) => {
-  const type = norm(notification.type);
-  const title = norm(notification.title || notification.message || notification.text);
+  const type = norm(notification?.type);
+  const title = norm(notification?.title || notification?.message || notification?.text);
   return type === 'mention' || /@all|mentioned/.test(title);
 };
 
 export const isNotificationForUser = (notification = {}, user = {}) => {
   if (!notification || !user) return false;
-  const targetUser = norm(notification.targetUser);
-  const targetRole = norm(notification.targetRole);
-  const userRole = norm(user.role);
+  const targetUser = norm(notification?.targetUser);
+  const targetRole = norm(notification?.targetRole);
+  const userRole = norm(user?.role);
 
   // Direct chat notifications must have an explicit target user.
   // Older role-wide chat notices caused users to see personal DMs between other people.
   if (isChatLikeNotification(notification)) {
-    if (targetUser) return notificationTargetMatchesUser(notification.targetUser, user);
+    if (targetUser) return notificationTargetMatchesUser(notification?.targetUser, user);
     if (!isBroadcastChatNotification(notification)) return false;
   }
 
-  if (targetUser) return notificationTargetMatchesUser(notification.targetUser, user);
+  if (targetUser) return notificationTargetMatchesUser(notification?.targetUser, user);
   return !!targetRole && targetRole === userRole;
 };
 

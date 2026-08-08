@@ -51,45 +51,45 @@ export const profilePhotoUrl = (value = '', version = '') => {
   return version ? `${full}${full.includes('?') ? '&' : '?'}v=${encodeURIComponent(version)}` : full;
 };
 
-export const getProfilePhotoVersion = (user = {}) => user.profilePhotoUpdatedAt || user.profileUpdatedAt || '';
+export const getProfilePhotoVersion = (user = {}) => user?.profilePhotoUpdatedAt || user?.profileUpdatedAt || '';
 
 export const buildInitialProfileDraft = (user = {}) => ({
-  phone: user.phone || '',
-  email: user.email || '',
-  address: user.address || '',
-  aadharNumber: user.aadharNumber || '',
-  panNumber: user.panNumber || '',
-  emergencyContact: user.emergencyContact || '',
-  designation: user.designation || user.role || '',
-  bankDetails: user.bankDetails || '',
-  profilePhoto: user.profilePhoto || ''
+  phone: user?.phone || '',
+  email: user?.email || '',
+  address: user?.address || '',
+  aadharNumber: user?.aadharNumber || '',
+  panNumber: user?.panNumber || '',
+  emergencyContact: user?.emergencyContact || '',
+  designation: user?.designation || user?.role || '',
+  bankDetails: user?.bankDetails || '',
+  profilePhoto: user?.profilePhoto || ''
 });
 
 export const buildProfileSavePayload = (currentUser = {}, draft = {}) => {
-  const phoneChanged = normalizePhone(draft.phone) !== normalizePhone(currentUser.phone);
-  const emailChanged = normalizeEmail(draft.email) !== normalizeEmail(currentUser.email);
+  const phoneChanged = normalizePhone(draft?.phone) !== normalizePhone(currentUser?.phone);
+  const emailChanged = normalizeEmail(draft?.email) !== normalizeEmail(currentUser?.email);
   return {
-    ...currentUser,
-    ...draft,
-    email: normalizeEmail(draft.email),
-    mobileRegistered: phoneChanged ? false : !!currentUser.mobileRegistered,
-    emailRegistered: emailChanged ? false : !!currentUser.emailRegistered,
+    ...(currentUser || {}),
+    ...(draft || {}),
+    email: normalizeEmail(draft?.email),
+    mobileRegistered: phoneChanged ? false : !!currentUser?.mobileRegistered,
+    emailRegistered: emailChanged ? false : !!currentUser?.emailRegistered,
     profileUpdatedAt: Date.now()
   };
 };
 
 export const buildRegisteredMobilePayload = (currentUser = {}, draft = {}) => ({
-  ...currentUser,
-  ...draft,
+  ...(currentUser || {}),
+  ...(draft || {}),
   mobileRegistered: true,
   mobileRegisteredAt: Date.now(),
   profileUpdatedAt: Date.now()
 });
 
 export const buildRegisteredEmailPayload = (currentUser = {}, draft = {}) => ({
-  ...currentUser,
-  ...draft,
-  email: normalizeEmail(draft.email),
+  ...(currentUser || {}),
+  ...(draft || {}),
+  email: normalizeEmail(draft?.email),
   emailRegistered: true,
   emailRegisteredAt: Date.now(),
   profileUpdatedAt: Date.now()

@@ -19,10 +19,10 @@ export const buildJitsiUrl = (roomName, displayName, options = {}) => {
     'config.enableClosePage=false',
     'config.enableWelcomePage=false',
     'config.readOnlyName=true',
-    options.audioOnly ? 'config.startAudioOnly=true' : '',
-    (options.muteAudio || options.shareScreen) ? 'config.startWithAudioMuted=true' : '',
-    (options.muteVideo || options.shareScreen || options.audioOnly) ? 'config.startWithVideoMuted=true' : '',
-    options.shareScreen ? 'config.startScreenSharing=true' : ''
+    options?.audioOnly ? 'config.startAudioOnly=true' : '',
+    (options?.muteAudio || options?.shareScreen) ? 'config.startWithAudioMuted=true' : '',
+    (options?.muteVideo || options?.shareScreen || options?.audioOnly) ? 'config.startWithVideoMuted=true' : '',
+    options?.shareScreen ? 'config.startScreenSharing=true' : ''
   ].filter(Boolean).join('&');
   return `${base}?${params.toString()}#${config}`;
 };

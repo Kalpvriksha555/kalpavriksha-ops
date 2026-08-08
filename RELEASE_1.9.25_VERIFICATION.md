@@ -1,7 +1,7 @@
 # Release 1.9.25 Verification
 
-Release: `1.9.25-permanent-relational-write-integrity`  
-Backend: `2.9.25-permanent-relational-write-integrity`  
+Release: `1.9.25-permanent-relational-write-integrity`
+Backend: `2.9.25-permanent-relational-write-integrity`
 Frontend: `2.9.25-permanent-relational-write-integrity`
 
 ## Completed before packaging

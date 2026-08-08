@@ -59,7 +59,7 @@ export const isCompletedDocument = (doc = {}) => {
 };
 
 const fileTime = (doc = {}) => {
-  const raw = doc.uploadedAt || doc.createdAt || doc.updatedAt || doc.at || doc.time || doc.id || 0;
+  const raw = doc?.uploadedAt || doc?.createdAt || doc?.updatedAt || doc?.at || doc?.time || doc?.id || 0;
   const numeric = Number(raw);
   if (Number.isFinite(numeric) && numeric > 0) return numeric;
   const parsed = new Date(raw).getTime();
@@ -77,32 +77,32 @@ export const getLatestCompletedFileName = (project = {}) => {
 };
 
 export const getTaskDescription = (project = {}) => {
-  const raw = project.description
-    ?? project.taskDescription
-    ?? project.task_description
-    ?? project.instructions
-    ?? project.specialInstructions
-    ?? project.special_instructions
-    ?? project.otherDescription
-    ?? project.other_description
-    ?? project.taskNote
-    ?? project.task_note
-    ?? project.workDescription
-    ?? project.work_description
-    ?? project.details
+  const raw = project?.description
+    ?? project?.taskDescription
+    ?? project?.task_description
+    ?? project?.instructions
+    ?? project?.specialInstructions
+    ?? project?.special_instructions
+    ?? project?.otherDescription
+    ?? project?.other_description
+    ?? project?.taskNote
+    ?? project?.task_note
+    ?? project?.workDescription
+    ?? project?.work_description
+    ?? project?.details
     ?? '';
   return String(raw || '').trim();
 };
 
 export const getEstimateDetails = (project = {}) => {
-  const raw = project.estimateDetails
-    ?? project.estimate_details
-    ?? project.propertyEstimateValue
-    ?? project.property_estimate_value
-    ?? project.estimateInstruction
-    ?? project.estimate_instruction
-    ?? project.estimateNote
-    ?? project.estimate_note
+  const raw = project?.estimateDetails
+    ?? project?.estimate_details
+    ?? project?.propertyEstimateValue
+    ?? project?.property_estimate_value
+    ?? project?.estimateInstruction
+    ?? project?.estimate_instruction
+    ?? project?.estimateNote
+    ?? project?.estimate_note
     ?? '';
   return String(raw || '').trim();
 };

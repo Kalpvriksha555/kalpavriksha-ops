@@ -1,7 +1,7 @@
 # Release 1.9.26 Verification
 
-Release: `1.9.26-deployment-concurrency-backup-closure`  
-Backend: `2.9.26-deployment-concurrency-backup-closure`  
+Release: `1.9.26-deployment-concurrency-backup-closure`
+Backend: `2.9.26-deployment-concurrency-backup-closure`
 Frontend: `2.9.26-deployment-concurrency-backup-closure`
 
 ## Baseline identity

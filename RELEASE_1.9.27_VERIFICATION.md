@@ -1,7 +1,7 @@
 # Release 1.9.27 Verification
 
-Release: `1.9.27-permanent-source-parity-cutover`  
-Backend: `2.9.27-permanent-source-parity-cutover`  
+Release: `1.9.27-permanent-source-parity-cutover`
+Backend: `2.9.27-permanent-source-parity-cutover`
 Frontend: `2.9.27-permanent-source-parity-cutover`
 
 ## Production evidence that drove this release

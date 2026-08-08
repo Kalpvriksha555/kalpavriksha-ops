@@ -139,13 +139,13 @@ export const isInAccountingMonth = (value, monthKey) => {
 };
 
 export const getProjectTaskMonthKey = (project = {}, fallback = '') => normalizeAccountingMonthKey(
-  project.taskAccountingPeriod
-    || project.taskDate
-    || project.operationalDate
-    || project.createdAt
-    || project.createdOn
-    || project.loggedAt
-    || project.date,
+  project?.taskAccountingPeriod
+    || project?.taskDate
+    || project?.operationalDate
+    || project?.createdAt
+    || project?.createdOn
+    || project?.loggedAt
+    || project?.date,
   fallback
 );
 
@@ -155,14 +155,14 @@ export const getProjectFinanceMonthKey = (project = {}, fallback = '') => {
   const taskMonth = getProjectTaskMonthKey(project);
   if (taskMonth) return taskMonth;
   return normalizeAccountingMonthKey(
-    project.financeAccountingPeriod
-      || project.ledger?.accountingPeriod
-      || project.paymentDate
-      || project.ledger?.date
-      || project.paymentTrackingUpdatedAt
-      || project.ledger?.updatedAt
-      || project.paymentUpdatedAt
-      || project.completedAt,
+    project?.financeAccountingPeriod
+      || project?.ledger?.accountingPeriod
+      || project?.paymentDate
+      || project?.ledger?.date
+      || project?.paymentTrackingUpdatedAt
+      || project?.ledger?.updatedAt
+      || project?.paymentUpdatedAt
+      || project?.completedAt,
     fallback
   );
 };
@@ -170,7 +170,7 @@ export const getProjectFinanceMonthKey = (project = {}, fallback = '') => {
 export const getProjectCreatedMonthKey = (project = {}, fallback = '') => getProjectTaskMonthKey(project, fallback);
 
 export const getProjectCompletedMonthKey = (project = {}, fallback = '') => normalizeAccountingMonthKey(
-  project.completedAt || project.draftingCompletedAt || project.submittedAt || project.closedAt,
+  project?.completedAt || project?.draftingCompletedAt || project?.submittedAt || project?.closedAt,
   fallback
 );
 
@@ -178,26 +178,26 @@ export const getFinanceEventMonthKey = (event = {}, project = {}, fallback = '')
   const taskMonth = getProjectFinanceMonthKey(project);
   if (taskMonth) return taskMonth;
   return normalizeAccountingMonthKey(
-    event.accountingPeriod || event.paymentDate || event.date || event.at || event.updatedAt || event.createdAt || event.time,
+    event?.accountingPeriod || event?.paymentDate || event?.date || event?.at || event?.updatedAt || event?.createdAt || event?.time,
     fallback
   );
 };
 
 const projectEstimateValue = (project = {}) => finiteNumber(
-  project.estimate ?? project.estimateAmount ?? project.amount ?? project.totalAmount ?? project.ledger?.expectedAmount
+  project?.estimate ?? project?.estimateAmount ?? project?.amount ?? project?.totalAmount ?? project?.ledger?.expectedAmount
 );
 const projectReceivedValue = (project = {}) => finiteNumber(
-  project.ledger?.amountIn ?? project.paymentAmountIn ?? project.amountReceived ?? project.receivedAmount
+  project?.ledger?.amountIn ?? project?.paymentAmountIn ?? project?.amountReceived ?? project?.receivedAmount
 );
-const projectExpensesValue = (project = {}) => finiteNumber(project.ledger?.expenses);
-const projectRefundValue = (project = {}) => finiteNumber(project.ledger?.refund ?? project.refundAmount);
+const projectExpensesValue = (project = {}) => finiteNumber(project?.ledger?.expenses);
+const projectRefundValue = (project = {}) => finiteNumber(project?.ledger?.refund ?? project?.refundAmount);
 
 const projectEstimate = (project = {}) => Math.max(0, projectEstimateValue(project) || 0);
 const projectReceived = (project = {}) => Math.max(0, projectReceivedValue(project) || 0);
 const projectExpenses = (project = {}) => Math.max(0, projectExpensesValue(project) || 0);
 const projectRefund = (project = {}) => Math.max(0, projectRefundValue(project) || 0);
 
-const eventTimestamp = (event = {}) => toTimestamp(event.at || event.updatedAt || event.createdAt || event.time || event.paymentDate);
+const eventTimestamp = (event = {}) => toTimestamp(event?.at || event?.updatedAt || event?.createdAt || event?.time || event?.paymentDate);
 
 const eventNumericPair = (event, previousFields, nextFields) => {
   const previous = previousFields.map(field => finiteNumber(event?.[field])).find(value => value !== null);
@@ -226,11 +226,11 @@ const deriveStatus = (estimate, received, explicit = '') => {
 export const buildProjectMonthlyFinanceEntry = (project = {}, monthKey) => {
   const normalizedMonth = normalizeAccountingMonthKey(monthKey);
   const projectMonth = getProjectFinanceMonthKey(project);
-  const allEvents = (Array.isArray(project.paymentAuditTrail) ? project.paymentAuditTrail : [])
+  const allEvents = (Array.isArray(project?.paymentAuditTrail) ? project?.paymentAuditTrail : [])
     .filter(Boolean)
     .map(event => ({ ...event, _monthKey:getFinanceEventMonthKey(event, project), _timestamp:eventTimestamp(event) }))
     .sort((a, b) => a._timestamp - b._timestamp);
-  const monthEvents = allEvents.filter(event => event._monthKey === normalizedMonth);
+  const monthEvents = allEvents.filter(event => event?._monthKey === normalizedMonth);
   const hasActivity = projectMonth === normalizedMonth || monthEvents.length > 0;
   const estimate = projectEstimate(project);
 
@@ -257,7 +257,7 @@ export const buildProjectMonthlyFinanceEntry = (project = {}, monthKey) => {
       refundMovement += refundPair.next - refundPair.previous;
       hasRefundDelta = true;
     } else {
-      const directRefund = finiteNumber(event.refundAmount);
+      const directRefund = finiteNumber(event?.refundAmount);
       if (directRefund !== null && directRefund !== 0) {
         refundMovement += directRefund;
         hasRefundDelta = true;
@@ -290,7 +290,7 @@ export const buildProjectMonthlyFinanceEntry = (project = {}, monthKey) => {
   // event assigned to this task month is therefore the closing state for that
   // month, regardless of the later audit timestamp.
   const closingEvent = monthEvents[monthEvents.length - 1]
-    || [...allEvents].reverse().find(event => event._timestamp > 0 && event._timestamp <= periodEnd);
+    || [...allEvents].reverse().find(event => event?._timestamp > 0 && event?._timestamp <= periodEnd);
   const closingPair = closingEvent
     ? eventNumericPair(closingEvent, ['oldAmount', 'previousAmount'], ['newAmount', 'amount', 'paymentAmountIn'])
     : { next:null };
@@ -302,7 +302,7 @@ export const buildProjectMonthlyFinanceEntry = (project = {}, monthKey) => {
   }
   closingReceived = Math.max(0, Number(closingReceived) || 0);
   const latestMonthEvent = monthEvents[monthEvents.length - 1] || null;
-  const currentProjectStatus = project.paymentTrackingStatus || project.paymentStatus || project.paymentReceived || project.ledger?.status || '';
+  const currentProjectStatus = project?.paymentTrackingStatus || project?.paymentStatus || project?.paymentReceived || project?.ledger?.status || '';
   const statusAtClose = deriveStatus(
     estimate,
     closingReceived,
@@ -311,7 +311,7 @@ export const buildProjectMonthlyFinanceEntry = (project = {}, monthKey) => {
       : latestMonthEvent?.newStatus || latestMonthEvent?.status || ''
   );
   const activityAt = latestMonthEvent?._timestamp
-    || toTimestamp(project.paymentDate || project.ledger?.date || project.paymentTrackingUpdatedAt || project.ledger?.updatedAt || project.completedAt || project.createdAt);
+    || toTimestamp(project?.paymentDate || project?.ledger?.date || project?.paymentTrackingUpdatedAt || project?.ledger?.updatedAt || project?.completedAt || project?.createdAt);
 
   const received = Number.isFinite(receivedMovement) ? receivedMovement : 0;
   const expenses = Number.isFinite(expenseMovement) ? expenseMovement : 0;
@@ -341,7 +341,7 @@ export const getAvailableFinanceMonthKeys = (projects = [], fallbackMonth = getC
   for (const project of Array.isArray(projects) ? projects : []) {
     const projectMonth = getProjectFinanceMonthKey(project);
     if (projectMonth) keys.add(projectMonth);
-    for (const event of Array.isArray(project?.paymentAuditTrail) ? project.paymentAuditTrail : []) {
+    for (const event of Array.isArray(project?.paymentAuditTrail) ? project?.paymentAuditTrail : []) {
       const eventMonth = getFinanceEventMonthKey(event, project);
       if (eventMonth) keys.add(eventMonth);
     }
@@ -352,8 +352,8 @@ export const getAvailableFinanceMonthKeys = (projects = [], fallbackMonth = getC
 export const hasRevisionInAccountingMonth = (project = {}, monthKey) => {
   const normalized = normalizeAccountingMonthKey(monthKey);
   const revisionItems = [
-    ...(Array.isArray(project.revisions) ? project.revisions : []),
-    ...(Array.isArray(project.subTasks) ? project.subTasks : [])
+    ...(Array.isArray(project?.revisions) ? project?.revisions : []),
+    ...(Array.isArray(project?.subTasks) ? project?.subTasks : [])
   ];
   if (revisionItems.some(item => getAccountingMonthKey(item?.createdAt || item?.at || item?.updatedAt || item?.time) === normalized)) return true;
   return revisionItems.length > 0 && getProjectCreatedMonthKey(project) === normalized;

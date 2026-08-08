@@ -84,7 +84,8 @@ export const stripCredentialFields = (user = {}) => {
 };
 
 export const publicSessionUser = (user = {}, credential = {}) => {
-  const safe = stripCredentialFields(user || {});
+  const safe = stripCredentialFields(user && typeof user === 'object' ? user : {});
+  credential = credential && typeof credential === 'object' ? credential : {};
   const authRole = normalizeAuthRole(safe.role || credential.role || '');
   const displayRole = authRole === 'ADMIN' ? 'Admin' : authRole === 'MANAGER' ? 'Manager' : 'Designer';
   return {

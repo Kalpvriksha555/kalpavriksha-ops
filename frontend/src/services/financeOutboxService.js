@@ -37,45 +37,45 @@ const createMutationId = () => {
   return `finance-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 };
 
-export const financeActorKey = (user = {}) => String(user.id || user.username || user.name || '').trim().toLowerCase();
+export const financeActorKey = (user = {}) => String(user?.id || user?.username || user?.name || '').trim().toLowerCase();
 
-export const financeTaskKey = (task = {}) => String(task.id || task.caseId || task.taskId || '').trim();
+export const financeTaskKey = (task = {}) => String(task?.id || task?.caseId || task?.taskId || '').trim();
 const financeLastSyncedKey = (actorId = '') => `${FINANCE_LAST_SYNCED_AT_KEY}::${String(actorId || '').trim().toLowerCase() || 'unknown'}`;
 
 export const sanitizeFinanceDraftForStorage = (draft = {}) => ({
-  estimate: String(draft.estimate ?? ''),
-  amountIn: String(draft.amountIn ?? ''),
-  expenses: String(draft.expenses ?? ''),
-  refund: String(draft.refund ?? ''),
-  date: String(draft.date ?? ''),
-  receivedFrom: String(draft.receivedFrom ?? ''),
-  txnId: String(draft.txnId ?? ''),
-  mode: String(draft.mode ?? ''),
-  note: String(draft.note ?? ''),
-  screenshot: draft.screenshot && typeof draft.screenshot === 'object'
+  estimate: String(draft?.estimate ?? ''),
+  amountIn: String(draft?.amountIn ?? ''),
+  expenses: String(draft?.expenses ?? ''),
+  refund: String(draft?.refund ?? ''),
+  date: String(draft?.date ?? ''),
+  receivedFrom: String(draft?.receivedFrom ?? ''),
+  txnId: String(draft?.txnId ?? ''),
+  mode: String(draft?.mode ?? ''),
+  note: String(draft?.note ?? ''),
+  screenshot: draft?.screenshot && typeof draft?.screenshot === 'object'
     ? {
-        id: draft.screenshot.id || '',
-        name: draft.screenshot.name || draft.screenshot.fileName || '',
-        fileName: draft.screenshot.fileName || draft.screenshot.name || '',
-        type: draft.screenshot.type || '',
-        mimeType: draft.screenshot.mimeType || '',
-        size: Number(draft.screenshot.size || 0),
-        uploadedAt: draft.screenshot.uploadedAt || draft.screenshot.createdAt || '',
+        id: draft?.screenshot.id || '',
+        name: draft?.screenshot.name || draft?.screenshot.fileName || '',
+        fileName: draft?.screenshot.fileName || draft?.screenshot.name || '',
+        type: draft?.screenshot.type || '',
+        mimeType: draft?.screenshot.mimeType || '',
+        size: Number(draft?.screenshot.size || 0),
+        uploadedAt: draft?.screenshot.uploadedAt || draft?.screenshot.createdAt || '',
       }
-    : (draft.screenshot || null),
+    : (draft?.screenshot || null),
 });
 
 export const getStoredFinanceDraftSignature = (draft = {}) => JSON.stringify({
-  estimate: String(draft.estimate ?? '').trim(),
-  amountIn: String(draft.amountIn ?? '').trim(),
-  expenses: String(draft.expenses ?? '').trim(),
-  refund: String(draft.refund ?? '').trim(),
-  date: String(draft.date ?? '').trim(),
-  receivedFrom: String(draft.receivedFrom ?? '').trim(),
-  txnId: String(draft.txnId ?? '').trim(),
-  mode: String(draft.mode ?? '').trim(),
-  note: String(draft.note ?? '').trim(),
-  screenshotId: draft.screenshot?.id || draft.screenshot || '',
+  estimate: String(draft?.estimate ?? '').trim(),
+  amountIn: String(draft?.amountIn ?? '').trim(),
+  expenses: String(draft?.expenses ?? '').trim(),
+  refund: String(draft?.refund ?? '').trim(),
+  date: String(draft?.date ?? '').trim(),
+  receivedFrom: String(draft?.receivedFrom ?? '').trim(),
+  txnId: String(draft?.txnId ?? '').trim(),
+  mode: String(draft?.mode ?? '').trim(),
+  note: String(draft?.note ?? '').trim(),
+  screenshotId: draft?.screenshot?.id || draft?.screenshot || '',
 });
 
 const parseStoredEnvelope = (raw) => {
@@ -300,8 +300,8 @@ export const markFinanceOutboxError = (key, mutationId = '', error = {}, options
   if (!storedRecord || (mutationId && String(storedRecord.mutationId) !== String(mutationId))) return storedRecord || null;
   const record = { ...storedRecord };
   record.lastError = String(error?.message || error || 'Payment update could not be synced.');
-  record.lastErrorCode = String(error?.code || options.code || 'FINANCE_SYNC_FAILED');
-  record.retryable = options.retryable !== false;
+  record.lastErrorCode = String(error?.code || options?.code || 'FINANCE_SYNC_FAILED');
+  record.retryable = options?.retryable !== false;
   record.state = 'error';
   record.updatedAt = Date.now();
   map[record.key] = record;

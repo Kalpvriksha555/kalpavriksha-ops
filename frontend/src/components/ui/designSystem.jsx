@@ -277,9 +277,9 @@ export const StatusAlert = ({ children, tone = 'info', title, className = '' }) 
 };
 
 const toastIconFor = (toast = {}) => {
-  const category = String(toast.category || '').toLowerCase();
-  const type = String(toast.type || '').toLowerCase();
-  const priority = String(toast.priority || '').toLowerCase();
+  const category = String(toast?.category || '').toLowerCase();
+  const type = String(toast?.type || '').toLowerCase();
+  const priority = String(toast?.priority || '').toLowerCase();
   if (priority === 'critical' || type === 'urgent' || type === 'error') return { icon: AlertCircle, className: 'text-red-500', bg: 'bg-red-50 border-red-100' };
   if (type === 'success') return { icon: CheckCircle, className: 'text-emerald-600', bg: 'bg-emerald-50 border-emerald-100' };
   if (category === 'chat' || type === 'chat' || type === 'mention') return { icon: MessageSquare, className: 'text-purple-600', bg: 'bg-purple-50 border-purple-100' };

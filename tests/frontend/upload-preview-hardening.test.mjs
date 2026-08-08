@@ -144,8 +144,8 @@ test('upload mutation durability is mirrored, bounded and target scoped', () => 
   assert.match(fileService, /UPLOAD_IDENTITY_CAPACITY_REACHED/);
   assert.match(fileService, /Object\.keys\(next\)\.length >= UPLOAD_MUTATION_MAX_RECORDS/);
   assert.match(fileService, /scope = ''/);
-  assert.match(fileService, /options\.chatScope, options\.recipientId, options\.recipientUsername, options\.recipient/);
-  assert.match(fileService, /options\.isVoiceNote \? 'voice-note' : ''/);
+  assert.match(fileService, /options\?\.chatScope, options\?\.recipientId, options\?\.recipientUsername, options\?\.recipient/);
+  assert.match(fileService, /options\?\.isVoiceNote \? 'voice-note' : ''/);
   assert.match(fileService, /addEventListener\?\.\('storage'/);
 });
 
@@ -189,11 +189,11 @@ test('upload identity creation is cross-tab serialized and scoped to immutable a
   assert.match(fileService, /verified\?\.token === token/);
   assert.match(fileService, /UPLOAD_IDENTITY_LOCK_TIMEOUT/);
   assert.match(fileService, /kalpavriksha-upload-mutation-ledger-v3/);
-  assert.match(fileService, /options\.actorId \|\| options\.actorUsername \|\| uploadedBy/);
+  assert.match(fileService, /options\?\.actorId \|\| options\?\.actorUsername \|\| uploadedBy/);
   assert.match(fileService, /alternateFingerprints/);
-  assert.match(fileService, /\[options\.actorUsername, uploadedBy\]/);
+  assert.match(fileService, /\[options\?\.actorUsername, uploadedBy\]/);
   assert.match(app, /actorId:\s*(?:currentUser|user)\.?id/);
-  assert.match(chat, /actorId:\s*currentUser\.id/);
+  assert.match(chat, /actorId:\s*currentUser\?\.id/);
 });
 
 test('older browsers do not buffer an entire private download when response streaming is unavailable', () => {

@@ -6,9 +6,9 @@ import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBad
 import { getArchiveBank, getArchiveLocation, getCompletedDateKey, groupArchivedByLocation, matchesArchiveSearch } from '../../utils/archiveUtils.js';
 import { MultiSelectCheckbox } from '../shared';
 
-const getCustomerDisplayName = (project = {}) => project.customerName || 'Customer not added';
+const getCustomerDisplayName = (project = {}) => project?.customerName || 'Customer not added';
 const isAdminUser = (user = {}) => String(user?.role || '').trim().toUpperCase() === 'ADMIN';
-const isRevisionWorkItem = (project = {}) => project.isRevisionWorkItem === true || String(project.id || '').includes('__REV__');
+const isRevisionWorkItem = (project = {}) => project?.isRevisionWorkItem === true || String(project?.id || '').includes('__REV__');
 const getArchiveSearchExtras = (project = {}) => [getTaskDescription(project), getEstimateDetails(project), getLatestCompletedFileName(project), getPaymentTrackingStatus(project)];
 
 const ArchivePaymentControl = ({ project, currentUser, onPaymentStatusChange }) => {
@@ -78,7 +78,16 @@ const ArchiveFilters = ({ state, months, banks, locations, onChange, onClear }) 
 
 export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, archiveViewState, setArchiveViewState, onPaymentStatusChange }) => {
   const [localState, setLocalState] = useState({});
-  const state = { filterMonth: 'All', filterDate: '', selectedBanks: [], selectedLocations: [], searchText: '', openLocations: [], scrollTop: 0, ...(archiveViewState || localState) };
+  const rawState = archiveViewState && typeof archiveViewState === 'object' ? archiveViewState : localState;
+  const state = {
+    filterMonth: String(rawState?.filterMonth || 'All'),
+    filterDate: String(rawState?.filterDate || ''),
+    selectedBanks: Array.isArray(rawState?.selectedBanks) ? rawState.selectedBanks : [],
+    selectedLocations: Array.isArray(rawState?.selectedLocations) ? rawState.selectedLocations : [],
+    searchText: String(rawState?.searchText || ''),
+    openLocations: Array.isArray(rawState?.openLocations) ? rawState.openLocations : [],
+    scrollTop: Number(rawState?.scrollTop || 0) || 0
+  };
   const viewportRef = useRef(null);
   const update = (patch) => {
     const updater = (previous = {}) => ({ filterMonth: 'All', filterDate: '', selectedBanks: [], selectedLocations: [], searchText: '', openLocations: [], scrollTop: 0, ...previous, ...patch });

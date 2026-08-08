@@ -24,10 +24,10 @@ import { authFetch, loginApi, clearBrowserSessionApi, logoutApi, changePasswordA
 import { sendChatMessageApi, updateChatMessageApi, deleteChatMessageApi, markChatReadApi, markNotificationReadApi, markAllNotificationsReadApi, createNotificationApi } from './services/chatService';
 import { FINANCE_FLUSH_EVENT, FINANCE_SYNC_EVENT, advanceFinanceOutboxAfterConfirmation, financeActorKey, getFinanceOutboxRecords, getFinanceSyncSnapshot, markFinanceOutboxAttempt, markFinanceOutboxError, queueFinanceDraft } from './services/financeOutboxService.js';
 import { buildNotification, getVisibleNotifications, NOTIFICATION_CATEGORIES, getNotificationCategory, getNotificationPriority, buildActivityTimeline, isNotificationForUser } from './services/notificationService';
-import { 
-  Briefcase, CheckCircle, Clock, FileText, LayoutDashboard, LogOut, 
-  MapPin, Plus, Search, User, Users, Wallet, ArrowRight, Upload, 
-  List, MessageSquare, Bell, Paperclip, X, Image as ImageIcon, 
+import {
+  Briefcase, CheckCircle, Clock, FileText, LayoutDashboard, LogOut,
+  MapPin, Plus, Search, User, Users, Wallet, ArrowRight, Upload,
+  List, MessageSquare, Bell, Paperclip, X, Image as ImageIcon,
   File as FileIcon, Archive, Send, Flag, Shield, Hash, Video, Phone,
   Calendar, Filter, Check, ArrowLeft, Download, ChevronRight, ChevronLeft, Lock, Eye, EyeOff, Map as MapIcon, AlertCircle, KanbanSquare, Link as LinkIcon, BarChart3, Building2, Smile, Star, Mic, Square, Trash2, Edit3, Save, ZoomIn, ZoomOut, RotateCw, RotateCcw, Maximize2, RefreshCcw
 } from 'lucide-react';
@@ -63,6 +63,23 @@ const createOpsBroadcast = () => {
 };
 const opsBroadcast = createOpsBroadcast();
 const OPS_TAB_ID = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+const CLIENT_RUNTIME_ERROR_LOG_KEY = 'kalpa_client_runtime_errors_v2';
+const CLIENT_RUNTIME_ERROR_LOG_LIMIT = 20;
+const recordClientRuntimeError = ({ error, source = 'runtime', componentStack = '' } = {}) => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CLIENT_RUNTIME_ERROR_LOG_KEY) || '[]');
+    const previous = Array.isArray(parsed) ? parsed : [];
+    const next = [{
+      at: new Date().toISOString(),
+      source: String(source || 'runtime').slice(0, 80),
+      message: String(error?.message || error || 'Unknown client error').slice(0, 2000),
+      stack: String(error?.stack || '').slice(0, 12000),
+      componentStack: String(componentStack || '').slice(0, 12000)
+    }, ...previous].slice(0, CLIENT_RUNTIME_ERROR_LOG_LIMIT);
+    localStorage.setItem(CLIENT_RUNTIME_ERROR_LOG_KEY, JSON.stringify(next));
+  } catch (_) {}
+};
 
 const PERMANENT_TASK_WRITE_CODES = new Set([
   'TASK_DATE_INVALID','TASK_DATE_FUTURE','TASK_COMPLETION_FORBIDDEN','COMPLETED_FILE_REQUIRED',
@@ -105,7 +122,7 @@ const sanitizeProjectForCache = (project) => {
   };
 };
 
-const sanitizeProjectsForCache = (projects) => (Array.isArray(projects) ? projects.map(sanitizeProjectForCache) : []);
+const sanitizeProjectsForCache = (projects) => (Array.isArray(projects) ? projects.filter(project => project && typeof project === 'object').map(sanitizeProjectForCache) : []);
 
 const FINANCE_COMPARE_FIELDS = Object.freeze([
   'estimate','estimateAmount','ledger','financeVersion','paymentTrackingStatus','paymentTrackingUpdatedAt','paymentTrackingUpdatedBy',
@@ -139,33 +156,33 @@ const createTaskMutationId = (prefix = 'task') => {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 };
 
-const operationalActorKey = (user = {}) => String(user.id || user.username || user.name || '').trim().toLowerCase();
+const operationalActorKey = (user = {}) => String(user?.id || user?.username || user?.name || '').trim().toLowerCase();
 
 const createFinanceLedgerDraft = (project = {}) => ({
-  estimate: String(project.estimate ?? project.estimateAmount ?? ''),
-  amountIn: String(project.ledger?.amountIn ?? project.paymentAmountIn ?? ''),
-  expenses: String(project.ledger?.expenses ?? ''),
-  refund: String(project.ledger?.refund ?? project.refundAmount ?? ''),
-  date: String(project.ledger?.date || project.paymentDate || getIndiaDateKey()),
-  receivedFrom: String(project.ledger?.receivedFrom || project.payerName || ''),
-  txnId: String(project.ledger?.txnId || project.transactionId || ''),
-  mode: String(project.ledger?.mode || ''),
-  note: String(project.ledger?.note || ''),
-  screenshot: project.ledger?.screenshot || null
+  estimate: String(project?.estimate ?? project?.estimateAmount ?? ''),
+  amountIn: String(project?.ledger?.amountIn ?? project?.paymentAmountIn ?? ''),
+  expenses: String(project?.ledger?.expenses ?? ''),
+  refund: String(project?.ledger?.refund ?? project?.refundAmount ?? ''),
+  date: String(project?.ledger?.date || project?.paymentDate || getIndiaDateKey()),
+  receivedFrom: String(project?.ledger?.receivedFrom || project?.payerName || ''),
+  txnId: String(project?.ledger?.txnId || project?.transactionId || ''),
+  mode: String(project?.ledger?.mode || ''),
+  note: String(project?.ledger?.note || ''),
+  screenshot: project?.ledger?.screenshot || null
 });
 
 const financeOutboxDetails = (draft = {}) => ({
-  estimate: Number(String(draft.estimate || '').replace(/[^0-9.-]/g, '')) || 0,
-  amountIn: Number(String(draft.amountIn || '').replace(/[^0-9.-]/g, '')) || 0,
-  paymentDate: normalizeTaskDateKey(draft.date || getIndiaDateKey(), getIndiaDateKey()),
-  accountingPeriod: normalizeAccountingMonthKey(draft.date, getCurrentAccountingMonthKey()),
-  mode: draft.mode || '',
-  transactionId: draft.txnId || '',
-  payerName: draft.receivedFrom || '',
-  expenses: Number(String(draft.expenses || '').replace(/[^0-9.-]/g, '')) || 0,
-  refund: Number(String(draft.refund || '').replace(/[^0-9.-]/g, '')) || 0,
-  note: draft.note || '',
-  screenshot: draft.screenshot || null
+  estimate: Number(String(draft?.estimate || '').replace(/[^0-9.-]/g, '')) || 0,
+  amountIn: Number(String(draft?.amountIn || '').replace(/[^0-9.-]/g, '')) || 0,
+  paymentDate: normalizeTaskDateKey(draft?.date || getIndiaDateKey(), getIndiaDateKey()),
+  accountingPeriod: normalizeAccountingMonthKey(draft?.date, getCurrentAccountingMonthKey()),
+  mode: draft?.mode || '',
+  transactionId: draft?.txnId || '',
+  payerName: draft?.receivedFrom || '',
+  expenses: Number(String(draft?.expenses || '').replace(/[^0-9.-]/g, '')) || 0,
+  refund: Number(String(draft?.refund || '').replace(/[^0-9.-]/g, '')) || 0,
+  note: draft?.note || '',
+  screenshot: draft?.screenshot || null
 });
 
 const parseFinanceDraftAmount = (value, label) => {
@@ -196,13 +213,13 @@ const rememberPendingCreatedProject = (project, options = {}) => {
     const raw=JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
     const key=String(project.id);
     const previous=raw[key] || {};
-    const mutationId=String(options.mutationId || previous.mutationId || createTaskMutationId(options.operation === 'create' ? 'create' : 'update')).trim();
+    const mutationId=String(options?.mutationId || previous.mutationId || createTaskMutationId(options?.operation === 'create' ? 'create' : 'update')).trim();
     raw[key]={
       project:sanitizeProjectForCache(project),
-      actorId:String(options.actorId || previous.actorId || '').trim().toLowerCase(),
-      operation:String(options.operation || previous.operation || (Number(project.taskVersion || 0) > 0 ? 'update' : 'create')),
+      actorId:String(options?.actorId || previous.actorId || '').trim().toLowerCase(),
+      operation:String(options?.operation || previous.operation || (Number(project.taskVersion || 0) > 0 ? 'update' : 'create')),
       mutationId,
-      expectedTaskVersion:Number(options.expectedTaskVersion ?? previous.expectedTaskVersion ?? project.taskVersion ?? 0),
+      expectedTaskVersion:Number(options?.expectedTaskVersion ?? previous.expectedTaskVersion ?? project.taskVersion ?? 0),
       createdAt:Number(previous.createdAt || Date.now()),
       lastAttemptAt:Number(previous.lastAttemptAt || 0),
       attempts:Number(previous.attempts || 0)
@@ -247,7 +264,7 @@ const getPendingDeletedRecords = (actorId = '') => {
 const getPendingDeletedProjectIds = (actorId = '') => getPendingDeletedRecords(actorId).map(record => String(record.id || '')).filter(Boolean);
 const rememberPendingDeletedProjects = (ids, options = {}) => {
   const incoming = (Array.isArray(ids) ? ids : [ids]).flat().map(x => String(x || '')).filter(Boolean);
-  const actorId = String(options.actorId || '').trim().toLowerCase();
+  const actorId = String(options?.actorId || '').trim().toLowerCase();
   if (!incoming.length) return getPendingDeletedProjectIds(actorId);
   try {
     const raw = JSON.parse(localStorage.getItem('kalpa_pending_deleted_project_ids') || '{}') || {};
@@ -280,7 +297,7 @@ const markPendingDeletedAttempt = (id, actorId = '') => {
 };
 const forgetPendingDeletedProjects = (ids, options = {}) => {
   const remove = new Set((Array.isArray(ids) ? ids : [ids]).flat().map(x => String(x || '')).filter(Boolean));
-  const actorKey = String(options.actorId || '').trim().toLowerCase();
+  const actorKey = String(options?.actorId || '').trim().toLowerCase();
   if (!remove.size) return getPendingDeletedProjectIds(actorKey);
   try {
     const raw = JSON.parse(localStorage.getItem('kalpa_pending_deleted_project_ids') || '{}') || {};
@@ -300,7 +317,7 @@ const getDeletedProjectIds = () => {
 };
 const saveDeletedProjectIds = (ids = [], options = {}) => {
   const protectedIds = getProtectedCreatedProjectIds();
-  const force = !!options.force;
+  const force = !!options?.force;
   const unique = [...new Set((ids || []).map(x => String(x)).filter(Boolean).filter(id => force || !protectedIds.has(id)))];
   try { localStorage.setItem('kalpa_deleted_project_ids', JSON.stringify(unique)); } catch(e) {}
   return unique;
@@ -357,8 +374,8 @@ const forgetRecentCreatedProjects = (...ids) => {
   } catch(e) {}
 };
 const projectIdentityMatches = (a = {}, b = {}) => {
-  const aIds = [a.id, a.caseId, ...(a.previousTaskIds || [])].map(x => String(x || '')).filter(Boolean);
-  const bIds = [b.id, b.caseId, ...(b.previousTaskIds || [])].map(x => String(x || '')).filter(Boolean);
+  const aIds = [a?.id, a?.caseId, ...(a?.previousTaskIds || [])].map(x => String(x || '')).filter(Boolean);
+  const bIds = [b?.id, b?.caseId, ...(b?.previousTaskIds || [])].map(x => String(x || '')).filter(Boolean);
   return aIds.some(id => bIds.includes(id));
 };
 const confirmPendingCreatedProjectsAgainstServer = (serverProjects = [], actorId = '') => {
@@ -441,18 +458,18 @@ const recordAssignmentLedgerBatch = (projects = []) => {
 const recordAssignmentLedger = (project = {}) => recordAssignmentLedgerBatch([project]);
 const applyAssignmentLedgerToProject = (project = {}, ledger = getAssignmentLedger()) => {
   if (!project?.id) return project;
-  const ledgerItem = ledger[String(project.id)];
+  const ledgerItem = ledger[String(project?.id)];
   if (!ledgerItem || !isAssignedValue(ledgerItem.assignedTo)) return project;
-  const projectVersion = Number(project.assignmentVersion || project.assignedAt || 0);
+  const projectVersion = Number(project?.assignmentVersion || project?.assignedAt || 0);
   const ledgerVersion = Number(ledgerItem.assignmentVersion || ledgerItem.assignedAt || 0);
-  if (!isAssignedValue(project.assignedTo) || ledgerVersion >= projectVersion) {
+  if (!isAssignedValue(project?.assignedTo) || ledgerVersion >= projectVersion) {
     return normalizeProjectRecord({
       ...project,
       assignedTo: normalizePersonName(ledgerItem.assignedTo),
-      assignedBy: ledgerItem.assignedBy || project.assignedBy,
-      assignedAt: ledgerItem.assignedAt || project.assignedAt,
-      assignmentVersion: ledgerVersion || project.assignmentVersion,
-      ownership: { ...(project.ownership || {}), assignedTo: normalizePersonName(ledgerItem.assignedTo), assignedBy: ledgerItem.assignedBy || project.assignedBy }
+      assignedBy: ledgerItem.assignedBy || project?.assignedBy,
+      assignedAt: ledgerItem.assignedAt || project?.assignedAt,
+      assignmentVersion: ledgerVersion || project?.assignmentVersion,
+      ownership: { ...(project?.ownership || {}), assignedTo: normalizePersonName(ledgerItem.assignedTo), assignedBy: ledgerItem.assignedBy || project?.assignedBy }
     });
   }
   return project;
@@ -464,10 +481,10 @@ const applyAssignmentLedgerToProjects = (projects = []) => {
 };
 
 const sanitizeChatMessageForCache = (message) => sanitizeFileLikeObjectForCache(message);
-const sanitizeChatsForCache = (messages) => (Array.isArray(messages) ? messages.map(sanitizeChatMessageForCache) : []);
+const sanitizeChatsForCache = (messages) => (Array.isArray(messages) ? messages.filter(message => message && typeof message === 'object').map(sanitizeChatMessageForCache) : []);
 
 const chatTimeValue = (message = {}) => {
-  const raw = message.sentAt || message.createdAt || message.updatedAt || message.id || 0;
+  const raw = message?.sentAt || message?.createdAt || message?.updatedAt || message?.id || 0;
   const numeric = Number(raw);
   if (Number.isFinite(numeric) && numeric > 0) return numeric;
   const parsed = new Date(raw).getTime();
@@ -534,7 +551,7 @@ const mergeNotificationsStable = (current = [], incoming = [], replaceIds = []) 
 const AUTHORIZATION_CACHE_SCOPE_KEY = 'kalpa_authorization_cache_scope_v1';
 const clearRoleScopedOperationalCaches = (user = {}) => {
   if (typeof localStorage === 'undefined') return;
-  const scope = `phase4:${String(user.id || user.username || '').trim()}:${String(user.role || '').trim().toUpperCase()}`;
+  const scope = `phase4:${String(user?.id || user?.username || '').trim()}:${String(user?.role || '').trim().toUpperCase()}`;
   let existing = '';
   try { existing = localStorage.getItem(AUTHORIZATION_CACHE_SCOPE_KEY) || ''; } catch {}
   if (existing !== scope) {
@@ -586,13 +603,13 @@ const toMs = (value) => {
   return Number.isNaN(parsed) ? 0 : parsed;
 };
 const userLastActivityAt = (user = {}) => Math.max(
-  toMs(user.lastHeartbeatAt),
-  toMs(user.lastSeenAt),
-  toMs(user.lastLoginAt),
-  toMs(user.availabilityUpdatedAt)
+  toMs(user?.lastHeartbeatAt),
+  toMs(user?.lastSeenAt),
+  toMs(user?.lastLoginAt),
+  toMs(user?.availabilityUpdatedAt)
 );
 const isUserActuallyOnline = (user = {}, nowMs = Date.now()) => {
-  if (!user || !user.isOnline) return false;
+  if (!user || !user?.isOnline) return false;
   const lastActivity = userLastActivityAt(user);
   return !!lastActivity && (nowMs - lastActivity) <= ONLINE_STALE_MS;
 };
@@ -624,16 +641,16 @@ const isTabAllowedForRole = (tab, role) => {
 };
 const TEAM_ALIASES_TO_BLOCK = []; // no hardcoded staff aliases blocked; deleted/restricted users are filtered by status
 const isSystemPlaceholderUser = (u = {}) => {
-  const nameKey = String(u.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  const usernameKey = String(u.username || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  return /operations\s*manager/i.test(String(u.name || '')) ||
-    String(u.id || '') === 'u-manager' ||
+  const nameKey = String(u?.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const usernameKey = String(u?.username || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return /operations\s*manager/i.test(String(u?.name || '')) ||
+    String(u?.id || '') === 'u-manager' ||
     TEAM_ALIASES_TO_BLOCK.includes(nameKey) ||
     TEAM_ALIASES_TO_BLOCK.includes(usernameKey);
 };
-const hasValidTeamRole = (u = {}) => [ROLES.ADMIN, ROLES.MANAGER, ROLES.DESIGNER].includes(normalizeRole(u.role));
-const isApprovedUser = (u = {}) => normalizeStatus(u.status) === 'APPROVED' && hasValidTeamRole(u) && !isSystemPlaceholderUser(u);
-const getOperationalUsers = (users = [], { includeAdmins = true } = {}) => (users || [])
+const hasValidTeamRole = (u = {}) => [ROLES.ADMIN, ROLES.MANAGER, ROLES.DESIGNER].includes(normalizeRole(u?.role));
+const isApprovedUser = (u = {}) => normalizeStatus(u?.status) === 'APPROVED' && hasValidTeamRole(u) && !isSystemPlaceholderUser(u);
+const getOperationalUsers = (users = [], { includeAdmins = true } = {}) => (Array.isArray(users) ? users : [])
   .map(normalizeTeamUser)
   .filter(u => isApprovedUser(u) && (includeAdmins || u.role !== ROLES.ADMIN))
   .sort((a, b) => {
@@ -641,7 +658,7 @@ const getOperationalUsers = (users = [], { includeAdmins = true } = {}) => (user
     return (roleOrder[a.role] ?? 9) - (roleOrder[b.role] ?? 9) || String(a.name).localeCompare(String(b.name));
   });
 
-const isArchivedLifecycleUser = (u = {}) => ['DELETED', 'REJECTED', 'ARCHIVED'].includes(normalizeStatus(u.status));
+const isArchivedLifecycleUser = (u = {}) => ['DELETED', 'REJECTED', 'ARCHIVED'].includes(normalizeStatus(u?.status));
 const getManagedTeamUsers = (users = [], { includeAdmins = true } = {}) => (users || [])
   .map(normalizeTeamUser)
   .filter(u => hasValidTeamRole(u) && !isSystemPlaceholderUser(u) && !isArchivedLifecycleUser(u) && (includeAdmins || u.role !== ROLES.ADMIN))
@@ -659,14 +676,14 @@ const makeEmployeeLifecycleEvent = (type, by = '', details = {}) => ({
 });
 
 const detectEmployeeLifecycleEventType = (existing = {}, next = {}) => {
-  if (!existing || !existing.id) return 'EMPLOYEE_CREATED';
-  const oldStatus = normalizeStatus(existing.status);
-  const newStatus = normalizeStatus(next.status);
+  if (!existing || !existing?.id) return 'EMPLOYEE_CREATED';
+  const oldStatus = normalizeStatus(existing?.status);
+  const newStatus = normalizeStatus(next?.status);
   if (!isArchivedLifecycleUser(existing) && isArchivedLifecycleUser(next)) return 'EMPLOYEE_ARCHIVED';
   if (oldStatus !== 'RESTRICTED' && newStatus === 'RESTRICTED') return 'LOGIN_RESTRICTED';
   if (oldStatus === 'RESTRICTED' && newStatus === 'APPROVED') return 'LOGIN_RESTORED';
-  if (normalizeRole(existing.role) !== normalizeRole(next.role)) return 'ROLE_CHANGED';
-  if (existing.password !== next.password) return 'PASSWORD_RESET';
+  if (normalizeRole(existing?.role) !== normalizeRole(next?.role)) return 'ROLE_CHANGED';
+  if (existing?.password !== next?.password) return 'PASSWORD_RESET';
   return 'EMPLOYEE_UPDATED';
 };
 
@@ -676,7 +693,7 @@ const stripLargeLocalFilesForCloud = (project) => sanitizeProjectForCache(projec
 
 const TASK_CATEGORIES = [
   'Key Route Map', 'Key Route + Map Estimate', 'Key Route + Floor Map',
-  'Colony Layout', 'Builder Layout', 'Subdivision', 
+  'Colony Layout', 'Builder Layout', 'Subdivision',
   'Floor Plan', 'Map Estimate', 'Other'
 ];
 
@@ -687,89 +704,89 @@ const INITIAL_USERS = [];
 
 const createEmployeeLifecycleProfile = (user = {}, existing = {}) => {
   const now = Date.now();
-  const role = normalizeRole(user.role || existing.role || ROLES.DESIGNER);
-  const status = normalizeStatus(user.status || existing.status || 'APPROVED');
+  const role = normalizeRole(user?.role || existing?.role || ROLES.DESIGNER);
+  const status = normalizeStatus(user?.status || existing?.status || 'APPROVED');
   const isArchived = ['DELETED', 'REJECTED', 'ARCHIVED'].includes(status);
   const isRestricted = status === 'RESTRICTED';
   const lifecycleStatus = isArchived ? 'ARCHIVED' : (isRestricted ? 'RESTRICTED' : 'ACTIVE');
   const active = lifecycleStatus === 'ACTIVE';
   const base = { ...existing, ...user, role, status };
-  const profileCreatedAt = existing.profileCreatedAt || user.profileCreatedAt || now;
-  const profileUpdatedAt = user.profileUpdatedAt || existing.profileUpdatedAt || user.updatedAt || existing.updatedAt || profileCreatedAt;
+  const profileCreatedAt = existing?.profileCreatedAt || user?.profileCreatedAt || now;
+  const profileUpdatedAt = user?.profileUpdatedAt || existing?.profileUpdatedAt || user?.updatedAt || existing?.updatedAt || profileCreatedAt;
   const workingRole = role === ROLES.ADMIN ? 'ADMIN' : (role === ROLES.MANAGER ? 'MANAGER' : 'DESIGNER');
-  const previousEvents = Array.isArray(existing.lifecycleEvents) ? existing.lifecycleEvents : [];
-  const incomingEvents = Array.isArray(user.lifecycleEvents) ? user.lifecycleEvents : [];
+  const previousEvents = Array.isArray(existing?.lifecycleEvents) ? existing?.lifecycleEvents : [];
+  const incomingEvents = Array.isArray(user?.lifecycleEvents) ? user?.lifecycleEvents : [];
   const lifecycleEvents = [...previousEvents, ...incomingEvents].filter((event, index, arr) =>
     event && event.id && arr.findIndex(e => e && e.id === event.id) === index
   ).slice(-100);
   const lifecycle = {
-    ...(existing.lifecycle || {}),
-    ...(user.lifecycle || {}),
+    ...(existing?.lifecycle || {}),
+    ...(user?.lifecycle || {}),
     status: lifecycleStatus,
     active,
     restricted: isRestricted,
     archived: isArchived,
-    createdAt: existing.lifecycle?.createdAt || user.lifecycle?.createdAt || profileCreatedAt,
+    createdAt: existing?.lifecycle?.createdAt || user?.lifecycle?.createdAt || profileCreatedAt,
     updatedAt: profileUpdatedAt,
-    archivedAt: isArchived ? (user.deletedAt || user.archivedAt || existing.lifecycle?.archivedAt || now) : null,
-    archivedBy: isArchived ? (user.deletedBy || user.archivedBy || existing.lifecycle?.archivedBy || '') : ''
+    archivedAt: isArchived ? (user?.deletedAt || user?.archivedAt || existing?.lifecycle?.archivedAt || now) : null,
+    archivedBy: isArchived ? (user?.deletedBy || user?.archivedBy || existing?.lifecycle?.archivedBy || '') : ''
   };
   const attendanceProfile = {
-    ...(existing.attendanceProfile || {}),
-    ...(user.attendanceProfile || {}),
-    createdAt: existing.attendanceProfile?.createdAt || user.attendanceProfile?.createdAt || profileCreatedAt,
+    ...(existing?.attendanceProfile || {}),
+    ...(user?.attendanceProfile || {}),
+    createdAt: existing?.attendanceProfile?.createdAt || user?.attendanceProfile?.createdAt || profileCreatedAt,
     active,
     includeInAttendance: active && role !== ROLES.ADMIN,
     lastPreparedAt: profileUpdatedAt
   };
   const availabilityProfile = {
-    ...(existing.availabilityProfile || {}),
-    ...(user.availabilityProfile || {}),
-    createdAt: existing.availabilityProfile?.createdAt || user.availabilityProfile?.createdAt || profileCreatedAt,
+    ...(existing?.availabilityProfile || {}),
+    ...(user?.availabilityProfile || {}),
+    createdAt: existing?.availabilityProfile?.createdAt || user?.availabilityProfile?.createdAt || profileCreatedAt,
     active,
     trackAvailability: active,
     defaultAvailability: 'Unavailable'
   };
   const chatProfile = {
-    ...(existing.chatProfile || {}),
-    ...(user.chatProfile || {}),
-    createdAt: existing.chatProfile?.createdAt || user.chatProfile?.createdAt || profileCreatedAt,
+    ...(existing?.chatProfile || {}),
+    ...(user?.chatProfile || {}),
+    createdAt: existing?.chatProfile?.createdAt || user?.chatProfile?.createdAt || profileCreatedAt,
     active,
     directMessages: active,
     mentions: active
   };
   const performanceProfile = {
-    ...(existing.performanceProfile || {}),
-    ...(user.performanceProfile || {}),
-    createdAt: existing.performanceProfile?.createdAt || user.performanceProfile?.createdAt || profileCreatedAt,
+    ...(existing?.performanceProfile || {}),
+    ...(user?.performanceProfile || {}),
+    createdAt: existing?.performanceProfile?.createdAt || user?.performanceProfile?.createdAt || profileCreatedAt,
     active: active && role !== ROLES.ADMIN,
-    completedTasks: existing.performanceProfile?.completedTasks || user.performanceProfile?.completedTasks || 0,
-    revisionsHandled: existing.performanceProfile?.revisionsHandled || user.performanceProfile?.revisionsHandled || 0,
-    averageCompletionMinutes: existing.performanceProfile?.averageCompletionMinutes || user.performanceProfile?.averageCompletionMinutes || 0
+    completedTasks: existing?.performanceProfile?.completedTasks || user?.performanceProfile?.completedTasks || 0,
+    revisionsHandled: existing?.performanceProfile?.revisionsHandled || user?.performanceProfile?.revisionsHandled || 0,
+    averageCompletionMinutes: existing?.performanceProfile?.averageCompletionMinutes || user?.performanceProfile?.averageCompletionMinutes || 0
   };
   const analyticsProfile = {
-    ...(existing.analyticsProfile || {}),
-    ...(user.analyticsProfile || {}),
-    createdAt: existing.analyticsProfile?.createdAt || user.analyticsProfile?.createdAt || profileCreatedAt,
+    ...(existing?.analyticsProfile || {}),
+    ...(user?.analyticsProfile || {}),
+    createdAt: existing?.analyticsProfile?.createdAt || user?.analyticsProfile?.createdAt || profileCreatedAt,
     active,
     role: workingRole,
-    daily: existing.analyticsProfile?.daily || user.analyticsProfile?.daily || {},
-    weekly: existing.analyticsProfile?.weekly || user.analyticsProfile?.weekly || {},
-    monthly: existing.analyticsProfile?.monthly || user.analyticsProfile?.monthly || {}
+    daily: existing?.analyticsProfile?.daily || user?.analyticsProfile?.daily || {},
+    weekly: existing?.analyticsProfile?.weekly || user?.analyticsProfile?.weekly || {},
+    monthly: existing?.analyticsProfile?.monthly || user?.analyticsProfile?.monthly || {}
   };
   const workloadProfile = {
-    ...(existing.workloadProfile || {}),
-    ...(user.workloadProfile || {}),
-    createdAt: existing.workloadProfile?.createdAt || user.workloadProfile?.createdAt || profileCreatedAt,
+    ...(existing?.workloadProfile || {}),
+    ...(user?.workloadProfile || {}),
+    createdAt: existing?.workloadProfile?.createdAt || user?.workloadProfile?.createdAt || profileCreatedAt,
     active: active && role !== ROLES.ADMIN,
-    dailyLimit: existing.workloadProfile?.dailyLimit || user.workloadProfile?.dailyLimit || (role === ROLES.MANAGER || role === ROLES.DESIGNER ? 15 : 0),
-    activeTasks: existing.workloadProfile?.activeTasks || user.workloadProfile?.activeTasks || 0,
-    pendingTasks: existing.workloadProfile?.pendingTasks || user.workloadProfile?.pendingTasks || 0
+    dailyLimit: existing?.workloadProfile?.dailyLimit || user?.workloadProfile?.dailyLimit || (role === ROLES.MANAGER || role === ROLES.DESIGNER ? 15 : 0),
+    activeTasks: existing?.workloadProfile?.activeTasks || user?.workloadProfile?.activeTasks || 0,
+    pendingTasks: existing?.workloadProfile?.pendingTasks || user?.workloadProfile?.pendingTasks || 0
   };
   const notificationPreferences = {
-    ...(existing.notificationPreferences || {}),
-    ...(user.notificationPreferences || {}),
-    createdAt: existing.notificationPreferences?.createdAt || user.notificationPreferences?.createdAt || profileCreatedAt,
+    ...(existing?.notificationPreferences || {}),
+    ...(user?.notificationPreferences || {}),
+    createdAt: existing?.notificationPreferences?.createdAt || user?.notificationPreferences?.createdAt || profileCreatedAt,
     enabled: active,
     task: active,
     chat: active,
@@ -804,16 +821,17 @@ const createEmployeeLifecycleProfile = (user = {}, existing = {}) => {
   return normalized;
 };
 const normalizeTeamUser = (u = {}) => {
-  const rawName = String(u.name || '').trim();
-  const rawUsername = String(u.username || '').trim();
+  u = u && typeof u === 'object' ? u : {};
+  const rawName = String(u?.name || '').trim();
+  const rawUsername = String(u?.username || '').trim();
   const normalized = {
     ...u,
-    name: rawName || u.name,
+    name: rawName || u?.name,
     username: rawUsername,
-    role: normalizeRole(u.role),
-    status: normalizeStatus(u.status),
-    isOnline: !!u.isOnline,
-    lastSeenAt: u.lastSeenAt || u.lastLogoutAt || null
+    role: normalizeRole(u?.role),
+    status: normalizeStatus(u?.status),
+    isOnline: !!u?.isOnline,
+    lastSeenAt: u?.lastSeenAt || u?.lastLogoutAt || null
   };
   const online = isUserActuallyOnline(normalized);
   const presenceSafe = online ? normalized : {
@@ -826,32 +844,32 @@ const normalizeTeamUser = (u = {}) => {
 };
 
 const getPresenceMs = (u = {}) => Math.max(
-  Number(u.lastHeartbeatAt) || 0,
-  Number(u.lastSeenAt) || 0,
-  Number(u.lastLoginAt) || 0,
-  Number(u.availabilityUpdatedAt) || 0,
-  Number(u.lastLogoutAt) || 0
+  Number(u?.lastHeartbeatAt) || 0,
+  Number(u?.lastSeenAt) || 0,
+  Number(u?.lastLoginAt) || 0,
+  Number(u?.availabilityUpdatedAt) || 0,
+  Number(u?.lastLogoutAt) || 0
 );
 
 const mergeTeamUserPresenceSafely = (prev = {}, incoming = {}) => {
   const prevTs = getPresenceMs(prev);
   const incomingTs = getPresenceMs(incoming);
-  const merged = { ...prev, ...incoming, id: prev.id || incoming.id };
-  const prevOnlineFresh = !!prev.isOnline && prevTs && (Date.now() - prevTs) <= ONLINE_STALE_MS;
-  const incomingStaleOffline = !incoming.isOnline && String(incoming.availability || '').toLowerCase() === 'unavailable';
+  const merged = { ...prev, ...incoming, id: prev?.id || incoming?.id };
+  const prevOnlineFresh = !!prev?.isOnline && prevTs && (Date.now() - prevTs) <= ONLINE_STALE_MS;
+  const incomingStaleOffline = !incoming?.isOnline && String(incoming?.availability || '').toLowerCase() === 'unavailable';
 
   // A delayed /api/state response or another idle tab must not erase a fresher
   // live heartbeat already seen by this browser. This was the main cause of the
   // Attendance screen jumping between two contradictory states.
   if (prevTs > incomingTs || (prevOnlineFresh && incomingStaleOffline)) {
-    merged.isOnline = prev.isOnline;
-    merged.availability = prev.availability;
-    merged.lastSeenAt = prev.lastSeenAt;
-    merged.lastHeartbeatAt = prev.lastHeartbeatAt;
-    merged.lastLoginAt = prev.lastLoginAt;
-    merged.lastLogoutAt = prev.lastLogoutAt;
-    merged.availabilityUpdatedAt = prev.availabilityUpdatedAt;
-    merged.breakStartedAt = prev.breakStartedAt;
+    merged.isOnline = prev?.isOnline;
+    merged.availability = prev?.availability;
+    merged.lastSeenAt = prev?.lastSeenAt;
+    merged.lastHeartbeatAt = prev?.lastHeartbeatAt;
+    merged.lastLoginAt = prev?.lastLoginAt;
+    merged.lastLogoutAt = prev?.lastLogoutAt;
+    merged.availabilityUpdatedAt = prev?.availabilityUpdatedAt;
+    merged.breakStartedAt = prev?.breakStartedAt;
   }
   return merged;
 };
@@ -878,13 +896,13 @@ const normalizePersonName = (name = '') => normalizeTeamUser({ name, username: n
 const identityKey = (value = '') => normalizePersonName(String(value || '')).toLowerCase().replace(/[^a-z0-9]/g, '');
 const samePerson = (a = '', b = '') => identityKey(a) === identityKey(b);
 
-const attendanceLogKey = (log = {}) => `${String(log.userId || log.name || log.id || '').toLowerCase().trim()}_${log.date || ''}`;
+const attendanceLogKey = (log = {}) => `${String(log?.userId || log?.name || log?.id || '').toLowerCase().trim()}_${log?.date || ''}`;
 const attendanceLogFreshness = (log = {}) => Math.max(
-  Number(log.lastTick) || 0,
-  Number(log.logoutAt) || 0,
-  Number(log.updatedAt) || 0,
-  Number(log.loginAt) || 0,
-  Number(log.firstLoginAt) || 0
+  Number(log?.lastTick) || 0,
+  Number(log?.logoutAt) || 0,
+  Number(log?.updatedAt) || 0,
+  Number(log?.loginAt) || 0,
+  Number(log?.firstLoginAt) || 0
 );
 const mergeAttendanceLogsStable = (existing = [], incoming = [], replaceIds = []) => {
   const replaced = new Set((replaceIds || []).map(value => String(value || '')).filter(Boolean));
@@ -923,17 +941,18 @@ const readEntryName = (entry) => typeof entry === 'string' ? entry : (entry?.nam
 const hasReadBy = (message, userName) => (message?.readBy || []).some(r => samePerson(readEntryName(r), userName));
 
 const normalizeTimelineEvent = (event = {}) => {
-  const at = event.at || event.time || event.createdAt || new Date().toISOString();
-  const title = event.title || event.text || event.action || 'Timeline Event';
+  event = event && typeof event === 'object' ? event : {};
+  const at = event?.at || event?.time || event?.createdAt || new Date().toISOString();
+  const title = event?.title || event?.text || event?.action || 'Timeline Event';
   return {
     ...event,
-    id: event.id || `${at}-${title}`,
+    id: event?.id || `${at}-${title}`,
     title,
-    text: event.text || title,
-    by: event.by || event.user || event.createdBy || 'System',
+    text: event?.text || title,
+    by: event?.by || event?.user || event?.createdBy || 'System',
     at,
-    time: event.time || at,
-    remarks: event.remarks || event.note || ''
+    time: event?.time || at,
+    remarks: event?.remarks || event?.note || ''
   };
 };
 
@@ -956,31 +975,32 @@ const normalizeTimeline = (timeline = [], history = []) => {
 };
 
 const normalizeProjectRecord = (project = {}) => {
-  const assignedTo = normalizePersonName(project.assignedTo || project.ownership?.assignedTo || project.assigneeName || project.assignedToName || project.assignedUserName || '');
-  const createdBy = normalizePersonName(project.createdBy || project.creatorName || '');
-  const manager = normalizePersonName(project.manager || '');
+  project = project && typeof project === 'object' ? project : {};
+  const assignedTo = normalizePersonName(project?.assignedTo || project?.ownership?.assignedTo || project?.assigneeName || project?.assignedToName || project?.assignedUserName || '');
+  const createdBy = normalizePersonName(project?.createdBy || project?.creatorName || '');
+  const manager = normalizePersonName(project?.manager || '');
   return {
     ...project,
-    id: String(project.id || project.caseId || '').trim(),
-    caseId: project.caseId || project.id,
+    id: String(project?.id || project?.caseId || '').trim(),
+    caseId: project?.caseId || project?.id,
     assignedTo: assignedTo || 'Unassigned',
-    createdBy: createdBy || project.createdBy,
-    manager: manager || project.manager,
-    taskName: project.taskName || makeTaskDisplayName(project),
-    timeline: normalizeTimeline(project.timeline, project.history)
+    createdBy: createdBy || project?.createdBy,
+    manager: manager || project?.manager,
+    taskName: project?.taskName || makeTaskDisplayName(project),
+    timeline: normalizeTimeline(project?.timeline, project?.history)
   };
 };
 
 const normalizeProjectRecords = (list = []) => (Array.isArray(list) ? list : []).map(normalizeProjectRecord);
 
-const projectFreshness = (p = {}) => Math.max(0, ...[p.updatedAt, p.syncVersion, p.assignmentVersion, p.assignedAt, p.completedAt, p.submittedAt, p.createdAt].map(value => {
+const projectFreshness = (p = {}) => Math.max(0, ...[p?.updatedAt, p?.syncVersion, p?.assignmentVersion, p?.assignedAt, p?.completedAt, p?.submittedAt, p?.createdAt].map(value => {
   const numeric = Number(value);
   if (Number.isFinite(numeric) && numeric > 0) return numeric;
   const parsed = new Date(value || 0).getTime();
   return Number.isNaN(parsed) ? 0 : parsed;
 }));
 const isAssignedValue = (value) => Boolean(value && String(value).trim() && String(value).trim() !== 'Unassigned');
-const assignmentFreshness = (p = {}) => Number(p.assignmentVersion || p.assignedAt || 0);
+const assignmentFreshness = (p = {}) => Number(p?.assignmentVersion || p?.assignedAt || 0);
 const mergeProjectRecordSafely = (existing = {}, incoming = {}) => {
   const a = normalizeProjectRecord(existing || {});
   const b = normalizeProjectRecord(incoming || {});
@@ -1030,34 +1050,34 @@ const latestCollectionMarker = (items = []) => {
 };
 
 const projectUiRevision = (project = {}) => [
-  project.id || '',
-  project.caseId || '',
-  project.displayId || '',
-  project.taskVersion || 0,
-  project.financeVersion || 0,
-  project.updatedAt || 0,
-  project.syncVersion || 0,
-  project.assignmentVersion || 0,
-  project.assignedTo || '',
-  project.assigneeId || '',
-  project.status || '',
-  project.reviewStatus || '',
-  project.priority || '',
-  project.customerName || '',
-  project.location || project.city || '',
-  project.client || project.bankName || '',
-  project.paymentStatus || '',
-  project.paymentTrackingStatus || '',
-  project.paymentTrackingUpdatedAt || 0,
-  project.ledger?.updatedAt || project.ledger?.lastUpdatedAt || 0,
-  latestCollectionMarker(project.documents),
-  latestCollectionMarker(project.workFiles),
-  latestCollectionMarker(project.completedFiles),
-  latestCollectionMarker(project.revisionFiles),
-  latestCollectionMarker(project.comments),
-  latestCollectionMarker(project.history),
-  latestCollectionMarker(project.timeline),
-  latestCollectionMarker(project.revisions)
+  project?.id || '',
+  project?.caseId || '',
+  project?.displayId || '',
+  project?.taskVersion || 0,
+  project?.financeVersion || 0,
+  project?.updatedAt || 0,
+  project?.syncVersion || 0,
+  project?.assignmentVersion || 0,
+  project?.assignedTo || '',
+  project?.assigneeId || '',
+  project?.status || '',
+  project?.reviewStatus || '',
+  project?.priority || '',
+  project?.customerName || '',
+  project?.location || project?.city || '',
+  project?.client || project?.bankName || '',
+  project?.paymentStatus || '',
+  project?.paymentTrackingStatus || '',
+  project?.paymentTrackingUpdatedAt || 0,
+  project?.ledger?.updatedAt || project?.ledger?.lastUpdatedAt || 0,
+  latestCollectionMarker(project?.documents),
+  latestCollectionMarker(project?.workFiles),
+  latestCollectionMarker(project?.completedFiles),
+  latestCollectionMarker(project?.revisionFiles),
+  latestCollectionMarker(project?.comments),
+  latestCollectionMarker(project?.history),
+  latestCollectionMarker(project?.timeline),
+  latestCollectionMarker(project?.revisions)
 ].join('|');
 
 const reuseStableProjects = (current = [], next = []) => {
@@ -1085,9 +1105,9 @@ const persistAndBroadcastProjects = (projects, options = {}) => {
   const normalized = filterDeletedProjects(applyAssignmentLedgerToProjects(normalizeProjectRecords(mergeTaskLists([], projects))));
   normalized.forEach(recordAssignmentLedger);
   if (USE_BACKEND_STATE) {
-    const changedProjects = Array.isArray(options.changedProjects) ? options.changedProjects : [];
-    const removedProjectIds = Array.isArray(options.removedProjectIds) ? options.removedProjectIds : [];
-    const replaceIds = options.replaceIds || [];
+    const changedProjects = Array.isArray(options?.changedProjects) ? options?.changedProjects : [];
+    const removedProjectIds = Array.isArray(options?.removedProjectIds) ? options?.removedProjectIds : [];
+    const replaceIds = options?.replaceIds || [];
     if (!changedProjects.length && !removedProjectIds.length && !replaceIds.length) return persistBackendProjectsCompatibility(normalized);
     if (!opsBroadcast) return normalized;
     try {
@@ -1120,7 +1140,9 @@ const getFileIcon = (filename) => {
 };
 
 const exportToCSV = (headers, rows, filename) => {
-  const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
+  const safeHeaders = Array.isArray(headers) ? headers : [];
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const csvContent = "data:text/csv;charset=utf-8," + [safeHeaders.join(","), ...safeRows.map(e => (Array.isArray(e) ? e : [e]).join(","))].join("\n");
   const encodedUri = encodeURI(csvContent);
   const link = document.createElement("a");
   link.setAttribute("href", encodedUri);
@@ -1131,12 +1153,14 @@ const exportToCSV = (headers, rows, filename) => {
 };
 
 const getAttendanceUser = (log, users = []) => {
-  return (users || []).find(u => String(u.id) === String(log.userId))
-    || (users || []).find(u => samePerson(u.name, log.name))
+  if (!log || typeof log !== 'object') return null;
+  const safeUsers = Array.isArray(users) ? users.filter(Boolean) : [];
+  return safeUsers.find(u => String(u?.id) === String(log.userId))
+    || safeUsers.find(u => samePerson(u?.name, log.name))
     || null;
 };
 
-const getProjectDateKey = (project) => formatDateKey(project.createdAt || project.completedAt || Date.now());
+const getProjectDateKey = (project) => formatDateKey(project?.createdAt || project?.completedAt || Date.now());
 
 const getDraftElapsed = (project, now = Date.now()) => {
   const elapsedMs = getDraftingElapsedMs(project, now);
@@ -1149,7 +1173,7 @@ const getTodayStart = () => new Date().setHours(0,0,0,0);
 
 const getDailyTaskLimit = (projects = []) => {
   const todayStart = getTodayStart();
-  const todayCount = projects.filter(p => (p.createdAt || 0) >= todayStart).length;
+  const todayCount = (Array.isArray(projects) ? projects : []).filter(p => (p?.createdAt || 0) >= todayStart).length;
   if (todayCount >= 10) return 15;
   if (todayCount >= 5) return 10;
   return 5;
@@ -1225,9 +1249,10 @@ const generateTraceableTaskId = ({ location = '', client = '', bankerName = '', 
   const bank = makeCodePart(client, 'BANK', 4);
   const person = makeCodePart(customerName || bankerName, 'CASE', 4);
   const prefix = `${loc}-${bank}-${person}`;
-  const existing = new Set((projects || [])
-    .filter(p => String(p.id || '') !== String(excludeId || ''))
-    .map(p => formatTaskId(p.id || '')));
+  const existing = new Set((Array.isArray(projects) ? projects : [])
+    .filter(Boolean)
+    .filter(p => String(p?.id || '') !== String(excludeId || ''))
+    .map(p => formatTaskId(p?.id || '')));
   getDeletedProjectIds().forEach(id => existing.add(formatTaskId(id)));
   let serial = 1;
   let nextId = `${prefix}-${String(serial).padStart(2, '0')}`;
@@ -1238,20 +1263,22 @@ const generateTraceableTaskId = ({ location = '', client = '', bankerName = '', 
   return nextId;
 };
 
-const getCustomerDisplayName = (project = {}) => project.customerName || 'Customer not added';
-const getBankDisplayName = (project = {}) => project.client || project.bankName || 'Bank not added';
+const getCustomerDisplayName = (project = {}) => project?.customerName || 'Customer not added';
+const getBankDisplayName = (project = {}) => project?.client || project?.bankName || 'Bank not added';
 const makeTaskDisplayName = (project = {}) => {
-  return [project.type, getCustomerDisplayName(project), project.location].filter(Boolean).join(' • ');
+  return [project?.type, getCustomerDisplayName(project), project?.location].filter(Boolean).join(' • ');
 };
 
 const getAssignmentRecommendations = (users = [], projects = []) => {
-  const limit = getDailyTaskLimit(projects);
+  const safeUsers = Array.isArray(users) ? users.filter(Boolean) : [];
+  const safeProjects = Array.isArray(projects) ? projects.filter(Boolean) : [];
+  const limit = getDailyTaskLimit(safeProjects);
   const todayStart = getTodayStart();
-  return users
-    .filter(u => (u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER) && String(u.status || 'APPROVED').toUpperCase() === 'APPROVED')
+  return safeUsers
+    .filter(u => (u?.role === ROLES.DESIGNER || u?.role === ROLES.MANAGER) && String(u?.status || 'APPROVED').toUpperCase() === 'APPROVED')
     .map(u => {
-      const active = projects.filter(p => p.assignedTo === u.name && p.status !== 'Completed').length;
-      const doneToday = projects.filter(p => p.assignedTo === u.name && p.status === 'Completed' && (p.completedAt || 0) >= todayStart).length;
+      const active = safeProjects.filter(p => p?.assignedTo === u?.name && p?.status !== 'Completed').length;
+      const doneToday = safeProjects.filter(p => p?.assignedTo === u?.name && p?.status === 'Completed' && (p?.completedAt || 0) >= todayStart).length;
       const onBreak = u.availability === 'Break';
       const offline = !isUserActuallyOnline(u);
       let score = active + (onBreak ? 2 : 0) + (offline ? 3 : 0);
@@ -1260,20 +1287,20 @@ const getAssignmentRecommendations = (users = [], projects = []) => {
     .sort((a,b) => a.score - b.score || b.doneToday - a.doneToday || a.name.localeCompare(b.name));
 };
 
-const getDisplayTaskId = (project = {}) => formatTaskId(project.displayId || project.originalTaskId || project.id);
-const isRevisionWorkItem = (project = {}) => project.isRevisionWorkItem === true || String(project.id || '').includes('__REV__');
+const getDisplayTaskId = (project = {}) => formatTaskId(project?.displayId || project?.originalTaskId || project?.id);
+const isRevisionWorkItem = (project = {}) => project?.isRevisionWorkItem === true || String(project?.id || '').includes('__REV__');
 const getNextRevisionNumber = (project = {}) => {
   const existing = [
-    ...(Array.isArray(project.revisionHistory) ? project.revisionHistory : []),
-    ...(Array.isArray(project.subTasks) ? project.subTasks : [])
+    ...(Array.isArray(project?.revisionHistory) ? project?.revisionHistory : []),
+    ...(Array.isArray(project?.subTasks) ? project?.subTasks : [])
   ];
   const nums = existing.map(item => Number(item.revisionNumber || String(item.revisionCode || '').replace(/[^0-9]/g, ''))).filter(Number.isFinite);
   return Math.max(0, ...nums) + 1;
 };
 const makeRevisionWorkItem = (project = {}, revision = {}, requestedBy = '') => {
-  const now = revision.createdAt || Date.now();
-  const revisionNumber = revision.revisionNumber || getNextRevisionNumber(project);
-  const baseId = String(project.originalTaskId || project.displayId || project.id || `TASK-${now}`);
+  const now = revision?.createdAt || Date.now();
+  const revisionNumber = revision?.revisionNumber || getNextRevisionNumber(project);
+  const baseId = String(project?.originalTaskId || project?.displayId || project?.id || `TASK-${now}`);
   return normalizeProjectRecord({
     ...project,
     id: `${baseId}__REV__${revisionNumber}_${now}`,
@@ -1284,7 +1311,7 @@ const makeRevisionWorkItem = (project = {}, revision = {}, requestedBy = '') => 
     revisionAssignedAt: now,
     revisionNumber,
     revisionCode: `R${revisionNumber}`,
-    taskName: `${project.taskName || makeTaskDisplayName(project)} • Revision ${revisionNumber}`,
+    taskName: `${project?.taskName || makeTaskDisplayName(project)} • Revision ${revisionNumber}`,
     status: 'Revision Pending',
     assignedAt: now,
     assignmentVersion: now,
@@ -1312,43 +1339,43 @@ const makeRevisionWorkItem = (project = {}, revision = {}, requestedBy = '') => 
     paymentStatus: 'Revision',
     paymentTrackingStatus: 'Revision',
     ledger: {},
-    documents: revision.attachments ? [...revision.attachments] : [],
+    documents: revision?.attachments ? [...revision?.attachments] : [],
     completedFiles: [],
-    subTasks: [{ ...revision, id: revision.id || now, status: 'Pending' }],
+    subTasks: [{ ...revision, id: revision?.id || now, status: 'Pending' }],
     timeline: [
       { id: now, text: `Revision ${revisionNumber} created from original task ${baseId}${requestedBy ? ` by ${requestedBy}` : ''}`, time: new Date(now).toLocaleString() },
-      ...(revision.title ? [{ id: now + 1, text: `Revision note: ${revision.title}`, time: new Date(now).toLocaleString() }] : [])
+      ...(revision?.title ? [{ id: now + 1, text: `Revision note: ${revision?.title}`, time: new Date(now).toLocaleString() }] : [])
     ]
   });
 };
 
 
 const getRevisionTimelineItems = (project = {}, projects = []) => {
-  const baseId = String(project.originalTaskId || project.displayId || project.id || '');
+  const baseId = String(project?.originalTaskId || project?.displayId || project?.id || '');
   const items = [];
   const pushItem = (raw = {}, fallback = {}) => {
     if (!raw) return;
-    const label = raw.revisionCode || (raw.revisionNumber ? `R${raw.revisionNumber}` : fallback.revisionCode || 'REV');
-    const title = raw.title || raw.comment || raw.text || raw.action || fallback.title || 'Revision activity';
-    const ts = Number(raw.at || raw.completedAt || raw.createdAt || raw.updatedAt || raw.id || fallback.at || Date.now());
+    const label = raw?.revisionCode || (raw?.revisionNumber ? `R${raw?.revisionNumber}` : fallback?.revisionCode || 'REV');
+    const title = raw?.title || raw?.comment || raw?.text || raw?.action || fallback?.title || 'Revision activity';
+    const ts = Number(raw?.at || raw?.completedAt || raw?.createdAt || raw?.updatedAt || raw?.id || fallback?.at || Date.now());
     items.push({
-      id: raw.id || `${label}-${ts}-${items.length}`,
+      id: raw?.id || `${label}-${ts}-${items.length}`,
       label,
       title,
-      action: raw.action || fallback.action || raw.status || 'Revision Activity',
-      status: raw.status || fallback.status || 'Pending',
-      by: raw.reviewer || raw.completedBy || raw.addedBy || raw.by || raw.requestedBy || fallback.by || '',
+      action: raw?.action || fallback?.action || raw?.status || 'Revision Activity',
+      status: raw?.status || fallback?.status || 'Pending',
+      by: raw?.reviewer || raw?.completedBy || raw?.addedBy || raw?.by || raw?.requestedBy || fallback?.by || '',
       at: ts,
-      workItemId: raw.workItemId || fallback.workItemId || '',
-      files: raw.files || raw.attachments || fallback.files || [],
+      workItemId: raw?.workItemId || fallback?.workItemId || '',
+      files: raw?.files || raw?.attachments || fallback?.files || [],
     });
   };
 
-  (Array.isArray(project.revisionHistory) ? project.revisionHistory : []).forEach(item => pushItem(item));
-  (Array.isArray(project.reviewHistory) ? project.reviewHistory : [])
+  (Array.isArray(project?.revisionHistory) ? project?.revisionHistory : []).forEach(item => pushItem(item));
+  (Array.isArray(project?.reviewHistory) ? project?.reviewHistory : [])
     .filter(item => String(item.action || item.comment || '').toLowerCase().includes('revision'))
     .forEach(item => pushItem(item));
-  (Array.isArray(project.subTasks) ? project.subTasks : []).forEach(item => pushItem(item, { action: 'Revision Requested', status: item.status || 'Pending' }));
+  (Array.isArray(project?.subTasks) ? project?.subTasks : []).forEach(item => pushItem(item, { action: 'Revision Requested', status: item.status || 'Pending' }));
 
   (Array.isArray(projects) ? projects : [])
     .filter(item => isRevisionWorkItem(item) && String(item.originalTaskId || item.displayId || '').trim() === baseId)
@@ -1380,9 +1407,9 @@ const getRevisionTimelineItems = (project = {}, projects = []) => {
     .sort((a, b) => (a.at || 0) - (b.at || 0));
 };
 
-const isRevisionTimelineItemCompleted = (item = {}) => ['DONE', 'COMPLETED', 'APPROVED', 'CLOSED', 'RESOLVED'].includes(normalizeWorkStatusForRevision(item.status || item.action));
+const isRevisionTimelineItemCompleted = (item = {}) => ['DONE', 'COMPLETED', 'APPROVED', 'CLOSED', 'RESOLVED'].includes(normalizeWorkStatusForRevision(item?.status || item?.action));
 
-const isIncompleteProject = (project = {}) => project.status !== 'Completed';
+const isIncompleteProject = (project = {}) => project?.status !== 'Completed';
 
 const isCarriedForwardProject = (project = {}, dateKey = formatDateKey()) => {
   const projectDate = getProjectDateKey(project);
@@ -1400,47 +1427,48 @@ const shouldShowOnOperationsDate = (project = {}, dateKey = formatDateKey()) => 
 const normalizeWorkStatusForRevision = (status = '') => String(status || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 const CLOSED_REVISION_STATUSES = new Set(['COMPLETED', 'APPROVED', 'ARCHIVED', 'CLOSED', 'DELETED', 'CANCELLED', 'CANCELED']);
 const ACTIVE_REVISION_STATUSES = new Set(['REVISIONPENDING', 'REVISIONINPROGRESS', 'REVERTED']);
-const isSubTaskOpen = (subTask = {}) => !['DONE', 'COMPLETED', 'APPROVED', 'CLOSED', 'RESOLVED'].includes(normalizeWorkStatusForRevision(subTask.status || 'Pending'));
+const isSubTaskOpen = (subTask = {}) => !['DONE', 'COMPLETED', 'APPROVED', 'CLOSED', 'RESOLVED'].includes(normalizeWorkStatusForRevision(subTask?.status || 'Pending'));
 const hasActiveRevision = (project = {}) => {
-  const statusKey = normalizeWorkStatusForRevision(project.status);
-  const reviewKey = normalizeWorkStatusForRevision(project.reviewStatus || project.finalConclusion || '');
+  const statusKey = normalizeWorkStatusForRevision(project?.status);
+  const reviewKey = normalizeWorkStatusForRevision(project?.reviewStatus || project?.finalConclusion || '');
   if (CLOSED_REVISION_STATUSES.has(statusKey) || reviewKey === 'APPROVED') return false;
   return ACTIVE_REVISION_STATUSES.has(statusKey)
     || ACTIVE_REVISION_STATUSES.has(reviewKey)
-    || (project.subTasks || project.revisions || []).some(isSubTaskOpen);
+    || (project?.subTasks || project?.revisions || []).some(isSubTaskOpen);
 };
 
 const getSlaInfo = (project = {}, now = Date.now()) => {
-  const createdAt = project.createdAt || now;
-  const assignedAt = project.assignedAt || project.assignedOn || (project.assignedTo && project.assignedTo !== 'Unassigned' ? createdAt : null);
-  const draftStart = project.draftingStartedAt || (project.status === 'Drafting' ? assignedAt || createdAt : null);
-  const submittedAt = project.submittedAt || project.draftingCompletedAt || null;
-  const completedAt = project.completedAt || null;
+  const createdAt = project?.createdAt || now;
+  const assignedAt = project?.assignedAt || project?.assignedOn || (project?.assignedTo && project?.assignedTo !== 'Unassigned' ? createdAt : null);
+  const draftStart = project?.draftingStartedAt || (project?.status === 'Drafting' ? assignedAt || createdAt : null);
+  const submittedAt = project?.submittedAt || project?.draftingCompletedAt || null;
+  const completedAt = project?.completedAt || null;
   const totalEnd = completedAt || now;
   const draftingEnd = submittedAt || completedAt || now;
   const reviewStart = submittedAt || null;
   const reviewEnd = completedAt || now;
   const ageHours = Math.floor((totalEnd - createdAt) / 3600000);
-  const isDelayed = project.status !== 'Completed' && ageHours >= 8;
-  const isWarning = project.status !== 'Completed' && ageHours >= 4 && ageHours < 8;
+  const isDelayed = project?.status !== 'Completed' && ageHours >= 8;
+  const isWarning = project?.status !== 'Completed' && ageHours >= 4 && ageHours < 8;
   return {
     createdAt, assignedAt, draftStart, submittedAt, completedAt,
     total: formatDuration(createdAt, totalEnd),
     drafting: draftStart ? formatDuration(draftStart, draftingEnd) : '-',
     review: reviewStart ? formatDuration(reviewStart, reviewEnd) : '-',
     ageHours,
-    label: isDelayed ? 'Delayed' : isWarning ? 'Near SLA' : project.status === 'Completed' ? 'Completed' : 'On Track',
-    colorClass: isDelayed ? 'bg-red-50 text-red-700 border-red-200' : isWarning ? 'bg-orange-50 text-orange-700 border-orange-200' : project.status === 'Completed' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-blue-50 text-blue-700 border-blue-200'
+    label: isDelayed ? 'Delayed' : isWarning ? 'Near SLA' : project?.status === 'Completed' ? 'Completed' : 'On Track',
+    colorClass: isDelayed ? 'bg-red-50 text-red-700 border-red-200' : isWarning ? 'bg-orange-50 text-orange-700 border-orange-200' : project?.status === 'Completed' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-blue-50 text-blue-700 border-blue-200'
   };
 };
 
 const getTodayMetrics = (projects = [], dateKey = formatDateKey()) => {
-  const todays = projects.filter(p => getProjectDateKey(p) === dateKey);
-  const carried = projects.filter(p => isCarriedForwardProject(p, dateKey));
-  const activeToday = projects.filter(p => shouldShowOnOperationsDate(p, dateKey));
-  const completedToday = projects.filter(p => p.status === 'Completed' && formatDateKey(p.completedAt || p.createdAt) === dateKey);
-  const pendingCollections = projects.filter(p => !isRevisionWorkItem(p) && !p.excludeFromLedger && !p.isFinanceExcluded && (Number(p.estimate) || 0) > (Number(p.ledger?.amountIn) || 0));
-  const paymentsToday = projects.filter(p => p.ledger?.updatedAt && formatDateKey(p.ledger.updatedAt) === dateKey);
+  const safeProjects = Array.isArray(projects) ? projects.filter(Boolean) : [];
+  const todays = safeProjects.filter(p => getProjectDateKey(p) === dateKey);
+  const carried = safeProjects.filter(p => isCarriedForwardProject(p, dateKey));
+  const activeToday = safeProjects.filter(p => shouldShowOnOperationsDate(p, dateKey));
+  const completedToday = safeProjects.filter(p => p?.status === 'Completed' && formatDateKey(p?.completedAt || p?.createdAt) === dateKey);
+  const pendingCollections = safeProjects.filter(p => !isRevisionWorkItem(p) && !p?.excludeFromLedger && !p?.isFinanceExcluded && (Number(p?.estimate) || 0) > (Number(p?.ledger?.amountIn) || 0));
+  const paymentsToday = safeProjects.filter(p => p?.ledger?.updatedAt && formatDateKey(p?.ledger?.updatedAt) === dateKey);
   const revisions = activeToday.filter(hasActiveRevision);
   return {
     todays, carried, activeToday, completedToday, pendingCollections, paymentsToday, revisions,
@@ -1932,7 +1960,7 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, onCreateUser, onUp
             <div key={u.id} className={`flex flex-col sm:flex-row sm:items-center justify-between p-5 rounded-2xl border gap-4 transition-all hover:border-indigo-200 hover:shadow-sm ${String(u.status || 'APPROVED').toUpperCase() === 'RESTRICTED' ? 'bg-red-50 border-red-100' : 'bg-slate-50 border-slate-100'}`}>
               <div className="flex-1">
                 <p className="font-extrabold text-slate-800 text-lg flex items-center">
-                   {u.name} 
+                   {u.name}
                    {u.role === ROLES.ADMIN && <Shield className="w-4 h-4 ml-2 text-indigo-500" />}
                 </p>
                 <div className="flex items-center text-xs font-bold text-slate-400 uppercase tracking-widest mt-1.5 gap-4">
@@ -1940,7 +1968,7 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, onCreateUser, onUp
                    <span>Password: <span className="text-slate-600">••••</span></span>
                 </div>
               </div>
-              
+
               <div className="flex flex-wrap gap-3 items-center">
                 {isAdmin && u.role !== ROLES.ADMIN && (
                    <select value={u.role} onChange={(e) => onUpdateAccess?.(u.id, { role: e.target.value }).catch(error => setAccessMessage(error?.message || 'Role update failed.'))} className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-xs font-bold text-slate-700 cursor-pointer outline-none focus:border-indigo-500">
@@ -1949,7 +1977,7 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, onCreateUser, onUp
                    </select>
                 )}
                 <Badge colorClass={`py-1.5 px-4 mr-2 ${String(u.status || 'APPROVED').toUpperCase() === 'RESTRICTED' ? 'bg-red-100 text-red-700 border-red-200' : (u.role === ROLES.ADMIN ? 'bg-indigo-100 text-indigo-700 border-indigo-200' : 'bg-emerald-100 text-emerald-700 border-emerald-200')}`}>{String(u.status || 'APPROVED').toUpperCase() === 'RESTRICTED' ? 'Restricted' : u.role}</Badge>
-                
+
                 {isAdmin && u.role !== ROLES.ADMIN && (
                    <button type="button" onClick={async () => {
                       const nextPassword = await requestInput(`Set a temporary password for ${u.name}. Use at least 10 characters with uppercase, lowercase and a number.`, { title: 'Reset employee password', inputType: 'password', placeholder: 'Temporary password' });
@@ -2182,15 +2210,15 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
   const setSelectedLocations = (value) => updateFinanceViewState({ selectedLocations: value });
   const setSelectedClients = (value) => updateFinanceViewState({ selectedClients: value });
   const setSelectedPaymentStatuses = (value) => updateFinanceViewState({ selectedPaymentStatuses: value });
-  
+
   const financePaymentStatuses = ['Not Updated', 'Pending', 'Partially Paid', 'Paid', 'Overpaid'];
   const deriveLedgerPaymentStatus = (project = {}) => {
     const estimate = getPaymentEstimateAmount(project);
     const received = getPaymentReceivedAmount(project);
-    const rawStatus = String(project.paymentTrackingStatus || project.paymentStatus || project.paymentReceived || project.ledger?.status || project.ledger?.paymentStatus || '').toUpperCase();
+    const rawStatus = String(project?.paymentTrackingStatus || project?.paymentStatus || project?.paymentReceived || project?.ledger?.status || project?.ledger?.paymentStatus || '').toUpperCase();
     const hasFinanceData = Boolean(
-      estimate > 0 || received > 0 || project.ledger?.updatedAt || project.ledger?.date || project.paymentTrackingUpdatedAt ||
-      project.paymentDate || project.paymentTime || project.ledger?.receivedFrom || project.ledger?.txnId || project.ledger?.mode
+      estimate > 0 || received > 0 || project?.ledger?.updatedAt || project?.ledger?.date || project?.paymentTrackingUpdatedAt ||
+      project?.paymentDate || project?.paymentTime || project?.ledger?.receivedFrom || project?.ledger?.txnId || project?.ledger?.mode
     );
 
     // Never show Paid/Cleared when no money has actually been received.
@@ -2210,7 +2238,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
       default: return 'bg-slate-100 text-slate-600 border-slate-200';
     }
   };
-  
+
   // Finance is always period-scoped. Expensive ledger derivation is memoized
   // and audit/month summaries are built only when their tab is opened.
   const baseLedgerProjects = useMemo(() => (Array.isArray(projects) ? projects : [])
@@ -2231,7 +2259,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
   const periodEntryById = useMemo(() => new Map(baseLedgerProjects.map(project => [
     String(project.id || project.caseId), entryForMonth(project, selectedMonth)
   ])), [baseLedgerProjects, entryForMonth, selectedMonth]);
-  const periodEntryFor = useCallback((project = {}) => periodEntryById.get(String(project.id || project.caseId))
+  const periodEntryFor = useCallback((project = {}) => periodEntryById.get(String(project?.id || project?.caseId))
     || entryForMonth(project, selectedMonth), [periodEntryById, entryForMonth, selectedMonth]);
 
   const periodBaseProjects = useMemo(() => baseLedgerProjects.filter(project => periodEntryFor(project).hasActivity), [baseLedgerProjects, periodEntryFor]);
@@ -2241,8 +2269,8 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
   const selectedClientsKey = selectedClients.join('|');
   const selectedPaymentStatusesKey = selectedPaymentStatuses.join('|');
   const matchesLocationAndClient = useCallback((project = {}) => {
-    if (selectedLocations.length > 0 && !selectedLocations.includes(getCanonicalLocationName(project.location || project.city))) return false;
-    if (selectedClients.length > 0 && !selectedClients.includes(getCanonicalBankName(project.client || project.bankName || project.bank))) return false;
+    if (selectedLocations.length > 0 && !selectedLocations.includes(getCanonicalLocationName(project?.location || project?.city))) return false;
+    if (selectedClients.length > 0 && !selectedClients.includes(getCanonicalBankName(project?.client || project?.bankName || project?.bank))) return false;
     return true;
   }, [selectedLocationsKey, selectedClientsKey]);
 
@@ -2497,7 +2525,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
                   const status = entry.statusAtClose;
                   const pen = finiteLedgerAmount(entry.pendingAtClose);
                   const updateDate = entry.activityAt ? new Date(entry.activityAt) : null;
-                  
+
                   return (
                     <tr key={p.id} className="hover:bg-slate-50 transition-colors">
                       <td className="px-6 py-5">
@@ -2843,7 +2871,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   }, [refreshDownloadedFileMap]);
 
   const isDocDownloaded = useCallback((doc = {}) => Boolean(downloadedFileMap[getProjectFileCacheKey(doc)]), [downloadedFileMap]);
-  
+
   const canManage = user.role === ROLES.ADMIN || user.role === ROLES.MANAGER;
   const isAssignedToMe = samePerson(project.assignedTo, user.name);
   const canDesignerRevertOwnTask = user.role === ROLES.DESIGNER && isAssignedToMe;
@@ -3015,9 +3043,9 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       updatedProject.reviewStatus = 'Approved';
       updatedProject.ownership = { ...(updatedProject.ownership || {}), reviewedBy: user.name, completedBy: user.name, approvedBy: user.name };
     }
-    
+
     updatedProject.timeline = [
-      ...(updatedProject.timeline || []), 
+      ...(updatedProject.timeline || []),
       { id: Date.now(), text: `Status advanced to ${updatedProject.status}`, time: new Date().toLocaleString() }
     ];
     onUpdateProject(updatedProject, project);
@@ -3054,7 +3082,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   const handleRevertStatus = () => {
     const updatedProject = { ...project };
     let revertedTo = '';
-    
+
     if (project.status === 'Drafting') revertedTo = 'Assigned';
     else if (project.status === 'Internal Review') revertedTo = 'Drafting';
     else if (project.status === 'Completed') {
@@ -3065,11 +3093,11 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       updatedProject.reviewStatus = 'Pending';
       updatedProject.reportSent = false;
     }
-    
+
     if (revertedTo) {
       updatedProject.status = revertedTo;
       updatedProject.timeline = [
-        ...(updatedProject.timeline || []), 
+        ...(updatedProject.timeline || []),
         { id: Date.now(), text: `Status reverted back to ${revertedTo} by ${user.name}`, time: new Date().toLocaleString() }
       ];
       onUpdateProject(updatedProject, project);
@@ -3185,7 +3213,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       notifyUser('Preview is available for PDF and image files. Please download this file to open it.');
       return;
     }
-    const name = doc.name || doc.fileName || (kind === 'image' ? 'Image Preview' : 'PDF Preview');
+    const name = doc?.name || doc?.fileName || (kind === 'image' ? 'Image Preview' : 'PDF Preview');
     if (filePreview?.objectUrl) {
       try { URL.revokeObjectURL(filePreview.objectUrl); } catch {}
     }
@@ -3462,13 +3490,14 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   };
 
   const removePendingAttachment = (bucket, docKey) => {
-    const removeFrom = (items = []) => items.filter((doc, idx) => String(doc.id || idx) !== String(docKey));
+    const removeFrom = (items = []) => (Array.isArray(items) ? items : []).filter((doc, idx) => String(doc?.id || idx) !== String(docKey));
     if (bucket === 'revision') setSubTaskAttachments(prev => removeFrom(prev));
     if (bucket === 'discussion') setNoteAttachments(prev => removeFrom(prev));
   };
 
   const renderInlineAttachments = (attachments = []) => {
-    if (!attachments || attachments.length === 0) return null;
+    attachments = Array.isArray(attachments) ? attachments.filter(Boolean) : [];
+    if (attachments.length === 0) return null;
     return (
       <div className="flex flex-wrap gap-2 mt-3">
         {attachments.map((doc, idx) => (
@@ -3600,7 +3629,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   };
 
   const toggleSubTask = (subTaskId) => {
-    const updatedSubTasks = (project.subTasks||[]).map(st => 
+    const updatedSubTasks = (project.subTasks||[]).map(st =>
       st.id === subTaskId ? { ...st, status: st.status === 'Pending' ? 'Done' : 'Pending' } : st
     );
     onUpdateProject({ ...project, subTasks: updatedSubTasks }, project);
@@ -3747,7 +3776,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       setIsSavingLedger(false);
     }
   };
-  
+
   const handlePrintReceipt = () => {
     const printWindow = window.open('', '_blank');
     const html = `
@@ -4051,7 +4080,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
           </div>
         </div>
         <div className="flex flex-wrap gap-3">
-          
+
           <button id="client-link-btn" type="button" onClick={copyClientLink} className={`px-4 py-2.5 bg-slate-100 text-slate-700 rounded-xl hover:bg-slate-200 transition-all flex items-center font-bold text-sm whitespace-nowrap`}>
              <LinkIcon className="w-4 h-4 mr-1.5" /> Client Link
           </button>
@@ -4059,7 +4088,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
           <button type="button" onClick={() => window.dispatchEvent(new CustomEvent('kalpa:discuss-task', { detail: { projectId: project.id || project.caseId || '', project } }))} className="px-4 py-2.5 bg-indigo-50 text-indigo-700 rounded-xl hover:bg-indigo-100 transition-all flex items-center font-bold text-sm whitespace-nowrap border border-indigo-100" title="Open team group chat with this task linked">
              <MessageSquare className="w-4 h-4 mr-1.5" /> Task Discussion
           </button>
-          
+
           <button type="button" onClick={shareCompletedFileOnWhatsApp} disabled={!isFinalApproved || completedDocsCount === 0} className={`px-4 py-2.5 rounded-xl transition-all flex items-center font-bold text-sm whitespace-nowrap ${isFinalApproved && completedDocsCount > 0 ? 'bg-green-500 text-white hover:bg-green-600 shadow-md shadow-green-100' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`} title={!isFinalApproved ? 'Final file can be shared only after internal review approval' : 'Share approved final file'}>
              <Send className="w-4 h-4 mr-1.5" /> Share PDF on WhatsApp
           </button>
@@ -4073,7 +4102,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
               <CheckCircle className="w-4 h-4 mr-2" /> Approve Final
             </button>
           )}
-          
+
           {canManage && (
              <button type="button" onClick={() => setShowEditCase(true)} className="px-4 py-2.5 bg-indigo-50 text-indigo-700 rounded-xl hover:bg-indigo-100 transition-all flex items-center font-bold text-sm whitespace-nowrap border border-indigo-100">
                <Edit3 className="w-4 h-4 mr-1.5" /> Edit Case
@@ -4093,7 +4122,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                 </button>
              )
           )}
-          
+
           {canRevertTask && (
               <button type="button" onClick={handleRevertStatus} className="px-4 py-2.5 bg-slate-100 text-slate-700 rounded-xl hover:bg-slate-200 transition-all flex items-center font-bold text-sm whitespace-nowrap" title={canDesignerRevertOwnTask ? 'Revert your own task to the previous workflow stage' : 'Revert task to the previous workflow stage'}>
                   <ArrowLeft className="w-4 h-4 mr-1.5" /> Revert
@@ -4184,7 +4213,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                 <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1.5">Created By</p>
                 <p className="font-bold text-slate-800 text-lg">{project.createdBy || 'System'} <span className="text-xs font-semibold text-slate-500 block">{project.createdAt ? new Date(project.createdAt).toLocaleString() : '-'}</span></p>
               </div>
-              
+
               <div>
                 <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1.5">Assigned To</p>
                 {canManage ? (
@@ -4291,7 +4320,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                  ))}
                </div>
              </div>
-             
+
              <div className="space-y-4">
                <h3 className="text-xs font-extrabold text-slate-400 uppercase tracking-widest bg-slate-50 py-2 px-3 rounded-lg inline-block">Source Files (From Bank)</h3>
                {(project.documents||[]).filter(d => d.type === 'source').map((doc, idx) => (
@@ -4306,7 +4335,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                    {isCurrentTransferForDoc(doc) && renderInlineFileTransferBar()}
                  </div>
                ))}
-               
+
                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mt-8 mb-4 border-t-2 border-slate-100 pt-6">
                   <h3 className="text-xs font-extrabold text-slate-400 uppercase tracking-widest bg-blue-50 py-2 px-3 rounded-lg inline-block">Working Files & Drafts</h3>
                   <div className="w-full sm:w-auto">
@@ -4494,10 +4523,10 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                  <h2 className="text-lg font-extrabold text-amber-900 flex items-center"><Wallet className="w-5 h-5 mr-2" /> Payment Ledger</h2>
                  <button onClick={handlePrintReceipt} className="text-xs font-bold text-amber-700 bg-white border border-amber-200 px-3 py-1.5 rounded-lg hover:bg-amber-100 shadow-sm transition-colors">Print Receipt</button>
               </div>
-              
+
               <div className="space-y-4 text-sm relative z-10">
                 <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Total Estimate Amount</label><input type="number" min="0" step="0.01" value={ledgerDraft.estimate} onChange={e => updateLedger('estimate', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
-                
+
                 <div className="grid grid-cols-2 gap-3">
                    <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Amount Received</label><input type="number" min="0" step="0.01" value={ledgerDraft.amountIn} onChange={e => updateLedger('amountIn', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-emerald-100 p-2.5 rounded-xl bg-white font-bold text-emerald-700 outline-none focus:border-emerald-400 disabled:opacity-60" /></div>
                    <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Actual Expenses</label><input type="number" min="0" step="0.01" value={ledgerDraft.expenses} onChange={e => updateLedger('expenses', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold text-amber-700 outline-none focus:border-amber-400 disabled:opacity-60" placeholder="e.g. print cost" /></div>
@@ -4507,7 +4536,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                    <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Date Paid</label><input type="date" value={ledgerDraft.date} onChange={e => updateLedger('date', e.target.value)} max={getIndiaDateKey()} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
                    <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Refund</label><input type="number" min="0" step="0.01" value={ledgerDraft.refund} onChange={e => updateLedger('refund', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-red-100 p-2.5 rounded-xl bg-white font-bold text-red-600 outline-none focus:border-red-400 disabled:opacity-60" /></div>
                 </div>
-                
+
                 <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Received From</label><input type="text" value={ledgerDraft.receivedFrom} onChange={e => updateLedger('receivedFrom', e.target.value)} disabled={isSavingLedger} placeholder="Sender Name" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Transaction ID</label><input type="text" value={ledgerDraft.txnId} onChange={e => updateLedger('txnId', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
@@ -4665,11 +4694,14 @@ class AppErrorBoundary extends React.Component {
   componentDidCatch(error, info) {
     try {
       console.error('Kalpvriksha Ops app error:', error, info);
-      localStorage.setItem('kalpa_last_error', JSON.stringify({
+      const savedError = {
         message: error?.message || String(error),
         stack: error?.stack || '',
+        componentStack: info?.componentStack || '',
         at: new Date().toISOString()
-      }));
+      };
+      localStorage.setItem('kalpa_last_error', JSON.stringify(savedError));
+      recordClientRuntimeError({ error, source:'app-error-boundary', componentStack: info?.componentStack || '' });
     } catch (_) {}
   }
 
@@ -4726,6 +4758,16 @@ function AppShell() {
     }
   }, []);
   useEffect(() => {
+    const captureError = (event) => recordClientRuntimeError({ error: event?.error || event?.message || 'Window error', source:'window-error' });
+    const captureRejection = (event) => recordClientRuntimeError({ error: event?.reason || 'Unhandled promise rejection', source:'unhandled-rejection' });
+    window.addEventListener('error', captureError);
+    window.addEventListener('unhandledrejection', captureRejection);
+    return () => {
+      window.removeEventListener('error', captureError);
+      window.removeEventListener('unhandledrejection', captureRejection);
+    };
+  }, []);
+  useEffect(() => {
     if (USE_BACKEND_STATE) return undefined;
     const compact = () => compactLargeLocalStoragePayloads();
     if (typeof window.requestIdleCallback === 'function') {
@@ -4754,7 +4796,7 @@ function AppShell() {
   const [authBootWarning, setAuthBootWarning] = useState('');
   const [authBootStage, setAuthBootStage] = useState('Preparing secure sign-in');
   const [dbError, setDbError] = useState(null);
-  
+
   const [users, setUsers] = useState(USE_BACKEND_STATE ? [] : INITIAL_USERS);
   const [projects, setProjects] = useState([]);
   const [chatMessages, setChatMessages] = useState([]);
@@ -4768,7 +4810,7 @@ function AppShell() {
   const [performanceRecords, setPerformanceRecords] = useState([]);
   const [performanceSummary, setPerformanceSummary] = useState(null);
   const [backendStateReady, setBackendStateReady] = useState(false);
-  
+
   const [activeTab, setActiveTab] = useState('command');
   const [selectedProject, setSelectedProject] = useState(null);
   const [archiveViewState, setArchiveViewState] = useState({ filterMonth: 'All', filterDate: '', selectedBanks: [], selectedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0 });
@@ -4849,7 +4891,7 @@ function AppShell() {
 
   const openUnifiedFilePreview = useCallback(async (doc = {}) => {
     const kind = getProjectFileKind(doc);
-    const name = doc.name || doc.fileName || (kind === 'image' ? 'Image Preview' : 'PDF Preview');
+    const name = doc?.name || doc?.fileName || (kind === 'image' ? 'Image Preview' : 'PDF Preview');
     if (kind === 'file' && !canPreviewProjectFile(doc)) {
       notifyUser('Preview is available for PDF and image files only. Use Download to save this file.');
       return;
@@ -4904,13 +4946,13 @@ function AppShell() {
   }, [openUnifiedFilePreview]);
 
   const [newTaskCategory, setNewTaskCategory] = useState(TASK_CATEGORIES[0]);
-  
+
   const [leadFiles, setLeadFiles] = useState([]);
   const [isSubmittingLead, setIsSubmittingLead] = useState(false);
   const [createTaskError, setCreateTaskError] = useState('');
   const createdTaskUploadAbortRef = useRef(null);
   const [createdTaskUpload, setCreatedTaskUpload] = useState({ active:false, project:null, total:0, confirmedFiles:[], failedFiles:[], currentFile:'', cancelled:false });
-  
+
   const [showLocalBanner, setShowLocalBanner] = useState(false);
 
   const clearAuthenticatedWorkspace = useCallback(({ clearCache = true } = {}) => {
@@ -4950,7 +4992,7 @@ function AppShell() {
     try { localStorage.setItem('kalpa_ui_dark_mode', darkMode ? 'true' : 'false'); } catch(e) {}
     try { document.documentElement.classList.toggle('kd-dark-root', !!darkMode); } catch(e) {}
   }, [darkMode]);
-  
+
   useEffect(() => { setProjectFileCacheActor(currentUser || {}); }, [currentUser?.id, currentUser?.username, currentUser?.name]);
   const savedFiltersStorageKey = `kalpa_saved_global_filters::${operationalActorKey(currentUser) || 'signed-out'}`;
   useEffect(() => {
@@ -5503,7 +5545,7 @@ function AppShell() {
       }
       // Only the lightweight ping should trigger a reload. Do not react to every
       // kalpa_projects write, otherwise two tabs can keep waking each other up.
-      if (event.key !== 'kalpa_projects_sync_ping') return;
+      if (event?.key !== 'kalpa_projects_sync_ping') return;
       try {
         const ping = JSON.parse(localStorage.getItem('kalpa_projects_sync_ping') || '{}');
         if (ping.source === OPS_TAB_ID) return;
@@ -5576,7 +5618,7 @@ function AppShell() {
           await signInWithCustomToken(auth, __initial_auth_token);
         } else {
           const authPromise = signInAnonymously(auth);
-          const timeoutPromise = new Promise((_, reject) => 
+          const timeoutPromise = new Promise((_, reject) =>
               setTimeout(() => reject(new Error("Auth Connection Timeout.")), 8000)
           );
           await Promise.race([authPromise, timeoutPromise]);
@@ -5588,9 +5630,9 @@ function AppShell() {
         setIsAuthReady(true);
       }
     };
-    
+
     initAuth();
-    
+
     const unsubscribe = onAuthStateChanged(auth, user => {
         setFirebaseUser(user);
     });
@@ -5607,21 +5649,25 @@ function AppShell() {
       const savedChats = localStorage.getItem('kalpa_chats');
       const savedNotifs = localStorage.getItem('kalpa_notifs');
       const savedLogs = localStorage.getItem('kalpa_attendance');
-      
-      setUsers(normalizeTeamUsers(savedUsers ? JSON.parse(savedUsers) : INITIAL_USERS));
-      const localProjects = savedProjects ? JSON.parse(savedProjects) : [];
-      const backupProjects = savedProjectsBackup ? JSON.parse(savedProjectsBackup) : [];
+
+      const parseStoredArray = (raw, fallback = []) => {
+        if (!raw) return fallback;
+        try { const parsed = JSON.parse(raw); return Array.isArray(parsed) ? parsed : fallback; } catch { return fallback; }
+      };
+      setUsers(normalizeTeamUsers(parseStoredArray(savedUsers, INITIAL_USERS)));
+      const localProjects = parseStoredArray(savedProjects);
+      const backupProjects = parseStoredArray(savedProjectsBackup);
       setProjects(() => filterDeletedProjects(protectRecentlyCreatedProjects(sanitizeProjectsForCache(localProjects), sanitizeProjectsForCache(backupProjects), operationalActorKey(currentUser))));
-      setChatMessages(savedChats ? sanitizeChatsForCache(JSON.parse(savedChats)) : []);
-      setNotifications(savedNotifs ? JSON.parse(savedNotifs) : []);
-      setAttendanceLogs(savedLogs ? JSON.parse(savedLogs) : []);
+      setChatMessages(sanitizeChatsForCache(parseStoredArray(savedChats)));
+      setNotifications(parseStoredArray(savedNotifs));
+      setAttendanceLogs(parseStoredArray(savedLogs));
       setIsDbReady(true);
       return;
     }
 
     const unsubs = [];
     setDbError(null);
-    
+
     const handleDbError = (err) => {
         console.error("Database permission error:", err);
         if (err.message.includes('Missing or insufficient permissions')) {
@@ -5837,8 +5883,8 @@ function AppShell() {
       targetUser,
       title,
       type,
-      category: extra.category,
-      priority: extra.priority,
+      category: extra?.category,
+      priority: extra?.priority,
       id: Date.now(),
       time: new Date().toLocaleTimeString()
     });
@@ -5932,7 +5978,7 @@ function AppShell() {
           setSelectedProject(updatedProject);
           setProjects(prev => {
             const next = filterDeletedProjects(mergeProjectsByFreshness(prev || [], [updatedProject]));
-            persistAndBroadcastProjects(next, { changedProjects: [updatedProject], replaceIds: options.replaceIds || [] });
+            persistAndBroadcastProjects(next, { changedProjects: [updatedProject], replaceIds: options?.replaceIds || [] });
             return next;
           });
           return updatedProject;
@@ -5991,7 +6037,7 @@ function AppShell() {
     setProjects(previous=>{
       const ids=new Set(projectsToSave.flatMap(item=>[item.id,item.caseId,item.displayId]).map(value=>String(value || '')).filter(Boolean));
       const next=filterDeletedProjects(mergeProjectsByFreshness((previous || []).filter(item=>!ids.has(String(item.id || '')) && !ids.has(String(item.caseId || '')) && !ids.has(String(item.displayId || ''))),projectsToSave));
-      persistAndBroadcastProjects(next, { changedProjects:projectsToSave, replaceIds:options.replaceIds || [] });
+      persistAndBroadcastProjects(next, { changedProjects:projectsToSave, replaceIds:options?.replaceIds || [] });
       return next;
     });
 
@@ -6013,7 +6059,7 @@ function AppShell() {
         const isCreate=!knownExisting;
         const expectedTaskVersion=Number(knownExisting?.taskVersion ?? projectToSave.taskVersion ?? 0);
         const mutationId=index === 0 && options?.taskMutationId
-          ? String(options.taskMutationId)
+          ? String(options?.taskMutationId)
           : createTaskMutationId(isCreate ? 'create' : 'update');
         try {
           const data=await createTaskApi({
@@ -6655,8 +6701,8 @@ function AppShell() {
   return (
     <div className={`min-h-screen bg-slate-50/50 font-sans text-slate-900 pb-20 antialiased selection:bg-indigo-100 selection:text-indigo-900 transition-colors duration-300 ${darkMode ? 'kd-dark' : ''}`}>
       <a href="#kalpa-main-content" className="kalpa-skip-link">Skip to main content</a>
-      
-      
+
+
       <ActiveToasts notifications={notifications} currentUser={currentUser} />{showLocalBanner && <LocalModeBanner onClose={() => setShowLocalBanner(false)} />}
 
       {dbError === 'permission-denied' && <DatabasePermissionBanner />}
@@ -6720,7 +6766,7 @@ function AppShell() {
 
       <main id="kalpa-main-content" tabIndex="-1" className="max-w-[1400px] mx-auto px-3 sm:px-6 lg:px-8 py-5 sm:py-8 animate-in fade-in duration-300">
         <MobileSearchBar globalSearch={globalSearch} setGlobalSearch={setGlobalSearch} />
-        
+
         {!globalSearch.trim() && !selectedProject && savedGlobalFilters.length > 0 && (
           <div className="bg-white border-2 border-slate-100 rounded-3xl p-4 mb-5 shadow-sm">
             <div className="flex items-center justify-between mb-3">
@@ -6972,7 +7018,7 @@ function AppShell() {
                 </div>
                 <IconButton label="Close create task modal" onClick={() => setShowNewLead(false)} className="kalpa-modal-icon-button"><X className="w-6 h-6 text-slate-600"/></IconButton>
              </div>
-             
+
              <form noValidate className="kalpa-create-task-form" onSubmit={async (e) => {
                e.preventDefault();
                if (isSubmittingLead) return;
@@ -6980,7 +7026,7 @@ function AppShell() {
                setCreateTaskError('');
                try {
                const fd = new FormData(e.target);
-               
+
                const client = fd.get('client');
                const bankerName = ''; // banker/loan officer removed from simplified operational form
                const customerName = fd.get('customerName');
@@ -7008,7 +7054,7 @@ function AppShell() {
                const newP = {
                  id: taskId,
                  taskName: [taskType, customerName, location].filter(Boolean).join(' • '),
-                 client, 
+                 client,
                  bankerName,
                  customerName,
                  location,
@@ -7040,7 +7086,7 @@ function AppShell() {
                  ledger: { accountingPeriod: taskAccountingPeriod },
                  reportSent: false
                };
-               
+
                if (docs.length > 0) {
                    newP.timeline.push({ id: Date.now()+1, text: `${docs.length} Source File(s) Attached`, time: new Date().toLocaleString() });
                }
@@ -7126,7 +7172,7 @@ function AppShell() {
                  setIsSubmittingLead(false);
                }
              }} className="kalpa-create-task-form custom-scrollbar">
-               
+
                <div className="grid grid-cols-1 sm:grid-cols-4 gap-5">
                  <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Bank Name</label><input required name="client" className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none transition-colors font-bold text-slate-800" placeholder="SBI Home Loans"/></div>
                  <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Customer Name</label><input required name="customerName" className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none transition-colors font-bold text-slate-800" placeholder="Rajesh Kumar"/></div>
@@ -7167,7 +7213,7 @@ function AppShell() {
                {newTaskCategory === 'Other' && (
                   <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Describe Custom Task</label><input name="otherType" className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none font-bold text-slate-800"/></div>
                )}
-               
+
                {newTaskCategory.toLowerCase().includes('estimate') && (
                   <div><label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Property Estimate Value to be Made</label><input name="estimateDetails" placeholder="e.g., ₹50,00,000" className="w-full border-2 border-slate-100 rounded-xl p-3.5 bg-slate-50 focus:bg-white focus:border-indigo-500 outline-none font-bold text-slate-800"/></div>
                )}
@@ -7195,7 +7241,7 @@ function AppShell() {
 
                <div className="mt-6 pt-6 border-t-2 border-slate-100">
                   <label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-3">Attach Initial Files (Optional)</label>
-                  
+
                   {leadFiles.length > 0 && (
                      <div className="mb-4 space-y-2">
                         {leadFiles.map((file, idx) => (
@@ -7206,7 +7252,7 @@ function AppShell() {
                         ))}
                      </div>
                   )}
-                  
+
                   <label className="border-2 border-dashed border-slate-200 rounded-2xl p-6 flex flex-col items-center justify-center text-center hover:bg-slate-50 transition-colors cursor-pointer w-full bg-slate-50/50">
                     <div className="bg-indigo-100 p-3 rounded-2xl mb-3 shadow-sm"><Upload className="w-6 h-6 text-indigo-600" /></div>
                     <p className="font-bold text-slate-700 text-base mb-1">Click to attach source files</p>
@@ -7228,7 +7274,7 @@ function AppShell() {
         </PortalLayer>
       )}
 
-      
+
     </div>
   );
 }

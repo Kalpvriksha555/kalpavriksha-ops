@@ -1,7 +1,7 @@
 # Kalpavriksha 1.9.30 Full Case / Upload Repair Verification
 
-Release: `1.9.30-runtime-persistence-recovery`  
-Backend: `2.9.30-runtime-persistence-recovery`  
+Release: `1.9.30-runtime-persistence-recovery`
+Backend: `2.9.30-runtime-persistence-recovery`
 Frontend: `2.9.30-runtime-persistence-recovery`
 
 ## Incident classes closed

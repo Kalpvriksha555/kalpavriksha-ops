@@ -1,6 +1,6 @@
 # Deploy Kalpavriksha 1.9.27
 
-Release: `1.9.27-permanent-source-parity-cutover`  
+Release: `1.9.27-permanent-source-parity-cutover`
 Backend/frontend: `2.9.27-permanent-source-parity-cutover`
 
 The production database must already pass strict relational integrity. This release does not restore or rewrite business rows.

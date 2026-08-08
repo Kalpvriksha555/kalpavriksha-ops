@@ -237,6 +237,7 @@ export function createOperationalJobStore({ pool = null, dataDir, usePostgres = 
 }
 
 export async function recordOperationalEvent(pool, usePostgres, event = {}) {
+  event = event && typeof event === 'object' ? event : {};
   const row = {
     eventType: String(event.eventType || 'SYSTEM_EVENT'),
     severity: String(event.severity || 'INFO').toUpperCase(),

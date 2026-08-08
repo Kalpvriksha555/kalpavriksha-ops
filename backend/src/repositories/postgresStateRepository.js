@@ -68,6 +68,31 @@ export function canonicalJsonClone(value, context = 'relational state') {
 // task/chat/notification update does not recursively sort and stringify the
 // complete workspace merely to refresh the integrity hash. Startup verification
 // still calls the uncached path and therefore independently validates every row.
+
+function assertRelationalObject(value, context) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    const error = new Error(`${context} must be a non-null object.`);
+    error.code = 'RELATIONAL_STATE_INVALID';
+    throw error;
+  }
+  return value;
+}
+
+function relationalArray(value, context) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    const error = new Error(`${context} must be an array when present.`);
+    error.code = 'RELATIONAL_STATE_INVALID';
+    throw error;
+  }
+  return value;
+}
+
+function relationalMap(value, context) {
+  if (value === undefined || value === null) return {};
+  return assertRelationalObject(value, context);
+}
+
 const canonicalTopLevelValueCache = new WeakMap();
 const canonicalArrayItemValueCache = new WeakMap();
 
@@ -176,18 +201,36 @@ function uniqueRows(items = [], keyFactory) {
 }
 
 export function decomposeState(state = {}) {
-  const users = uniqueRows(state.users || [], (item, index) => item.id || item.userId || item.username || deterministicId('user', item, index));
-  const cases = uniqueRows(state.cases || state.projects || [], (item, index) => item.id || item.caseId || deterministicId('case', item, index));
-  const payments = uniqueRows((state.payments || []).filter(Boolean), (item, index) => item.id || item.paymentId || item.transactionId || item.referenceId || deterministicId('payment', item, index));
-  const performanceRecords = uniqueRows(state.performanceRecords || [], (item, index) => item.id || `${item.userId || item.userName || item.name || 'performance'}:${item.period || item.month || item.date || index}`);
-  const notifications = uniqueRows(state.notifications || [], (item, index) => item.id || deterministicId('notification', item, index));
-  const teamChat = uniqueRows(state.teamChat || state.chatMessages || [], (item, index) => item.id || deterministicId('chat', item, index));
-  const whatsappInbox = uniqueRows(state.whatsappInbox || [], (item, index) => item.id || deterministicId('whatsapp', item, index));
-  const audit = uniqueRows(state.audit || [], (item, index) => item.id || deterministicId('audit', item, index));
-  const attendanceLogs = uniqueRows(state.attendanceLogs || [], (item, index) => item.id || `${item.userId || item.userName || item.name || 'attendance'}:${item.date || item.day || item.createdAt || index}`);
-  const files = uniqueRows(state.files || [], (item, index) => item.id || item.storedName || item.url || deterministicId('file', item, index));
-  const deletedProjectIds = [...new Set((state.deletedProjectIds || []).map(safeText).filter(Boolean))];
-  const chatReads = Object.entries(state.chatReads || {}).map(([readerKey, payload]) => ({ id: safeText(readerKey), payload: Array.isArray(payload) ? payload : [] })).filter(row => row.id);
+  state = assertRelationalObject(state, 'Relational state');
+  const usersSource = relationalArray(state.users, 'Relational users');
+  const casesSource = state.cases !== undefined && state.cases !== null
+    ? relationalArray(state.cases, 'Relational cases')
+    : relationalArray(state.projects, 'Relational projects');
+  const paymentsSource = relationalArray(state.payments, 'Relational payments');
+  const performanceSource = relationalArray(state.performanceRecords, 'Relational performance records');
+  const notificationsSource = relationalArray(state.notifications, 'Relational notifications');
+  const chatSource = state.teamChat !== undefined && state.teamChat !== null
+    ? relationalArray(state.teamChat, 'Relational team chat')
+    : relationalArray(state.chatMessages, 'Relational chat messages');
+  const whatsappSource = relationalArray(state.whatsappInbox, 'Relational WhatsApp inbox');
+  const auditSource = relationalArray(state.audit, 'Relational audit');
+  const attendanceSource = relationalArray(state.attendanceLogs, 'Relational attendance logs');
+  const filesSource = relationalArray(state.files, 'Relational files');
+  const deletedIdsSource = relationalArray(state.deletedProjectIds, 'Relational deleted project IDs');
+  const chatReadsSource = relationalMap(state.chatReads, 'Relational chat reads');
+
+  const users = uniqueRows(usersSource, (item, index) => item.id || item.userId || item.username || deterministicId('user', item, index));
+  const cases = uniqueRows(casesSource, (item, index) => item.id || item.caseId || deterministicId('case', item, index));
+  const payments = uniqueRows(paymentsSource.filter(Boolean), (item, index) => item.id || item.paymentId || item.transactionId || item.referenceId || deterministicId('payment', item, index));
+  const performanceRecords = uniqueRows(performanceSource, (item, index) => item.id || `${item.userId || item.userName || item.name || 'performance'}:${item.period || item.month || item.date || index}`);
+  const notifications = uniqueRows(notificationsSource, (item, index) => item.id || deterministicId('notification', item, index));
+  const teamChat = uniqueRows(chatSource, (item, index) => item.id || deterministicId('chat', item, index));
+  const whatsappInbox = uniqueRows(whatsappSource, (item, index) => item.id || deterministicId('whatsapp', item, index));
+  const audit = uniqueRows(auditSource, (item, index) => item.id || deterministicId('audit', item, index));
+  const attendanceLogs = uniqueRows(attendanceSource, (item, index) => item.id || `${item.userId || item.userName || item.name || 'attendance'}:${item.date || item.day || item.createdAt || index}`);
+  const files = uniqueRows(filesSource, (item, index) => item.id || item.storedName || item.url || deterministicId('file', item, index));
+  const deletedProjectIds = [...new Set(deletedIdsSource.map(safeText).filter(Boolean))];
+  const chatReads = Object.entries(chatReadsSource).map(([readerKey, payload]) => ({ id: safeText(readerKey), payload: Array.isArray(payload) ? payload : [] })).filter(row => row.id);
   const misc = Object.fromEntries(Object.entries(state).filter(([key]) => !KNOWN_STATE_KEYS.has(key)));
 
   return {
@@ -208,20 +251,34 @@ export function decomposeState(state = {}) {
 }
 
 export function recomposeState(parts = {}) {
+  parts = assertRelationalObject(parts, 'Relational state parts');
+  const misc = relationalMap(parts.misc, 'Relational misc state');
+  const users = relationalArray(parts.users, 'Relational user rows');
+  const cases = relationalArray(parts.cases, 'Relational case rows');
+  const deletedProjectIds = relationalArray(parts.deletedProjectIds, 'Relational deleted project ID rows');
+  const payments = relationalArray(parts.payments, 'Relational payment rows');
+  const performanceRecords = relationalArray(parts.performanceRecords, 'Relational performance rows');
+  const notifications = relationalArray(parts.notifications, 'Relational notification rows');
+  const teamChat = relationalArray(parts.teamChat, 'Relational chat rows');
+  const whatsappInbox = relationalArray(parts.whatsappInbox, 'Relational WhatsApp rows');
+  const audit = relationalArray(parts.audit, 'Relational audit rows');
+  const attendanceLogs = relationalArray(parts.attendanceLogs, 'Relational attendance rows');
+  const files = relationalArray(parts.files, 'Relational file rows');
+  const chatReads = relationalArray(parts.chatReads, 'Relational chat-read rows');
   return {
-    ...(parts.misc || {}),
-    users: (parts.users || []).map(row => row.payload),
-    cases: (parts.cases || []).map(row => row.payload),
-    deletedProjectIds: [...(parts.deletedProjectIds || [])],
-    payments: (parts.payments || []).map(row => row.payload).filter(Boolean),
-    performanceRecords: (parts.performanceRecords || []).map(row => row.payload),
-    notifications: (parts.notifications || []).map(row => row.payload),
-    teamChat: (parts.teamChat || []).map(row => row.payload),
-    whatsappInbox: (parts.whatsappInbox || []).map(row => row.payload),
-    audit: (parts.audit || []).map(row => row.payload),
-    attendanceLogs: (parts.attendanceLogs || []).map(row => row.payload),
-    files: (parts.files || []).map(row => row.payload),
-    chatReads: Object.fromEntries((parts.chatReads || []).map(row => [row.id, row.payload]))
+    ...misc,
+    users: users.map(row => row?.payload).filter(value => value !== undefined && value !== null),
+    cases: cases.map(row => row?.payload).filter(value => value !== undefined && value !== null),
+    deletedProjectIds: [...deletedProjectIds],
+    payments: payments.map(row => row?.payload).filter(Boolean),
+    performanceRecords: performanceRecords.map(row => row?.payload).filter(value => value !== undefined && value !== null),
+    notifications: notifications.map(row => row?.payload).filter(value => value !== undefined && value !== null),
+    teamChat: teamChat.map(row => row?.payload).filter(value => value !== undefined && value !== null),
+    whatsappInbox: whatsappInbox.map(row => row?.payload).filter(value => value !== undefined && value !== null),
+    audit: audit.map(row => row?.payload).filter(value => value !== undefined && value !== null),
+    attendanceLogs: attendanceLogs.map(row => row?.payload).filter(value => value !== undefined && value !== null),
+    files: files.map(row => row?.payload).filter(value => value !== undefined && value !== null),
+    chatReads: Object.fromEntries(chatReads.filter(row => row && row.id).map(row => [row.id, Array.isArray(row.payload) ? row.payload : []]))
   };
 }
 
@@ -1583,6 +1640,7 @@ export function mergeVerifiedPhysicalCounts({ metadataCounts = {}, calculatedCou
 }
 
 export function verifyPersistedRelationalSnapshot(parts = {}, metadata = {}) {
+  metadata = assertRelationalObject(metadata, 'Relational metadata');
   const persistedState = recomposeState(parts);
   // Compare metadata with the rows that actually exist in PostgreSQL.
   // Re-decomposing payloads can collapse distinct relational rows when legacy

@@ -203,6 +203,7 @@ function safeStoragePath(root, storageKey) {
 }
 
 export function createFileStorage(options = {}) {
+  options = options && typeof options === 'object' ? options : {};
   const root = path.resolve(options.root || path.join(process.cwd(), 'private-files'));
   const antivirusMode = String(options.antivirusMode ?? process.env.FILE_ANTIVIRUS_MODE ?? 'disabled').trim().toLowerCase();
   const antivirusRequired = options.antivirusRequired ?? String(process.env.FILE_ANTIVIRUS_REQUIRED || '').trim().toLowerCase() === 'true';
@@ -565,7 +566,9 @@ export function createFileStorage(options = {}) {
 }
 
 export function buildFileReconciliationReport(state = {}, storage, options = {}) {
-  const docs = Array.isArray(options.docs) ? options.docs : (state.files || []);
+  state = state && typeof state === 'object' ? state : {};
+  options = options && typeof options === 'object' ? options : {};
+  const docs = Array.isArray(options.docs) ? options.docs : (Array.isArray(state.files) ? state.files : []);
   const references = new Map();
   const missing = [];
   const invalid = [];

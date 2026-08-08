@@ -22,6 +22,8 @@ export function timelineEventTitle(type = '') {
 }
 
 export function normalizeTimelineEvent(event = {}, fallback = {}) {
+  event = event && typeof event === 'object' ? event : {};
+  fallback = fallback && typeof fallback === 'object' ? fallback : {};
   const at = event.at || event.time || event.createdAt || fallback.at || now();
   const type = String(event.type || fallback.type || 'manual').trim().toLowerCase() || 'manual';
   const title = event.title || event.action || event.text || fallback.title || timelineEventTitle(type);
@@ -39,6 +41,7 @@ export function normalizeTimelineEvent(event = {}, fallback = {}) {
 }
 
 export function normalizeCaseTimeline(c = {}) {
+  c = c && typeof c === 'object' ? c : {};
   const hasExplicitTimeline = Object.prototype.hasOwnProperty.call(c || {}, 'timeline');
   const existing = Array.isArray(c.timeline) ? c.timeline : [];
   const fromHistory = !hasExplicitTimeline && Array.isArray(c.history)
@@ -57,6 +60,8 @@ export function normalizeCaseTimeline(c = {}) {
 }
 
 export function addCaseTimelineEvent(c = {}, event = {}) {
+  c = c && typeof c === 'object' ? c : {};
+  event = event && typeof event === 'object' ? event : {};
   c.timeline = normalizeCaseTimeline(c);
   const normalized = normalizeTimelineEvent(event);
   c.timeline.push(normalized);

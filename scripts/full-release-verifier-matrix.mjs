@@ -21,6 +21,7 @@ const steps = [
   { id:'regression-guard', label:'Regression guard', args:['scripts/regression-guard.mjs'] },
   { id:'production-audit', label:'Production regression audit', args:['scripts/production-regression-audit.mjs'] },
   { id:'frontend-tests', label:'Frontend tests', args:['--test', ...testFiles('tests/frontend')] },
+  { id:'frontend-runtime-bootstrap', label:'Signed-out React runtime bootstrap', args:['scripts/frontend-runtime-bootstrap-check.mjs'] },
   { id:'backend-tests', label:'Backend tests', args:['--test', ...testFiles('tests/backend')] },
   { id:'finance', label:'Finance durability', args:['scripts/phase-2-finance-durability-check.mjs'] },
   { id:'authentication', label:'Authentication', args:['scripts/phase-3-authentication-check.mjs'] },

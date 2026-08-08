@@ -42,12 +42,12 @@ const toTime = (value) => {
 
 export const getTaskFinanceTime = (task = {}) => Math.max(
   0,
-  toTime(task.financeVersion),
-  toTime(task.paymentTrackingUpdatedAt),
-  toTime(task.ledger?.updatedAt),
-  toTime(task.paymentUpdatedAt),
-  toTime(task.paymentDate),
-  ...(Array.isArray(task.paymentAuditTrail) ? task.paymentAuditTrail.map(item => toTime(item?.at || item?.updatedAt || item?.createdAt)) : [0])
+  toTime(task?.financeVersion),
+  toTime(task?.paymentTrackingUpdatedAt),
+  toTime(task?.ledger?.updatedAt),
+  toTime(task?.paymentUpdatedAt),
+  toTime(task?.paymentDate),
+  ...(Array.isArray(task?.paymentAuditTrail) ? task?.paymentAuditTrail.map(item => toTime(item?.at || item?.updatedAt || item?.createdAt)) : [0])
 );
 
 const financeScore = (task = {}) => FINANCE_FIELDS.reduce((score, field) => {
@@ -85,7 +85,7 @@ export const TASK_SYNC_STORAGE_KEYS = Object.freeze({
 });
 
 export const getTaskRecordTime = (task = {}) => {
-  const candidates = [task.updatedAt, task.syncVersion, task.assignmentVersion, task.assignedAt, task.completedAt, task.submittedAt, task.createdAt];
+  const candidates = [task?.updatedAt, task?.syncVersion, task?.assignmentVersion, task?.assignedAt, task?.completedAt, task?.submittedAt, task?.createdAt];
   return Math.max(0, ...candidates.map(value => {
     const numeric = Number(value);
     if (Number.isFinite(numeric) && numeric > 0) return numeric;
@@ -101,14 +101,14 @@ export const normalizeTaskAssignee = (value) => {
 
 export const normalizeTaskRecord = (task = {}) => {
   if (!task || typeof task !== 'object') return task;
-  const assignedTo = normalizeTaskAssignee(task.assignedTo || task.ownership?.assignedTo || task.assigneeName || task.assignedToName || task.assignedUserName);
+  const assignedTo = normalizeTaskAssignee(task?.assignedTo || task?.ownership?.assignedTo || task?.assigneeName || task?.assignedToName || task?.assignedUserName);
   return {
     ...task,
-    id: String(task.id || task.caseId || '').trim() || task.id,
-    caseId: task.caseId || task.id,
+    id: String(task?.id || task?.caseId || '').trim() || task?.id,
+    caseId: task?.caseId || task?.id,
     assignedTo,
-    ownership: { ...(task.ownership || {}), assignedTo },
-    updatedAt: task.updatedAt || task.syncVersion || task.createdAt || Date.now()
+    ownership: { ...(task?.ownership || {}), assignedTo },
+    updatedAt: task?.updatedAt || task?.syncVersion || task?.createdAt || Date.now()
   };
 };
 

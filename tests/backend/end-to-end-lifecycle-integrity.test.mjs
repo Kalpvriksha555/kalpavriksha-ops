@@ -183,7 +183,7 @@ test('full release verifier matrix runs every gate and aggregates all failures',
   const pkg=JSON.parse(fs.readFileSync(new URL('../../package.json',import.meta.url),'utf8'));
   for (const marker of [
     'security-package-audit','doctor','regression-guard','production-audit',
-    'frontend-tests','backend-tests','finance','authentication','authorization',
+    'frontend-tests','frontend-runtime-bootstrap','backend-tests','finance','authentication','authorization',
     'database','files','reliability','release','frontend-ux','integration','build'
   ]) assert.match(matrix,new RegExp(`id:'${marker}'`));
   assert.match(matrix,/for \(const step of steps\) results\.push\(await runStep\(step\)\)/);

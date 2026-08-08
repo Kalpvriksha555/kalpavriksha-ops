@@ -33,18 +33,19 @@ const assertOk = async (response, fallback) => {
 };
 
 export const sendChatMessageApi = async (message = {}) => {
-  const flatFile = message.fileId ? {
-    id: message.fileId,
-    fileId: message.fileId,
-    name: message.fileName || 'Attachment',
-    mime: message.fileType || '',
-    size: Number(message.fileSize || 0),
-    url: message.fileUrl || '',
-    downloadUrl: message.downloadUrl || ''
+  message = message && typeof message === 'object' ? message : {};
+  const flatFile = message?.fileId ? {
+    id: message?.fileId,
+    fileId: message?.fileId,
+    name: message?.fileName || 'Attachment',
+    mime: message?.fileType || '',
+    size: Number(message?.fileSize || 0),
+    url: message?.fileUrl || '',
+    downloadUrl: message?.downloadUrl || ''
   } : null;
   const files = [
-    ...(Array.isArray(message.files) ? message.files : []),
-    ...(message.file ? [message.file] : []),
+    ...(Array.isArray(message?.files) ? message?.files : []),
+    ...(message?.file ? [message?.file] : []),
     ...(flatFile ? [flatFile] : [])
   ].filter((file, index, all) => file && all.findIndex(item => String(item.id || item.fileId || '') === String(file.id || file.fileId || '')) === index);
   const response = await authFetch(`${API_BASE}/api/chat`, {
@@ -52,28 +53,29 @@ export const sendChatMessageApi = async (message = {}) => {
     headers: { 'Content-Type':'application/json' },
     body: JSON.stringify({
       mutationId:mutationIdFor(message,'chat',{useRecordId:true}),
-      text:message.text || '',
-      recipient:message.recipient || 'global',
-      caseId:message.caseId || '',
-      mentions:message.mentions || [],
-      taskRefs:message.taskRefs || [],
+      text:message?.text || '',
+      recipient:message?.recipient || 'global',
+      caseId:message?.caseId || '',
+      mentions:message?.mentions || [],
+      taskRefs:message?.taskRefs || [],
       files,
-      roomUrl:message.roomUrl || '',
-      fileUrl:message.fileUrl || ''
+      roomUrl:message?.roomUrl || '',
+      fileUrl:message?.fileUrl || ''
     })
   });
   return assertOk(response, 'Message could not be sent.');
 };
 
 export const updateChatMessageApi = async (messageId, patch = {}) => {
+  patch = patch && typeof patch === 'object' ? patch : {};
   const response = await authFetch(`${API_BASE}/api/chat/${encodeURIComponent(String(messageId))}`, {
     method: 'PATCH',
     headers: { 'Content-Type':'application/json' },
     body: JSON.stringify({
-      ...(patch.text !== undefined ? { text:patch.text } : {}),
-      ...(patch.deleted !== undefined ? { deleted:Boolean(patch.deleted) } : {}),
-      ...(patch.reactions ? { reactions:patch.reactions } : {}),
-      ...(patch.readBy ? { readBy:patch.readBy, markRead:true } : {})
+      ...(patch?.text !== undefined ? { text:patch?.text } : {}),
+      ...(patch?.deleted !== undefined ? { deleted:Boolean(patch?.deleted) } : {}),
+      ...(patch?.reactions ? { reactions:patch?.reactions } : {}),
+      ...(patch?.readBy ? { readBy:patch?.readBy, markRead:true } : {})
     })
   });
   return assertOk(response, 'Message could not be updated.');
@@ -105,19 +107,20 @@ export const markAllNotificationsReadApi = async () => {
 
 
 export const createNotificationApi = async (notification = {}) => {
+  notification = notification && typeof notification === 'object' ? notification : {};
   const response = await authFetch(`${API_BASE}/api/notifications`, {
     method:'POST',
     headers:{ 'Content-Type':'application/json' },
     body:JSON.stringify({
       mutationId:mutationIdFor(notification,'notification'),
-      targetRole:notification.targetRole || '',
-      targetUser:notification.targetUser || '',
-      title:notification.title || notification.text || '',
-      type:notification.type || 'info',
-      category:notification.category || '',
-      priority:notification.priority || 'Normal',
-      target:notification.target || '',
-      caseId:notification.caseId || notification.projectId || ''
+      targetRole:notification?.targetRole || '',
+      targetUser:notification?.targetUser || '',
+      title:notification?.title || notification?.text || '',
+      type:notification?.type || 'info',
+      category:notification?.category || '',
+      priority:notification?.priority || 'Normal',
+      target:notification?.target || '',
+      caseId:notification?.caseId || notification?.projectId || ''
     })
   });
   return assertOk(response, 'Notification could not be created.');

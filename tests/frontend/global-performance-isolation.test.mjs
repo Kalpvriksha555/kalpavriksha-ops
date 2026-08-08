@@ -19,7 +19,7 @@ test('workspace refreshes are low-priority transitions and preserve unchanged ob
 });
 
 test('user normalization no longer invents a new profile timestamp on every render', () => {
-  assert.match(app, /const profileUpdatedAt = user\.profileUpdatedAt \|\| existing\.profileUpdatedAt/);
+  assert.match(app, /const profileUpdatedAt = user\?\.profileUpdatedAt \|\| existing\?\.profileUpdatedAt/);
   assert.doesNotMatch(app, /const profileUpdatedAt = now;/);
 });
 

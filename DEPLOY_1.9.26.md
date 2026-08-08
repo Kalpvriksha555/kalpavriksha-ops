@@ -2,7 +2,7 @@
 
 # Deploy Kalpavriksha 1.9.26
 
-Release: `1.9.26-deployment-concurrency-backup-closure`  
+Release: `1.9.26-deployment-concurrency-backup-closure`
 Backend/frontend: `2.9.26-deployment-concurrency-backup-closure`
 
 This release supersedes 1.9.25 for deployment. Do not run the 1.9.25 deployment script again.

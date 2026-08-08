@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { ToastViewport } from "../ui/designSystem.jsx";
 import { getVisibleNotifications } from "../../services/notificationService";
 
-const storageKeyFor = (user = {}) => `kalpa_dismissed_toasts_${String(user.id || user.name || "guest").replace(/[^a-z0-9_-]/gi, "_")}`;
+const storageKeyFor = (user = {}) => `kalpa_dismissed_toasts_${String(user?.id || user?.name || "guest").replace(/[^a-z0-9_-]/gi, "_")}`;
 
 export const ActiveToasts = ({ toasts = [], notifications = [], currentUser }) => {
   const storageKey = storageKeyFor(currentUser || {});

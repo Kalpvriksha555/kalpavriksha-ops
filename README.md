@@ -1,4 +1,4 @@
-> **Current production deployment baseline:** `1.9.30-runtime-persistence-recovery`. Use `bash scripts/launch-deploy-1.9.30-vps.sh` from an extracted release directory outside the live path. Older deployment entrypoints are superseded.
+> **Current production deployment baseline:** `1.9.29-final-health-probe-closure`. Use `bash scripts/launch-deploy-1.9.29-vps.sh`. Older deployment entrypoints are superseded.
 
 
 # Kalpvriksha Designs Ops — Team Transparency & Speed Release
@@ -81,7 +81,7 @@ Read before deployment:
 - `TEAM_TRANSPARENCY_SPEED_FIX.md`
 - `TEAM_TRANSPARENCY_SPEED_VERIFICATION.md`
 
-Before production deployment, use `scripts/launch-deploy-1.9.30-vps.sh` from an extracted release directory outside `/var/www/kalpavriksha-ops`. It runs the complete source, clean-install, environment, production-integrity and verified-backup gates before downtime. A narrowly recognized legacy files/performance metadata drift is repaired only after the verified full backup and while writes are stopped; any other hash or collection drift still fails closed.
+Before production deployment, use `scripts/launch-deploy-1.9.29-vps.sh`. It runs the complete source, clean-install, environment, production-integrity and verified-backup gates before downtime. A narrowly recognized legacy files/performance metadata drift is repaired only after the verified full backup and while writes are stopped; any other hash or collection drift still fails closed.
 
 
 ## Reliability commands

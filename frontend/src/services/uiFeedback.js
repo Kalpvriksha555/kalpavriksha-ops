@@ -10,7 +10,7 @@ const emit = (detail) => {
 export const notifyUser = (message, options = {}) => {
   const text = String(message || '').trim();
   if (!text) return;
-  emit({ kind: 'toast', id: `ui-${Date.now()}-${++sequence}`, message: text, tone: options.tone || 'info', title: options.title || '' });
+  emit({ kind: 'toast', id: `ui-${Date.now()}-${++sequence}`, message: text, tone: options?.tone || 'info', title: options?.title || '' });
 };
 
 const request = (kind, message, options = {}) => {

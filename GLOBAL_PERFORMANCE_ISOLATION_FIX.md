@@ -1,6 +1,6 @@
 # Global Performance Isolation Fix
 
-Release: `1.9.21-global-performance-isolation`  
+Release: `1.9.21-global-performance-isolation`
 Backend/Frontend: `2.9.21-global-performance-isolation`
 
 ## Objective

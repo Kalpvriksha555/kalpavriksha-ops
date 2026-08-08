@@ -34,14 +34,14 @@ const identityKey = (value = '') => normalizePersonName(String(value || '')).toL
 const samePerson = (a = '', b = '') => identityKey(a) === identityKey(b);
 
 const userLastActivityAt = (user = {}) => Math.max(
-  toMs(user.lastHeartbeatAt),
-  toMs(user.lastSeenAt),
-  toMs(user.lastLoginAt),
-  toMs(user.availabilityUpdatedAt)
+  toMs(user?.lastHeartbeatAt),
+  toMs(user?.lastSeenAt),
+  toMs(user?.lastLoginAt),
+  toMs(user?.availabilityUpdatedAt)
 );
 
 export const isPresenceUserOnline = (user = {}, nowMs = Date.now()) => {
-  if (!user || !user.isOnline) return false;
+  if (!user || !user?.isOnline) return false;
   const lastActivity = userLastActivityAt(user);
   return !!lastActivity && (nowMs - lastActivity) <= ONLINE_STALE_MS;
 };
@@ -82,8 +82,8 @@ export const isSessionDateMatch = (ms, dateKey) => {
 };
 
 export const getAttendanceSessionStartMs = (log = {}, user = null) => {
-  const dateKey = log.date || localDateKeyFromMs(Date.now());
-  const explicitCandidates = [toMs(log.loginAt), toMs(log.firstLoginAt)].filter(Boolean);
+  const dateKey = log?.date || localDateKeyFromMs(Date.now());
+  const explicitCandidates = [toMs(log?.loginAt), toMs(log?.firstLoginAt)].filter(Boolean);
   const sameDayExplicit = explicitCandidates.find(ms => isSessionDateMatch(ms, dateKey));
   if (sameDayExplicit) return sameDayExplicit;
 
@@ -93,7 +93,7 @@ export const getAttendanceSessionStartMs = (log = {}, user = null) => {
   const userLogin = toMs(user?.lastLoginAt);
   if (isSessionDateMatch(userLogin, dateKey)) return userLogin;
 
-  return parseDateTimeFromLogClock(dateKey, log.loginTime || log.firstLogin);
+  return parseDateTimeFromLogClock(dateKey, log?.loginTime || log?.firstLogin);
 };
 
 export const getAttendanceSessionEndMs = (log = {}, user = null, now = Date.now()) => {
@@ -101,14 +101,14 @@ export const getAttendanceSessionEndMs = (log = {}, user = null, now = Date.now(
   const online = user && isPresenceUserOnline(user, now);
   if (online) return now;
 
-  const dateKey = log.date || (start ? localDateKeyFromMs(start) : localDateKeyFromMs(Date.now()));
+  const dateKey = log?.date || (start ? localDateKeyFromMs(start) : localDateKeyFromMs(Date.now()));
   const candidates = [
-    toMs(log.logoutAt),
-    toMs(log.lastTick),
+    toMs(log?.logoutAt),
+    toMs(log?.lastTick),
     toMs(user?.lastLogoutAt),
     toMs(user?.lastSeenAt),
     toMs(user?.lastHeartbeatAt),
-    parseDateTimeFromLogClock(log.date, log.logoutTime)
+    parseDateTimeFromLogClock(log?.date, log?.logoutTime)
   ].filter(Boolean).filter(ms => (!start || ms >= start) && (!dateKey || isSessionDateMatch(ms, dateKey)));
 
   if (candidates.length) return Math.max(...candidates);
@@ -117,7 +117,7 @@ export const getAttendanceSessionEndMs = (log = {}, user = null, now = Date.now(
 
 export const getAttendanceFirstLoginLabel = (log = {}, user = null) => {
   const start = getAttendanceSessionStartMs(log, user);
-  return start ? formatClockTimeFromMs(start) : (log.loginTime || '-');
+  return start ? formatClockTimeFromMs(start) : (log?.loginTime || '-');
 };
 
 export const deriveAttendanceSession = (log = {}, user = null, now = Date.now()) => {
@@ -125,13 +125,13 @@ export const deriveAttendanceSession = (log = {}, user = null, now = Date.now())
   const end = getAttendanceSessionEndMs(log, user, now);
   const online = !!(user && isPresenceUserOnline(user, now));
   const breakMinutes = getBreakMinutesFromLog(log, now, user);
-  const savedTotal = Math.max(0, Math.floor(Number(log.totalLoggedInMinutes) || 0));
+  const savedTotal = Math.max(0, Math.floor(Number(log?.totalLoggedInMinutes) || 0));
   const computedTotal = start && end && end >= start ? Math.floor((end - start) / 60000) : 0;
 
   // Prefer the session window. It prevents offline users from continuing to accrue time
   // after logout while still recovering missing totals for online users.
   const totalLoggedInMinutes = computedTotal || savedTotal;
-  const savedActive = Math.max(0, Math.floor(Number(log.activeMinutes) || 0));
+  const savedActive = Math.max(0, Math.floor(Number(log?.activeMinutes) || 0));
   const computedActive = Math.max(0, totalLoggedInMinutes - breakMinutes);
 
   return {
@@ -141,14 +141,14 @@ export const deriveAttendanceSession = (log = {}, user = null, now = Date.now())
     totalLoggedInMinutes,
     activeMinutes: Math.max(savedActive, computedActive),
     breakMinutes,
-    firstLoginLabel: start ? formatClockTimeFromMs(start) : (log.loginTime || '-'),
+    firstLoginLabel: start ? formatClockTimeFromMs(start) : (log?.loginTime || '-'),
     lastSeenMs: online ? 0 : end
   };
 };
 
 export const getBreakMinutesFromLog = (log = {}, now = Date.now(), user = null) => {
-  const stored = Number(log.totalBreakMinutes || log.breakMinutes || log.breakMinutesToday || 0) || 0;
-  const logBreakStart = toMs(log.currentBreakStartedAt || log.breakStartedAt);
+  const stored = Number(log?.totalBreakMinutes || log?.breakMinutes || log?.breakMinutesToday || 0) || 0;
+  const logBreakStart = toMs(log?.currentBreakStartedAt || log?.breakStartedAt);
   const userBreakStart = toMs(user?.currentBreakStartedAt || user?.breakStartedAt || user?.availabilityProfile?.breakStartedAt);
   const userOnBreak = String(user?.availability || '').toLowerCase() === 'break';
   const activeStart = logBreakStart || (userOnBreak ? userBreakStart : 0);
@@ -161,46 +161,46 @@ export const WORK_DONE_STATUSES = new Set(['COMPLETED', 'CLOSED', 'CANCELLED', '
 export const isActiveWorkStatus = (status = '') => !WORK_DONE_STATUSES.has(normalizeWorkStatus(status));
 
 export const getDraftingSessionStart = (project = {}) => (
-  toMs(project.draftingResumedAt)
-  || toMs(project.currentDraftingStartedAt)
-  || toMs(project.draftingStartedAt)
-  || toMs(project.workStartedAt)
-  || toMs(project.busySinceAt)
-  || toMs(project.assignedAt)
-  || toMs(project.startedAt)
-  || toMs(project.createdAt)
+  toMs(project?.draftingResumedAt)
+  || toMs(project?.currentDraftingStartedAt)
+  || toMs(project?.draftingStartedAt)
+  || toMs(project?.workStartedAt)
+  || toMs(project?.busySinceAt)
+  || toMs(project?.assignedAt)
+  || toMs(project?.startedAt)
+  || toMs(project?.createdAt)
   || 0
 );
 
 export const getDraftingElapsedMs = (project = {}, now = Date.now()) => {
-  const saved = Math.max(0, Number(project.draftingElapsedMsBeforePause) || Number(project.draftingElapsedMs) || 0);
-  if (isDraftingStatus(project.status)) {
+  const saved = Math.max(0, Number(project?.draftingElapsedMsBeforePause) || Number(project?.draftingElapsedMs) || 0);
+  if (isDraftingStatus(project?.status)) {
     const sessionStart = getDraftingSessionStart(project);
     return saved + (sessionStart ? Math.max(0, toMs(now) - sessionStart) : 0);
   }
-  if (isDraftingPausedStatus(project.status)) return saved;
-  const completed = toMs(project.draftingCompletedAt) || toMs(project.submittedAt) || toMs(project.completedAt);
-  if (completed) return Number(project.draftingFinalElapsedMs) || saved || (toMs(project.draftingStartedAt) ? Math.max(0, completed - toMs(project.draftingStartedAt)) : 0);
-  return saved || (toMs(project.draftingStartedAt) ? Math.max(0, toMs(now) - toMs(project.draftingStartedAt)) : 0);
+  if (isDraftingPausedStatus(project?.status)) return saved;
+  const completed = toMs(project?.draftingCompletedAt) || toMs(project?.submittedAt) || toMs(project?.completedAt);
+  if (completed) return Number(project?.draftingFinalElapsedMs) || saved || (toMs(project?.draftingStartedAt) ? Math.max(0, completed - toMs(project?.draftingStartedAt)) : 0);
+  return saved || (toMs(project?.draftingStartedAt) ? Math.max(0, toMs(now) - toMs(project?.draftingStartedAt)) : 0);
 };
 
 export const getTaskBusySince = (project = {}) => getDraftingSessionStart(project);
 
 export const getTaskFinishedAt = (project = {}) => Math.max(
-  toMs(project.completedAt),
-  toMs(project.draftingCompletedAt),
-  toMs(project.submittedAt),
-  toMs(project.closedAt),
-  toMs(project.reviewedAt),
-  toMs(project.finishedAt),
-  toMs(project.updatedAt)
+  toMs(project?.completedAt),
+  toMs(project?.draftingCompletedAt),
+  toMs(project?.submittedAt),
+  toMs(project?.closedAt),
+  toMs(project?.reviewedAt),
+  toMs(project?.finishedAt),
+  toMs(project?.updatedAt)
 );
 
 export const isDraftingStatus = (status = '') => normalizeWorkStatus(status) === 'DRAFTING';
 export const isDraftingPausedStatus = (status = '') => normalizeWorkStatus(status) === 'DRAFTINGPAUSED';
 
 export const getUserActiveTasks = (projects = [], userName = '') => (
-  (projects || []).filter(project => samePerson(project.assignedTo, userName) && isDraftingStatus(project.status))
+  (projects || []).filter(project => samePerson(project?.assignedTo, userName) && isDraftingStatus(project?.status))
 );
 
 export const getUserDraftingTask = (projects = [], userName = '') => (
@@ -211,7 +211,7 @@ export const getUserDraftingTask = (projects = [], userName = '') => (
 
 export const getUserLastCompletedAt = (projects = [], userName = '') => {
   const completed = (projects || [])
-    .filter(project => samePerson(project.assignedTo, userName) && !isActiveWorkStatus(project.status) && getTaskFinishedAt(project))
+    .filter(project => samePerson(project?.assignedTo, userName) && !isActiveWorkStatus(project?.status) && getTaskFinishedAt(project))
     .map(project => getTaskFinishedAt(project))
     .sort((a, b) => b - a);
   return completed.length ? completed[0] : 0;
@@ -266,12 +266,12 @@ export const getUserTaskActiveMinutesForDate = (projects = [], userName = '', da
   if (!dayStart || !dayEnd) return 0;
 
   const intervals = (projects || [])
-    .filter(project => project && identityKey(project.assignedTo || project.designer || project.completedBy) === key)
+    .filter(project => project && identityKey(project?.assignedTo || project?.designer || project?.completedBy) === key)
     .map(project => {
       const start = getTaskBusySince(project);
       if (!start) return null;
       const finished = getTaskFinishedAt(project);
-      const end = isActiveWorkStatus(project.status) ? now : (finished || toMs(project.updatedAt) || now);
+      const end = isActiveWorkStatus(project?.status) ? now : (finished || toMs(project?.updatedAt) || now);
       const from = Math.max(start, dayStart);
       const to = Math.min(end, dayEnd, now);
       if (!from || !to || to <= from) return null;
@@ -296,7 +296,7 @@ export const getUserTaskActiveMinutesForDate = (projects = [], userName = '', da
 };
 
 export const getAttendanceActiveTaskMinutes = (log = {}, user = null, projects = [], now = Date.now()) => {
-  if (!user || normalizeRole(user.role) === PRESENCE_ROLES.ADMIN) return 0;
+  if (!user || normalizeRole(user?.role) === PRESENCE_ROLES.ADMIN) return 0;
 
   const session = deriveAttendanceSession(log, user, now);
   const sessionStart = session.start;
@@ -307,8 +307,8 @@ export const getAttendanceActiveTaskMinutes = (log = {}, user = null, projects =
   // Do not let active time exceed total logged-in time.
   if (!sessionStart || !sessionEnd || sessionEnd <= sessionStart || session.totalLoggedInMinutes <= 0) return 0;
 
-  const dateKey = log.date || localDateKeyFromMs(sessionStart || now);
-  const key = identityKey(user.name || log.name);
+  const dateKey = log?.date || localDateKeyFromMs(sessionStart || now);
+  const key = identityKey(user?.name || log?.name);
   if (!key || !dateKey) return 0;
 
   const dayStart = new Date(`${dateKey}T00:00:00`).getTime();
@@ -318,12 +318,12 @@ export const getAttendanceActiveTaskMinutes = (log = {}, user = null, projects =
   if (!windowStart || !windowEnd || windowEnd <= windowStart) return 0;
 
   const intervals = (projects || [])
-    .filter(project => project && samePerson(project.assignedTo || project.designer || project.completedBy, user.name || log.name))
+    .filter(project => project && samePerson(project?.assignedTo || project?.designer || project?.completedBy, user?.name || log?.name))
     .map(project => {
       const start = getTaskBusySince(project);
       if (!start) return null;
       const finished = getTaskFinishedAt(project);
-      const end = isActiveWorkStatus(project.status) ? now : (finished || toMs(project.updatedAt) || now);
+      const end = isActiveWorkStatus(project?.status) ? now : (finished || toMs(project?.updatedAt) || now);
       const from = Math.max(start, windowStart);
       const to = Math.min(end, windowEnd);
       if (!from || !to || to <= from) return null;
@@ -369,11 +369,11 @@ export const getActiveMinutesFromLog = (log = {}, user = null, now = Date.now())
 );
 
 export const buildAttendanceAccrual = (log = {}, now = Date.now(), isOnBreak = false) => {
-  const delta = getSafeAttendanceDeltaMinutes(log.lastTick || log.logoutAt || log.loginAt, now, 10);
+  const delta = getSafeAttendanceDeltaMinutes(log?.lastTick || log?.logoutAt || log?.loginAt, now, 10);
   return {
-    totalLoggedInMinutes: (Number(log.totalLoggedInMinutes) || 0) + delta,
-    activeMinutes: (Number(log.activeMinutes) || 0) + (!isOnBreak ? delta : 0),
-    totalBreakMinutes: (Number(log.totalBreakMinutes) || 0) + (isOnBreak ? delta : 0),
+    totalLoggedInMinutes: (Number(log?.totalLoggedInMinutes) || 0) + delta,
+    activeMinutes: (Number(log?.activeMinutes) || 0) + (!isOnBreak ? delta : 0),
+    totalBreakMinutes: (Number(log?.totalBreakMinutes) || 0) + (isOnBreak ? delta : 0),
     lastTick: now
   };
 };
@@ -409,25 +409,25 @@ export const getOpenBreakEvent = (events = [], now = Date.now()) => normalizeBre
 
 export const buildAttendanceEngineV3 = ({ attendanceLogs = [], users = [], projects = [], dateKey = localDateKeyFromMs(Date.now()), now = Date.now() } = {}) => {
   const operationalUsers = (Array.isArray(users) ? users : [])
-    .filter(user => user && String(user.status || 'APPROVED').toUpperCase() === 'APPROVED')
-    .filter(user => normalizeRole(user.role) !== PRESENCE_ROLES.ADMIN);
+    .filter(user => user && String(user?.status || 'APPROVED').toUpperCase() === 'APPROVED')
+    .filter(user => normalizeRole(user?.role) !== PRESENCE_ROLES.ADMIN);
   const safeLogs = Array.isArray(attendanceLogs) ? attendanceLogs : [];
 
   const findLogForUser = (user) => safeLogs
-    .filter(log => log && log.date === dateKey && (String(log.userId || '') === String(user.id || '') || samePerson(log.name, user.name)))
+    .filter(log => log && log?.date === dateKey && (String(log?.userId || '') === String(user?.id || '') || samePerson(log?.name, user?.name)))
     .sort((a, b) => Math.max(toMs(b.lastTick), toMs(b.logoutAt), toMs(b.updatedAt), toMs(b.loginAt), toMs(b.firstLoginAt)) - Math.max(toMs(a.lastTick), toMs(a.logoutAt), toMs(a.updatedAt), toMs(a.loginAt), toMs(a.firstLoginAt)))[0] || null;
 
   const rows = operationalUsers.map(user => {
     const log = findLogForUser(user);
-    const baseBreakEvents = Array.isArray(log?.breakEvents) ? log.breakEvents : [];
-    const inferredBreakStart = ((dateKey === localDateKeyFromMs(now) && String(user.availability || '').toLowerCase() === 'break') ? (user.currentBreakStartedAt || user.breakStartedAt || user.availabilityProfile?.breakStartedAt || null) : null);
+    const baseBreakEvents = Array.isArray(log?.breakEvents) ? log?.breakEvents : [];
+    const inferredBreakStart = ((dateKey === localDateKeyFromMs(now) && String(user?.availability || '').toLowerCase() === 'break') ? (user?.currentBreakStartedAt || user?.breakStartedAt || user?.availabilityProfile?.breakStartedAt || null) : null);
     const openBreakExists = baseBreakEvents.some(ev => ev && (ev.start || ev.startAt) && !(ev.end || ev.endAt));
     const rowBase = {
       ...(log || {}),
-      id: log?.id || `${user.id || identityKey(user.name)}_${dateKey}_empty`,
-      userId: user.id,
-      name: user.name,
-      role: normalizeRole(user.role),
+      id: log?.id || `${user?.id || identityKey(user?.name)}_${dateKey}_empty`,
+      userId: user?.id,
+      name: user?.name,
+      role: normalizeRole(user?.role),
       date: dateKey,
       breakEvents: inferredBreakStart && !openBreakExists ? [...baseBreakEvents, { start: inferredBreakStart, startTime: formatClockTimeFromMs(inferredBreakStart) }] : baseBreakEvents,
       currentBreakStartedAt: log?.currentBreakStartedAt || inferredBreakStart,
@@ -436,11 +436,11 @@ export const buildAttendanceEngineV3 = ({ attendanceLogs = [], users = [], proje
     const session = deriveAttendanceSession(rowBase, user, now);
     const hasLogin = !!session.start;
     const isToday = dateKey === localDateKeyFromMs(now);
-    const latestPresenceMs = Math.max(toMs(user.lastHeartbeatAt), toMs(user.lastSeenAt), toMs(rowBase.lastTick), toMs(rowBase.logoutAt));
+    const latestPresenceMs = Math.max(toMs(user?.lastHeartbeatAt), toMs(user?.lastSeenAt), toMs(rowBase.lastTick), toMs(rowBase.logoutAt));
     const freshPresence = isToday && !!latestPresenceMs && (now - latestPresenceMs) <= ONLINE_STALE_MS;
     const onlineNow = isToday && hasLogin && (isPresenceUserOnline(user, now) || (!!rowBase.isOnline && freshPresence));
-    const onBreak = onlineNow && (String(user.availability || rowBase.status || '').toLowerCase().includes('break') || !!rowBase.currentBreakStartedAt);
-    const activeTasks = getUserActiveTasks(projects, user.name || rowBase.name);
+    const onBreak = onlineNow && (String(user?.availability || rowBase.status || '').toLowerCase().includes('break') || !!rowBase.currentBreakStartedAt);
+    const activeTasks = getUserActiveTasks(projects, user?.name || rowBase.name);
     const taskBusyMinutes = getAttendanceActiveTaskMinutes(rowBase, user, projects, now);
     const savedProductiveCandidates = [
       rowBase.productiveMinutes,

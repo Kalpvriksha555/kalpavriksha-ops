@@ -2961,7 +2961,7 @@ const normalizeRole = (role = '') => {
 };
 const normalizeStatus = (status = 'APPROVED') => String(status || 'APPROVED').trim().toUpperCase() || 'APPROVED';
 const systemUserPattern = /operations\s*manager/i;
-const teamIdentityKey = (u = {}) => String(u.username || u.name || u.id || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const teamIdentityKey = (u = {}) => String(u?.username || u?.name || u?.id || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const validTeamRole = (role = '') => ['Admin','Manager','Designer'].includes(normalizeRole(role));
 function employeeLifecycleProfile(user = {}, existing = {}) {
   const nowMs = Date.now();

@@ -216,12 +216,13 @@ export function readAndVerifyReleaseCertificate(filePath, options = {}) {
 }
 
 export function extractCasesFromRecoverySource(raw = {}) {
-  const root = raw?.state && typeof raw.state === 'object' ? raw.state : raw;
-  const candidates = [root.cases, root.projects, root.projectsBackup, raw.projectsBackup, raw.projects];
+  const safeRaw = raw && typeof raw === 'object' ? raw : {};
+  const root = safeRaw.state && typeof safeRaw.state === 'object' ? safeRaw.state : safeRaw;
+  const candidates = [root.cases, root.projects, root.projectsBackup, safeRaw.projectsBackup, safeRaw.projects];
   return candidates.find((items) => Array.isArray(items) && items.length) || [];
 }
 
-const caseKey = (record = {}) => String(record.id || record.caseId || record.caseNo || '').trim();
+const caseKey = (record = {}) => String(record?.id || record?.caseId || record?.caseNo || '').trim();
 
 export function buildFinanceRecoveryPlan({
   sourceCases = [],

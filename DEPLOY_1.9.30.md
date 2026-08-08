@@ -1,6 +1,6 @@
 # Deploy Kalpavriksha 1.9.30
 
-Release: `1.9.30-runtime-persistence-recovery`  
+Release: `1.9.30-runtime-persistence-recovery`
 Backend/frontend: `2.9.30-runtime-persistence-recovery`
 
 Extract the complete release ZIP outside `/var/www/kalpavriksha-ops`, then run:
@@ -17,7 +17,7 @@ The launcher detaches through `systemd-run`, records the unit in `/root/kalpavri
 journalctl -fu "$(cat /root/kalpavriksha-deploy-last-unit)"
 ```
 
-The deployment fails closed before cutover if the exact release version, clean dependency install, complete verification suite, production environment, PostgreSQL integrity, release certificate, staged liveness/readiness, or verified backup gates fail. It captures the previous runtime/source/environment/frontend/certificate for rollback before live mutation. It never treats a failed gate as permission to overwrite production business data.
+The deployment fails closed before cutover if the exact release version, clean dependency install, complete verification suite, signed-out React runtime bootstrap, production frontend build, production environment, PostgreSQL integrity, release certificate, staged liveness/readiness, or verified backup gates fail. It captures the previous runtime/source/environment/frontend/certificate for rollback before live mutation. It never treats a failed gate as permission to overwrite production business data.
 
 A successful run ends with:
 

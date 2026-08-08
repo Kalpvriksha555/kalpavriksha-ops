@@ -38,12 +38,12 @@ const collectionNewestTimestamp = (items = []) => Math.max(
 
 export const financeFreshness = (record = {}) => Math.max(
   0,
-  toTimestamp(record.financeVersion),
-  toTimestamp(record.paymentTrackingUpdatedAt),
-  toTimestamp(record.ledger?.updatedAt),
-  toTimestamp(record.paymentUpdatedAt),
-  toTimestamp(record.paymentDate),
-  collectionNewestTimestamp(record.paymentAuditTrail)
+  toTimestamp(record?.financeVersion),
+  toTimestamp(record?.paymentTrackingUpdatedAt),
+  toTimestamp(record?.ledger?.updatedAt),
+  toTimestamp(record?.paymentUpdatedAt),
+  toTimestamp(record?.paymentDate),
+  collectionNewestTimestamp(record?.paymentAuditTrail)
 );
 
 export const financeCompletenessScore = (record = {}) => {

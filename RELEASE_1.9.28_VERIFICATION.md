@@ -1,6 +1,6 @@
 # Release 1.9.28 Verification
 
-Release: `1.9.28-atomic-frontend-release-gate-closure`  
+Release: `1.9.28-atomic-frontend-release-gate-closure`
 Backend/frontend: `2.9.28-atomic-frontend-release-gate-closure`
 
 This release is a narrow successor to 1.9.27. It closes the production permanent-gate false negative caused by `frontend/dist.previous` entering the certified source hash after an atomic frontend switch.

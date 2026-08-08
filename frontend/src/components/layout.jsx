@@ -18,9 +18,9 @@ export const DatabasePermissionBanner = () => (
 );
 
 const getNotificationIcon = (notification = {}) => {
-  const category = notification.category || '';
-  const type = notification.type || '';
-  if (notification.priority === 'Critical' || type === 'urgent') return <AlertCircle className="w-5 h-5 text-red-500 mr-3 mt-0.5 shrink-0" />;
+  const category = notification?.category || '';
+  const type = notification?.type || '';
+  if (notification?.priority === 'Critical' || type === 'urgent') return <AlertCircle className="w-5 h-5 text-red-500 mr-3 mt-0.5 shrink-0" />;
   if (category === 'Chat' || type === 'mention') return <MessageSquare className="w-5 h-5 text-purple-500 mr-3 mt-0.5 shrink-0" />;
   if (category === 'Meeting') return <Video className="w-5 h-5 text-indigo-500 mr-3 mt-0.5 shrink-0" />;
   if (category === 'Attendance') return <Calendar className="w-5 h-5 text-emerald-500 mr-3 mt-0.5 shrink-0" />;

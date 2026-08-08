@@ -14,6 +14,8 @@ import { notifyUser, requestConfirmation } from '../../services/uiFeedback.js';
 
 export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onDeleteMessage, onUpdateMessage, onMarkMessagesRead, appId, projects = [], onOpenTaskReference, onPreviewFile, onDownloadFile }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const lastMentionReadRef = useRef(Number(currentUser?.lastMentionRead || 0));
+  const lastChatReadRef = useRef(Number(currentUser?.lastChatRead || 0));
   const [presenceNow, setPresenceNow] = useState(Date.now());
   const [activeChannel, setActiveChannel] = useState('global');
   const [msg, setMsg] = useState('');
@@ -49,17 +51,17 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const hiddenKey = `kalpa_chat_hidden_${currentUser?.id || identityKey(currentUser?.name || '')}`;
   const pinnedKey = `kalpa_chat_pinned_${currentUser?.id || identityKey(currentUser?.name || '')}`;
   const [localReadState, setLocalReadState] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(localReadKey) || '{}'); } catch(e) { return {}; }
+    try { const saved = JSON.parse(localStorage.getItem(localReadKey) || '{}'); return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {}; } catch(e) { return {}; }
   });
   const [hiddenMessageIds, setHiddenMessageIds] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(hiddenKey) || '[]'); } catch(e) { return []; }
+    try { const saved = JSON.parse(localStorage.getItem(hiddenKey) || '[]'); return Array.isArray(saved) ? saved.map(String) : []; } catch(e) { return []; }
   });
   const [pinnedMessageIds, setPinnedMessageIds] = useState(() => {
     try { const saved = JSON.parse(localStorage.getItem(pinnedKey) || '[]'); return Array.isArray(saved) ? saved.map(String) : []; } catch(e) { return []; }
   });
   const readThroughRef = useRef(localReadState);
-  const chatUsers = getOperationalUsers(users || [], { includeAdmins: true }).filter(u => !samePerson(u.name, currentUser.name));
-  const liveCurrentUser = getOperationalUsers(users || [], { includeAdmins: true }).find(u => samePerson(u.name, currentUser.name)) || currentUser;
+  const chatUsers = getOperationalUsers(users || [], { includeAdmins: true }).filter(u => !samePerson(u.name, currentUser?.name));
+  const liveCurrentUser = getOperationalUsers(users || [], { includeAdmins: true }).find(u => samePerson(u.name, currentUser?.name)) || currentUser;
   const currentUserOnline = isUserActuallyOnline(liveCurrentUser, presenceNow);
   const currentUserAliases = [currentUser?.name, currentUser?.username, currentUser?.id].filter(Boolean);
   const currentUserAliasKeys = currentUserAliases.flatMap(alias => [identityKey(alias), String(alias || '').trim().toLowerCase()]).filter(Boolean);
@@ -88,11 +90,11 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     recipient: activePeer?.name || (activeChannel === 'global' ? 'global' : activeChannel)
   });
   const activePeerOnline = activePeer ? isUserActuallyOnline(activePeer, presenceNow) : false;
-  const activeCallRoom = activePeer ? createSafeMeetingRoomName('KalpaVriksha_DM', appId || 'kalpavriksha_production_v1', ...[currentUser.name, activePeer.name].sort()) : '';
-  const activeCallUrl = activePeer ? buildJitsiUrl(activeCallRoom, currentUser.name, { audioOnly: callAudioOnly, shareScreen: callShareScreen }) : '';
+  const activeCallRoom = activePeer ? createSafeMeetingRoomName('KalpaVriksha_DM', appId || 'kalpavriksha_production_v1', ...[currentUser?.name, activePeer.name].sort()) : '';
+  const activeCallUrl = activePeer ? buildJitsiUrl(activeCallRoom, currentUser?.name, { audioOnly: callAudioOnly, shareScreen: callShareScreen }) : '';
 
   const normalizeTaskToken = (value = '') => String(value || '').replace(/^#/, '').trim().toUpperCase();
-  const getTaskDisplayId = (project = {}) => formatTaskId(project.id || project.caseId || '');
+  const getTaskDisplayId = (project = {}) => formatTaskId(project?.id || project?.caseId || '');
   const taskLookup = React.useMemo(() => {
     const map = new Map();
     (projects || []).forEach(project => {
@@ -180,10 +182,10 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   }, [taskLookup]);
 
   useEffect(() => {
-    try { const saved = JSON.parse(localStorage.getItem(localReadKey) || '{}'); readThroughRef.current = saved; setLocalReadState(saved); } catch(e) { readThroughRef.current = {}; setLocalReadState({}); }
+    try { const saved = JSON.parse(localStorage.getItem(localReadKey) || '{}'); const safe = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {}; readThroughRef.current = safe; setLocalReadState(safe); } catch(e) { readThroughRef.current = {}; setLocalReadState({}); }
   }, [localReadKey]);
   useEffect(() => {
-    try { const saved = JSON.parse(localStorage.getItem(hiddenKey) || '[]'); setHiddenMessageIds(Array.isArray(saved) ? saved : []); } catch(e) { setHiddenMessageIds([]); }
+    try { const saved = JSON.parse(localStorage.getItem(hiddenKey) || '[]'); setHiddenMessageIds(Array.isArray(saved) ? saved.map(String) : []); } catch(e) { setHiddenMessageIds([]); }
   }, [hiddenKey]);
   useEffect(() => {
     try { const saved = JSON.parse(localStorage.getItem(pinnedKey) || '[]'); setPinnedMessageIds(Array.isArray(saved) ? saved.map(String) : []); } catch(e) { setPinnedMessageIds([]); }
@@ -289,25 +291,25 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     if (isOpen) markCurrentChannelReadNow(activeChannel);
   }, [isOpen, activeChannel, chatMessages.length]);
 
-  const isGlobalMessage = (m = {}) => String(m.recipient || '').trim().toLowerCase() === 'global' || !String(m.recipient || '').trim();
+  const isGlobalMessage = (m = {}) => String(m?.recipient || '').trim().toLowerCase() === 'global' || !String(m?.recipient || '').trim();
   const isDirectMessageForCurrentUser = (m = {}) => {
     if (!m || isGlobalMessage(m)) return false;
-    return sameCurrentUser(m.sender) || sameCurrentUser(m.recipient);
+    return sameCurrentUser(m?.sender) || sameCurrentUser(m?.recipient);
   };
   const isIncomingDirectToCurrentUser = (m = {}) => {
     if (!m || isGlobalMessage(m)) return false;
-    return !sameCurrentUser(m.sender) && sameCurrentUser(m.recipient);
+    return !sameCurrentUser(m?.sender) && sameCurrentUser(m?.recipient);
   };
   const isMessageForCurrentUser = (m = {}) => {
-    if (!m || m.deleted || hiddenMessageIds.includes(String(m.id))) return false;
+    if (!m || m?.deleted || hiddenMessageIds.includes(String(m?.id))) return false;
     if (isGlobalMessage(m)) return true;
     return isDirectMessageForCurrentUser(m);
   };
   const getMessageChannelForCurrentUser = (m = {}) => {
     if (isGlobalMessage(m)) return 'global';
     if (!isDirectMessageForCurrentUser(m)) return 'global';
-    if (sameCurrentUser(m.sender)) return m.recipient || 'global';
-    return m.sender || 'global';
+    if (sameCurrentUser(m?.sender)) return m?.recipient || 'global';
+    return m?.sender || 'global';
   };
 
   const unreadMessages = React.useMemo(() => (chatMessages || []).filter(m => {
@@ -347,6 +349,11 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     return { directTotal, total: unreadMessages.length, latest };
   }, [chatUsers, unreadMessages, chatMessages, hiddenMessageIds, localReadState, isOpen, activeChannel]);
   const unreadDirectTotal = unreadSummary.directTotal;
+  useEffect(() => {
+    lastMentionReadRef.current = Number(currentUser?.lastMentionRead || 0);
+    lastChatReadRef.current = Number(currentUser?.lastChatRead || 0);
+  }, [currentUser?.id, currentUser?.username, currentUser?.name, currentUser?.lastMentionRead, currentUser?.lastChatRead]);
+
   const totalUnreadCount = unreadSummary.total;
   const latestUnreadMessage = unreadSummary.latest;
 
@@ -358,10 +365,10 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
 
   const getMessagePreviewText = (m = {}) => {
     if (!m) return '';
-    if (m.deleted) return 'Message was deleted';
-    if (m.isVoiceNote) return '🎙️ Voice note';
-    if (m.fileName) return `📎 ${m.fileName}`;
-    return String(m.text || 'Message').replace(/\s+/g, ' ').trim();
+    if (m?.deleted) return 'Message was deleted';
+    if (m?.isVoiceNote) return '🎙️ Voice note';
+    if (m?.fileName) return `📎 ${m?.fileName}`;
+    return String(m?.text || 'Message').replace(/\s+/g, ' ').trim();
   };
 
   const openConversationForMessage = (m) => {
@@ -381,15 +388,15 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       else chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }, 200);
   };
-  const hasUnreadGlobalMention = unreadMessages.some(m => (m.recipient === 'global' || !m.recipient) && (m.text?.includes(`@${currentUser.name}`) || m.text?.includes('@all')));
+  const hasUnreadGlobalMention = unreadMessages.some(m => (m.recipient === 'global' || !m.recipient) && (m.text?.includes(`@${currentUser?.name}`) || m.text?.includes('@all')));
 
   useEffect(() => {
     if (hasUnreadGlobalMention && !isOpen) {
-      const latestMention = unreadMessages.filter(m => (m.recipient === 'global' || !m.recipient) && (m.text?.includes(`@${currentUser.name}`) || m.text?.includes('@all'))).pop();
-      if (latestMention && latestMention.id > (currentUser.lastMentionRead || 0)) {
+      const latestMention = unreadMessages.filter(m => (m.recipient === 'global' || !m.recipient) && (m.text?.includes(`@${currentUser?.name}`) || m.text?.includes('@all'))).pop();
+      if (latestMention && latestMention.id > lastMentionReadRef.current) {
         setIsOpen(true);
         setActiveChannel('global');
-        currentUser.lastMentionRead = latestMention.id;
+        lastMentionReadRef.current = latestMention.id;
       }
     }
   }, [chatMessages, hasUnreadGlobalMention, isOpen]);
@@ -417,11 +424,11 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       clearComposerContext();
       return;
     }
-    const senderRole = users.find(u => samePerson(u.name, currentUser.name))?.role || '';
+    const senderRole = users.find(u => samePerson(u.name, currentUser?.name))?.role || '';
     const newMsg = {
       id: now,
       text,
-      sender: currentUser.name,
+      sender: currentUser?.name,
       senderRole,
       recipient: activeChannel,
       time: nowText,
@@ -429,12 +436,12 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       replyTo: replyTo ? { id: replyTo.id, sender: replyTo.sender, text: replyTo.text || replyTo.fileName || 'Attachment' } : null,
       taskRefs: buildTaskRefsForMessage(text),
       reactions: {},
-      readBy: [{ name: currentUser.name, time: nowText }]
+      readBy: [{ name: currentUser?.name, time: nowText }]
     };
     onSendMessage(newMsg);
     setMsg('');
     clearComposerContext();
-    currentUser.lastChatRead = now;
+    lastChatReadRef.current = now;
   };
 
   const handleInputChange = (e) => {
@@ -453,15 +460,15 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
 
   const createBaseMessage = (overrides = {}) => {
     const now = makeMessageId();
-    const senderRole = users.find(u => samePerson(u.name, currentUser.name))?.role || '';
+    const senderRole = users.find(u => samePerson(u.name, currentUser?.name))?.role || '';
     return {
       id: now,
-      sender: currentUser.name,
+      sender: currentUser?.name,
       senderRole,
       recipient: activeChannel,
       time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
       sentAt: now,
-      readBy: [{ name: currentUser.name, time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) }],
+      readBy: [{ name: currentUser?.name, time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) }],
       reactions: {},
       ...overrides
     };
@@ -469,50 +476,50 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
 
 
   const uploadChatFileToServer = async (file, target, extra = {}, signal) => {
-    return uploadProjectFile(file, '', 'chat', currentUser.name, {
+    return uploadProjectFile(file, '', 'chat', currentUser?.name, {
       signal,
-      actorId: currentUser.id,
-      actorUsername: currentUser.username,
+      actorId: currentUser?.id,
+      actorUsername: currentUser?.username,
       chatScope: target.chatScope,
       recipientId: target.recipientId,
       recipientUsername: target.recipientUsername,
       recipient: target.recipient,
-      isVoiceNote: Boolean(extra.isVoiceNote),
+      isVoiceNote: Boolean(extra?.isVoiceNote),
       timeoutMs:30 * 60 * 1000
     });
   };
 
   const buildAttachmentMessage = (fileMeta = {}, fallback = {}, extra = {}) => {
-    const fileName = fileMeta.name || fallback.name || 'Attachment';
-    const fileType = fileMeta.mime || fileMeta.mimeType || fallback.type || '';
-    const fileSize = fileMeta.size || fallback.size || 0;
-    const previewUrl = getInlineChatPreviewUrl(fileMeta.previewUrl || fileMeta.url || fallback.url || fileMeta.downloadUrl || '');
-    const downloadUrl = fileMeta.downloadUrl
-      ? absoluteChatUrl(fileMeta.downloadUrl)
-      : absoluteChatUrl(fileMeta.downloadUrl || fileMeta.url || fallback.url || previewUrl || '');
+    const fileName = fileMeta?.name || fallback?.name || 'Attachment';
+    const fileType = fileMeta?.mime || fileMeta?.mimeType || fallback?.type || '';
+    const fileSize = fileMeta?.size || fallback?.size || 0;
+    const previewUrl = getInlineChatPreviewUrl(fileMeta?.previewUrl || fileMeta?.url || fallback?.url || fileMeta?.downloadUrl || '');
+    const downloadUrl = fileMeta?.downloadUrl
+      ? absoluteChatUrl(fileMeta?.downloadUrl)
+      : absoluteChatUrl(fileMeta?.downloadUrl || fileMeta?.url || fallback?.url || previewUrl || '');
     const url = previewUrl || downloadUrl;
     const fileRecord = {
       ...fileMeta,
-      id: fileMeta.id || fallback.id,
+      id: fileMeta?.id || fallback?.id,
       name: fileName,
-      storedName: fileMeta.storedName,
+      storedName: fileMeta?.storedName,
       mime: fileType,
       mimeType: fileType,
       size: fileSize,
-      url: previewUrl || fileMeta.previewUrl || fileMeta.url || fallback.url || '',
-      previewUrl: previewUrl || fileMeta.previewUrl || fileMeta.url || fallback.url || '',
-      downloadUrl: downloadUrl || fileMeta.downloadUrl || ''
+      url: previewUrl || fileMeta?.previewUrl || fileMeta?.url || fallback?.url || '',
+      previewUrl: previewUrl || fileMeta?.previewUrl || fileMeta?.url || fallback?.url || '',
+      downloadUrl: downloadUrl || fileMeta?.downloadUrl || ''
     };
     return createBaseMessage({
-      text: extra.text || `Shared attachment: ${fileName}`,
+      text: extra?.text || `Shared attachment: ${fileName}`,
       fileName,
       fileUrl: url,
       downloadUrl,
       fileType,
       fileSize,
       files: [fileRecord],
-      uploadStatus: extra.uploadStatus || 'ready',
-      taskRefs: extra.taskRefs || buildTaskRefsForMessage(extra.text || ''),
+      uploadStatus: extra?.uploadStatus || 'ready',
+      taskRefs: extra?.taskRefs || buildTaskRefsForMessage(extra?.text || ''),
       replyTo: replyTo ? { id: replyTo.id, sender: replyTo.sender, text: replyTo.text || replyTo.fileName || 'Attachment' } : null,
       ...extra
     });
@@ -523,7 +530,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     if (attachmentUploadAbortRef.current) attachmentUploadAbortRef.current.abort();
     attachmentUploadAbortRef.current = controller;
     let fileMeta = uploadedFileMeta;
-    setUploadingAttachment({ stage:'upload', name:file?.name || fileMeta?.name || 'Attachment', size:file?.size || fileMeta?.size || 0, type:file?.type || fileMeta?.mimeType || '', voice:Boolean(extra.isVoiceNote), target });
+    setUploadingAttachment({ stage:'upload', name:file?.name || fileMeta?.name || 'Attachment', size:file?.size || fileMeta?.size || 0, type:file?.type || fileMeta?.mimeType || '', voice:Boolean(extra?.isVoiceNote), target });
     try {
       if (!fileMeta) fileMeta = await uploadChatFileToServer(file, target, extra, controller.signal);
       setUploadingAttachment(previous => ({ ...(previous || {}), stage:'message' }));
@@ -658,8 +665,8 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     setCallShareScreen(shareScreen);
     setCallStartedAt(Date.now());
     setIsCalling(true);
-    const room = createSafeMeetingRoomName('KalpaVriksha_DM', appId || 'kalpavriksha_production_v1', ...[currentUser.name, activePeer.name].sort());
-    const url = buildJitsiUrl(room, currentUser.name, { audioOnly, shareScreen });
+    const room = createSafeMeetingRoomName('KalpaVriksha_DM', appId || 'kalpavriksha_production_v1', ...[currentUser?.name, activePeer.name].sort());
+    const url = buildJitsiUrl(room, currentUser?.name, { audioOnly, shareScreen });
     onSendMessage(createBaseMessage({
       text: shareScreen ? `🖥️ Started screen sharing / help session` : (audioOnly ? `📞 Started an Audio Call` : `📹 Started a Video Call`),
       recipient: activePeer.name,
@@ -891,10 +898,10 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   };
 
   const deleteForEveryone = async (m) => {
-    if (!(sameCurrentUser(m.sender) || currentUser.role === ROLES.ADMIN)) return;
+    if (!(sameCurrentUser(m.sender) || currentUser?.role === ROLES.ADMIN)) return;
     if (!(await requestConfirmation('Delete this message for everyone?', { title: 'Delete message', tone: 'danger', confirmLabel: 'Delete for everyone' }))) return;
     if (typeof onUpdateMessage === 'function') {
-      updateMessage({ ...m, deleted: true, text: 'This message was deleted.', fileUrl: '', fileName: '', fileType: '', roomUrl: '', deletedBy: currentUser.name, deletedAt: Date.now() });
+      updateMessage({ ...m, deleted: true, text: 'This message was deleted.', fileUrl: '', fileName: '', fileType: '', roomUrl: '', deletedBy: currentUser?.name, deletedAt: Date.now() });
     } else if (typeof onDeleteMessage === 'function') {
       onDeleteMessage(m.id);
     }
@@ -904,8 +911,8 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const toggleReaction = (m, emoji) => {
     const reactions = { ...(m.reactions || {}) };
     const names = Array.isArray(reactions[emoji]) ? [...reactions[emoji]] : [];
-    const already = names.some(n => samePerson(n, currentUser.name));
-    reactions[emoji] = already ? names.filter(n => !samePerson(n, currentUser.name)) : [...names, currentUser.name];
+    const already = names.some(n => samePerson(n, currentUser?.name));
+    reactions[emoji] = already ? names.filter(n => !samePerson(n, currentUser?.name)) : [...names, currentUser?.name];
     if (!reactions[emoji].length) delete reactions[emoji];
     updateMessage({ ...m, reactions });
     setReactionMenu(null);
@@ -935,7 +942,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   };
 
   const renderTaskReferenceCards = (message = {}, isMine = false) => {
-    const refs = resolveTaskReferences(message.text || '', message.taskRefs || []);
+    const refs = resolveTaskReferences(message?.text || '', message?.taskRefs || []);
     if (!refs.length) return null;
     return (
       <div className="mt-3 space-y-2">
@@ -943,7 +950,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
           const taskId = getTaskDisplayId(task);
           return (
             <button
-              key={`${message.id || 'msg'}-${taskId}`}
+              key={`${message?.id || 'msg'}-${taskId}`}
               type="button"
               onClick={(e) => { e.stopPropagation(); openTaskFromChat(task); }}
               className={`w-full text-left rounded-2xl border p-3 transition-all shadow-sm ${isMine ? 'bg-white/10 border-white/20 hover:bg-white/20 text-white' : 'bg-indigo-50 border-indigo-100 hover:border-indigo-300 text-slate-800'}`}
@@ -1040,22 +1047,22 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   };
 
   const getAttachmentFileRecord = (m = {}) => {
-    const first = m.files?.[0] || {};
-    const fileName = m.fileName || first.name || 'Attachment';
-    const fileType = m.fileType || first.mime || first.mimeType || '';
-    const rawPreview = first.previewUrl || m.previewUrl || first.url || m.fileUrl || m.downloadUrl || first.downloadUrl || '';
-    const rawDownload = m.downloadUrl || first.downloadUrl || first.url || m.fileUrl || rawPreview;
+    const first = m?.files?.[0] || {};
+    const fileName = m?.fileName || first.name || 'Attachment';
+    const fileType = m?.fileType || first.mime || first.mimeType || '';
+    const rawPreview = first.previewUrl || m?.previewUrl || first.url || m?.fileUrl || m?.downloadUrl || first.downloadUrl || '';
+    const rawDownload = m?.downloadUrl || first.downloadUrl || first.url || m?.fileUrl || rawPreview;
     const previewUrl = getInlineChatPreviewUrl(rawPreview);
     const downloadUrl = absoluteChatUrl(rawDownload || '');
     return {
       ...first,
-      id: first.fileId || first.id || m.fileId || m.id,
-      fileId: first.fileId || first.id || m.fileId,
+      id: first.fileId || first.id || m?.fileId || m?.id,
+      fileId: first.fileId || first.id || m?.fileId,
       name: fileName,
       fileName,
       mime: fileType,
       mimeType: fileType,
-      size: m.fileSize || first.size || 0,
+      size: m?.fileSize || first.size || 0,
       url: previewUrl,
       previewUrl,
       downloadUrl,
@@ -1228,7 +1235,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
               <p className="text-indigo-100 text-[10px] font-bold mt-1 uppercase tracking-widest">Global • Direct • Files • Voice</p>
             </div>
             <div className="kalpa-chat-channel-strip flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar" style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-x pan-y', overscrollBehaviorX: 'contain' }}>
-              <button type="button" onClick={() => { setActiveChannel('global'); setIsCalling(false); setShowEmojiPicker(false); setActionMenu(null); setReactionMenu(null); currentUser.lastChatRead = Date.now(); markCurrentChannelReadNow('global'); }} className={`w-full text-left px-4 py-3 rounded-xl font-bold flex items-center justify-between transition-colors ${activeChannel === 'global' ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>
+              <button type="button" onClick={() => { setActiveChannel('global'); setIsCalling(false); setShowEmojiPicker(false); setActionMenu(null); setReactionMenu(null); lastChatReadRef.current = Date.now(); markCurrentChannelReadNow('global'); }} className={`w-full text-left px-4 py-3 rounded-xl font-bold flex items-center justify-between transition-colors ${activeChannel === 'global' ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>
                 <span className="flex items-center"><Hash className="w-4 h-4 mr-2"/> Global Chat</span>
                 {unreadGlobalCount > 0 && <span className="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full">{unreadGlobalCount}</span>}
               </button>
@@ -1237,7 +1244,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
               {chatUsers.map(u => {
                 const unreadDMCount = getDirectUnreadCountForUser(u.name);
                 return (
-                  <button type="button" key={u.id} onClick={() => { setActiveChannel(u.name); setIsCalling(false); setShowEmojiPicker(false); setActionMenu(null); setReactionMenu(null); currentUser.lastChatRead = Date.now(); markCurrentChannelReadNow(u.name); }} className={`w-full text-left px-4 py-3 rounded-xl font-bold flex items-center justify-between transition-colors ${samePerson(activeChannel, u.name) ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>
+                  <button type="button" key={u.id} onClick={() => { setActiveChannel(u.name); setIsCalling(false); setShowEmojiPicker(false); setActionMenu(null); setReactionMenu(null); lastChatReadRef.current = Date.now(); markCurrentChannelReadNow(u.name); }} className={`w-full text-left px-4 py-3 rounded-xl font-bold flex items-center justify-between transition-colors ${samePerson(activeChannel, u.name) ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>
                     <div className="flex flex-col min-w-0 pr-2">
                       <span className="truncate flex items-center gap-2"><span className={`w-2 h-2 rounded-full ${isUserActuallyOnline(u, presenceNow) ? (u.availability === 'Break' ? 'bg-amber-400' : 'bg-emerald-500') : 'bg-slate-300'}`}></span>{u.name}</span>
                       <span className="text-[10px] text-slate-400 uppercase truncate">{isUserActuallyOnline(u, presenceNow) ? (u.availability === 'Break' ? 'On break' : 'Available to chat') : `Offline${u.lastSeenAt || u.lastLogoutAt || u.lastHeartbeatAt ? ` • ${formatLastSeenDateTime(u.lastSeenAt || u.lastLogoutAt || u.lastHeartbeatAt)}` : ''}`} • {u.role}</span>
@@ -1265,7 +1272,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
                   <button type="button" onClick={() => startCall(false)} className="p-2 rounded-xl bg-slate-50 hover:bg-indigo-50 text-slate-500 hover:text-indigo-600" title="Video call"><Video className="w-4 h-4" /></button>
                   <button type="button" onClick={() => startCall(false, true)} className="px-3 py-2 rounded-xl bg-slate-50 hover:bg-indigo-50 text-xs font-black text-slate-500 hover:text-indigo-600">Share screen</button>
                 </>}
-                <button type="button" onClick={() => { setIsOpen(false); markCurrentChannelReadNow(activeChannel); currentUser.lastChatRead = Date.now(); }} className="kalpa-chat-close-btn text-slate-500 hover:text-slate-700 p-2 bg-slate-50 rounded-full transition-colors ml-2" aria-label="Close chat"><X className="w-5 h-5" /></button>
+                <button type="button" onClick={() => { setIsOpen(false); markCurrentChannelReadNow(activeChannel); lastChatReadRef.current = Date.now(); }} className="kalpa-chat-close-btn text-slate-500 hover:text-slate-700 p-2 bg-slate-50 rounded-full transition-colors ml-2" aria-label="Close chat"><X className="w-5 h-5" /></button>
               </div>
             </div>
 
@@ -1326,7 +1333,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
                           {!isMine && renderMessageOptions(m)}
                         </div>
                         {reactions.length > 0 && <div className={`flex flex-wrap gap-1 mt-1 ${isMine ? 'justify-end' : 'justify-start'}`}>{reactions.map(([emoji, names]) => <button key={`${m.id}-${emoji}`} type="button" onClick={(e) => openReactionMenu(e, m)} title={(names || []).join(', ')} className="bg-white border border-slate-200 rounded-full px-2 py-0.5 text-xs shadow-sm hover:border-indigo-200"><span>{emoji}</span> <span className="font-black text-slate-500">{names.length}</span></button>)}</div>}
-                        <span className="text-[9px] font-bold text-slate-300 mt-1 mx-1 flex items-center gap-1">{m.time}{isMine && <span title={(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser.name)).length ? `Read by ${(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser.name)).map(r => `${readEntryName(r)} at ${r.time || ''}`).join(', ')}` : 'Sent'} className={(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser.name)).length ? 'text-blue-500' : 'text-slate-300'}>{(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser.name)).length ? '✓✓' : '✓'}</span>}</span>
+                        <span className="text-[9px] font-bold text-slate-300 mt-1 mx-1 flex items-center gap-1">{m.time}{isMine && <span title={(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser?.name)).length ? `Read by ${(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser?.name)).map(r => `${readEntryName(r)} at ${r.time || ''}`).join(', ')}` : 'Sent'} className={(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser?.name)).length ? 'text-blue-500' : 'text-slate-300'}>{(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser?.name)).length ? '✓✓' : '✓'}</span>}</span>
                       </div>
                     );
                   })}
@@ -1463,9 +1470,9 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
               <button type="button" onClick={(e) => openReactionMenu(e, activeActionMessage)} className="w-full text-left px-3 py-2.5 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100 flex items-center gap-2"><span className="w-6 text-center">😊</span> React</button>
               <button type="button" onClick={() => forwardMessage(activeActionMessage)} className="w-full text-left px-3 py-2.5 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100 flex items-center gap-2"><span className="w-6 text-center">↗</span> Forward</button>
               <button type="button" onClick={() => copyMessage(activeActionMessage)} className="w-full text-left px-3 py-2.5 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100 flex items-center gap-2"><span className="w-6 text-center">⧉</span> Copy</button>
-              {samePerson(activeActionMessage.sender, currentUser.name) && !activeActionMessage.deleted && <button type="button" onClick={() => editMessage(activeActionMessage)} className="w-full text-left px-3 py-2.5 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100 flex items-center gap-2"><span className="w-6 text-center">✎</span> Edit</button>}
+              {samePerson(activeActionMessage.sender, currentUser?.name) && !activeActionMessage.deleted && <button type="button" onClick={() => editMessage(activeActionMessage)} className="w-full text-left px-3 py-2.5 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100 flex items-center gap-2"><span className="w-6 text-center">✎</span> Edit</button>}
               <button type="button" onClick={() => deleteForMe(activeActionMessage)} className="w-full text-left px-3 py-2.5 text-sm font-bold text-slate-700 rounded-xl hover:bg-slate-50 active:bg-slate-100 flex items-center gap-2"><span className="w-6 text-center">⊘</span> Hide for me</button>
-              {(samePerson(activeActionMessage.sender, currentUser.name) || currentUser.role === ROLES.ADMIN) && <button type="button" onClick={() => deleteForEveryone(activeActionMessage)} className="w-full text-left px-3 py-2.5 text-sm font-black text-red-600 rounded-xl hover:bg-red-50 active:bg-red-100 flex items-center gap-2"><span className="w-6 text-center">🗑</span> Delete for everyone</button>}
+              {(samePerson(activeActionMessage.sender, currentUser?.name) || currentUser?.role === ROLES.ADMIN) && <button type="button" onClick={() => deleteForEveryone(activeActionMessage)} className="w-full text-left px-3 py-2.5 text-sm font-black text-red-600 rounded-xl hover:bg-red-50 active:bg-red-100 flex items-center gap-2"><span className="w-6 text-center">🗑</span> Delete for everyone</button>}
             </div>
           </div>
         </div>
@@ -1499,7 +1506,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
             </div>
             <div className="p-2 flex items-center gap-1 overflow-x-auto" style={{ overscrollBehaviorX: 'contain', WebkitOverflowScrolling: 'touch' }}>
               {reactionEmojis.map(emoji => {
-                const selected = Array.isArray((activeReactionMessage.reactions || {})[emoji]) && (activeReactionMessage.reactions || {})[emoji].some(n => samePerson(n, currentUser.name));
+                const selected = Array.isArray((activeReactionMessage.reactions || {})[emoji]) && (activeReactionMessage.reactions || {})[emoji].some(n => samePerson(n, currentUser?.name));
                 return (
                   <button
                     type="button"

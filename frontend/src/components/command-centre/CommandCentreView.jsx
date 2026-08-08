@@ -60,14 +60,14 @@ const toMs = (value) => {
 };
 
 const userLastActivityAt = (user = {}) => Math.max(
-  toMs(user.lastHeartbeatAt),
-  toMs(user.lastSeenAt),
-  toMs(user.lastLoginAt),
-  toMs(user.availabilityUpdatedAt)
+  toMs(user?.lastHeartbeatAt),
+  toMs(user?.lastSeenAt),
+  toMs(user?.lastLoginAt),
+  toMs(user?.availabilityUpdatedAt)
 );
 
 const isUserActuallyOnline = (user = {}, nowMs = Date.now()) => {
-  if (!user || !user.isOnline) return false;
+  if (!user || !user?.isOnline) return false;
   const lastActivity = userLastActivityAt(user);
   return !!lastActivity && (nowMs - lastActivity) <= ONLINE_STALE_MS;
 };
@@ -88,13 +88,13 @@ const normalizeStatus = (status = 'APPROVED') => {
 const ROLES = { ADMIN: 'Admin', MANAGER: 'Manager', DESIGNER: 'Designer' };
 
 const isSystemPlaceholderUser = (u = {}) => {
-  return /operations\s*manager/i.test(String(u.name || '')) || String(u.id || '') === 'u-manager';
+  return /operations\s*manager/i.test(String(u?.name || '')) || String(u?.id || '') === 'u-manager';
 };
 
 const createEmployeeLifecycleProfile = (user = {}, existing = {}) => {
   const now = Date.now();
-  const role = normalizeRole(user.role || existing.role || ROLES.DESIGNER);
-  const status = normalizeStatus(user.status || existing.status || 'APPROVED');
+  const role = normalizeRole(user?.role || existing?.role || ROLES.DESIGNER);
+  const status = normalizeStatus(user?.status || existing?.status || 'APPROVED');
   const archived = ['DELETED', 'REJECTED', 'ARCHIVED'].includes(status);
   const active = !archived && status !== 'RESTRICTED';
   return {
@@ -103,32 +103,33 @@ const createEmployeeLifecycleProfile = (user = {}, existing = {}) => {
     role,
     status,
     lifecycleStatus: archived ? 'ARCHIVED' : (status === 'RESTRICTED' ? 'RESTRICTED' : 'ACTIVE'),
-    attendanceProfile: { ...(existing.attendanceProfile || {}), ...(user.attendanceProfile || {}), includeInAttendance: active && role !== ROLES.ADMIN },
-    availabilityProfile: { ...(existing.availabilityProfile || {}), ...(user.availabilityProfile || {}), trackAvailability: active },
-    workloadProfile: { ...(existing.workloadProfile || {}), ...(user.workloadProfile || {}), dailyLimit: existing.workloadProfile?.dailyLimit || user.workloadProfile?.dailyLimit || (role === ROLES.ADMIN ? 0 : 15) },
-    profileUpdatedAt: user.profileUpdatedAt || existing.profileUpdatedAt || now
+    attendanceProfile: { ...(existing?.attendanceProfile || {}), ...(user?.attendanceProfile || {}), includeInAttendance: active && role !== ROLES.ADMIN },
+    availabilityProfile: { ...(existing?.availabilityProfile || {}), ...(user?.availabilityProfile || {}), trackAvailability: active },
+    workloadProfile: { ...(existing?.workloadProfile || {}), ...(user?.workloadProfile || {}), dailyLimit: existing?.workloadProfile?.dailyLimit || user?.workloadProfile?.dailyLimit || (role === ROLES.ADMIN ? 0 : 15) },
+    profileUpdatedAt: user?.profileUpdatedAt || existing?.profileUpdatedAt || now
   };
 };
 
 const normalizeTeamUser = (u = {}) => {
-  const rawName = String(u.name || '').trim();
-  const rawUsername = String(u.username || '').trim();
+  u = u && typeof u === 'object' ? u : {};
+  const rawName = String(u?.name || '').trim();
+  const rawUsername = String(u?.username || '').trim();
   const normalized = {
     ...u,
-    name: rawName || u.name,
+    name: rawName || u?.name,
     username: rawUsername,
-    role: normalizeRole(u.role),
-    status: normalizeStatus(u.status),
-    isOnline: !!u.isOnline,
-    lastSeenAt: u.lastSeenAt || u.lastLogoutAt || null
+    role: normalizeRole(u?.role),
+    status: normalizeStatus(u?.status),
+    isOnline: !!u?.isOnline,
+    lastSeenAt: u?.lastSeenAt || u?.lastLogoutAt || null
   };
   const online = isUserActuallyOnline(normalized);
   return createEmployeeLifecycleProfile(online ? normalized : { ...normalized, isOnline: false, availability: 'Unavailable', breakStartedAt: null }, u);
 };
 
-const hasValidTeamRole = (u = {}) => [ROLES.ADMIN, ROLES.MANAGER, ROLES.DESIGNER].includes(normalizeRole(u.role));
-const isApprovedUser = (u = {}) => normalizeStatus(u.status) === 'APPROVED' && hasValidTeamRole(u) && !isSystemPlaceholderUser(u);
-const getOperationalUsers = (users = [], { includeAdmins = true } = {}) => (users || [])
+const hasValidTeamRole = (u = {}) => [ROLES.ADMIN, ROLES.MANAGER, ROLES.DESIGNER].includes(normalizeRole(u?.role));
+const isApprovedUser = (u = {}) => normalizeStatus(u?.status) === 'APPROVED' && hasValidTeamRole(u) && !isSystemPlaceholderUser(u);
+const getOperationalUsers = (users = [], { includeAdmins = true } = {}) => (Array.isArray(users) ? users : [])
   .map(normalizeTeamUser)
   .filter(u => isApprovedUser(u) && (includeAdmins || u.role !== ROLES.ADMIN))
   .sort((a, b) => {
@@ -137,24 +138,24 @@ const getOperationalUsers = (users = [], { includeAdmins = true } = {}) => (user
   });
 
 const normalizePersonName = (name = '') => normalizeTeamUser({ name, username: name }).name || name;
-const getCustomerDisplayName = (project = {}) => project.customerName || 'Customer not added';
-const makeTaskDisplayName = (project = {}) => [project.type, getCustomerDisplayName(project), project.location].filter(Boolean).join(' • ');
+const getCustomerDisplayName = (project = {}) => project?.customerName || 'Customer not added';
+const makeTaskDisplayName = (project = {}) => [project?.type, getCustomerDisplayName(project), project?.location].filter(Boolean).join(' • ');
 const getProjectDateKey = (project) => formatDateKey(project.createdAt || project.completedAt || Date.now());
-const getProjectCompletedDateKey = (project = {}) => formatDateKey(project.completedAt || project.draftingCompletedAt || project.submittedAt || project.updatedAt || project.createdAt || Date.now());
+const getProjectCompletedDateKey = (project = {}) => formatDateKey(project?.completedAt || project?.draftingCompletedAt || project?.submittedAt || project?.updatedAt || project?.createdAt || Date.now());
 const normalizeWorkStatus = (status = '') => String(status || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 const REVISION_STATUS_KEYS = new Set(['REVISIONPENDING', 'REVISIONINPROGRESS', 'REVERTED']);
 const COMPLETED_STATUS_KEYS = new Set(['COMPLETED', 'APPROVED', 'FINALAPPROVED', 'CLOSED']);
 const hasCompletedDeliverable = (project = {}) => {
-  const completedFiles = Array.isArray(project.completedFiles) && project.completedFiles.length > 0;
-  const completedDocs = Array.isArray(project.documents) && project.documents.some(doc => ['completed', 'final'].includes(String(doc?.type || '').toLowerCase()));
+  const completedFiles = Array.isArray(project?.completedFiles) && project?.completedFiles.length > 0;
+  const completedDocs = Array.isArray(project?.documents) && project?.documents.some(doc => ['completed', 'final'].includes(String(doc?.type || '').toLowerCase()));
   return completedFiles || completedDocs;
 };
 const isProjectCompleted = (project = {}) => {
-  const statusKey = normalizeWorkStatus(project.status);
-  const reviewKey = normalizeWorkStatus(project.reviewStatus || project.finalConclusion || '');
+  const statusKey = normalizeWorkStatus(project?.status);
+  const reviewKey = normalizeWorkStatus(project?.reviewStatus || project?.finalConclusion || '');
   if (REVISION_STATUS_KEYS.has(statusKey) || REVISION_STATUS_KEYS.has(reviewKey)) return false;
   if (COMPLETED_STATUS_KEYS.has(statusKey) || reviewKey === 'APPROVED') return true;
-  return !!project.completedAt && hasCompletedDeliverable(project);
+  return !!project?.completedAt && hasCompletedDeliverable(project);
 };
 const isIncompleteProject = (project = {}) => !isProjectCompleted(project);
 
@@ -165,10 +166,10 @@ const isIncompleteProject = (project = {}) => !isProjectCompleted(project);
 // excluded separately so they do not duplicate finance/performance records.
 const isAnalyticsCompletedProject = (project = {}) => {
   if (!project || isRevisionOnlyWorkItem(project)) return false;
-  const statusKey = normalizeWorkStatus(project.status);
-  const reviewKey = normalizeWorkStatus(project.reviewStatus || project.finalConclusion || '');
+  const statusKey = normalizeWorkStatus(project?.status);
+  const reviewKey = normalizeWorkStatus(project?.reviewStatus || project?.finalConclusion || '');
   if (COMPLETED_STATUS_KEYS.has(statusKey) || reviewKey === 'APPROVED') return true;
-  if (project.completedAt || project.finalApprovedAt || project.approvedAt || project.draftingCompletedAt || project.submittedAt) return true;
+  if (project?.completedAt || project?.finalApprovedAt || project?.approvedAt || project?.draftingCompletedAt || project?.submittedAt) return true;
   return hasCompletedDeliverable(project);
 };
 const isCarriedForwardProject = (project = {}, dateKey = formatDateKey()) => isIncompleteProject(project) && getProjectDateKey(project) < dateKey;
@@ -180,17 +181,18 @@ const parseTimelineTime = (value) => {
 };
 
 const getTimelineEvents = (project = {}) => [
-  ...(Array.isArray(project.timeline) ? project.timeline : []),
-  ...(Array.isArray(project.history) ? project.history : []),
-  ...(Array.isArray(project.activityLog) ? project.activityLog : []),
-  ...(Array.isArray(project.events) ? project.events : [])
+  ...(Array.isArray(project?.timeline) ? project?.timeline : []),
+  ...(Array.isArray(project?.history) ? project?.history : []),
+  ...(Array.isArray(project?.activityLog) ? project?.activityLog : []),
+  ...(Array.isArray(project?.events) ? project?.events : [])
 ];
 
 const getTimelineEventTime = (event = {}) => parseTimelineTime(
-  event.at || event.time || event.timestamp || event.date || event.createdAt || event.updatedAt || event.completedAt || event.id
+  event?.at || event?.time || event?.timestamp || event?.date || event?.createdAt || event?.updatedAt || event?.completedAt || event?.id
 );
 
 const findTimelineTime = (project = {}, patterns = []) => {
+  patterns = Array.isArray(patterns) ? patterns : [];
   const events = getTimelineEvents(project);
   for (const event of events) {
     const text = String(event?.text || event?.message || event?.title || event?.action || event?.type || event?.status || '').toLowerCase();
@@ -226,7 +228,7 @@ const parseDurationToMinutes = (value) => {
 
 
 const getLatestDocumentTimestamp = (project = {}) => {
-  const buckets = [project.completedFiles, project.documents, project.files, project.uploads, project.attachments]
+  const buckets = [project?.completedFiles, project?.documents, project?.files, project?.uploads, project?.attachments]
     .filter(Array.isArray);
   const times = [];
   for (const list of buckets) {
@@ -244,18 +246,18 @@ const getLatestDocumentTimestamp = (project = {}) => {
 
 const getEarliestTaskTimestamp = (project = {}) => {
   const candidates = [
-    project.draftingStartedAt,
-    project.currentDraftingStartedAt,
-    project.draftingResumedAt,
-    project.workStartedAt,
-    project.startedAt,
-    project.assignedAt,
-    project.createdAt,
-    project.dateCreated,
-    project.createdOn,
-    project.addedAt,
-    project.leadCreatedAt,
-    project.receivedAt,
+    project?.draftingStartedAt,
+    project?.currentDraftingStartedAt,
+    project?.draftingResumedAt,
+    project?.workStartedAt,
+    project?.startedAt,
+    project?.assignedAt,
+    project?.createdAt,
+    project?.dateCreated,
+    project?.createdOn,
+    project?.addedAt,
+    project?.leadCreatedAt,
+    project?.receivedAt,
     firstTimelineTime(project)
   ].map(toMs).filter(Boolean);
   return candidates.length ? Math.min(...candidates) : 0;
@@ -263,17 +265,17 @@ const getEarliestTaskTimestamp = (project = {}) => {
 
 const getLatestTaskTimestamp = (project = {}) => {
   const candidates = [
-    project.completedAt,
-    project.completionAt,
-    project.completedOn,
-    project.finalApprovedAt,
-    project.approvedAt,
-    project.draftingCompletedAt,
-    project.submittedAt,
-    project.deliveredAt,
-    project.updatedAt,
-    project.lastUpdatedAt,
-    project.modifiedAt,
+    project?.completedAt,
+    project?.completionAt,
+    project?.completedOn,
+    project?.finalApprovedAt,
+    project?.approvedAt,
+    project?.draftingCompletedAt,
+    project?.submittedAt,
+    project?.deliveredAt,
+    project?.updatedAt,
+    project?.lastUpdatedAt,
+    project?.modifiedAt,
     getLatestDocumentTimestamp(project),
     lastTimelineTime(project)
   ].map(toMs).filter(Boolean);
@@ -295,20 +297,20 @@ const getLegacyBaselineCompletionMinutes = (project = {}) => {
 };
 
 const getCompletionDurationMinutes = (project = {}) => {
-  const explicitMinutes = Number(project.completionMinutes || project.averageCompletionMinutes || project.durationMinutes || project.completionDurationMinutes || project.totalMinutes || 0);
+  const explicitMinutes = Number(project?.completionMinutes || project?.averageCompletionMinutes || project?.durationMinutes || project?.completionDurationMinutes || project?.totalMinutes || 0);
   if (explicitMinutes > 0) return Math.round(explicitMinutes);
 
-  const explicitTextMinutes = parseDurationToMinutes(project.completionDuration || project.duration || project.elapsed || project.totalElapsed || project.draftingElapsed || project.turnaroundTime);
+  const explicitTextMinutes = parseDurationToMinutes(project?.completionDuration || project?.duration || project?.elapsed || project?.totalElapsed || project?.draftingElapsed || project?.turnaroundTime);
   if (explicitTextMinutes > 0) return explicitTextMinutes;
 
-  const explicitMs = Number(project.completionMs || project.durationMs || project.elapsedMs || project.totalElapsedMs || project.draftingElapsedMs || project.totalDurationMs || 0);
+  const explicitMs = Number(project?.completionMs || project?.durationMs || project?.elapsedMs || project?.totalElapsedMs || project?.draftingElapsedMs || project?.totalDurationMs || 0);
   if (explicitMs > 0) return Math.max(1, Math.round(explicitMs / 60000));
 
-  const workflowStart = toMs(project.draftingStartedAt || project.currentDraftingStartedAt || project.draftingResumedAt || project.workStartedAt || project.startedAt)
+  const workflowStart = toMs(project?.draftingStartedAt || project?.currentDraftingStartedAt || project?.draftingResumedAt || project?.workStartedAt || project?.startedAt)
     || findTimelineTime(project, [/drafting.*start/, /work.*start/, /started/]);
   const start = workflowStart || getEarliestTaskTimestamp(project);
 
-  const workflowEnd = toMs(project.completedAt || project.completionAt || project.completedOn || project.finalApprovedAt || project.approvedAt || project.draftingCompletedAt || project.submittedAt || project.deliveredAt)
+  const workflowEnd = toMs(project?.completedAt || project?.completionAt || project?.completedOn || project?.finalApprovedAt || project?.approvedAt || project?.draftingCompletedAt || project?.submittedAt || project?.deliveredAt)
     || getLatestDocumentTimestamp(project)
     || findTimelineTime(project, [/completed/, /approved/, /submitted/, /uploaded/, /delivered/, /finished/]);
   const end = workflowEnd || getLatestTaskTimestamp(project);
@@ -323,7 +325,7 @@ const getCompletionDurationMinutes = (project = {}) => {
   if (broadStart && broadEnd && broadEnd >= broadStart) return Math.max(1, Math.round((broadEnd - broadStart) / 60000));
 
   // Final fallback for legacy completed cases without detailed timestamps: use their stored SLA elapsed bucket if available.
-  const legacyElapsed = parseDurationToMinutes(project.slaElapsed || project.elapsedLabel || project.ageLabel);
+  const legacyElapsed = parseDurationToMinutes(project?.slaElapsed || project?.elapsedLabel || project?.ageLabel);
   if (legacyElapsed > 0) return legacyElapsed;
 
   // Older production records may only store status + counts without a clean lifecycle timestamp.
@@ -336,12 +338,12 @@ const getCompletionDurationMinutes = (project = {}) => {
 
 
 const getProjectBreakMinutes = (project = {}) => {
-  const direct = Number(project.breakMinutes || project.breakDurationMinutes || project.totalBreakMinutes || project.pauseMinutes || 0) || 0;
+  const direct = Number(project?.breakMinutes || project?.breakDurationMinutes || project?.totalBreakMinutes || project?.pauseMinutes || 0) || 0;
   if (direct > 0) return Math.round(direct);
-  const breaks = Array.isArray(project.breaks) ? project.breaks : Array.isArray(project.pauseLog) ? project.pauseLog : [];
+  const breaks = Array.isArray(project?.breaks) ? project?.breaks : Array.isArray(project?.pauseLog) ? project?.pauseLog : [];
   return breaks.reduce((sum, b = {}) => {
-    const start = toMs(b.start || b.startedAt || b.from);
-    const end = toMs(b.end || b.endedAt || b.to) || Date.now();
+    const start = toMs(b?.start || b?.startedAt || b?.from);
+    const end = toMs(b?.end || b?.endedAt || b?.to) || Date.now();
     return start && end > start ? sum + Math.round((end - start) / 60000) : sum;
   }, 0);
 };
@@ -353,9 +355,9 @@ const getActiveCompletionMinutes = (project = {}) => {
 };
 
 const getReviewDurationMinutes = (project = {}) => {
-  const submitted = toMs(project.submittedAt || project.uploadedAt || project.completedAt || project.draftingCompletedAt)
+  const submitted = toMs(project?.submittedAt || project?.uploadedAt || project?.completedAt || project?.draftingCompletedAt)
     || findTimelineTime(project, [/submitted/, /uploaded/, /completion/]);
-  const reviewed = toMs(project.reviewedAt || project.internalReviewAt || project.reviewApprovedAt || project.finalApprovedAt || project.approvedAt)
+  const reviewed = toMs(project?.reviewedAt || project?.internalReviewAt || project?.reviewApprovedAt || project?.finalApprovedAt || project?.approvedAt)
     || findTimelineTime(project, [/review.*approved/, /internal.*review/, /approved/]);
   if (submitted && reviewed && reviewed >= submitted) return Math.max(1, Math.round((reviewed - submitted) / 60000));
 
@@ -371,25 +373,25 @@ const getReviewDurationMinutes = (project = {}) => {
 
 const getPerformanceOwnerName = (project = {}) => {
   const candidates = [
-    project.assignedTo,
-    project.assigneeName,
-    project.assignedToName,
-    project.assignedUserName,
-    project.designerName,
-    project.completedBy,
-    project.ownerName,
-    project.userName,
-    project.managerName
+    project?.assignedTo,
+    project?.assigneeName,
+    project?.assignedToName,
+    project?.assignedUserName,
+    project?.designerName,
+    project?.completedBy,
+    project?.ownerName,
+    project?.userName,
+    project?.managerName
   ].map(v => String(v || '').trim()).filter(Boolean);
   return candidates[0] || '';
 };
 
-const getPerformanceTaskId = (project = {}) => formatTaskId(project.originalTaskId || project.rootTaskId || project.parentTaskId || project.caseId || project.id || '');
+const getPerformanceTaskId = (project = {}) => formatTaskId(project?.originalTaskId || project?.rootTaskId || project?.parentTaskId || project?.caseId || project?.id || '');
 
 const isRevisionOnlyWorkItem = (project = {}) => {
-  const idText = String(project.id || project.caseId || project.taskId || '').toUpperCase();
-  const statusText = String(project.status || project.type || project.caseType || '').toUpperCase();
-  return /_REV_|-REV-|REVISION/.test(idText) || (statusText.includes('REVISION') && !!project.parentTaskId);
+  const idText = String(project?.id || project?.caseId || project?.taskId || '').toUpperCase();
+  const statusText = String(project?.status || project?.type || project?.caseType || '').toUpperCase();
+  return /_REV_|-REV-|REVISION/.test(idText) || (statusText.includes('REVISION') && !!project?.parentTaskId);
 };
 
 const createPerformanceRecord = (project = {}) => {
@@ -398,10 +400,10 @@ const createPerformanceRecord = (project = {}) => {
   if (!userName) return null;
   const taskId = getPerformanceTaskId(project);
   if (!taskId) return null;
-  const completedAt = getLatestTaskTimestamp(project) || toMs(project.completedAt || project.updatedAt || project.createdAt) || Date.now();
-  const startedAt = toMs(project.draftingStartedAt || project.currentDraftingStartedAt || project.workStartedAt || project.startedAt)
+  const completedAt = getLatestTaskTimestamp(project) || toMs(project?.completedAt || project?.updatedAt || project?.createdAt) || Date.now();
+  const startedAt = toMs(project?.draftingStartedAt || project?.currentDraftingStartedAt || project?.workStartedAt || project?.startedAt)
     || findTimelineTime(project, [/drafting.*start/, /work.*start/, /designer.*start/, /started/])
-    || toMs(project.assignedAt || project.assignmentAt)
+    || toMs(project?.assignedAt || project?.assignmentAt)
     || getEarliestTaskTimestamp(project);
   const rawCompletionMinutes = getCompletionDurationMinutes(project);
   const totalCompletionMinutes = Math.max(1, Math.round((rawCompletionMinutes || getLegacyBaselineCompletionMinutes(project)) - getProjectBreakMinutes(project)));
@@ -412,9 +414,9 @@ const createPerformanceRecord = (project = {}) => {
     taskId,
     userName,
     caseType: getCaseTypeName(project),
-    location: project.location || project.city || project.area || '',
-    bank: project.bank || project.bankName || project.branchBank || '',
-    assignedAt: toMs(project.assignedAt || project.assignmentAt) || 0,
+    location: project?.location || project?.city || project?.area || '',
+    bank: project?.bank || project?.bankName || project?.branchBank || '',
+    assignedAt: toMs(project?.assignedAt || project?.assignmentAt) || 0,
     startedAt: startedAt || 0,
     completedAt: completedAt || 0,
     totalCompletionMinutes,
@@ -438,7 +440,7 @@ const buildPerformanceRecords = (projects = []) => {
 };
 
 const averageMinutes = (items = [], getter = x => x) => {
-  const values = items.map(getter).map(Number).filter(v => Number.isFinite(v) && v > 0);
+  const values = (Array.isArray(items) ? items : []).map(getter).map(Number).filter(v => Number.isFinite(v) && v > 0);
   return values.length ? Math.round(values.reduce((sum, v) => sum + v, 0) / values.length) : 0;
 };
 
@@ -448,19 +450,20 @@ const displayMinutes = (minutes = 0, empty = 'No data') => {
 };
 
 const normalizePerformanceRecord = (record = {}) => {
-  const userName = String(record.userName || record.assigneeName || record.assignedTo || record.designerName || record.completedBy || '').trim();
-  const taskId = String(record.taskId || record.caseId || record.caseNo || record.id || '').trim();
-  const completion = Number(record.totalCompletionMinutes || record.effectiveMinutes || record.completionMinutes || record.durationMinutes || 0) || 0;
-  const review = Number(record.reviewMinutes || record.averageReviewMinutes || 0) || 0;
+  record = record && typeof record === 'object' ? record : {};
+  const userName = String(record?.userName || record?.assigneeName || record?.assignedTo || record?.designerName || record?.completedBy || '').trim();
+  const taskId = String(record?.taskId || record?.caseId || record?.caseNo || record?.id || '').trim();
+  const completion = Number(record?.totalCompletionMinutes || record?.effectiveMinutes || record?.completionMinutes || record?.durationMinutes || 0) || 0;
+  const review = Number(record?.reviewMinutes || record?.averageReviewMinutes || 0) || 0;
   return {
     ...record,
     userName,
     taskId,
-    caseType: String(record.caseType || record.type || record.serviceType || 'Other').trim() || 'Other',
-    completedAt: toMs(record.completedAt || record.finishedAt || record.updatedAt || record.createdAt) || Number(record.completedAt || 0) || 0,
+    caseType: String(record?.caseType || record?.type || record?.serviceType || 'Other').trim() || 'Other',
+    completedAt: toMs(record?.completedAt || record?.finishedAt || record?.updatedAt || record?.createdAt) || Number(record?.completedAt || 0) || 0,
     totalCompletionMinutes: completion > 0 ? Math.round(completion) : 0,
     reviewMinutes: review > 0 ? Math.round(review) : 0,
-    revisionCount: Number(record.revisionCount || record.revisions || 0) || 0
+    revisionCount: Number(record?.revisionCount || record?.revisions || 0) || 0
   };
 };
 
@@ -476,12 +479,12 @@ const mergePerformanceRecordSets = (...sets) => {
   return Array.from(byKey.values()).sort((a,b)=>(b.completedAt||0)-(a.completedAt||0));
 };
 
-const getCaseTypeName = (project = {}) => String(project.caseType || project.type || project.taskType || project.serviceType || 'Other').trim() || 'Other';
+const getCaseTypeName = (project = {}) => String(project?.caseType || project?.type || project?.taskType || project?.serviceType || 'Other').trim() || 'Other';
 
 
 const getProjectSlaInfo = (project = {}, now = Date.now()) => {
-  const start = toMs(project.createdAt || project.receivedAt || project.assignedAt) || now;
-  const end = toMs(project.completedAt || project.approvedAt || project.draftingCompletedAt || project.updatedAt) || now;
+  const start = toMs(project?.createdAt || project?.receivedAt || project?.assignedAt) || now;
+  const end = toMs(project?.completedAt || project?.approvedAt || project?.draftingCompletedAt || project?.updatedAt) || now;
   const elapsedHours = Math.max(0, (end - start) / 3600000);
   const completed = isProjectCompleted(project);
   const score = completed
@@ -495,9 +498,9 @@ const getProjectSlaInfo = (project = {}, now = Date.now()) => {
 };
 
 const getProjectRevisionTotal = (project = {}) => {
-  const revisions = Array.isArray(project.revisions) ? project.revisions.length : 0;
-  const subTasks = Array.isArray(project.subTasks) ? project.subTasks.length : 0;
-  const count = Number(project.revisionCount || project.revisionsCount || 0) || 0;
+  const revisions = Array.isArray(project?.revisions) ? project?.revisions.length : 0;
+  const subTasks = Array.isArray(project?.subTasks) ? project?.subTasks.length : 0;
+  const count = Number(project?.revisionCount || project?.revisionsCount || 0) || 0;
   return Math.max(revisions, subTasks, count, hasActiveRevision(project) ? 1 : 0);
 };
 
@@ -505,6 +508,7 @@ const getQualityLabel = (score = 0) => score >= 85 ? 'Excellent' : score >= 70 ?
 const getQualityBadgeClass = (score = 0) => score >= 85 ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : score >= 70 ? 'bg-blue-50 text-blue-700 border-blue-100' : score >= 50 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100';
 
 const getCaseTypeStats = (completed = []) => {
+  completed = Array.isArray(completed) ? completed.filter(Boolean) : [];
   const grouped = completed.reduce((acc, item) => {
     const key = item.caseType || getCaseTypeName(item);
     const mins = Number(item.totalCompletionMinutes || 0) || getActiveCompletionMinutes(item);
@@ -521,15 +525,16 @@ const getCaseTypeStats = (completed = []) => {
 };
 
 const getTodayBreakMinutes = (user = {}) => {
-  const fromProfile = Number(user.attendanceProfile?.todayBreakMinutes || user.breakMinutesToday || user.totalBreakMinutesToday || 0) || 0;
-  const liveStart = toMs(user.breakStartedAt || user.currentBreakStartedAt || user.availabilityProfile?.breakStartedAt);
+  const fromProfile = Number(user?.attendanceProfile?.todayBreakMinutes || user?.breakMinutesToday || user?.totalBreakMinutesToday || 0) || 0;
+  const liveStart = toMs(user?.breakStartedAt || user?.currentBreakStartedAt || user?.availabilityProfile?.breakStartedAt);
   const live = liveStart ? Math.max(0, Math.floor((Date.now() - liveStart) / 60000)) : 0;
   return Math.round(fromProfile + live);
 };
 
 const getLiveStatus = (user = {}, activeTasks = []) => {
+  activeTasks = Array.isArray(activeTasks) ? activeTasks.filter(Boolean) : [];
   const online = isUserActuallyOnline(user);
-  const onBreak = online && String(user.availability || '').toLowerCase() === 'break';
+  const onBreak = online && String(user?.availability || '').toLowerCase() === 'break';
   const breakMinutes = getTodayBreakMinutes(user);
   if (onBreak) return {
     key: 'break',
@@ -555,7 +560,7 @@ const getLiveStatus = (user = {}, activeTasks = []) => {
   return {
     key: 'offline',
     label: 'Offline',
-    detail: formatLastSeenDateTime(user.lastSeenAt || user.lastLogoutAt || user.lastHeartbeatAt) || 'Unavailable',
+    detail: formatLastSeenDateTime(user?.lastSeenAt || user?.lastLogoutAt || user?.lastHeartbeatAt) || 'Unavailable',
     dotClass: 'bg-slate-300',
     badgeClass: 'bg-slate-100 text-slate-500 border-slate-200'
   };
@@ -563,8 +568,10 @@ const getLiveStatus = (user = {}, activeTasks = []) => {
 const shouldShowOnOperationsDate = (project = {}, dateKey = formatDateKey()) => getProjectDateKey(project) === dateKey || wasCompletedOnDate(project, dateKey) || (dateKey === formatDateKey() && isCarriedForwardProject(project, dateKey));
 
 const exportToCSV = (headers = [], rows = [], filename = 'Report.csv') => {
+  headers = Array.isArray(headers) ? headers : [];
+  rows = Array.isArray(rows) ? rows : [];
   const escapeCell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
-  const csv = [headers.map(escapeCell).join(','), ...rows.map(row => row.map(escapeCell).join(','))].join('\n');
+  const csv = [headers.map(escapeCell).join(','), ...rows.map(row => (Array.isArray(row) ? row : [row]).map(escapeCell).join(','))].join('\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -611,28 +618,28 @@ const canonicalReportName = (value, fallback = 'Not added', aliases = {}) => {
 };
 
 const getBankName = (project = {}) => {
-  const direct = cleanReportValue(project.client || project.bankName || project.bank || project.bank_name || project.bankTitle || project.lender || project.financier || project.loanBank || project.clientName || project.institution);
-  const nested = cleanReportValue(project.caseDetails?.client || project.caseDetails?.bankName || project.caseDetails?.bank || project.form?.client || project.form?.bankName || project.metadata?.client || project.metadata?.bankName);
+  const direct = cleanReportValue(project?.client || project?.bankName || project?.bank || project?.bank_name || project?.bankTitle || project?.lender || project?.financier || project?.loanBank || project?.clientName || project?.institution);
+  const nested = cleanReportValue(project?.caseDetails?.client || project?.caseDetails?.bankName || project?.caseDetails?.bank || project?.form?.client || project?.form?.bankName || project?.metadata?.client || project?.metadata?.bankName);
   return canonicalReportName(direct || nested, 'Bank not added');
 };
 
 const getBranchName = (project = {}) => {
-  const direct = cleanReportValue(project.branchName || project.branch || project.bankBranch || project.branch_name);
-  const nested = cleanReportValue(project.caseDetails?.branchName || project.caseDetails?.branch || project.form?.branchName || project.metadata?.branchName);
-  const location = cleanReportValue(project.locationName || project.location || project.siteLocation || project.city || project.area);
+  const direct = cleanReportValue(project?.branchName || project?.branch || project?.bankBranch || project?.branch_name);
+  const nested = cleanReportValue(project?.caseDetails?.branchName || project?.caseDetails?.branch || project?.form?.branchName || project?.metadata?.branchName);
+  const location = cleanReportValue(project?.locationName || project?.location || project?.siteLocation || project?.city || project?.area);
   return canonicalReportName(direct || nested || location, 'Location not added', REPORT_LOCATION_ALIASES);
 };
 
-const getPaymentStatus = (project = {}) => String(project.paymentTrackingStatus || project.paymentStatus || project.paymentReceived || project.ledger?.status || project.ledger?.paymentStatus || '').toLowerCase();
-const getEstimateAmount = (project = {}) => Number(project.estimateAmount || project.estimate || project.totalAmount || project.amount || project.ledger?.estimateAmount || project.ledger?.amount || 0) || 0;
-const getReceivedAmount = (project = {}) => Number(project.receivedAmount || project.paymentReceivedAmount || project.amountReceived || project.ledger?.amountIn || project.ledger?.receivedAmount || 0) || 0;
-const getFinanceUpdatedAt = (project = {}) => toMs(project.paymentTrackingUpdatedAt || project.paymentUpdatedAt || project.paymentDate || project.ledger?.updatedAt || project.ledger?.date || project.completedAt || project.createdAt);
-const getProjectAgeHours = (project = {}, fromMs = Date.now()) => Math.max(0, Math.round((fromMs - (getFinanceUpdatedAt(project) || toMs(project.createdAt) || fromMs)) / 3600000));
+const getPaymentStatus = (project = {}) => String(project?.paymentTrackingStatus || project?.paymentStatus || project?.paymentReceived || project?.ledger?.status || project?.ledger?.paymentStatus || '').toLowerCase();
+const getEstimateAmount = (project = {}) => Number(project?.estimateAmount || project?.estimate || project?.totalAmount || project?.amount || project?.ledger?.estimateAmount || project?.ledger?.amount || 0) || 0;
+const getReceivedAmount = (project = {}) => Number(project?.receivedAmount || project?.paymentReceivedAmount || project?.amountReceived || project?.ledger?.amountIn || project?.ledger?.receivedAmount || 0) || 0;
+const getFinanceUpdatedAt = (project = {}) => toMs(project?.paymentTrackingUpdatedAt || project?.paymentUpdatedAt || project?.paymentDate || project?.ledger?.updatedAt || project?.ledger?.date || project?.completedAt || project?.createdAt);
+const getProjectAgeHours = (project = {}, fromMs = Date.now()) => Math.max(0, Math.round((fromMs - (getFinanceUpdatedAt(project) || toMs(project?.createdAt) || fromMs)) / 3600000));
 const deriveFinancePaymentStatus = (project = {}) => {
   const estimate = getEstimateAmount(project);
   const received = getReceivedAmount(project);
   const raw = getPaymentStatus(project).toUpperCase();
-  const hasFinanceData = Boolean(estimate > 0 || received > 0 || project.ledger?.updatedAt || project.paymentTrackingUpdatedAt || project.paymentDate || project.ledger?.receivedFrom || project.ledger?.txnId || project.ledger?.mode);
+  const hasFinanceData = Boolean(estimate > 0 || received > 0 || project?.ledger?.updatedAt || project?.paymentTrackingUpdatedAt || project?.paymentDate || project?.ledger?.receivedFrom || project?.ledger?.txnId || project?.ledger?.mode);
   if (received > 0 && estimate > 0 && received >= estimate) return received > estimate ? 'overpaid' : 'paid';
   if (received > 0 && estimate > 0 && received < estimate) return 'partially-paid';
   if (received > 0 && estimate <= 0) return 'paid';
@@ -641,16 +648,16 @@ const deriveFinancePaymentStatus = (project = {}) => {
 };
 const isFinancePending = (project = {}) => ['pending', 'partially-paid'].includes(deriveFinancePaymentStatus(project));
 const isFinanceReceived = (project = {}) => ['paid', 'overpaid'].includes(deriveFinancePaymentStatus(project));
-const countBy = (items = [], keyFn) => items.reduce((acc, item) => {
+const countBy = (items = [], keyFn) => (Array.isArray(items) ? items : []).reduce((acc, item) => {
   const key = keyFn(item) || 'Not added';
   acc[key] = (acc[key] || 0) + 1;
   return acc;
 }, {});
 const topRowsFromCount = (countMap = {}, limit = 8) => Object.entries(countMap).sort((a, b) => b[1] - a[1]).slice(0, limit);
-const getCompletedCount = (projects = []) => projects.filter(isProjectCompleted).length;
-const getRevisionCount = (projects = []) => projects.filter(p => (p.subTasks || p.revisions || []).length > 0 || hasActiveRevision(p)).length;
+const getCompletedCount = (projects = []) => (Array.isArray(projects) ? projects : []).filter(Boolean).filter(isProjectCompleted).length;
+const getRevisionCount = (projects = []) => (Array.isArray(projects) ? projects : []).filter(Boolean).filter(p => (p.subTasks || p.revisions || []).length > 0 || hasActiveRevision(p)).length;
 const getSlaCompliancePct = (projects = []) => {
-  const done = projects.filter(isProjectCompleted);
+  const done = (Array.isArray(projects) ? projects : []).filter(Boolean).filter(isProjectCompleted);
   if (!done.length) return 100;
   const onTime = done.filter(p => {
     const start = toMs(p.createdAt) || Date.now();
@@ -662,11 +669,11 @@ const getSlaCompliancePct = (projects = []) => {
 
 const CLOSED_REVISION_STATUSES = new Set(['COMPLETED', 'APPROVED', 'ARCHIVED', 'CLOSED', 'DELETED', 'CANCELLED', 'CANCELED']);
 const ACTIVE_REVISION_STATUSES = REVISION_STATUS_KEYS;
-const isSubTaskOpen = (subTask = {}) => !['DONE', 'COMPLETED', 'APPROVED', 'CLOSED', 'RESOLVED'].includes(normalizeWorkStatus(subTask.status || 'Pending'));
-const getOpenRevisionItems = (project = {}) => (project.subTasks || project.revisions || []).filter(isSubTaskOpen);
+const isSubTaskOpen = (subTask = {}) => !['DONE', 'COMPLETED', 'APPROVED', 'CLOSED', 'RESOLVED'].includes(normalizeWorkStatus(subTask?.status || 'Pending'));
+const getOpenRevisionItems = (project = {}) => (project?.subTasks || project?.revisions || []).filter(isSubTaskOpen);
 const hasActiveRevision = (project = {}) => {
-  const statusKey = normalizeWorkStatus(project.status);
-  const reviewKey = normalizeWorkStatus(project.reviewStatus || project.finalConclusion || '');
+  const statusKey = normalizeWorkStatus(project?.status);
+  const reviewKey = normalizeWorkStatus(project?.reviewStatus || project?.finalConclusion || '');
   if (CLOSED_REVISION_STATUSES.has(statusKey) || reviewKey === 'APPROVED') return false;
   return ACTIVE_REVISION_STATUSES.has(statusKey)
     || ACTIVE_REVISION_STATUSES.has(reviewKey)
@@ -682,11 +689,11 @@ const getLatestRevisionNote = (project = {}) => {
 };
 
 const getSlaInfo = (project = {}, now = Date.now()) => {
-  const createdAt = project.createdAt || now;
-  const assignedAt = project.assignedAt || project.assignedOn || (project.assignedTo && project.assignedTo !== 'Unassigned' ? createdAt : null);
-  const draftStart = project.draftingStartedAt || (normalizeWorkStatus(project.status) === 'DRAFTING' ? assignedAt || createdAt : null);
-  const submittedAt = project.submittedAt || project.draftingCompletedAt || null;
-  const completedAt = project.completedAt || null;
+  const createdAt = project?.createdAt || now;
+  const assignedAt = project?.assignedAt || project?.assignedOn || (project?.assignedTo && project?.assignedTo !== 'Unassigned' ? createdAt : null);
+  const draftStart = project?.draftingStartedAt || (normalizeWorkStatus(project?.status) === 'DRAFTING' ? assignedAt || createdAt : null);
+  const submittedAt = project?.submittedAt || project?.draftingCompletedAt || null;
+  const completedAt = project?.completedAt || null;
   const totalEnd = completedAt || now;
   const draftingEnd = submittedAt || completedAt || now;
   const reviewStart = submittedAt || null;
@@ -697,7 +704,7 @@ const getSlaInfo = (project = {}, now = Date.now()) => {
   const isWarning = !completed && ageHours >= 4 && ageHours < 8;
   return {
     total: formatDuration(createdAt, totalEnd),
-    drafting: project.draftingStartedAt ? formatMinutes(Math.floor(getDraftingElapsedMs(project, now) / 60000)) : (draftStart ? formatDuration(draftStart, draftingEnd) : '-'),
+    drafting: project?.draftingStartedAt ? formatMinutes(Math.floor(getDraftingElapsedMs(project, now) / 60000)) : (draftStart ? formatDuration(draftStart, draftingEnd) : '-'),
     review: reviewStart ? formatDuration(reviewStart, reviewEnd) : '-',
     ageHours,
     label: isDelayed ? 'Delayed' : isWarning ? 'Near SLA' : completed ? 'Completed' : 'On Track',
@@ -706,16 +713,16 @@ const getSlaInfo = (project = {}, now = Date.now()) => {
 };
 
 
-const isUnassignedCase = (project = {}) => !project.assignedTo || String(project.assignedTo || '').trim().toLowerCase() === 'unassigned';
+const isUnassignedCase = (project = {}) => !project?.assignedTo || String(project?.assignedTo || '').trim().toLowerCase() === 'unassigned';
 const isInternalReviewPending = (project = {}) => {
-  const statusKey = normalizeWorkStatus(project.status);
-  const reviewKey = normalizeWorkStatus(project.reviewStatus || project.finalConclusion || '');
+  const statusKey = normalizeWorkStatus(project?.status);
+  const reviewKey = normalizeWorkStatus(project?.reviewStatus || project?.finalConclusion || '');
   return statusKey === 'INTERNALREVIEW' || reviewKey === 'PENDINGREVIEW' || reviewKey === 'REVIEWPENDING';
 };
 const isReadyForDelivery = (project = {}) => {
-  const statusKey = normalizeWorkStatus(project.status);
-  const reviewKey = normalizeWorkStatus(project.reviewStatus || project.finalConclusion || '');
-  const paymentKey = normalizeWorkStatus(project.paymentStatus || project.ledger?.paymentStatus || '');
+  const statusKey = normalizeWorkStatus(project?.status);
+  const reviewKey = normalizeWorkStatus(project?.reviewStatus || project?.finalConclusion || '');
+  const paymentKey = normalizeWorkStatus(project?.paymentStatus || project?.ledger?.paymentStatus || '');
   return isProjectCompleted(project)
     && !hasActiveRevision(project)
     && !['ARCHIVED','CLOSED','DELETED'].includes(statusKey)
@@ -723,14 +730,14 @@ const isReadyForDelivery = (project = {}) => {
     && (reviewKey === 'APPROVED' || statusKey === 'COMPLETED' || statusKey === 'APPROVED' || statusKey === 'FINALAPPROVED');
 };
 const isPaymentPending = (project = {}) => {
-  const estimate = Number(project.estimate || project.estimateAmount || project.amount || 0);
-  const received = Number(project.ledger?.amountIn || project.amountReceived || 0);
-  const statusKey = normalizeWorkStatus(project.paymentStatus || project.ledger?.paymentStatus || '');
+  const estimate = Number(project?.estimate || project?.estimateAmount || project?.amount || 0);
+  const received = Number(project?.ledger?.amountIn || project?.amountReceived || 0);
+  const statusKey = normalizeWorkStatus(project?.paymentStatus || project?.ledger?.paymentStatus || '');
   return statusKey === 'PENDING' || statusKey === 'PAYMENTPENDING' || (estimate > 0 && received < estimate);
 };
 const getSlaBucket = (project = {}, now = Date.now()) => {
-  const createdAt = toMs(project.createdAt) || now;
-  const endAt = toMs(project.completedAt || project.approvedAt) || now;
+  const createdAt = toMs(project?.createdAt) || now;
+  const endAt = toMs(project?.completedAt || project?.approvedAt) || now;
   const hours = Math.max(0, (endAt - createdAt) / 3600000);
   if (isProjectCompleted(project)) return { key: 'completed', label: 'Completed', range: 'Done', colorClass: 'bg-emerald-50 text-emerald-700 border-emerald-100' };
   if (hours < 2) return { key: 'healthy', label: 'Healthy', range: '0–2 hrs', colorClass: 'bg-emerald-50 text-emerald-700 border-emerald-100' };
@@ -764,18 +771,19 @@ const getActivityIcon = (type = '') => {
 };
 const isFinancialActivityEvent = (event = {}) => {
   const searchable = [
-    event.type,
-    event.title,
-    event.text,
-    event.action,
-    event.message,
-    event.remarks,
-    event.note,
-    event.status
+    event?.type,
+    event?.title,
+    event?.text,
+    event?.action,
+    event?.message,
+    event?.remarks,
+    event?.note,
+    event?.status
   ].filter(Boolean).join(' ').toLowerCase();
   return /\b(payment|paid|finance|financial|ledger|refund|transaction|collection|amount\s+received|amount\s+paid|receipt)\b/i.test(searchable);
 };
 const buildLiveActivityFeed = (projects = [], nowMs = Date.now()) => {
+  projects = Array.isArray(projects) ? projects.filter(Boolean) : [];
   const startOfToday = new Date(nowMs);
   startOfToday.setHours(0, 0, 0, 0);
   const todayStartMs = startOfToday.getTime();
@@ -839,6 +847,7 @@ const buildLiveActivityFeed = (projects = [], nowMs = Date.now()) => {
 };
 
 const getTodayMetrics = (projects = [], dateKey = formatDateKey()) => {
+  projects = (Array.isArray(projects) ? projects : []).filter(Boolean);
   const todays = projects.filter(p => getProjectDateKey(p) === dateKey);
   const carried = projects.filter(p => isCarriedForwardProject(p, dateKey));
   const activeToday = projects.filter(p => shouldShowOnOperationsDate(p, dateKey));
@@ -870,6 +879,9 @@ const getTodayMetrics = (projects = [], dateKey = formatDateKey()) => {
 };
 
 export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = [], onSelectProject, onNavigate, onOpenPerformance, currentUser }) => {
+  const safeProjects = Array.isArray(projects) ? projects.filter(Boolean) : [];
+  const safeUsers = Array.isArray(users) ? users.filter(Boolean) : [];
+  const safeAttendanceLogs = Array.isArray(attendanceLogs) ? attendanceLogs.filter(Boolean) : [];
   const [dateKey, setDateKey] = useState(formatDateKey());
   const [availabilityFilter, setAvailabilityFilter] = useState('Available');
   const [dashboardFilter, setDashboardFilter] = useState('all');
@@ -882,29 +894,29 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
   const presenceTaskStateStorageKey = `kalpa_presence_task_state::${cacheActorKey}`;
   const [presenceTimes, setPresenceTimes] = useState({});
   useEffect(() => {
-    try { setPresenceTimes(JSON.parse(localStorage.getItem(presenceTimesStorageKey) || '{}')); } catch (e) { setPresenceTimes({}); }
+    try { const saved = JSON.parse(localStorage.getItem(presenceTimesStorageKey) || '{}'); setPresenceTimes(saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {}); } catch (e) { setPresenceTimes({}); }
   }, [presenceTimesStorageKey]);
   useEffect(() => { const timer = setInterval(() => setAvailabilityNow(Date.now()), 30000); return () => clearInterval(timer); }, []);
-  const metrics = useMemo(() => getTodayMetrics(projects, dateKey), [projects, dateKey]);
+  const metrics = useMemo(() => getTodayMetrics(safeProjects, dateKey), [projects, dateKey]);
   const isAdmin = currentUser?.role === ROLES.ADMIN;
   const activityDayKey = formatDateKey(availabilityNow);
   const liveActivityFeed = useMemo(() => {
     const todayKey = activityDayKey;
-    return buildLiveActivityFeed(projects, availabilityNow).filter(item => formatDateKey(item.at) === todayKey).slice(0, 14);
+    return buildLiveActivityFeed(safeProjects, availabilityNow).filter(item => formatDateKey(item.at) === todayKey).slice(0, 14);
   }, [projects, activityDayKey]);
   const rawActiveBoard = useMemo(() => metrics.activeToday.slice().sort((a,b) => (toMs(b.completedAt || b.updatedAt || b.createdAt) || 0) - (toMs(a.completedAt || a.updatedAt || a.createdAt) || 0)), [metrics.activeToday]);
-  const people = useMemo(() => getOperationalUsers(users || [], { includeAdmins: true }), [users]);
+  const people = useMemo(() => getOperationalUsers(safeUsers, { includeAdmins: true }), [users]);
   const workingTeam = useMemo(() => people.filter(u => u.role === ROLES.DESIGNER || u.role === ROLES.MANAGER), [people]);
   const activeTasksByPerson = useMemo(() => {
     const map = new Map();
-    people.forEach(member => map.set(normalizePersonName(member.name), getUserActiveTasks(projects, member.name)));
+    people.forEach(member => map.set(normalizePersonName(member.name), getUserActiveTasks(safeProjects, member.name)));
     return map;
   }, [people, projects]);
   const activeTasksFor = (userName) => activeTasksByPerson.get(normalizePersonName(userName)) || [];
   const latestAttendanceByPerson = useMemo(() => {
     const map = new Map();
     const todayKey = formatDateKey();
-    for (const log of (attendanceLogs || [])) {
+    for (const log of safeAttendanceLogs) {
       if (!log || String(log.date || formatDateKey(log.loginAt || log.createdAt || Date.now())) !== todayKey) continue;
       const stamp = Math.max(toMs(log.lastTick), toMs(log.logoutAt), toMs(log.updatedAt));
       for (const key of [log.userId ? `id:${log.userId}` : '', log.name ? `name:${normalizePersonName(log.name)}` : ''].filter(Boolean)) {
@@ -914,10 +926,10 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
     }
     return map;
   }, [attendanceLogs, activityDayKey]);
-  const todayAttendanceFor = (member = {}) => latestAttendanceByPerson.get(`id:${member.id}`)?.log || latestAttendanceByPerson.get(`name:${normalizePersonName(member.name)}`)?.log || null;
+  const todayAttendanceFor = (member = {}) => latestAttendanceByPerson.get(`id:${member?.id}`)?.log || latestAttendanceByPerson.get(`name:${normalizePersonName(member?.name)}`)?.log || null;
   const workloadStatsByPerson = useMemo(() => {
     const map = new Map();
-    for (const project of (projects || [])) {
+    for (const project of safeProjects) {
       const key = normalizePersonName(project.assignedTo);
       if (!key) continue;
       const stats = map.get(key) || { completedToday: 0, revisions: 0 };
@@ -928,7 +940,7 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
     return map;
   }, [projects, dateKey]);
   const isMemberOnBreak = (member = {}) => {
-    const directAvailability = String(member.availability || '').trim().toLowerCase().replace(/[^a-z]/g, '');
+    const directAvailability = String(member?.availability || '').trim().toLowerCase().replace(/[^a-z]/g, '');
     if (directAvailability === 'break' || directAvailability === 'onbreak') return true;
     const log = todayAttendanceFor(member);
     const logStatus = String(log?.status || '').trim().toLowerCase().replace(/[^a-z]/g, '');
@@ -938,16 +950,16 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
   useEffect(() => {
     const now = Date.now();
     let previous = {};
-    try { previous = JSON.parse(localStorage.getItem(presenceTaskStateStorageKey) || '{}'); } catch (e) { previous = {}; }
+    try { const saved = JSON.parse(localStorage.getItem(presenceTaskStateStorageKey) || '{}'); previous = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {}; } catch (e) { previous = {}; }
     let existingTimes = {};
-    try { existingTimes = JSON.parse(localStorage.getItem(presenceTimesStorageKey) || '{}'); } catch (e) { existingTimes = {}; }
+    try { const saved = JSON.parse(localStorage.getItem(presenceTimesStorageKey) || '{}'); existingTimes = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {}; } catch (e) { existingTimes = {}; }
     const nextState = {};
     const nextTimes = { ...existingTimes };
 
     people.forEach(member => {
       if (member.role === ROLES.ADMIN) return;
       const key = normalizePersonName(member.name);
-      const active = getUserActiveTasks(projects, member.name);
+      const active = getUserActiveTasks(safeProjects, member.name);
       const activeIds = active.map(task => String(task.id || task.caseId || '')).filter(Boolean).sort();
       const activeCount = activeIds.length;
       const previousCount = Number(previous?.[key]?.activeCount || 0);
@@ -957,7 +969,7 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
       const busySince = getUserBusySince(projects, member.name);
 
       nextState[key] = { activeCount, activeIds, updatedAt: now };
-      nextTimes[key] = nextTimes[key] || {};
+      nextTimes[key] = nextTimes[key] && typeof nextTimes[key] === 'object' && !Array.isArray(nextTimes[key]) ? nextTimes[key] : {};
 
       if (activeCount > 0) {
         const newTaskStarted = previousCount === 0 || previousIds !== nextIds;
@@ -1236,7 +1248,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
   const now = Date.now();
   const todayKey = formatDateKey();
   const rangeMs = range === 'week' ? 7 * 86400000 : range === 'quarter' ? 90 * 86400000 : 30 * 86400000;
-  const allProjects = Array.isArray(projects) ? projects : [];
+  const allProjects = Array.isArray(projects) ? projects.filter(Boolean) : [];
   const scopedProjects = useMemo(() => allProjects.filter(p => (toMs(p.createdAt) || now) >= now - rangeMs || (toMs(p.completedAt) || 0) >= now - rangeMs), [projects, range]);
   const leaderboardMembers = Array.isArray(leaderboard?.members) ? leaderboard.members : [];
   const team = useMemo(() => {
@@ -1702,7 +1714,7 @@ export const ReportsAnalyticsView = ({ projects = [], users = [], currentUser = 
   const [selectedMonth, setSelectedMonth] = useState(getCurrentAccountingMonthKey());
   const accountingMonth = normalizeAccountingMonthKey(selectedMonth, getCurrentAccountingMonthKey());
   const accountingMonthLabel = formatAccountingMonthLabel(accountingMonth);
-  const projectList = useMemo(() => Array.isArray(projects) ? projects : [], [projects]);
+  const projectList = useMemo(() => Array.isArray(projects) ? projects.filter(Boolean) : [], [projects]);
 
   // Reports use exact calendar-month event buckets instead of rolling 30/90-day
   // windows. A case created last month and completed this month contributes only
@@ -1779,7 +1791,7 @@ export const ProductionQAView = ({ projects = [], users = [], currentUser = null
   const todayKey = formatDateKey();
   const team = getOperationalUsers(users, { includeAdmins: true });
   const activeTeam = getOperationalUsers(users, { includeAdmins: false });
-  const projectList = Array.isArray(projects) ? projects : [];
+  const projectList = Array.isArray(projects) ? projects.filter(Boolean) : [];
   const timelineReady = projectList.filter(p => Array.isArray(p.timeline) && p.timeline.length > 0).length;
   const casesWithIds = projectList.filter(p => p.id || p.caseId).length;
   const completedCases = projectList.filter(isProjectCompleted);

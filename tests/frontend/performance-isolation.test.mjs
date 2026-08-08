@@ -66,10 +66,10 @@ test('idle finance synchronization does not repaint the application every fiftee
 });
 
 test('backend project synchronization sends row deltas and never reads stale task caches', () => {
-  assert.match(app, /Array\.isArray\(options\.changedProjects\)/);
+  assert.match(app, /Array\.isArray\(options\?\.changedProjects\)/);
   assert.match(app, /changedProjects:projectsToSave/);
   assert.match(app, /removedProjectIds:deleteIds/);
-  assert.match(app, /replaceIds:options\.replaceIds \|\| \[\]/);
+  assert.match(app, /replaceIds:options\?\.replaceIds \|\| \[\]/);
   assert.match(app, /if \(USE_BACKEND_STATE\) \{\s*void refreshWorkspaceSnapshot\(\)/s);
   assert.match(app, /if \(!opsBroadcast\)/);
 });

@@ -27,14 +27,14 @@ export const toMs = (value) => {
 };
 
 export const userLastActivityAt = (user = {}) => Math.max(
-  toMs(user.lastHeartbeatAt),
-  toMs(user.lastSeenAt),
-  toMs(user.lastLoginAt),
-  toMs(user.availabilityUpdatedAt)
+  toMs(user?.lastHeartbeatAt),
+  toMs(user?.lastSeenAt),
+  toMs(user?.lastLoginAt),
+  toMs(user?.availabilityUpdatedAt)
 );
 
 export const isUserActuallyOnline = (user = {}, nowMs = Date.now()) => {
-  if (!user || !user.isOnline) return false;
+  if (!user || !user?.isOnline) return false;
   const lastActivity = userLastActivityAt(user);
   return !!lastActivity && (nowMs - lastActivity) <= ONLINE_STALE_MS;
 };
@@ -52,25 +52,25 @@ export const normalizeStatus = (status = 'APPROVED') => String(status || 'APPROV
 export const ROLES = { ADMIN: 'Admin', MANAGER: 'Manager', DESIGNER: 'Designer' };
 
 export const normalizeChatUser = (u = {}) => {
-  const rawName = String(u.name || '').trim();
-  const rawUsername = String(u.username || '').trim();
+  const rawName = String(u?.name || '').trim();
+  const rawUsername = String(u?.username || '').trim();
   return {
-    ...u,
-    name: rawName || u.name,
+    ...(u || {}),
+    name: rawName || u?.name,
     username: rawUsername,
-    role: normalizeRole(u.role),
-    status: normalizeStatus(u.status),
-    lastSeenAt: u.lastSeenAt || u.lastLogoutAt || null
+    role: normalizeRole(u?.role),
+    status: normalizeStatus(u?.status),
+    lastSeenAt: u?.lastSeenAt || u?.lastLogoutAt || null
   };
 };
 
-export const isSystemPlaceholderUser = (u = {}) => /operations\s*manager/i.test(String(u.name || '')) || String(u.id || '') === 'u-manager';
-export const hasValidTeamRole = (u = {}) => [ROLES.ADMIN, ROLES.MANAGER, ROLES.DESIGNER].includes(normalizeRole(u.role));
-export const isApprovedUser = (u = {}) => normalizeStatus(u.status) === 'APPROVED' && hasValidTeamRole(u) && !isSystemPlaceholderUser(u);
+export const isSystemPlaceholderUser = (u = {}) => /operations\s*manager/i.test(String(u?.name || '')) || String(u?.id || '') === 'u-manager';
+export const hasValidTeamRole = (u = {}) => [ROLES.ADMIN, ROLES.MANAGER, ROLES.DESIGNER].includes(normalizeRole(u?.role));
+export const isApprovedUser = (u = {}) => normalizeStatus(u?.status) === 'APPROVED' && hasValidTeamRole(u) && !isSystemPlaceholderUser(u);
 
 export const getOperationalUsers = (users = [], { includeAdmins = true } = {}) => (users || [])
   .map(normalizeChatUser)
-  .filter(u => isApprovedUser(u) && (includeAdmins || u.role !== ROLES.ADMIN))
+  .filter(u => isApprovedUser(u) && (includeAdmins || u?.role !== ROLES.ADMIN))
   .sort((a, b) => {
     const roleOrder = { [ROLES.ADMIN]: 0, [ROLES.MANAGER]: 1, [ROLES.DESIGNER]: 2 };
     return (roleOrder[a.role] ?? 9) - (roleOrder[b.role] ?? 9) || String(a.name).localeCompare(String(b.name));

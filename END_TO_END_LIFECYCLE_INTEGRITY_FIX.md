@@ -1,6 +1,6 @@
 # End-to-End Lifecycle Integrity Fix
 
-Release: `1.9.20-end-to-end-lifecycle-integrity`  
+Release: `1.9.20-end-to-end-lifecycle-integrity`
 Backend/Frontend: `2.9.20-end-to-end-lifecycle-integrity`
 
 This release audits and repairs the complete operational lifecycle from task creation through source upload, assignment, drafting, work-file upload, internal review, completion, revision, case editing, file deletion and finance updates.

@@ -8,16 +8,16 @@ import { getTaskBusySince, getUserActiveTasks, getDraftingElapsedMs, getUserFree
 import { getStatusColor } from '../../services/taskService';
 
 const isAdminUser = (user = {}) => String(user?.role || '').trim().toUpperCase() === 'ADMIN';
-const getDisplayTaskId = (project = {}) => formatTaskId(project.displayId || project.originalTaskId || project.id);
-const isRevisionWorkItem = (project = {}) => project.isRevisionWorkItem === true || String(project.id || '').includes('__REV__');
+const getDisplayTaskId = (project = {}) => formatTaskId(project?.displayId || project?.originalTaskId || project?.id);
+const isRevisionWorkItem = (project = {}) => project?.isRevisionWorkItem === true || String(project?.id || '').includes('__REV__');
 const isRevisionLikeProject = (project = {}) => {
-  const status = String(project.status || project.reviewStatus || '').toLowerCase();
-  return isRevisionWorkItem(project) || status.includes('revision') || project.revisionCode || project.originalTaskId;
+  const status = String(project?.status || project?.reviewStatus || '').toLowerCase();
+  return isRevisionWorkItem(project) || status.includes('revision') || project?.revisionCode || project?.originalTaskId;
 };
 const getRevisionLabel = (project = {}) => {
   if (!isRevisionLikeProject(project)) return null;
   const baseId = getDisplayTaskId(project);
-  const code = project.revisionCode || (project.revisionNumber ? `R${project.revisionNumber}` : 'REV');
+  const code = project?.revisionCode || (project?.revisionNumber ? `R${project?.revisionNumber}` : 'REV');
   return `${code} • Original ${baseId}`;
 };
 
@@ -249,7 +249,7 @@ const TeamActivityPanel = ({ users, projects, nowTick, ROLES, onSelectProject, g
 
 
 const RevisionQueuePanel = ({ projects, onSelectProject, getCustomerDisplayName }) => {
-  const revisionProjects = (projects || []).filter(isRevisionLikeProject).filter(p => String(p.status || '').toLowerCase() !== 'completed');
+  const revisionProjects = (Array.isArray(projects) ? projects.filter(Boolean) : []).filter(isRevisionLikeProject).filter(p => String(p.status || '').toLowerCase() !== 'completed');
   if (revisionProjects.length === 0) return null;
   return (
     <div className="bg-red-50 border-2 border-red-100 rounded-3xl p-4 sm:p-5 shadow-sm">
@@ -302,6 +302,9 @@ export const ActiveOperationsView = ({
   currentUser,
   onPaymentStatusChange,
 }) => {
+  const safeDisplayedProjects = Array.isArray(displayedProjects) ? displayedProjects.filter(Boolean) : [];
+  const safeProjects = Array.isArray(projects) ? projects.filter(Boolean) : [];
+  const safeActiveUsers = Array.isArray(activeUsers) ? activeUsers.filter(Boolean) : [];
   const [nowTick, setNowTick] = useState(Date.now());
   useEffect(() => {
     const tick = () => setNowTick(Date.now());
@@ -339,18 +342,18 @@ export const ActiveOperationsView = ({
       </div>
     </div>
 
-    <RevisionQueuePanel projects={displayedProjects} onSelectProject={selectTask} getCustomerDisplayName={getCustomerDisplayName} />
+    <RevisionQueuePanel projects={safeDisplayedProjects} onSelectProject={selectTask} getCustomerDisplayName={getCustomerDisplayName} />
 
     <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px] gap-5 sm:gap-8">
       <div className="w-full min-w-0">
         {boardViewMode === 'kanban' ? (
-          <OperationsKanban projects={displayedProjects} onSelectProject={selectTask} getCustomerDisplayName={getCustomerDisplayName} onDiscussTask={onDiscussTask} currentUser={currentUser} onPaymentStatusChange={onPaymentStatusChange} />
+          <OperationsKanban projects={safeDisplayedProjects} onSelectProject={selectTask} getCustomerDisplayName={getCustomerDisplayName} onDiscussTask={onDiscussTask} currentUser={currentUser} onPaymentStatusChange={onPaymentStatusChange} />
         ) : (
-          <OperationsTable projects={displayedProjects} onSelectProject={selectTask} getCustomerDisplayName={getCustomerDisplayName} getDraftElapsed={getDraftElapsed} nowTick={nowTick} onDiscussTask={onDiscussTask} currentUser={currentUser} onPaymentStatusChange={onPaymentStatusChange} />
+          <OperationsTable projects={safeDisplayedProjects} onSelectProject={selectTask} getCustomerDisplayName={getCustomerDisplayName} getDraftElapsed={getDraftElapsed} nowTick={nowTick} onDiscussTask={onDiscussTask} currentUser={currentUser} onPaymentStatusChange={onPaymentStatusChange} />
         )}
       </div>
 
-      <TeamActivityPanel users={activeUsers} projects={projects} nowTick={nowTick} ROLES={ROLES} onSelectProject={selectTask} getOperationalUsers={getOperationalUsers} isUserActuallyOnline={isUserActuallyOnline} />
+      <TeamActivityPanel users={safeActiveUsers} projects={safeProjects} nowTick={nowTick} ROLES={ROLES} onSelectProject={selectTask} getOperationalUsers={getOperationalUsers} isUserActuallyOnline={isUserActuallyOnline} />
     </div>
   </div>
   );

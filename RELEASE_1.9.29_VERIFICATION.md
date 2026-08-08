@@ -1,6 +1,6 @@
 # Release 1.9.29 Verification
 
-Release: `1.9.29-final-health-probe-closure`  
+Release: `1.9.29-final-health-probe-closure`
 Backend/frontend: `2.9.29-final-health-probe-closure`
 
 This is a narrow successor to 1.9.28. Production evidence showed that the 1.9.28 permanent backend had already passed relational integrity, liveness and readiness when an anonymous `curl -f /api/db/health` received the expected HTTP 401 from the admin-protected route. Curl converted that response to exit code 22 and the strict deployment controller rolled back a healthy release.
