@@ -79,7 +79,11 @@ test('repeated unhandled failures trigger a controlled restart instead of leavin
 test('backup commands have progress, stale-lock recovery, bounded deadlines, and partial cleanup', () => {
   assert.match(backupCreate, /BACKUP_STALE_LOCK_MS/);
   assert.match(backupCreate, /database export started/);
-  assert.match(backupCreate, /private file archive started/);
+  assert.match(backupCreate, /private file archive started from stable snapshot/);
+  assert.match(backupCreate, /rsync-converged-snapshot/);
+  assert.match(backupCreate, /BACKUP_FILE_SNAPSHOT_ATTEMPTS/);
+  assert.match(backupCreate, /--dry-run/);
+  assert.match(backupCreate, /--itemize-changes/);
   assert.match(backupCreate, /BACKUP_DATABASE_TIMEOUT_MS/);
   assert.match(backupCreate, /BACKUP_FILES_TIMEOUT_MS/);
   assert.match(backupCreate, /\.postgres\.dump\.partial/);

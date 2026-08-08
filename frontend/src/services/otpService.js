@@ -3,7 +3,7 @@ import { authFetch } from './authService';
 
 const buildOtpError = (error) => {
   if (error?.name === 'TypeError' || String(error?.message || '').toLowerCase().includes('failed to fetch')) {
-    return 'OTP backend is not reachable. Start the backend first with: npm run dev:all, or run backend on port 8080.';
+    return 'The secure OTP service is temporarily unreachable. Check your connection and try again.';
   }
   return error?.message || 'OTP service error.';
 };

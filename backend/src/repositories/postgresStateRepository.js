@@ -7,16 +7,60 @@ const KNOWN_STATE_KEYS = new Set([
   'attendanceLogs', 'files', 'chatReads'
 ]);
 
-function stableValue(value) {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.keys(value).sort().map(key => [key, stableValue(value[key])]));
+function stableValue(value, { inArray = false, key = '' } = {}, stack = new Set()) {
+  const valueType = typeof value;
+  if (value === null) return null;
+  if (valueType === 'bigint') throw new TypeError('BigInt values are not valid JSON state.');
+  if (valueType === 'number') return Number.isFinite(value) ? value : null;
+  if (valueType === 'string' || valueType === 'boolean') return value;
+  if (valueType === 'undefined' || valueType === 'function' || valueType === 'symbol') return inArray ? null : undefined;
+
+  if (value && typeof value.toJSON === 'function') {
+    const replacement = value.toJSON(key);
+    if (replacement !== value) return stableValue(replacement, { inArray, key }, stack);
   }
-  return value;
+
+  if (stack.has(value)) throw new TypeError('Circular references are not valid JSON state.');
+  stack.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return Array.from(value, (item, index) => {
+        const normalized = stableValue(item, { inArray:true, key:String(index) }, stack);
+        return normalized === undefined ? null : normalized;
+      });
+    }
+    const normalized = {};
+    for (const childKey of Object.keys(value).sort()) {
+      const child = stableValue(value[childKey], { inArray:false, key:childKey }, stack);
+      if (child !== undefined) normalized[childKey] = child;
+    }
+    return normalized;
+  } finally {
+    stack.delete(value);
+  }
 }
 
 export function stableStringify(value) {
-  return JSON.stringify(stableValue(value));
+  const normalized = stableValue(value);
+  return normalized === undefined ? undefined : JSON.stringify(normalized);
+}
+
+export function canonicalJsonClone(value, context = 'relational state') {
+  let encoded;
+  try {
+    encoded = JSON.stringify(value);
+  } catch (cause) {
+    const error = new Error(`${context} contains a value that PostgreSQL JSON cannot store: ${cause?.message || String(cause)}`);
+    error.code = 'RELATIONAL_NON_JSON_STATE';
+    error.cause = cause;
+    throw error;
+  }
+  if (encoded === undefined) {
+    const error = new Error(`${context} does not contain a JSON value.`);
+    error.code = 'RELATIONAL_NON_JSON_STATE';
+    throw error;
+  }
+  return JSON.parse(encoded);
 }
 
 // Selective writes keep every unrelated top-level collection by reference. Cache
@@ -43,8 +87,8 @@ function stableArrayItemStringCached(value) {
 
 function stableStringifyTopLevelCached(state = {}) {
   if (!state || typeof state !== 'object' || Array.isArray(state)) return stableStringify(state);
-  const keys = Object.keys(state).sort();
-  const entries = keys.map(key => {
+  const entries = [];
+  for (const key of Object.keys(state).sort()) {
     const value = state[key];
     let encoded;
     if (value && typeof value === 'object') {
@@ -53,11 +97,14 @@ function stableStringifyTopLevelCached(state = {}) {
         encoded = Array.isArray(value)
           ? `[${Array.from(value, stableArrayItemStringCached).join(',')}]`
           : stableStringify(value);
-        canonicalTopLevelValueCache.set(value, encoded);
+        if (encoded !== undefined) canonicalTopLevelValueCache.set(value, encoded);
       }
-    } else encoded = JSON.stringify(value);
-    return `${JSON.stringify(key)}:${encoded}`;
-  });
+    } else encoded = stableStringify(value);
+    // JSON.stringify omits undefined/function/symbol object properties. Keep the
+    // cached path byte-identical to the independent uncached startup hash.
+    if (encoded === undefined) continue;
+    entries.push(`${JSON.stringify(key)}:${encoded}`);
+  }
   return `{${entries.join(',')}}`;
 }
 
@@ -970,10 +1017,15 @@ export function rowsRequiringRelationalWrite(rows = [], existingRows = []) {
   });
 }
 
-async function upsertRows(client, config, rows = [], { deleteMissing = true, deleteIds = [] } = {}) {
+async function upsertRows(client, config, rows = [], { deleteMissing = true, deleteIds = [], preserveExistingSortOrder = false } = {}) {
   const columns = config.columns;
   const updateColumns = columns.filter(column => column !== config.idColumn);
   const chunkSize = 150;
+  let nextNewSortOrder = null;
+  if (preserveExistingSortOrder && rows.length) {
+    const minimum = await client.query(`SELECT COALESCE(MIN(sort_order),0)::int AS "minSortOrder" FROM ${config.table}`);
+    nextNewSortOrder = Number(minimum.rows[0]?.minSortOrder || 0) - 1;
+  }
   for (let start = 0; start < rows.length; start += chunkSize) {
     const chunk = rows.slice(start, start + chunkSize);
     const existing = await client.query(
@@ -982,7 +1034,18 @@ async function upsertRows(client, config, rows = [], { deleteMissing = true, del
         WHERE ${config.idColumn} = ANY($1::text[])`,
       [chunk.map(row => row.id)]
     );
-    const pending = rowsRequiringRelationalWrite(chunk, existing.rows);
+    const existingById = new Map(existing.rows.map(row => [String(row.id), row]));
+    const canonicalRows = chunk.map(row => {
+      const current = existingById.get(String(row.id));
+      return {
+        ...row,
+        sortOrder:preserveExistingSortOrder
+          ? (current ? Number(current.sortOrder || 0) : nextNewSortOrder--)
+          : Number(row.sortOrder || 0),
+        payload:canonicalJsonClone(row.payload, `${config.table}:${row.id}`)
+      };
+    });
+    const pending = rowsRequiringRelationalWrite(canonicalRows, existing.rows);
     if (!pending.length) continue;
     const values = [];
     const tuples = pending.map((row, rowIndex) => {
@@ -1033,7 +1096,54 @@ function selectedRowIdSets(collectionRowIds = null) {
   return selected;
 }
 
-function prepareSelectedRows(existingRows = [], incomingRows = [], selectedIds = new Set()) {
+function relationalRowIdentityValues(collection = '', row = {}) {
+  const payload = row?.payload || {};
+  const values = [row?.id];
+  if (collection === 'cases') values.push(payload.id, payload.caseId, payload.displayId, payload.originalTaskId);
+  else if (collection === 'users') values.push(payload.id, payload.userId, payload.username, payload.name);
+  else if (collection === 'payments') values.push(payload.id, payload.paymentId, payload.caseId, payload.caseNo, payload.taskId, payload.projectId);
+  else values.push(payload.id);
+  return [...new Set(values.map(value => String(value || '').trim()).filter(Boolean))];
+}
+
+function resolveSelectedPrimaryIds(collection = '', existingRows = [], incomingRows = [], requestedIds = new Set()) {
+  const aliases = new Map();
+  for (const row of [...(existingRows || []), ...(incomingRows || [])]) {
+    const primary = String(row?.id || '').trim();
+    if (!primary) continue;
+    for (const alias of relationalRowIdentityValues(collection, row)) {
+      if (!aliases.has(alias)) aliases.set(alias, new Set());
+      aliases.get(alias).add(primary);
+    }
+  }
+  const resolved = new Set();
+  const primaryIds = new Set([...(existingRows || []), ...(incomingRows || [])]
+    .map(row => String(row?.id || '').trim())
+    .filter(Boolean));
+  for (const requestedValue of requestedIds || []) {
+    const requested = String(requestedValue || '').trim();
+    if (!requested) continue;
+    // An exact immutable row id always wins over a payload alias. Legacy data
+    // can contain a display/case alias that happens to equal another row id.
+    if (primaryIds.has(requested)) {
+      resolved.add(requested);
+      continue;
+    }
+    const matches = aliases.get(requested);
+    if (matches?.size > 1) {
+      const error = new Error(`Relational row selection is ambiguous for ${collection}:${requested}.`);
+      error.code = 'RELATIONAL_ROW_SELECTION_AMBIGUOUS';
+      error.collection = collection;
+      error.rowId = requested;
+      throw error;
+    }
+    resolved.add(matches?.size === 1 ? [...matches][0] : requested);
+  }
+  return resolved;
+}
+
+function prepareSelectedRows(collection = '', existingRows = [], incomingRows = [], requestedIds = new Set()) {
+  const selectedIds = resolveSelectedPrimaryIds(collection, existingRows, incomingRows, requestedIds);
   const existingById = new Map((existingRows || []).map(row => [String(row.id), row]));
   const incomingById = new Map((incomingRows || []).map(row => [String(row.id), row]));
   let nextSortOrder = (existingRows || []).reduce((minimum, row) => Math.min(minimum, Number(row.sortOrder || 0)), 0) - 1;
@@ -1044,9 +1154,6 @@ function prepareSelectedRows(existingRows = [], incomingRows = [], selectedIds =
     const id = String(idValue);
     const incoming = incomingById.get(id);
     const existing = existingById.get(id);
-    // An explicitly selected row that disappeared from the incoming collection is
-    // a row-level deletion. This is required for task deletion and prevents the
-    // old row from surviving invisibly in PostgreSQL after the UI removes it.
     if (!incoming) {
       if (existing) {
         committedById.delete(id);
@@ -1062,25 +1169,37 @@ function prepareSelectedRows(existingRows = [], incomingRows = [], selectedIds =
     committedById.set(id, adjusted);
   }
   const committedRows = [...committedById.values()].sort((a,b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0) || String(a.id).localeCompare(String(b.id)));
-  return { committedRows, writeRows, deleteIds };
+  return { committedRows, writeRows, deleteIds, selectedIds };
 }
 
 export function prepareRelationalWrite(existingParts = {}, incomingParts = {}, selectedCollections = null, collectionRowIds = null) {
   const selected = selectedCollectionSet(selectedCollections);
   if (!selected) return { committedParts:incomingParts, writeParts:incomingParts, rowSelections:new Map(), rowDeletions:new Map() };
-  const rowSelections = selectedRowIdSets(collectionRowIds);
+  const requestedSelections = selectedRowIdSets(collectionRowIds);
+  const rowSelections = new Map();
   const rowDeletions = new Map();
   const committedParts = { ...existingParts };
   const writeParts = { ...incomingParts };
   for (const key of selected) {
-    const selectedIds = rowSelections.get(key);
-    if (selectedIds) {
-      const prepared = prepareSelectedRows(existingParts[key] || [], incomingParts[key] || [], selectedIds);
-      committedParts[key] = prepared.committedRows;
-      writeParts[key] = prepared.writeRows;
+    const requestedIds = requestedSelections.get(key);
+    if (requestedIds) {
+      const prepared = prepareSelectedRows(key, existingParts[key] || [], incomingParts[key] || [], requestedIds);
+      rowSelections.set(key, prepared.selectedIds);
+      committedParts[key] = prepared.committedRows.map(row => ({
+        ...row,
+        payload:canonicalJsonClone(row.payload, `${key}:${row.id}`)
+      }));
+      writeParts[key] = prepared.writeRows.map(row => ({
+        ...row,
+        payload:canonicalJsonClone(row.payload, `${key}:${row.id}`)
+      }));
       if (prepared.deleteIds?.length) rowDeletions.set(key, prepared.deleteIds);
     } else {
-      committedParts[key] = incomingParts[key];
+      committedParts[key] = (incomingParts[key] || []).map(row => ({
+        ...row,
+        payload:canonicalJsonClone(row.payload, `${key}:${row.id}`)
+      }));
+      writeParts[key] = committedParts[key];
     }
   }
   return { committedParts, writeParts, rowSelections, rowDeletions };
@@ -1136,7 +1255,8 @@ export function prepareFastSelectedRelationalWrite({
   collectionRowIds = null
 } = {}) {
   const selected = selectedCollectionSet(selectedCollections);
-  const rowSelections = selectedRowIdSets(collectionRowIds);
+  const requestedSelections = selectedRowIdSets(collectionRowIds);
+  const rowSelections = new Map();
   if (!selected || !selected.size) return null;
 
   const selectedKeys = [...selected];
@@ -1148,29 +1268,32 @@ export function prepareFastSelectedRelationalWrite({
   const rowDeletions = new Map();
 
   for (const key of normalKeys) {
-    const selectedIds = rowSelections.get(key);
-    const prepared = selectedIds
+    const requestedIds = requestedSelections.get(key);
+    const prepared = requestedIds
       ? prepareSelectedRows(
+          key,
           existingSelectedParts[key] || [],
           incomingSelectedParts[key] || [],
-          selectedIds
+          requestedIds
         )
       : {
           committedRows:incomingSelectedParts[key] || [],
           writeRows:incomingSelectedParts[key] || [],
           deleteIds:[]
         };
+    const selectedIds = prepared.selectedIds || null;
+    if (selectedIds?.size) rowSelections.set(key, selectedIds);
     const committedRows = prepared.committedRows.map(row => {
       // Row-level writes preserve every unrelated payload reference. Only the
       // selected records are cloned for transaction ownership, preventing a
       // one-row audit/notification/task update from cloning the whole table.
       if (selectedIds && !selectedIds.has(String(row.id))) return row;
       if (row.payload && typeof row.payload === 'object') canonicalArrayItemValueCache.delete(row.payload);
-      return { ...row, payload:structuredClone(row.payload) };
+      return { ...row, payload:canonicalJsonClone(row.payload, `${key}:${row.id}`) };
     });
     const writeRows = prepared.writeRows.map(row => ({
       ...row,
-      payload: structuredClone(row.payload)
+      payload:canonicalJsonClone(row.payload, `${key}:${row.id}`)
     }));
     committedState[key] = committedRows.map(row => row.payload);
     writeParts[key] = writeRows;
@@ -1181,11 +1304,11 @@ export function prepareFastSelectedRelationalWrite({
   // tables. Supporting them here keeps task deletion and chat-read updates on the
   // selective path rather than rebuilding every file/performance/chat row.
   if (selected.has('deletedProjectIds')) {
-    committedState.deletedProjectIds = structuredClone(incomingState.deletedProjectIds || []);
+    committedState.deletedProjectIds = canonicalJsonClone(incomingState.deletedProjectIds || [], 'deletedProjectIds');
     writeParts.deletedProjectIds = committedState.deletedProjectIds;
   }
   if (selected.has('chatReads')) {
-    committedState.chatReads = structuredClone(incomingState.chatReads || {});
+    committedState.chatReads = canonicalJsonClone(incomingState.chatReads || {}, 'chatReads');
     writeParts.chatReads = Object.entries(committedState.chatReads).map(([id, payload]) => ({ id, payload }));
   }
   if (selected.has('misc')) {
@@ -1193,7 +1316,7 @@ export function prepareFastSelectedRelationalWrite({
     Object.keys(committedState).forEach(key => {
       if (!KNOWN_STATE_KEYS.has(key)) delete committedState[key];
     });
-    Object.assign(committedState, structuredClone(misc));
+    Object.assign(committedState, canonicalJsonClone(misc, 'misc state'));
     writeParts.misc = misc;
   }
 
@@ -1211,6 +1334,15 @@ export function mergeRelationalParts(existingParts = {}, incomingParts = {}, sel
   return prepareRelationalWrite(existingParts, incomingParts, selectedCollections).committedParts;
 }
 
+
+function payloadDifferenceKeys(expected = {}, physical = {}) {
+  if (!expected || typeof expected !== 'object' || Array.isArray(expected)
+      || !physical || typeof physical !== 'object' || Array.isArray(physical)) return [];
+  return [...new Set([...Object.keys(expected), ...Object.keys(physical)])]
+    .filter(key => stableStringify(expected[key]) !== stableStringify(physical[key]))
+    .sort()
+    .slice(0, 25);
+}
 
 async function verifySelectedRowsPhysicallyPersisted(client, preparedWrite = {}) {
   const rowSelections = preparedWrite.rowSelections || new Map();
@@ -1233,24 +1365,80 @@ async function verifySelectedRowsPhysicallyPersisted(client, preparedWrite = {})
         if (physicalRows.has(keyId)) {
           const error = new Error(`Relational row deletion verification failed for ${key}:${keyId}.`);
           error.code = 'RELATIONAL_SELECTED_ROW_DELETE_MISMATCH';
+          error.collection = key;
+          error.rowId = keyId;
           throw error;
         }
         continue;
       }
       const expected = expectedRows.get(keyId);
       const physical = physicalRows.get(keyId);
-      const jsonSafeExpected = expected ? JSON.parse(JSON.stringify(expected.payload)) : null;
-      if (!expected || !physical
-        || Number(expected.sortOrder || 0) !== Number(physical.sortOrder || 0)
-        || stableStringify(jsonSafeExpected) !== stableStringify(physical.payload)) {
-        const error = new Error(`Relational selected-row verification failed for ${key}:${keyId}.`);
+      const jsonSafeExpected = expected ? canonicalJsonClone(expected.payload, `${key}:${keyId}`) : null;
+      if (!expected || !physical || stableStringify(jsonSafeExpected) !== stableStringify(physical.payload)) {
+        const expectedHash = expected ? crypto.createHash('sha256').update(stableStringify(jsonSafeExpected) || '').digest('hex') : '';
+        const physicalHash = physical ? crypto.createHash('sha256').update(stableStringify(physical.payload) || '').digest('hex') : '';
+        const changedKeys = payloadDifferenceKeys(jsonSafeExpected, physical?.payload);
+        const error = new Error(`Relational selected-row verification failed for ${key}:${keyId}${changedKeys.length ? ` (changed fields: ${changedKeys.join(', ')})` : ''}.`);
         error.code = 'RELATIONAL_SELECTED_ROW_MISMATCH';
         error.collection = key;
         error.rowId = keyId;
+        error.expectedPayloadHash = expectedHash;
+        error.physicalPayloadHash = physicalHash;
+        error.changedFields = changedKeys;
         throw error;
       }
     }
   }
+}
+
+function selectedStateValue(state = {}, key = '') {
+  if (key === 'cases') return state.cases || state.projects || [];
+  if (key === 'teamChat') return state.teamChat || state.chatMessages || [];
+  if (key === 'misc') return Object.fromEntries(Object.entries(state).filter(([name]) => !KNOWN_STATE_KEYS.has(name)));
+  return state[key] ?? (key === 'chatReads' ? {} : []);
+}
+
+async function readPhysicalStateAfterWrite(client, baseState = {}, selectedCollections = null) {
+  const selected = selectedCollectionSet(selectedCollections);
+  if (!selected) {
+    const parts = await readRelationalParts(client);
+    return { state:recomposeState(parts), counts:entityCounts(parts), full:true };
+  }
+  const state = { ...baseState };
+  for (const key of selected) {
+    if (Object.prototype.hasOwnProperty.call(TABLE_CONFIG, key)) {
+      const rows = await readRows(client, TABLE_CONFIG[key].table, TABLE_CONFIG[key].idColumn === 'id' ? 'sort_order,id' : TABLE_CONFIG[key].idColumn);
+      state[key] = rows.map(row => row.payload);
+      continue;
+    }
+    if (key === 'deletedProjectIds') {
+      const rows = await client.query('SELECT project_id FROM ops_deleted_projects ORDER BY sort_order,project_id');
+      state.deletedProjectIds = rows.rows.map(row => row.project_id);
+      continue;
+    }
+    if (key === 'chatReads') {
+      const rows = await readRows(client, 'ops_chat_reads', 'reader_key');
+      state.chatReads = Object.fromEntries(rows.map(row => [row.id, row.payload]));
+      continue;
+    }
+    if (key === 'misc') {
+      for (const name of Object.keys(state)) if (!KNOWN_STATE_KEYS.has(name)) delete state[name];
+      const rows = await client.query('SELECT key,payload FROM ops_misc_state ORDER BY key');
+      Object.assign(state, Object.fromEntries(rows.rows.map(row => [row.key, row.payload])));
+    }
+  }
+  return { state, counts:directStateCounts(state), full:false };
+}
+
+function assertSelectedCollectionsMatchPhysical(intendedState = {}, physicalState = {}, selectedCollections = null) {
+  const selected = selectedCollectionSet(selectedCollections);
+  if (!selected) return;
+  const mismatches = [...selected].filter(key => stableStringify(selectedStateValue(intendedState, key)) !== stableStringify(selectedStateValue(physicalState, key)));
+  if (!mismatches.length) return;
+  const error = new Error(`PostgreSQL read-back differs from the intended committed collections: ${mismatches.join(', ')}.`);
+  error.code = 'RELATIONAL_SELECTED_COLLECTION_MISMATCH';
+  error.collections = mismatches;
+  throw error;
 }
 
 async function syncRelationalParts(client, parts = {}, selectedCollections = null, rowSelections = new Map(), rowDeletions = new Map()) {
@@ -1259,7 +1447,11 @@ async function syncRelationalParts(client, parts = {}, selectedCollections = nul
 
   for (const [key, config] of Object.entries(TABLE_CONFIG)) {
     if (!shouldSync(key)) continue;
-    await upsertRows(client, config, parts[key] || [], { deleteMissing:!rowSelections.has(key), deleteIds:rowDeletions.get(key) || [] });
+    await upsertRows(client, config, parts[key] || [], {
+      deleteMissing:!rowSelections.has(key),
+      deleteIds:rowDeletions.get(key) || [],
+      preserveExistingSortOrder:rowSelections.has(key)
+    });
   }
 
   if (shouldSync('deletedProjectIds')) {
@@ -1520,7 +1712,7 @@ export async function persistRelationalState(pool, {
     if (metadata.allowLegacyOrphans === true) {
       await client.query("SELECT set_config('kalpa.allow_legacy_orphans','on',true)");
     }
-    const current = await client.query('SELECT state_version,entity_counts FROM app_state_metadata WHERE key=$1 FOR UPDATE', ['main']);
+    const current = await client.query('SELECT state_version,snapshot_hash,entity_counts FROM app_state_metadata WHERE key=$1 FOR UPDATE', ['main']);
     const currentVersion = Number(current.rows[0]?.state_version || 0);
     if (currentVersion !== Number(expectedVersion)) {
       const error = new Error(`State changed on the server while this update was being saved. Expected version ${expectedVersion}, current version ${currentVersion}. Refresh and retry.`);
@@ -1529,12 +1721,38 @@ export async function persistRelationalState(pool, {
       throw error;
     }
 
-    // A partial relational write must hash and revision the state that will
-    // actually exist in PostgreSQL, not the larger normalized in-memory state.
-    // This matters because startup normalization can expose derived performance
-    // and file records that have not yet been durably materialized. Updating the
-    // metadata hash from that in-memory view during a users-only heartbeat would
-    // otherwise make the next restart fail its integrity check.
+    // Selective writes are built from the last physically verified relational
+    // shadow. Verify that immutable base before touching rows so an accidental
+    // in-process mutation or stale cache can never be converted into new metadata.
+    if (selectedCollections && persistedBaseState) {
+      const shadowHash = stateSnapshotHash(persistedBaseState, { cacheTopLevel:true });
+      const expectedShadowHash = String(current.rows[0]?.snapshot_hash || '');
+      const shadowCounts = directStateCounts(persistedBaseState);
+      const shadowCountMismatches = compareCounts(current.rows[0]?.entity_counts || {}, shadowCounts);
+      if (!expectedShadowHash || shadowHash !== expectedShadowHash || shadowCountMismatches.length) {
+        const error = new Error(`The in-process relational shadow no longer matches committed metadata${shadowCountMismatches.length ? ` for: ${shadowCountMismatches.join(', ')}` : ''}. The write was blocked before PostgreSQL rows changed.`);
+        error.code = 'RELATIONAL_SHADOW_HASH_DIVERGENCE';
+        error.expectedHash = expectedShadowHash;
+        error.actualHash = shadowHash;
+        error.collections = shadowCountMismatches;
+        throw error;
+      }
+    }
+
+    const skipRevisionSnapshot = metadata.skipRevisionSnapshot === true;
+    let shouldWriteRevisionSnapshot = !skipRevisionSnapshot || metadata.forceRevisionSnapshot === true;
+    if (!shouldWriteRevisionSnapshot && metadata.periodicRevisionSnapshot === true) {
+      const revisionInterval = Math.max(5, Math.min(500, Number(metadata.revisionSnapshotInterval || 100)));
+      const revisionMaxAgeMinutes = Math.max(5, Math.min(24 * 60, Number(metadata.revisionSnapshotMaxAgeMinutes || 60)));
+      const latestRevision = await client.query('SELECT state_version,created_at FROM state_revisions ORDER BY state_version DESC LIMIT 1');
+      const latestVersion = Number(latestRevision.rows[0]?.state_version || 0);
+      const latestAt = latestRevision.rows[0]?.created_at ? new Date(latestRevision.rows[0].created_at).getTime() : 0;
+      shouldWriteRevisionSnapshot = !latestRevision.rows.length
+        || Number(targetVersion) - latestVersion >= revisionInterval
+        || !latestAt
+        || Date.now() - latestAt >= revisionMaxAgeMinutes * 60_000;
+    }
+
     const fastSelectedWrite = selectedCollections && persistedBaseState
       ? prepareFastSelectedRelationalWrite({
           persistedBaseState,
@@ -1545,42 +1763,44 @@ export async function persistRelationalState(pool, {
       : null;
 
     let preparedWrite;
-    let committedState;
-    let counts;
+    let intendedCommittedState;
     if (fastSelectedWrite) {
       preparedWrite = fastSelectedWrite;
-      committedState = fastSelectedWrite.committedState;
-      counts = fastSelectedWrite.counts;
+      intendedCommittedState = fastSelectedWrite.committedState;
     } else {
-      const incomingParts = decomposeState(normalized);
+      const jsonSafeNormalized = selectedCollections ? normalized : canonicalJsonClone(normalized, 'complete relational state');
+      const incomingParts = decomposeState(jsonSafeNormalized);
       const existingParts = selectedCollections
         ? (persistedBaseState ? decomposeState(persistedBaseState) : await readRelationalParts(client))
         : null;
       preparedWrite = selectedCollections
         ? prepareRelationalWrite(existingParts, incomingParts, [...selectedCollections], metadata.collectionRowIds)
         : { committedParts:incomingParts, writeParts:incomingParts, rowSelections:new Map(), rowDeletions:new Map() };
-      const committedParts = preparedWrite.committedParts;
-      committedState = selectedCollections ? recomposeState(committedParts) : normalized;
-      counts = entityCounts(committedParts);
+      intendedCommittedState = selectedCollections ? recomposeState(preparedWrite.committedParts) : jsonSafeNormalized;
     }
-    const hash = stateSnapshotHash(committedState, { cacheTopLevel:true });
 
     await syncRelationalParts(client, preparedWrite.writeParts, metadata.collections, preparedWrite.rowSelections, preparedWrite.rowDeletions || new Map());
     await verifySelectedRowsPhysicallyPersisted(client, preparedWrite);
-    // Entity counts are part of the integrity boundary and must describe the
-    // rows that PostgreSQL actually committed. Older live processes could
-    // calculate file/performance counts from a normalized shadow and silently
-    // reintroduce count-only drift even while the canonical snapshot hash was
-    // still correct. Recheck only the collections touched by a selective write
-    // (all collections for a full write), fail closed on any shadow divergence,
-    // and preserve the already verified counts of unrelated tables.
-    const physicalCounts = await readPhysicalEntityCounts(client, selectedCollections ? [...selectedCollections] : null);
-    counts = mergeVerifiedPhysicalCounts({
+
+    // The integrity hash is now built from PostgreSQL read-back, never from an
+    // optimistic in-memory representation. Routine writes reread only touched
+    // collections; periodic recovery revisions independently reread every table.
+    const physical = await readPhysicalStateAfterWrite(
+      client,
+      intendedCommittedState,
+      shouldWriteRevisionSnapshot ? null : (selectedCollections ? [...selectedCollections] : null)
+    );
+    if (!physical.full) assertSelectedCollectionsMatchPhysical(intendedCommittedState, physical.state, [...selectedCollections]);
+    let committedState = physical.state;
+    const calculatedCounts = physical.counts;
+    const physicalCounts = await readPhysicalEntityCounts(client, shouldWriteRevisionSnapshot ? null : (selectedCollections ? [...selectedCollections] : null));
+    const counts = mergeVerifiedPhysicalCounts({
       metadataCounts:current.rows[0]?.entity_counts || {},
-      calculatedCounts:counts,
+      calculatedCounts,
       physicalCounts,
-      selectedCollections:selectedCollections ? [...selectedCollections] : null
+      selectedCollections:shouldWriteRevisionSnapshot ? null : (selectedCollections ? [...selectedCollections] : null)
     });
+    const hash = stateSnapshotHash(committedState, { cacheTopLevel:true });
     const financeEvents = Array.isArray(metadata.financeEvents)
       ? metadata.financeEvents
       : (metadata.financeEvent ? [metadata.financeEvent] : []);
@@ -1606,19 +1826,6 @@ export async function persistRelationalState(pool, {
 
     const actor = safeText(metadata.actor || metadata.financeEvent?.actor || metadata.authOperations?.[0]?.actor || 'system');
     const reason = safeText(metadata.reason || (metadata.financeEvent ? 'finance_update' : metadata.authOperations?.length ? 'authentication_update' : 'state_update'));
-    const skipRevisionSnapshot = metadata.skipRevisionSnapshot === true;
-    let shouldWriteRevisionSnapshot = !skipRevisionSnapshot || metadata.forceRevisionSnapshot === true;
-    if (!shouldWriteRevisionSnapshot && metadata.periodicRevisionSnapshot === true) {
-      const revisionInterval = Math.max(5, Math.min(500, Number(metadata.revisionSnapshotInterval || 100)));
-      const revisionMaxAgeMinutes = Math.max(5, Math.min(24 * 60, Number(metadata.revisionSnapshotMaxAgeMinutes || 60)));
-      const latestRevision = await client.query('SELECT state_version,created_at FROM state_revisions ORDER BY state_version DESC LIMIT 1');
-      const latestVersion = Number(latestRevision.rows[0]?.state_version || 0);
-      const latestAt = latestRevision.rows[0]?.created_at ? new Date(latestRevision.rows[0].created_at).getTime() : 0;
-      shouldWriteRevisionSnapshot = !latestRevision.rows.length
-        || Number(targetVersion) - latestVersion >= revisionInterval
-        || !latestAt
-        || Date.now() - latestAt >= revisionMaxAgeMinutes * 60_000;
-    }
     if (shouldWriteRevisionSnapshot) {
       await client.query(
         `INSERT INTO state_revisions(state_version,actor,reason,snapshot_hash,entity_counts,snapshot)
@@ -1626,10 +1833,18 @@ export async function persistRelationalState(pool, {
         [targetVersion, actor || 'system', reason, hash, JSON.stringify(counts), JSON.stringify(committedState)]
       );
     }
-    await client.query(
-      `UPDATE app_state_metadata SET state_version=$2,snapshot_hash=$3,entity_counts=$4::jsonb,source='relational',updated_at=now() WHERE key=$1`,
-      ['main', targetVersion, hash, JSON.stringify(counts)]
+    const metadataUpdate = await client.query(
+      `UPDATE app_state_metadata
+          SET state_version=$2,snapshot_hash=$3,entity_counts=$4::jsonb,source='relational',updated_at=now()
+        WHERE key=$1 AND state_version=$5 AND snapshot_hash=$6
+        RETURNING state_version,snapshot_hash,entity_counts`,
+      ['main', targetVersion, hash, JSON.stringify(counts), expectedVersion, String(current.rows[0]?.snapshot_hash || '')]
     );
+    if (metadataUpdate.rowCount !== 1) {
+      const error = new Error('Relational integrity metadata changed before the transaction could commit.');
+      error.code = 'RELATIONAL_METADATA_COMPARE_AND_SWAP_FAILED';
+      throw error;
+    }
 
     if (shouldWriteRevisionSnapshot) {
       const keep = Math.max(25, Math.min(5000, Number(revisionRetention || 200)));

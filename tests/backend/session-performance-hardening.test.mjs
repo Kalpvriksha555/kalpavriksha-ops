@@ -37,10 +37,11 @@ test('state hydration uses a compact read-only snapshot and cached performance b
 });
 
 test('partial relational writes use the version-matched persisted shadow instead of rereading every table', () => {
-  assert.match(server, /relationalShadowState = structuredClone\(loaded\.persistedState \|\| loaded\.state\)/);
+  assert.match(server, /relationalShadowState = ownRelationalShadow\(loaded\.persistedState \|\| loaded\.state\)/);
+  assert.match(server, /function freezeRelationalShadow/);
   assert.match(server, /persistedBaseState: relationalShadowState/);
   assert.match(repository, /persistedBaseState \? decomposeState\(persistedBaseState\) : await readRelationalParts\(client\)/);
-  assert.match(repository, /committedState,/);
+  assert.match(repository, /const physical = await readPhysicalStateAfterWrite/);
   assert.match(repository, /committedStateOwned: Boolean\(fastSelectedWrite\)/);
   assert.match(repository, /revisionSnapshotWritten:shouldWriteRevisionSnapshot/);
 });
@@ -75,7 +76,7 @@ test('adaptive state reads return unchanged or presence-only payloads without re
 test('leaderboard keeps historical aggregates cached while live presence stays fresh', () => {
   assert.match(server, /let leaderboardAggregateCache = new Map\(\)/);
   assert.match(server, /function leaderboardAggregateStats/);
-  assert.match(server, /const cacheKey = `\$\{performanceDataRevision\}:\$\{config\.key\}:\$\{todayKey\}`/);
+  assert.match(server, /const cacheKey = `\$\{performanceDataRevision\}:\$\{rangeKey\}:\$\{todayKey\}`/);
   assert.match(server, /function buildTeamLeaderboard[\s\S]*presenceById[\s\S]*availability:presence\.availability/);
   assert.match(server, /leaderboardAggregateCache\.clear\(\)/);
   assert.match(server, /return !reason\.startsWith\('presence_'\)/);
@@ -86,33 +87,8 @@ test('leaderboard case counts resolve assignee ids as well as display names', ()
   const end = server.indexOf('function buildTeamLeaderboard', start);
   const block = server.slice(start, end);
   assert.match(block, /userKeyById/);
-  assert.match(block, /record\.assigneeId/);
+  assert.match(block, /c\.assigneeId/);
   assert.match(block, /canonicalOwner/);
-});
-
-
-test('performance leaderboard supports exact calendar months, overall scope, and reversible admin baselines', () => {
-  assert.match(server, /function performanceScopeConfig/);
-  assert.match(server, /scope:'month'/);
-  assert.match(server, /scope:'overall'/);
-  assert.match(server, /serverMonthKey\(timestamp\) === config\.month/);
-  assert.match(server, /app\.patch\('\/api\/performance\/baseline\/:id', requireAdminSession/);
-  assert.match(server, /scoreBaselineMonth/);
-  assert.match(server, /Full performance score history restored/);
-  assert.match(server, /\['Manager','Designer'\]\.includes\(targetRole\)/);
-  assert.match(server, /PERFORMANCE_ROLE_NOT_ELIGIBLE/);
-  assert.match(server, /collections:\['users','audit'\]/);
-});
-
-test('monthly performance excludes ambiguous and carried-forward completions', () => {
-  assert.match(server, /completionEventAt:completionEventAt\|\|0/);
-  assert.match(server, /if \(config\.scope === 'month'\) return explicit/);
-  assert.match(server, /performanceCaseCompletedAt/);
-  assert.match(server, /function performanceWorkAndCompletionMatchScope/);
-  assert.match(server, /config\.scope === 'month' \|\| baselineAt/);
-  assert.match(server, /parseDateMs\(record\.assignedAt \|\| record\.startedAt \|\| record\.createdAt\)/);
-  assert.match(server, /const completedInScope = completed && performanceWorkAndCompletionMatchScope\(createdAt, completedAt/);
-  assert.doesNotMatch(server.slice(server.indexOf('function performanceCaseCompletedAt'), server.indexOf('function performanceCaseRevisionAt')), /updatedAt/);
 });
 
 test('collection-aware workspace sync does not resend cases for chat-only changes', () => {

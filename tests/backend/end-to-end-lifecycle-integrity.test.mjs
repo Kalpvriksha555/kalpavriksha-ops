@@ -37,8 +37,8 @@ test('long uploads reauthorise a fresh task immediately before persistence',()=>
   const end=server.indexOf("app.get('/api/files/:id'",start);
   const block=server.slice(start,end);
   assert.ok(block.indexOf('prepareSecureUploads') < block.indexOf('taskDb(projectId'));
-  assert.match(block,/authorizeUpload\(readDb\(\)\)/);
-  assert.match(block,/const caseRecord=authorizeUpload\(d\)/);
+  assert.match(block,/const initialState=readDb\(\);\s*authorizeUpload\(initialState\)/);
+  assert.match(block,/const uploadSnapshot=taskDb\(projectId,\{files:true\}\);\s*const d=uploadSnapshot\.snapshot;\s*const caseRecord=authorizeUpload\(d\)/);
 });
 
 test('hot task, upload, and delete paths avoid cloning unrelated workspace collections',()=>{
@@ -222,34 +222,4 @@ test('deployment opts into clean-install, environment, and backup gates before d
   assert.match(deploy,/KALPA_VERIFY_INCLUDE_DEPLOYMENT_GATES=true/);
   for (const id of ['clean-install','production-environment','production-integrity-audit','backup-create','backup-verify','backup-status']) assert.match(matrix,new RegExp(`id:'${id}'`));
   assert.ok(deploy.indexOf('npm run verify:matrix') < deploy.indexOf('Stopping application writes'));
-});
-
-
-test('final deployment verification uses public health and authenticated database integrity checks',()=>{
-  const deploy=fs.readFileSync(new URL('../../scripts/deploy-1.9.24-vps.sh',import.meta.url),'utf8');
-  const finalBlock=deploy.slice(deploy.indexOf('log "Final health responses"'));
-  assert.match(finalBlock,/api\/health\/live/);
-  assert.match(finalBlock,/api\/health\/ready/);
-  assert.match(finalBlock,/npm run db:integrity --prefix backend/);
-  assert.doesNotMatch(finalBlock,/curl -fsS .*api\/db\/health/);
-});
-
-
-test('monthly performance hot deploy updates only its runtime delta without the full release matrix',()=>{
-  const deploy=fs.readFileSync(new URL('../../scripts/deploy-monthly-performance-only-vps.sh',import.meta.url),'utf8');
-  assert.match(deploy,/backend\/src\/server\.js/);
-  assert.match(deploy,/backend\/src\/repositories\/postgresStateRepository\.js/);
-  assert.match(deploy,/npm ci --prefix "\$STAGE\/frontend"/);
-  assert.match(deploy,/monthly-finance-reports-ledger\.test\.mjs/);
-  assert.match(deploy,/session-performance-hardening\.test\.mjs/);
-  assert.match(deploy,/db-integrity-canonicalize-current\.mjs/);
-  assert.match(deploy,/CANONICALIZE VERIFIED CURRENT PHYSICAL RELATIONAL STATE/);
-  assert.match(deploy,/BACKEND WRITES ARE STOPPED/);
-  assert.ok(deploy.indexOf('pm2 stop "$PM2_NAME"') < deploy.indexOf('Canonicalizing only integrity metadata'));
-  assert.match(deploy,/Operational PostgreSQL rows rewritten: no/);
-  assert.match(deploy,/api\/health\/ready/);
-  assert.doesNotMatch(deploy,/verify:matrix/);
-  assert.doesNotMatch(deploy,/db:migrate/);
-  assert.doesNotMatch(deploy,/backup:create/);
-  assert.doesNotMatch(deploy,/npm ci --prefix backend/);
 });

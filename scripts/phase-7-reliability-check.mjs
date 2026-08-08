@@ -20,7 +20,9 @@ const component=path.join(backupRoot,'sample.dump');fs.writeFileSync(component,'
 const sha256=crypto.createHash('sha256').update(fs.readFileSync(component)).digest('hex');
 const manifest={schemaVersion:1,id:'sample',backupType:'DATABASE',status:'VERIFIED',ok:true,createdAt:new Date().toISOString(),verifiedAt:new Date().toISOString(),components:{database:{file:'sample.dump',sizeBytes:fs.statSync(component).size,sha256}},verification:{ok:true,checks:[{component:'database',ok:true}]}};
 fs.writeFileSync(path.join(backupRoot,'sample.manifest.json'),JSON.stringify(manifest,null,2));
-const backupStatus=inspectBackupManifests(backupRoot,{maxAgeHours:26});assert.equal(backupStatus.ok,true);assert.equal(backupStatus.status,'HEALTHY');
+const failedManifest={schemaVersion:2,id:'failed-later',backupType:'FULL',status:'FAILED',ok:false,createdAt:new Date(Date.now()+1000).toISOString(),completedAt:new Date(Date.now()+1000).toISOString(),components:{},verification:{ok:false,checks:[]},error:'simulated failed later attempt'};
+fs.writeFileSync(path.join(backupRoot,'failed-later.manifest.json'),JSON.stringify(failedManifest,null,2));
+const backupStatus=inspectBackupManifests(backupRoot,{maxAgeHours:26});assert.equal(backupStatus.ok,true);assert.equal(backupStatus.status,'HEALTHY');assert.equal(backupStatus.latest.id,'failed-later');assert.equal(backupStatus.latestVerified.id,'sample');assert.equal(backupStatus.warning,'LATEST_BACKUP_ATTEMPT_FAILED');
 const disk=filesystemUsage(temp);assert.equal(disk.ok,true);assert.ok(disk.totalBytes>0);
 const jobs=createOperationalJobStore({dataDir:temp,usePostgres:false});
 const failed=await jobs.recordFailure('TEST_JOB',new Error('expected failure'),{safe:true});assert.equal(failed.status,'FAILED');
@@ -46,7 +48,7 @@ try{
  const readyAgain=await request('/api/health/ready');assert.equal(readyAgain.response.status,200);
  const login=await request('/api/auth/login',{method:'POST',body:{username:'phase7admin',password:'StrongAdmin123'}});assert.equal(login.response.ok,true,JSON.stringify(login.payload));const session={cookie:login.cookie,csrf:login.payload.csrfToken};
  const reliability=await request('/api/system/reliability',{session});assert.equal(reliability.response.status,200,JSON.stringify(reliability.payload));assert.equal(reliability.payload.backups.status,'HEALTHY');assert.equal(reliability.payload.disk.storage.ok,true);
- const backups=await request('/api/system/backups',{session});assert.equal(backups.payload.latest.id,'sample');
+ const backups=await request('/api/system/backups',{session});assert.equal(backups.payload.latest.id,'failed-later');assert.equal(backups.payload.latestVerified.id,'sample');assert.equal(backups.payload.warning,'LATEST_BACKUP_ATTEMPT_FAILED');
  const runtimeJobs=await request('/api/system/jobs',{session});assert.equal(runtimeJobs.response.ok,true);assert.equal(runtimeJobs.payload.jobs.some(job=>job.id===safeFailedJob.id),true);
  const safeRetry=await request(`/api/system/jobs/${safeFailedJob.id}/retry`,{method:'POST',session});assert.equal(safeRetry.response.status,200);assert.equal(safeRetry.payload.job.status,'PENDING');
  const unsafeRetry=await request(`/api/system/jobs/${unsafeFailedJob.id}/retry`,{method:'POST',session});assert.equal(unsafeRetry.response.status,409);assert.equal(unsafeRetry.payload.code,'UNSAFE_AUTOMATIC_RETRY');

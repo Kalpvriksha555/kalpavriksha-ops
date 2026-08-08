@@ -19,6 +19,7 @@ requireText('backend/src/server.js', /auth_credentials/, 'Credential store is mi
 requireText('backend/src/server.js', /auth_sessions/, 'Session store is missing.');
 requireText('backend/src/server.js', /auth_events/, 'Authentication audit store is missing.');
 requireText('backend/src/server.js', /migrateLegacyCredentials/, 'Legacy credential migration is missing.');
+requireText('backend/src/server.js', /PASSWORD_RECOVERY_REQUESTED/, 'Password recovery audit coverage is missing.');
 requireText('frontend/src/services/authService.js', /credentials:\s*'include'/, 'Frontend cookie transport is missing.');
 requireText('frontend/src/App.jsx', /clearBrowserSessionApi\(\)/, 'Fresh-login browser bootstrap is missing.');
 requireText('backend/src/server.js', /app\.post\('\/api\/auth\/clear-browser-session'/, 'Browser-session revocation endpoint is missing.');
@@ -133,6 +134,28 @@ try {
   assert(created.response.status === 201 && created.payload.user?.mustChangePassword === true, 'Temporary employee account creation failed.');
   const userId = created.payload.user.id;
 
+  const managerCreated = await jsonRequest('/api/auth/users', {
+    method: 'POST', cookie: adminCookie, csrf: adminCsrf,
+    body: { name: 'Phase 3 Manager', username: 'phase3manager', password: 'ManagerTemp123', role: 'MANAGER' }
+  });
+  assert(managerCreated.response.status === 201 && managerCreated.payload.user?.role === 'Manager', 'Manager account creation failed.');
+  const managerId = managerCreated.payload.user.id;
+  const managerLogin = await jsonRequest('/api/auth/login', {
+    method: 'POST', body: { username: 'phase3manager', password: 'ManagerTemp123' }
+  });
+  assert(managerLogin.response.ok && managerLogin.payload.user?.role === 'Manager', 'Manager login failed.');
+  const managerChanged = await jsonRequest('/api/auth/change-password', {
+    method: 'POST', cookie: managerLogin.cookie, csrf: managerLogin.payload.csrfToken,
+    body: { currentPassword: 'ManagerTemp123', newPassword: 'ManagerPermanent456' }
+  });
+  assert(managerChanged.response.ok && managerChanged.payload.user?.mustChangePassword === false, 'Manager password replacement failed.');
+  const managerState = await jsonRequest('/api/state', { cookie: managerChanged.cookie });
+  assert(managerState.response.ok, 'Manager state access failed.');
+  const peerDesigner = (managerState.payload.users || []).find(user => String(user.id || '') === String(userId));
+  assert(peerDesigner && String(peerDesigner.id || '') === String(userId), 'Manager could not locate the Designer peer by immutable user id.');
+  assert(!(peerDesigner.aadharNumber || peerDesigner.panNumber || peerDesigner.bankDetails || peerDesigner.emergencyContact || peerDesigner.address), 'Peer profile private fields leaked to Manager state.');
+  assert(String(managerId || '').length > 0, 'Manager id was not assigned.');
+
   const tempLogin = await jsonRequest('/api/auth/login', {
     method: 'POST', body: { username: 'phase3designer', password: 'TempSecure123' }
   });
@@ -179,7 +202,7 @@ try {
 
   const storedDb = fs.readFileSync(dbFile, 'utf8');
   const storedAuth = fs.readFileSync(authFile, 'utf8');
-  for (const secret of ['\"password\":\"123\"', 'TempSecure123', 'Permanent456']) {
+  for (const secret of ['\"password\":\"123\"', 'TempSecure123', 'Permanent456', 'ManagerTemp123']) {
     assert(!storedDb.includes(secret) && !storedAuth.includes(secret), 'A plaintext password was written to persistent storage.');
   }
   const authStore = JSON.parse(storedAuth);

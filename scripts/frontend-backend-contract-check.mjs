@@ -67,7 +67,6 @@ const requiredContracts = [
   ['POST','/api/otp/send'],
   ['POST','/api/otp/verify'],
   ['GET','/api/performance/leaderboard'],
-  ['PATCH','/api/performance/baseline/:id'],
   ['POST','/api/performance/rebuild'],
   ['GET','/api/finance/history/:id'],
   ['GET','/api/system/reliability'],
@@ -86,7 +85,7 @@ const frontendMarkers = [
   '/api/auth/login', '/api/auth/session', '/api/state?', '/api/state/projects',
   '/payment-status', '/api/presence', '/api/files/upload', '/api/chat',
   '/api/notifications', '/api/profile/photo', '/api/performance/leaderboard',
-  '/api/performance/baseline', '/api/performance/rebuild', '/api/finance/history', '/api/system/reliability'
+  '/api/performance/rebuild', '/api/finance/history', '/api/system/reliability'
 ];
 for (const marker of frontendMarkers) {
   assert(frontendSource.includes(marker), `Frontend calls ${marker}`);

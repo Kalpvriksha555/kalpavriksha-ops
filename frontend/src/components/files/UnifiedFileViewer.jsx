@@ -32,10 +32,16 @@ export const UnifiedFileViewer = ({ file, onClose, onDownload }) => {
   const [preview, setPreview] = useState(null);
   const [view, setView] = useState({ zoom: 1, rotation: 0, fit: 'page', panX: 0, panY: 0, page: 1, scrollTop: 0 });
   const [textSearch, setTextSearch] = useState('');
+  const [previewRetryKey, setPreviewRetryKey] = useState(0);
+  const [downloadState, setDownloadState] = useState({ active:false, message:'' });
   const dragRef = useRef({ active: false, startX: 0, startY: 0, panX: 0, panY: 0, pinchDistance: 0, pinchZoom: 1 });
   const abortRef = useRef(null);
   const contentRef = useRef(null);
   const searchInputRef = useRef(null);
+  const closeButtonRef = useRef(null);
+  const previousFocusRef = useRef(null);
+  const dialogRef = useRef(null);
+  const downloadAbortRef = useRef(null);
   const title = getFileTitle(file || {});
   const requestedKey = getViewerKey(file || {});
   const fileKind = useMemo(() => getProjectFileKind(file || {}), [file]);
@@ -52,13 +58,19 @@ export const UnifiedFileViewer = ({ file, onClose, onDownload }) => {
       try { abortRef.current.abort(); } catch {}
       abortRef.current = null;
     }
+    if (downloadAbortRef.current) {
+      try { downloadAbortRef.current.abort(); } catch {}
+      downloadAbortRef.current = null;
+    }
     setPreview((current) => {
       releaseProjectFilePreview(current);
       return null;
     });
     setView({ zoom: 1, rotation: 0, fit: 'page', panX: 0, panY: 0, page: 1, scrollTop: 0 });
     setTextSearch('');
+    setDownloadState({ active:false, message:'' });
     onClose?.();
+    window.requestAnimationFrame(() => previousFocusRef.current?.focus?.());
   }, [onClose, persistCurrentState]);
 
   const zoomIn = useCallback(() => setView((v) => ({ ...v, fit: 'custom', zoom: clamp(Number((v.zoom + 0.25).toFixed(2)), 0.25, 4) })), []);
@@ -77,11 +89,45 @@ export const UnifiedFileViewer = ({ file, onClose, onDownload }) => {
     setView((v) => ({ ...v, page: Number(v.page || 1) + 1 }));
   }, []);
   const resetPan = useCallback(() => setView((v) => ({ ...v, fit: 'page', zoom: 1, panX: 0, panY: 0 })), []);
-  const download = useCallback(() => onDownload?.(file || preview?.file), [file, onDownload, preview?.file]);
+  const download = useCallback(async () => {
+    if (downloadState.active) return;
+    const controller = new AbortController();
+    downloadAbortRef.current = controller;
+    setDownloadState({ active:true, message:'Downloading…' });
+    try {
+      const result = await onDownload?.(file || preview?.file, { signal:controller.signal });
+      if (controller.signal.aborted) { setDownloadState({ active:false, message:'Download cancelled.' }); return; }
+      setDownloadState({ active:false, message:result?.completionConfirmed === false ? 'Browser download started; confirm it in your browser downloads list.' : (result?.ok === false ? (result?.error?.message || 'Download failed.') : 'Download completed.') });
+    } catch (error) {
+      if (controller.signal.aborted) setDownloadState({ active:false, message:'Download cancelled.' });
+      else setDownloadState({ active:false, message:error?.message || 'Download failed.' });
+    } finally {
+      if (downloadAbortRef.current === controller) downloadAbortRef.current = null;
+    }
+  }, [downloadState.active, file, onDownload, preview?.file]);
+
+  const cancelPreview = useCallback(() => {
+    if (abortRef.current) {
+      try { abortRef.current.abort(); } catch {}
+      abortRef.current = null;
+    }
+    setPreview((current) => current ? { ...current, loading:false, error:'Preview cancelled.' } : current);
+  }, []);
 
   useEffect(() => {
     if (!isOpen) return undefined;
+    previousFocusRef.current = document.activeElement;
+    window.requestAnimationFrame(() => closeButtonRef.current?.focus());
     const onKeyDown = (event) => {
+      if (event.key === 'Tab') {
+        const focusable = Array.from(dialogRef.current?.querySelectorAll?.('button:not([disabled]), input:not([disabled]), [href], iframe, [tabindex]:not([tabindex="-1"])') || []);
+        if (focusable.length) {
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); return; }
+          if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); return; }
+        }
+      }
       const key = event.key;
       const target = event.target;
       const isTyping = target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(String(target.tagName || '').toUpperCase());
@@ -156,7 +202,7 @@ export const UnifiedFileViewer = ({ file, onClose, onDownload }) => {
       });
 
     return () => { controller.abort(); };
-  }, [file, requestedKey, title]);
+  }, [file, requestedKey, title, previewRetryKey]);
 
   useEffect(() => {
     if (!isOpen || !requestedKey) return undefined;
@@ -180,6 +226,9 @@ export const UnifiedFileViewer = ({ file, onClose, onDownload }) => {
     if (abortRef.current) {
       try { abortRef.current.abort(); } catch {}
     }
+    if (downloadAbortRef.current) {
+      try { downloadAbortRef.current.abort(); } catch {}
+    }
     setPreview((current) => {
       releaseProjectFilePreview(current);
       return null;
@@ -189,21 +238,25 @@ export const UnifiedFileViewer = ({ file, onClose, onDownload }) => {
   if (!isOpen || typeof document === 'undefined') return null;
 
   const active = preview || { file, kind: fileKind, title, loading: true };
-  const isImage = active.kind === 'image';
-  const isPdf = active.kind === 'pdf';
-  const isText = active.kind === 'text';
-  const isOffice = active.kind === 'office';
-  const isCad = active.kind === 'cad';
+  const kind = active.kind;
+  const isImage = kind === 'image';
+  const isPdf = kind === 'pdf';
+  const isVideo = kind === 'video';
+  const isAudio = kind === 'audio';
+  const isText = kind === 'text';
+  const isOffice = kind === 'office';
+  const isCad = kind === 'cad';
+  const isMetadataOnly = ['office', 'cad', 'file'].includes(kind);
   const zoomPercent = Math.round((view.zoom || 1) * 100);
   const openUrl = active.url || '';
   const sourcePreviewUrl = active.sourceUrl || getProjectFilePreviewUrl(file || {});
-  const pdfViewerUrl = useMemo(() => {
+  const pdfViewerUrl = (() => {
     if (!isPdf || !active.url) return active.url || '';
     const base = String(active.url || '').split('#')[0];
     const viewMode = view.fit === 'page' ? 'Fit' : 'FitH';
     const zoomValue = view.fit === 'custom' ? `&zoom=${Math.max(25, Math.min(400, zoomPercent))}` : '';
     return `${base}#toolbar=0&navpanes=0&scrollbar=1&view=${viewMode}${zoomValue}`;
-  }, [active.url, isPdf, view.fit, zoomPercent]);
+  })();
   const searchNeedle = textSearch.trim().toLowerCase();
   const textMatches = searchNeedle && isText ? (String(active.text || '').toLowerCase().match(new RegExp(searchNeedle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length : 0;
 
@@ -254,7 +307,7 @@ export const UnifiedFileViewer = ({ file, onClose, onDownload }) => {
   };
 
   return createPortal((
-    <div className="kalpa-unified-viewer fixed inset-0 z-[2147483647] bg-slate-950/85 backdrop-blur-sm p-0 sm:p-5 flex items-center justify-center animate-in fade-in duration-150" style={{ zIndex: 2147483647 }} role="dialog" aria-modal="true">
+    <div ref={dialogRef} className="kalpa-unified-viewer fixed inset-0 z-[2147483647] bg-slate-950/85 backdrop-blur-sm p-0 sm:p-5 flex items-center justify-center animate-in fade-in duration-150" style={{ zIndex: 2147483647 }} role="dialog" aria-modal="true">
       <div className="kalpa-unified-viewer-panel bg-white w-full max-w-7xl h-[100dvh] sm:h-[94vh] rounded-none sm:rounded-[1.75rem] shadow-2xl border border-slate-200 overflow-hidden flex flex-col animate-in zoom-in-95 duration-150 relative" style={{ zIndex: 2147483647 }}>
         <div className="kalpa-unified-viewer-header px-3 sm:px-5 py-2.5 border-b border-slate-100 bg-slate-50/95 relative z-[2]">
           <div className="flex items-center gap-2 min-w-0">
@@ -291,8 +344,9 @@ export const UnifiedFileViewer = ({ file, onClose, onDownload }) => {
                 </div>
               )}
               {openUrl && !active.loading && !active.error && <button type="button" onClick={() => window.open(openUrl, '_blank', 'noopener,noreferrer')} className="hidden sm:flex text-xs font-black text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 px-3 py-2 rounded-xl items-center gap-1.5 shrink-0"><ExternalLink className="w-3.5 h-3.5" /> Open</button>}
-              <button type="button" onClick={download} className="hidden sm:flex text-xs font-black text-indigo-700 bg-white hover:bg-indigo-50 border border-indigo-100 px-3 py-2 rounded-xl items-center gap-1.5 shrink-0"><Download className="w-3.5 h-3.5" /> Download</button>
-              <button type="button" onClick={close} className="kalpa-viewer-close-button absolute right-3 top-3 sm:right-4 sm:top-3 p-2.5 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 shadow-sm flex items-center justify-center z-[5]" title="Close" aria-label="Close preview"><X className="w-5 h-5" /></button>
+              <button type="button" onClick={download} disabled={downloadState.active} className="hidden sm:flex text-xs font-black text-indigo-700 bg-white hover:bg-indigo-50 border border-indigo-100 px-3 py-2 rounded-xl items-center gap-1.5 shrink-0"><Download className="w-3.5 h-3.5" /> Download</button>
+              {downloadState.active && <button type="button" onClick={() => downloadAbortRef.current?.abort()} className="hidden sm:flex text-xs font-black text-rose-700 bg-rose-50 border border-rose-100 px-3 py-2 rounded-xl">Cancel download</button>}
+              <button ref={closeButtonRef} type="button" onClick={close} className="kalpa-viewer-close-button absolute right-3 top-3 sm:right-4 sm:top-3 p-2.5 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 shadow-sm flex items-center justify-center z-[5]" title="Close" aria-label="Close preview"><X className="w-5 h-5" /></button>
             </div>
           </div>
         </div>
@@ -303,6 +357,7 @@ export const UnifiedFileViewer = ({ file, onClose, onDownload }) => {
               <div className="w-12 h-12 rounded-full border-4 border-slate-200 border-t-indigo-500 animate-spin" />
               <p className="text-sm font-black">Preparing preview...</p>
               <div className="w-72 max-w-[80vw] h-3 rounded-full bg-slate-200 overflow-hidden"><div className="w-1/2 h-full bg-indigo-500 animate-pulse rounded-full" /></div>
+              <button type="button" onClick={cancelPreview} className="text-xs font-black text-rose-600 bg-white border border-rose-100 px-4 py-2 rounded-xl">Cancel preview</button>
             </div>
           ) : active.error ? (
             <div className="w-full h-full flex items-center justify-center p-6">
@@ -311,6 +366,7 @@ export const UnifiedFileViewer = ({ file, onClose, onDownload }) => {
                 <h4 className="font-black text-slate-900 text-lg">Preview could not open</h4>
                 <p className="text-sm font-semibold text-slate-500 mt-2 break-words">{active.error}</p>
                 <div className="mt-5 flex flex-col sm:flex-row justify-center gap-2">
+                  <button type="button" onClick={() => setPreviewRetryKey(value => value + 1)} className="text-xs font-black text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 px-4 py-2 rounded-xl">Retry preview</button>
                   <button type="button" onClick={download} className="text-xs font-black text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-4 py-2 rounded-xl">Download file</button>
                 </div>
               </div>
@@ -355,6 +411,14 @@ export const UnifiedFileViewer = ({ file, onClose, onDownload }) => {
                 <div className="m-auto bg-white rounded-2xl border border-slate-200 p-6 text-center text-sm font-bold text-slate-500">PDF preview link is missing.</div>
               )}
             </div>
+          ) : isVideo ? (
+            <div className="w-full h-full bg-slate-950 flex items-center justify-center p-4">
+              <video src={active.url} controls preload="metadata" className="max-w-full max-h-full rounded-xl bg-black" />
+            </div>
+          ) : isAudio ? (
+            <div className="w-full h-full flex items-center justify-center p-6 bg-slate-950">
+              <div className="w-full max-w-xl rounded-3xl bg-white p-6"><p className="text-sm font-black text-slate-800 mb-4">{active.title || title}</p><audio src={active.url} controls preload="metadata" className="w-full" /></div>
+            </div>
           ) : isText ? (
             <div className="w-full min-h-full bg-slate-950 p-4 sm:p-6">
               <pre className="min-h-full whitespace-pre-wrap break-words rounded-2xl bg-slate-900 text-slate-100 border border-slate-700 p-4 text-xs sm:text-sm leading-6 font-mono">{active.text || 'Text preview is empty.'}</pre>
@@ -380,7 +444,7 @@ export const UnifiedFileViewer = ({ file, onClose, onDownload }) => {
             <div className="w-full min-h-full flex items-center justify-center p-6">
               <div className="max-w-2xl w-full bg-white rounded-3xl p-6 border text-center shadow-sm">
                 <FileText className="w-12 h-12 mx-auto text-slate-400 mb-3" />
-                <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">{isCad ? 'CAD metadata preview' : 'Metadata preview'}</p>
+                <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">{isCad ? 'CAD metadata preview' : (isMetadataOnly ? 'Metadata preview' : 'File preview')}</p>
                 <h4 className="font-black text-slate-900 text-lg mt-1">{active.title || title}</h4>
                 <p className="text-sm font-semibold text-slate-500 mt-2">{isCad ? 'DWG/CAD drawings need a dedicated CAD app. Preview shows safe metadata here without forcing a download.' : 'This file type cannot be rendered safely in the browser yet. Preview shows metadata without forcing a download.'}</p>
                 <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3 text-left text-xs font-bold text-slate-500">
@@ -394,6 +458,7 @@ export const UnifiedFileViewer = ({ file, onClose, onDownload }) => {
           )}
         </div>
 
+        {downloadState.message && <div className="px-4 py-2 bg-white border-t border-slate-100 text-[11px] font-bold text-slate-500">{downloadState.message}</div>}
         <div className="kalpa-unified-viewer-footer sm:hidden px-3 py-2.5 bg-white border-t border-slate-100">
           <div className="kalpa-mobile-preview-toolbar flex gap-2 overflow-x-auto pb-1">
             {(isImage || isPdf) && !active.loading && !active.error && <>
@@ -403,6 +468,7 @@ export const UnifiedFileViewer = ({ file, onClose, onDownload }) => {
               <button type="button" onClick={rotate} className="shrink-0 text-xs font-black text-slate-700 bg-slate-50 border border-slate-200 px-3 py-2 rounded-xl flex items-center justify-center gap-1"><RefreshCcw className="w-3.5 h-3.5" /> Rotate</button>
             </>}
             {openUrl && !active.loading && !active.error && <button type="button" onClick={() => window.open(openUrl, '_blank', 'noopener,noreferrer')} className="shrink-0 text-xs font-black text-slate-700 bg-slate-50 border border-slate-200 px-3 py-2 rounded-xl flex items-center justify-center gap-1"><ExternalLink className="w-3.5 h-3.5" /> Open</button>}
+            {downloadState.active && <button type="button" onClick={() => downloadAbortRef.current?.abort()} className="shrink-0 text-xs font-black text-rose-700 bg-rose-50 border border-rose-100 px-3 py-2 rounded-xl">Cancel download</button>}
             <button type="button" onClick={download} className="shrink-0 text-xs font-black text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-3 py-2 rounded-xl flex items-center justify-center gap-1"><Download className="w-3.5 h-3.5" /> Download</button>
           </div>
         </div>

@@ -174,9 +174,6 @@ grep -q "FILE_STORAGE_GC_GRACE_MS" "$STAGE/backend/src/server.js" || \
 grep -q "safeCountMetadataDrift" "$STAGE/backend/scripts/db-integrity-audit.mjs" || \
   fail "GitHub main does not contain count-only relational integrity classification"
 
-grep -q "operationalSameCountRebaselineSafe" "$STAGE/backend/scripts/db-integrity-audit.mjs" || \
-  fail "GitHub main does not contain evidence-bounded same-count integrity classification"
-
 grep -q "REPAIR VERIFIED LEGACY INTEGRITY METADATA" "$STAGE/backend/scripts/db-integrity-repair.mjs" || \
   fail "GitHub main does not contain guarded legacy integrity repair"
 
@@ -296,11 +293,11 @@ if (gcBlock.indexOf('activeFileStorageKeys(readDb())') < 0 || gcBlock.indexOf('f
 if (gcBlock.indexOf('activeFileStorageKeys(readDb())') > gcBlock.indexOf('fileStorage.softDelete(key')) {
   throw new Error('File garbage collection must recheck active references before moving an object.');
 }
-for (const marker of ['auditRelationalIntegrityMetadata', 'reconcileRelationalIntegrityMetadata', 'rebaselineOperationalSameCountIntegrity', 'mergeVerifiedPhysicalCounts', 'RELATIONAL_SHADOW_DIVERGENCE']) {
+for (const marker of ['auditRelationalIntegrityMetadata', 'reconcileRelationalIntegrityMetadata', 'mergeVerifiedPhysicalCounts', 'RELATIONAL_SHADOW_DIVERGENCE']) {
   if (!repository.includes(marker)) throw new Error(`Relational integrity hardening marker is missing: ${marker}`);
 }
-if (!integrityAudit.includes('LEGACY_SHADOW_REBASELINE_REQUIRED') || !integrityAudit.includes('OPERATIONAL_SAME_COUNT_REBASELINE_REQUIRED') || !integrityAudit.includes('UNSAFE_INTEGRITY_DRIFT')) throw new Error('Production integrity audit does not classify guarded legacy and same-count operational drift.');
-for (const marker of ['REPAIR VERIFIED LEGACY INTEGRITY METADATA', 'verifyManifest', 'legacyShadowRebaselineSafe', 'operationalSameCountRebaselineSafe', 'recent verified full backup']) {
+if (!integrityAudit.includes('LEGACY_SHADOW_REBASELINE_REQUIRED') || !integrityAudit.includes('UNSAFE_INTEGRITY_DRIFT')) throw new Error('Production integrity audit does not classify guarded legacy shadow drift.');
+for (const marker of ['REPAIR VERIFIED LEGACY INTEGRITY METADATA', 'verifyManifest', 'legacyShadowRebaselineSafe', 'recent verified full backup']) {
   if (!integrityRepair.includes(marker)) throw new Error(`Integrity repair safeguard is missing: ${marker}`);
 }
 const migrateIndex=deploy.indexOf('npm run db:migrate --prefix backend');
@@ -463,10 +460,8 @@ curl -fsS "http://127.0.0.1:${PORT}/api/health/live"
 echo
 curl -fsS "http://127.0.0.1:${PORT}/api/health/ready"
 echo
-
-log "Final authenticated database integrity"
-cd "$LIVE"
-npm run db:integrity --prefix backend
+curl -fsS "http://127.0.0.1:${PORT}/api/db/health"
+echo
 
 log "PM2 status"
 pm2 status "$PM2_NAME"

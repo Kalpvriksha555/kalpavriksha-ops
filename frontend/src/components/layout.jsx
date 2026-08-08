@@ -12,13 +12,8 @@ export const LocalModeBanner = ({ onClose }) => (
 
 export const DatabasePermissionBanner = () => (
   <div className="bg-red-600 border-b-4 border-red-800 text-white p-4 text-center text-sm shadow-xl z-50 relative">
-    <p className="font-black text-lg mb-1">⚠️ FIREBASE DATABASE IS LOCKED ⚠️</p>
-    <p className="font-medium max-w-4xl mx-auto">
-      Your database is currently rejecting read/write access. To fix this:<br/>
-      1. Go to Firebase Console &rarr; <b>Firestore Database</b> &rarr; <b>Rules</b> tab.<br/>
-      2. Change <code className="bg-red-800/50 px-2 py-0.5 rounded mx-1">allow read, write: if false;</code> to <code className="bg-emerald-500 px-2 py-0.5 rounded font-mono mx-1 shadow-sm">allow read, write: if true;</code><br/>
-      3. Click "Publish", wait 30 seconds, and refresh this page.
-    </p>
+    <p className="font-black text-lg mb-1">Secure workspace unavailable</p>
+    <p className="font-medium max-w-4xl mx-auto">No cached production records are being shown. Reconnect to the authorised backend or contact the administrator.</p>
   </div>
 );
 

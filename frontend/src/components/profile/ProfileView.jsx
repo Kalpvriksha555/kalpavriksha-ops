@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { User, Upload, Lock, CheckCircle } from 'lucide-react';
 import { uploadProfilePhoto } from '../../services/profileService';
 import {
@@ -16,11 +16,16 @@ import {
 
 const ROLES = { ADMIN: 'Admin', MANAGER: 'Manager', DESIGNER: 'Designer' };
 
-export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToBase64, sendRealOtp, verifyRealOtp, onChangePassword }) => {
+export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, sendRealOtp, verifyRealOtp, onChangePassword }) => {
+  const MAX_PROFILE_PHOTO_BYTES = 5 * 1024 * 1024;
   const [draft, setDraft] = useState(() => buildInitialProfileDraft(currentUser));
   const [saved, setSaved] = useState(false);
   const [photoMessage, setPhotoMessage] = useState('');
   const [photoUploading, setPhotoUploading] = useState(false);
+  const [photoProgress, setPhotoProgress] = useState(0);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const photoUploadAbortRef = useRef(null);
+  const localPhotoPreviewRef = useRef('');
   const [passwordForm, setPasswordForm] = useState({ current: '', next: '', confirm: '' });
   const [passwordMessage, setPasswordMessage] = useState('');
   const [mobileOtp, setMobileOtp] = useState('');
@@ -31,50 +36,81 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
   const [emailMessage, setEmailMessage] = useState('');
   const [emailSending, setEmailSending] = useState(false);
   const [emailVerifying, setEmailVerifying] = useState(false);
+  const [mobileSending, setMobileSending] = useState(false);
+
+  useEffect(() => () => {
+    photoUploadAbortRef.current?.abort();
+    if (localPhotoPreviewRef.current) URL.revokeObjectURL(localPhotoPreviewRef.current);
+  }, []);
+
+  const mergeConfirmedUser = (confirmedUser) => {
+    if (!confirmedUser) throw new Error('The backend did not confirm the profile change.');
+    const confirmed = { ...currentUser, ...confirmedUser };
+    setCurrentUser(confirmed);
+    setDraft(buildInitialProfileDraft(confirmed));
+    return confirmed;
+  };
 
   const handlePhoto = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setPhotoMessage('');
-    if (!String(file.type || '').startsWith('image/')) {
-      setPhotoMessage('Please select an image file only.');
+    if (file.size <= 0) {
+      setPhotoMessage('The selected image is empty.');
+      e.target.value = '';
+      return;
+    }
+    if (file.size > MAX_PROFILE_PHOTO_BYTES) {
+      setPhotoMessage('Profile photos must be no larger than 5 MB.');
+      e.target.value = '';
+      return;
+    }
+    if (!String(file.type || '').startsWith('image/') || !/\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(file.name || '')) {
+      setPhotoMessage('Please select an image file only (.png,.jpg,.jpeg,.gif,.webp,.bmp).');
       e.target.value = '';
       return;
     }
 
-    let preview = '';
-    try {
-      preview = typeof fileToBase64 === 'function' ? await fileToBase64(file) : URL.createObjectURL(file);
-      setDraft(prev => ({ ...prev, profilePhoto: preview }));
-    } catch (_err) {
-      // Preview is helpful but upload should still continue even if preview fails.
-    }
+    if (localPhotoPreviewRef.current) URL.revokeObjectURL(localPhotoPreviewRef.current);
+    const preview = URL.createObjectURL(file);
+    localPhotoPreviewRef.current = preview;
+    setDraft(prev => ({ ...prev, profilePhoto: preview }));
 
+    const controller = new AbortController();
+    photoUploadAbortRef.current?.abort();
+    photoUploadAbortRef.current = controller;
+    setPhotoProgress(0);
     setPhotoUploading(true);
     try {
-      const data = await uploadProfilePhoto({ file, user: currentUser });
-      const profilePhoto = data.profilePhoto || data.url || preview;
-      const updated = { ...currentUser, profilePhoto, profilePhotoUpdatedAt: Date.now(), profileUpdatedAt: Date.now() };
+      const data = await uploadProfilePhoto({ file, signal:controller.signal, onProgress:setPhotoProgress });
+      const updated = mergeConfirmedUser(data.user);
+      const profilePhoto = updated.profilePhoto || data.profilePhoto || data.url || preview;
       setDraft(prev => ({ ...prev, profilePhoto }));
-      setCurrentUser(updated);
-      onUpdateUser(updated);
       setPhotoMessage('Photo uploaded successfully.');
     } catch (err) {
       setPhotoMessage(err.message || 'Unable to upload photo. Please try again.');
       if (!currentUser.profilePhoto) setDraft(prev => ({ ...prev, profilePhoto: '' }));
     } finally {
+      if (photoUploadAbortRef.current === controller) photoUploadAbortRef.current = null;
       setPhotoUploading(false);
       e.target.value = '';
     }
   };
 
-  const handleSave = () => {
-    const updated = buildProfileSavePayload(currentUser, draft);
-    setDraft(prev => ({ ...prev, email: updated.email }));
-    setCurrentUser(updated);
-    onUpdateUser(updated);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2200);
+  const handleSave = async () => {
+    if (profileSaving) return;
+    setProfileSaving(true);
+    try {
+      const patch = buildProfileSavePayload(currentUser, draft);
+      const response = await onUpdateUser(patch);
+      mergeConfirmedUser(response.user);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2200);
+    } catch (error) {
+      setPhotoMessage(error?.message || 'The backend did not confirm the profile update.');
+    } finally {
+      setProfileSaving(false);
+    }
   };
 
   const handleProfilePasswordChange = async () => {
@@ -91,6 +127,7 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
       setPasswordMessage('Use at least 10 characters with uppercase, lowercase and a number, without spaces.');
       return;
     }
+    setMobileSending(true);
     try {
       await onChangePassword?.({ currentPassword: passwordForm.current, newPassword: passwordForm.next });
       setPasswordForm({ current: '', next: '', confirm: '' });
@@ -114,6 +151,8 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
     } catch (err) {
       setMobileChallengeId('');
       setMobileMessage(err.message || 'Unable to send OTP. Please check SMS settings.');
+    } finally {
+      setMobileSending(false);
     }
   };
 
@@ -128,9 +167,8 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
       setMobileMessage(err.message || 'Invalid OTP. Please try again.');
       return;
     }
-    const updated = buildRegisteredMobilePayload(currentUser, draft);
-    setCurrentUser(updated);
-    onUpdateUser(updated);
+    const response = await onUpdateUser(buildRegisteredMobilePayload(currentUser, draft));
+    mergeConfirmedUser(response.user);
     setMobileChallengeId('');
     setMobileOtp('');
     setMobileMessage('Mobile registered successfully for OTP login/recovery.');
@@ -189,8 +227,8 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
     const clean = normalizeEmail(draft.email);
     const updated = buildRegisteredEmailPayload(currentUser, draft);
     setDraft(prev => ({ ...prev, email: clean }));
-    setCurrentUser(updated);
-    onUpdateUser(updated);
+    const response = await onUpdateUser(updated);
+    mergeConfirmedUser(response.user);
     setEmailChallengeId('');
     setEmailOtp('');
     setEmailVerifying(false);
@@ -217,8 +255,9 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
             </div>
             <label className="mt-4 inline-flex items-center justify-center bg-indigo-50 text-indigo-700 px-4 py-2 rounded-xl font-black text-sm cursor-pointer hover:bg-indigo-100 border border-indigo-100">
               <Upload className="w-4 h-4 mr-2" /> {photoUploading ? 'Uploading...' : 'Add Photo'}
-              <input type="file" accept="image/*" onChange={handlePhoto} disabled={photoUploading} className="hidden" />
+              <input type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,image/*" onChange={handlePhoto} disabled={photoUploading} className="hidden" />
             </label>
+            {photoUploading && <div className="mt-3"><div className="h-2 rounded-full bg-slate-100 overflow-hidden"><div className="h-full bg-indigo-500" style={{ width:`${photoProgress}%` }} /></div><button type="button" onClick={() => photoUploadAbortRef.current?.abort()} className="mt-2 text-xs font-black text-red-600">Cancel upload</button></div>}
             {photoMessage && <p className={`text-xs font-black mt-3 ${photoMessage.includes('success') ? 'text-emerald-600' : 'text-red-600'}`}>{photoMessage}</p>}
             <p className="text-xs text-slate-400 font-bold mt-3">{currentUser.name}<br/>{currentUser.role}</p>
             <div className={`mt-3 inline-flex px-3 py-1.5 rounded-full text-[11px] font-black border ${currentUser.mobileRegistered ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-amber-50 text-amber-700 border-amber-100'}`}>
@@ -240,7 +279,7 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
               </div>
             ))}
             <div className="md:col-span-2 flex flex-wrap items-center gap-3 pt-2">
-              <button type="button" onClick={handleSave} className="bg-slate-800 text-white px-6 py-3 rounded-xl font-black hover:bg-slate-700 shadow-lg shadow-slate-200">Save Profile</button>
+              <button type="button" disabled={profileSaving} onClick={handleSave} className="bg-slate-800 text-white px-6 py-3 rounded-xl font-black hover:bg-slate-700 shadow-lg shadow-slate-200 disabled:opacity-60">{profileSaving ? 'Saving…' : 'Save Profile'}</button>
               {saved && <span className="text-emerald-600 font-black text-sm bg-emerald-50 border border-emerald-100 px-4 py-2 rounded-xl">Profile saved</span>}
               {currentUser.role !== ROLES.ADMIN && <span className="text-xs font-bold text-amber-600 bg-amber-50 border border-amber-100 px-3 py-2 rounded-xl">Please keep Aadhaar/contact details updated.</span>}
             </div>
@@ -259,7 +298,7 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <input value={draft.email} onChange={e => { setDraft(prev => ({ ...prev, email: e.target.value })); setEmailMessage(''); setEmailChallengeId(''); setEmailOtp(''); }} placeholder="Email address" className="border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
           <button type="button" onClick={sendEmailRegistrationOtp} disabled={emailSending} className="bg-indigo-50 text-indigo-700 px-5 py-3 rounded-xl font-black hover:bg-indigo-100 border border-indigo-100 disabled:opacity-60 disabled:cursor-not-allowed">{emailSending ? 'Sending...' : 'Send Email OTP'}</button>
-          <input value={emailOtp} onChange={e => setEmailOtp(e.target.value)} placeholder="Enter email OTP" className="border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
+          <input autoComplete="one-time-code" value={emailOtp} onChange={e => setEmailOtp(e.target.value)} placeholder="Enter email OTP" className="border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
         </div>
         <div className="flex flex-wrap items-center gap-3 mt-4">
           <button type="button" onClick={verifyEmailRegistrationOtp} disabled={emailVerifying || !emailChallengeId} className="bg-emerald-600 text-white px-5 py-3 rounded-xl font-black hover:bg-emerald-700 shadow-lg shadow-emerald-100 disabled:opacity-60 disabled:cursor-not-allowed">{emailVerifying ? 'Verifying...' : 'Verify & Register Email'}</button>
@@ -277,8 +316,8 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, fileToB
         </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <input value={draft.phone} onChange={e => { setDraft(prev => ({ ...prev, phone: e.target.value })); setMobileMessage(''); }} placeholder="Mobile number" className="border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
-          <button type="button" onClick={sendMobileRegistrationOtp} className="bg-indigo-50 text-indigo-700 px-5 py-3 rounded-xl font-black hover:bg-indigo-100 border border-indigo-100">Send OTP</button>
-          <input value={mobileOtp} onChange={e => setMobileOtp(e.target.value)} placeholder="Enter OTP" className="border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
+          <button type="button" disabled={mobileSending} onClick={sendMobileRegistrationOtp} className="bg-indigo-50 text-indigo-700 px-5 py-3 rounded-xl font-black hover:bg-indigo-100 border border-indigo-100 disabled:opacity-60">{mobileSending ? 'Sending…' : 'Send OTP'}</button>
+          <input autoComplete="one-time-code" value={mobileOtp} onChange={e => setMobileOtp(e.target.value)} placeholder="Enter OTP" className="border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
         </div>
         <div className="flex flex-wrap items-center gap-3 mt-4">
           <button type="button" onClick={verifyMobileRegistrationOtp} className="bg-emerald-600 text-white px-5 py-3 rounded-xl font-black hover:bg-emerald-700 shadow-lg shadow-emerald-100">Verify & Register Mobile</button>

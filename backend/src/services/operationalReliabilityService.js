@@ -92,18 +92,24 @@ export function inspectBackupManifests(backupRoot, { maxAgeHours = 26 } = {}) {
     .map(entry => readManifest(path.join(root, entry.name)))
     .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
   const latest = manifests[0] || null;
-  const createdMs = latest?.createdAt ? new Date(latest.createdAt).getTime() : 0;
-  const ageHours = createdMs > 0 ? Number(((Date.now() - createdMs) / 3_600_000).toFixed(2)) : null;
-  const latestOk = !!latest && latest.status === 'VERIFIED' && latest.ok !== false;
-  const fresh = latestOk && ageHours !== null && ageHours <= Number(maxAgeHours || 26);
+  const latestVerified = manifests.find(item => item.status === 'VERIFIED' && item.ok !== false) || null;
+  const verifiedCreatedMs = latestVerified?.createdAt ? new Date(latestVerified.createdAt).getTime() : 0;
+  const ageHours = verifiedCreatedMs > 0 ? Number(((Date.now() - verifiedCreatedMs) / 3_600_000).toFixed(2)) : null;
+  const fresh = !!latestVerified && ageHours !== null && ageHours <= Number(maxAgeHours || 26);
+  const latestAttemptOk = !!latest && latest.status === 'VERIFIED' && latest.ok !== false;
+  const latestAttemptFailed = !!latest && !latestAttemptOk;
   return {
     root,
     count: manifests.length,
     latest,
+    latestVerified,
+    latestAttemptOk,
+    latestAttemptFailed,
     ageHours,
     maxAgeHours: Number(maxAgeHours || 26),
     ok: fresh,
-    status: !latest ? 'MISSING' : !latestOk ? 'UNVERIFIED' : fresh ? 'HEALTHY' : 'STALE',
+    status: !latestVerified ? (latest ? 'NO_VERIFIED_BACKUP' : 'MISSING') : fresh ? 'HEALTHY' : 'STALE',
+    warning: latestAttemptFailed && fresh ? 'LATEST_BACKUP_ATTEMPT_FAILED' : '',
     manifests: manifests.slice(0, 25)
   };
 }
@@ -182,8 +188,11 @@ export function createOperationalJobStore({ pool = null, dataDir, usePostgres = 
   }
 
   async function recordFailure(jobType, error, payload = {}, options = {}) {
+    const deterministicId = options.id || (options.dedupKey
+      ? `failure-${crypto.createHash('sha256').update(`${jobType}:${options.dedupKey}`).digest('hex').slice(0, 32)}`
+      : undefined);
     const job = await upsert({
-      id: options.id,
+      id: deterministicId,
       jobType,
       status:'FAILED',
       attempts:Number(options.attempts || 1),
@@ -196,7 +205,35 @@ export function createOperationalJobStore({ pool = null, dataDir, usePostgres = 
     return job;
   }
 
-  return { upsert, list, retry, recordFailure };
+  async function resolveFailures(jobType, result = {}) {
+    const normalizedType = String(jobType || '').trim();
+    if (!normalizedType) return 0;
+    if (usePostgres && pool) {
+      const updated = await pool.query(
+        `UPDATE operational_jobs
+            SET status='SUCCEEDED',result=$2::jsonb,error='',completed_at=COALESCE(completed_at,now()),updated_at=now()
+          WHERE job_type=$1 AND status='FAILED'`,
+        [normalizedType, JSON.stringify(safeJson(result || {}))]
+      );
+      return Number(updated.rowCount || 0);
+    }
+    const jobs = readLocalJobs(dataDir);
+    let changed = 0;
+    const updatedAt = new Date().toISOString();
+    for (const job of jobs) {
+      if (String(job.jobType || job.job_type || '') !== normalizedType || String(job.status || '').toUpperCase() !== 'FAILED') continue;
+      job.status = 'SUCCEEDED';
+      job.result = safeJson(result || {});
+      job.error = '';
+      job.completedAt = job.completedAt || updatedAt;
+      job.updatedAt = updatedAt;
+      changed += 1;
+    }
+    if (changed) writeLocalJobs(dataDir, jobs.slice(0, 1000));
+    return changed;
+  }
+
+  return { upsert, list, retry, recordFailure, resolveFailures };
 }
 
 export async function recordOperationalEvent(pool, usePostgres, event = {}) {

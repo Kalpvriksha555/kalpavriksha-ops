@@ -1,5 +1,8 @@
 import { API_BASE } from '../config/appConfig';
 
+const SAFE_INLINE_PROFILE_PHOTO = /^data:image\/(?:png|jpeg|gif|webp|bmp);base64,[a-z0-9+/=\s]+$/i;
+const MAX_LEGACY_INLINE_PROFILE_PHOTO_CHARS = 7 * 1024 * 1024;
+
 export const normalizePhone = (value = '') => String(value || '').replace(/\D/g, '');
 
 export const normalizeEmail = (value = '') => String(value || '').trim().toLowerCase();
@@ -16,9 +19,10 @@ export const profilePhotoUrl = (value = '', version = '') => {
   let url = String(value || '').trim();
   if (!url) return '';
 
-  // Data/blob URLs are temporary local previews. Keep them untouched while the
-  // user is uploading a new photo. Persisted server URLs are normalized below.
-  if (/^(blob:|data:)/i.test(url)) return url;
+  if (url.startsWith('blob:')) return url;
+  if (url.startsWith('data:')) {
+    return url.length <= MAX_LEGACY_INLINE_PROFILE_PHOTO_CHARS && SAFE_INLINE_PROFILE_PHOTO.test(url) ? url : '';
+  }
 
   const apiBase = String(API_BASE || '').replace(/\/+$/, '');
 
@@ -31,7 +35,7 @@ export const profilePhotoUrl = (value = '', version = '') => {
       if (parsed.pathname.startsWith('/api/profile/photo/') || parsed.pathname.startsWith('/uploads/')) {
         url = `${parsed.pathname}${parsed.search || ''}`;
       } else {
-        return url;
+        return '';
       }
     }
   } catch (_err) {
@@ -41,6 +45,7 @@ export const profilePhotoUrl = (value = '', version = '') => {
   if (url.startsWith('/uploads/')) url = url.replace('/uploads/', '/api/profile/photo/');
   if (url.startsWith('uploads/')) url = url.replace('uploads/', '/api/profile/photo/');
   if (url.startsWith('api/profile/photo/')) url = `/${url}`;
+  if (!url.startsWith('/api/profile/photo/')) return '';
 
   const full = url.startsWith('/') ? `${apiBase}${url}` : `${apiBase}/${url.replace(/^\/+/, '')}`;
   return version ? `${full}${full.includes('?') ? '&' : '?'}v=${encodeURIComponent(version)}` : full;

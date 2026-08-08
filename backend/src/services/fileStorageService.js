@@ -5,7 +5,8 @@ import { spawn } from 'child_process';
 
 const DEFAULT_ALLOWED_EXTENSIONS = Object.freeze([
   '.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.heif',
-  '.dwg', '.dxf', '.xlsx', '.xls', '.csv', '.docx', '.doc', '.rtf', '.pptx', '.ppt', '.txt'
+  '.dwg', '.dxf', '.xlsx', '.xls', '.csv', '.docx', '.doc', '.rtf', '.pptx', '.ppt', '.txt',
+  '.mp4', '.mov', '.avi', '.mkv', '.webm', '.mp3', '.wav', '.m4a', '.ogg'
 ]);
 
 const ACTIVE_OR_EXECUTABLE_EXTENSIONS = new Set([
@@ -26,12 +27,20 @@ const MIME_BY_EXTENSION = Object.freeze({
   '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   '.doc': 'application/msword', '.rtf': 'application/rtf',
   '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  '.ppt': 'application/vnd.ms-powerpoint', '.txt': 'text/plain'
+  '.ppt': 'application/vnd.ms-powerpoint', '.txt': 'text/plain',
+  '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.avi': 'video/x-msvideo', '.mkv': 'video/x-matroska', '.webm': 'video/webm',
+  '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4', '.ogg': 'audio/ogg'
 });
 
 const OOXML_EXTENSIONS = new Set(['.xlsx', '.docx', '.pptx']);
 const OLE_EXTENSIONS = new Set(['.xls', '.doc', '.ppt']);
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.heif']);
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm']);
+const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.ogg']);
+const FILE_QUARANTINE_RETENTION_MS = Number(process.env.FILE_QUARANTINE_RETENTION_MS || 7 * 24 * 60 * 60 * 1000);
+const FILE_QUARANTINE_MAX_BYTES = Number(process.env.FILE_QUARANTINE_MAX_BYTES || 512 * 1024 * 1024);
+const FILE_STORAGE_HEALTH_CACHE_MS = Number(process.env.FILE_STORAGE_HEALTH_CACHE_MS || 30 * 1000);
+const FILE_INCOMING_RETENTION_MS = Number(process.env.FILE_INCOMING_RETENTION_MS || 60 * 60 * 1000);
 
 export class FileValidationError extends Error {
   constructor(code, message, statusCode = 400, details = {}) {
@@ -54,7 +63,10 @@ function normalizedExtension(filename = '') {
 
 export function safeOriginalFileName(value = 'file') {
   const base = path.basename(String(value || 'file').replace(/\0/g, '')).normalize('NFKC');
-  const cleaned = base.replace(/[\u0000-\u001f\u007f]/g, '').replace(/[\\/:*?"<>|]/g, '_').trim();
+  const cleaned = base
+    .replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/gu, '')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .trim();
   return (cleaned || 'file').slice(0, 180);
 }
 
@@ -80,7 +92,14 @@ function detectSignature(buffer, extension) {
   if (buffer.subarray(0, 6).toString('ascii') === 'GIF87a' || buffer.subarray(0, 6).toString('ascii') === 'GIF89a') return { family: 'image', mime: 'image/gif' };
   if (buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'WEBP') return { family: 'image', mime: 'image/webp' };
   if (startsWith(buffer, [0x42, 0x4d])) return { family: 'image', mime: 'image/bmp' };
-  if (buffer.subarray(4, 12).toString('ascii').includes('ftypheic') || buffer.subarray(4, 12).toString('ascii').includes('ftypheif')) return { family: 'image', mime: MIME_BY_EXTENSION[extension] || 'image/heic' };
+  const isoBrand = buffer.subarray(4, 32).toString('ascii');
+  if (/ftyp(?:heic|heif|heix|hevc|mif1|msf1)/.test(isoBrand)) return { family: 'image', mime: MIME_BY_EXTENSION[extension] || 'image/heic' };
+  if (startsWith(buffer, [0x1a, 0x45, 0xdf, 0xa3])) return { family: extension === '.webm' ? 'webm' : 'matroska', mime: MIME_BY_EXTENSION[extension] || 'video/webm' };
+  if (buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'WAVE') return { family: 'wav', mime: 'audio/wav' };
+  if (buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'AVI ') return { family: 'avi', mime: 'video/x-msvideo' };
+  if (buffer.subarray(0, 4).toString('ascii') === 'OggS') return { family: 'ogg', mime: 'audio/ogg' };
+  if (buffer.subarray(0, 3).toString('ascii') === 'ID3' || startsWith(buffer, [0xff, 0xfb]) || startsWith(buffer, [0xff, 0xf3]) || startsWith(buffer, [0xff, 0xf2])) return { family: 'mp3', mime: 'audio/mpeg' };
+  if (buffer.subarray(4, 8).toString('ascii') === 'ftyp') return { family: 'iso-media', mime: MIME_BY_EXTENSION[extension] || 'application/octet-stream' };
   if (startsWith(buffer, [0x50, 0x4b, 0x03, 0x04]) || startsWith(buffer, [0x50, 0x4b, 0x05, 0x06]) || startsWith(buffer, [0x50, 0x4b, 0x07, 0x08])) return { family: 'zip', mime: MIME_BY_EXTENSION[extension] || 'application/zip' };
   if (startsWith(buffer, [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])) return { family: 'ole', mime: MIME_BY_EXTENSION[extension] || 'application/x-ole-storage' };
   const ascii = buffer.subarray(0, 32).toString('ascii').trimStart();
@@ -100,6 +119,13 @@ function validateSignature(extension, signature) {
   if (extension === '.dxf') return signature.family === 'dxf';
   if (extension === '.rtf') return signature.family === 'rtf';
   if (['.csv', '.txt'].includes(extension)) return signature.family === 'text';
+  if (extension === '.webm') return signature.family === 'webm';
+  if (extension === '.mkv') return signature.family === 'matroska' || signature.family === 'webm';
+  if (extension === '.wav') return signature.family === 'wav';
+  if (extension === '.avi') return signature.family === 'avi';
+  if (extension === '.ogg') return signature.family === 'ogg';
+  if (extension === '.mp3') return signature.family === 'mp3';
+  if (['.mp4', '.mov', '.m4a'].includes(extension)) return signature.family === 'iso-media';
   return false;
 }
 
@@ -124,23 +150,49 @@ function readHead(filePath, bytes = 8192) {
   }
 }
 
-function validateStructuredContainer(filePath, extension) {
-  if (!OOXML_EXTENSIONS.has(extension)) return true;
+function readZipCentralDirectoryNames(filePath) {
   const stat = fs.statSync(filePath);
-  const sampleSize = Math.min(stat.size, 1024 * 1024);
+  const tailSize = Math.min(stat.size, 65_557 + 22);
   const fd = fs.openSync(filePath, 'r');
   try {
-    const head = Buffer.alloc(sampleSize);
-    const tail = Buffer.alloc(sampleSize);
-    const headCount = fs.readSync(fd, head, 0, sampleSize, 0);
-    const tailOffset = Math.max(0, stat.size - sampleSize);
-    const tailCount = fs.readSync(fd, tail, 0, sampleSize, tailOffset);
-    const indexText = Buffer.concat([head.subarray(0, headCount), tail.subarray(0, tailCount)]).toString('latin1');
-    const expectedFolder = extension === '.docx' ? 'word/' : extension === '.xlsx' ? 'xl/' : 'ppt/';
-    return indexText.includes('[Content_Types].xml') && indexText.includes(expectedFolder);
+    const tail = Buffer.alloc(tailSize);
+    fs.readSync(fd, tail, 0, tailSize, Math.max(0, stat.size - tailSize));
+    let eocd = -1;
+    for (let i = tail.length - 22; i >= 0; i -= 1) {
+      if (tail.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+    }
+    if (eocd < 0) return [];
+    const totalEntries = tail.readUInt16LE(eocd + 10);
+    const centralSize = tail.readUInt32LE(eocd + 12);
+    const centralOffset = tail.readUInt32LE(eocd + 16);
+    if (!Number.isFinite(centralOffset) || !Number.isFinite(centralSize) || centralOffset + centralSize > stat.size) return [];
+    const central = Buffer.alloc(centralSize);
+    fs.readSync(fd, central, 0, centralSize, centralOffset);
+    const names = [];
+    let offset = 0;
+    for (let entry = 0; entry < totalEntries && offset + 46 <= central.length; entry += 1) {
+      if (central.readUInt32LE(offset) !== 0x02014b50) return [];
+      const nameLength = central.readUInt16LE(offset + 28);
+      const extraLength = central.readUInt16LE(offset + 30);
+      const commentLength = central.readUInt16LE(offset + 32);
+      const nameStart = offset + 46;
+      const nameEnd = nameStart + nameLength;
+      if (nameEnd > central.length) return [];
+      names.push(central.subarray(nameStart, nameEnd).toString('utf8'));
+      offset = nameEnd + extraLength + commentLength;
+    }
+    return names;
   } finally {
     fs.closeSync(fd);
   }
+}
+
+function validateStructuredContainer(filePath, extension) {
+  if (!OOXML_EXTENSIONS.has(extension)) return true;
+  const names = readZipCentralDirectoryNames(filePath);
+  if (!names.length) return false;
+  const expectedFolder = extension === '.docx' ? 'word/' : extension === '.xlsx' ? 'xl/' : 'ppt/';
+  return names.includes('[Content_Types].xml') && names.some(name => name.startsWith(expectedFolder));
 }
 
 function safeStoragePath(root, storageKey) {
@@ -164,8 +216,48 @@ export function createFileStorage(options = {}) {
   const leaseMaxAgeMs = Number.isFinite(requestedLeaseMaxAgeMs) ? Math.max(60_000, requestedLeaseMaxAgeMs) : 30 * 60 * 1000;
   const legacyRoots = [...new Set((options.legacyRoots || []).filter(Boolean).map(item => path.resolve(item)))];
   const allowedExtensions = new Set((options.allowedExtensions || DEFAULT_ALLOWED_EXTENSIONS).map(value => String(value).toLowerCase().startsWith('.') ? String(value).toLowerCase() : `.${String(value).toLowerCase()}`));
+  const incomingRetentionMs = Math.max(60_000, Number(options.incomingRetentionMs || FILE_INCOMING_RETENTION_MS));
+  const quarantineRetentionMs = Math.max(60_000, Number(options.quarantineRetentionMs || FILE_QUARANTINE_RETENTION_MS));
+  const quarantineMaxBytes = Math.max(1024 * 1024, Number(options.quarantineMaxBytes || FILE_QUARANTINE_MAX_BYTES));
+  const healthCacheMs = Math.max(1_000, Number(options.healthCacheMs || FILE_STORAGE_HEALTH_CACHE_MS));
+  let objectCountCache = { at:0, value:0 };
 
   [root, tempRoot, objectsRoot, quarantineRoot, trashRoot, locksRoot].forEach(mkdirPrivate);
+
+  function pruneIncoming(referenceTime = Date.now()) {
+    const cutoff = referenceTime - incomingRetentionMs;
+    for (const name of fs.readdirSync(tempRoot)) {
+      const fp = path.join(tempRoot, name);
+      try {
+        const stat = fs.statSync(fp);
+        if (stat.isFile() && stat.mtimeMs < cutoff) fs.unlinkSync(fp);
+      } catch {}
+    }
+  }
+
+  function pruneQuarantine(referenceTime = Date.now()) {
+    const files = [];
+    const walk = directory => {
+      if (!fs.existsSync(directory)) return;
+      for (const entry of fs.readdirSync(directory, { withFileTypes:true })) {
+        const fp = path.join(directory, entry.name);
+        if (entry.isDirectory()) walk(fp);
+        else if (entry.isFile()) { try { const stat=fs.statSync(fp); files.push({ fp, size:stat.size, mtimeMs:stat.mtimeMs }); } catch {} }
+      }
+    };
+    walk(quarantineRoot);
+    const cutoff = referenceTime - quarantineRetentionMs;
+    for (const item of files.filter(item => item.mtimeMs < cutoff)) { try { fs.unlinkSync(item.fp); } catch {} }
+    const remaining = files.filter(item => item.mtimeMs >= cutoff).sort((a,b)=>b.mtimeMs-a.mtimeMs);
+    let total = remaining.reduce((sum,item)=>sum+item.size,0);
+    for (const item of [...remaining].reverse()) {
+      if (total<=quarantineMaxBytes) break;
+      try { fs.unlinkSync(item.fp); total -= item.size; } catch {}
+    }
+  }
+
+  pruneIncoming();
+  pruneQuarantine();
 
   function tempDestination() {
     mkdirPrivate(tempRoot);
@@ -252,6 +344,7 @@ export function createFileStorage(options = {}) {
     const destination = path.join(directory, name);
     fs.renameSync(file.path, destination);
     fs.writeFileSync(`${destination}.json`, JSON.stringify({ code, reason, originalName: file.originalname || '', size: Number(file.size || 0), quarantinedAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
+    pruneQuarantine();
     return destination;
   }
 
@@ -327,13 +420,25 @@ export function createFileStorage(options = {}) {
       if (!destination) throw new FileValidationError('INVALID_STORAGE_KEY', 'A secure storage key could not be generated.', 500);
       mkdirPrivate(path.dirname(destination));
       let deduplicated = false;
+      let repairedCorruptObject = false;
       if (fs.existsSync(destination)) {
-        deduplicated = true;
-        fs.unlinkSync(file.path);
+        const existingStat = fs.statSync(destination);
+        const existingHash = existingStat.size === stat.size ? await sha256File(destination) : '';
+        if (existingStat.size === stat.size && existingHash === sha256) {
+          deduplicated = true;
+          fs.unlinkSync(file.path);
+        } else {
+          const repairPath = `${destination}.repair-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
+          fs.renameSync(file.path, repairPath);
+          try { fs.chmodSync(repairPath, 0o600); } catch {}
+          fs.renameSync(repairPath, destination);
+          repairedCorruptObject = true;
+        }
       } else {
         fs.renameSync(file.path, destination);
         try { fs.chmodSync(destination, 0o600); } catch {}
       }
+      objectCountCache.at = 0;
       const result = {
         originalName,
         extension,
@@ -348,6 +453,7 @@ export function createFileStorage(options = {}) {
         antivirusEngine: antivirus.engine || '',
         storageProvider: 'local-private',
         deduplicated,
+        repairedCorruptObject,
         storedAt: new Date().toISOString(),
         purpose: String(context.purpose || '').toUpperCase()
       };
@@ -446,13 +552,16 @@ export function createFileStorage(options = {}) {
     try {
       fs.writeFileSync(probe, 'ok', { mode: 0o600 });
       fs.unlinkSync(probe);
-      return { ok: true, root, writable: true, objects: listObjects().length, antivirusMode, antivirusRequired };
+      if (!objectCountCache.at || Date.now() - objectCountCache.at >= healthCacheMs) {
+        objectCountCache = { at:Date.now(), value:listObjects().length };
+      }
+      return { ok: true, root, writable: true, objects: objectCountCache.value, antivirusMode, antivirusRequired };
     } catch (error) {
       return { ok: false, root, writable: false, error: error.message, antivirusMode, antivirusRequired };
     }
   }
 
-  return { root, tempRoot, objectsRoot, quarantineRoot, trashRoot, locksRoot, allowedExtensions, antivirusMode, antivirusRequired, tempDestination, validateAndStore, resolve, importLegacyFile, listObjects, acquireLease, hasActiveLease, softDelete, health, quarantine };
+  return { root, tempRoot, objectsRoot, quarantineRoot, trashRoot, locksRoot, allowedExtensions, antivirusMode, antivirusRequired, tempDestination, validateAndStore, resolve, importLegacyFile, listObjects, acquireLease, hasActiveLease, softDelete, health, quarantine, pruneIncoming, pruneQuarantine };
 }
 
 export function buildFileReconciliationReport(state = {}, storage, options = {}) {

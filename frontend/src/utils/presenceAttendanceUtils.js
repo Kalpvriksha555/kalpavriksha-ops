@@ -2,6 +2,8 @@
 // Extracted during modularization phase 4 to keep App.jsx focused on UI orchestration.
 
 const ONLINE_STALE_MS = 5 * 60 * 1000;
+const COMPANY_TIME_ZONE = 'Asia/Kolkata';
+const INDIA_OFFSET = '+05:30';
 
 export const toMs = (value) => {
   if (!value) return 0;
@@ -48,13 +50,13 @@ export const isPresenceUserOnline = (user = {}, nowMs = Date.now()) => {
 export const formatClockTimeFromMs = (ms, fallback = '-') => {
   const value = toMs(ms);
   if (!value) return fallback;
-  return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return new Date(value).toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit', timeZone:COMPANY_TIME_ZONE });
 };
 
 export const localDateKeyFromMs = (ms) => {
   const value = toMs(ms);
   if (!value) return '';
-  return new Date(value).toLocaleDateString('en-CA');
+  return new Intl.DateTimeFormat('en-CA', { timeZone:COMPANY_TIME_ZONE, year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date(value));
 };
 
 const parseDateTimeFromLogClock = (dateKey, clockValue = '') => {
@@ -62,7 +64,7 @@ const parseDateTimeFromLogClock = (dateKey, clockValue = '') => {
   const raw = String(clockValue || '').trim();
   if (!raw) return 0;
   // Supports both modern browser times (01:06 AM) and older 24-hour entries (15:21).
-  const direct = new Date(`${dateKey} ${raw}`).getTime();
+  const direct = new Date(`${dateKey}T${raw} ${INDIA_OFFSET}`).getTime();
   if (!Number.isNaN(direct)) return direct;
   const match24 = raw.match(/^(\d{1,2}):(\d{2})$/);
   if (match24) {
@@ -80,7 +82,7 @@ export const isSessionDateMatch = (ms, dateKey) => {
 };
 
 export const getAttendanceSessionStartMs = (log = {}, user = null) => {
-  const dateKey = log.date || new Date().toLocaleDateString('en-CA');
+  const dateKey = log.date || localDateKeyFromMs(Date.now());
   const explicitCandidates = [toMs(log.loginAt), toMs(log.firstLoginAt)].filter(Boolean);
   const sameDayExplicit = explicitCandidates.find(ms => isSessionDateMatch(ms, dateKey));
   if (sameDayExplicit) return sameDayExplicit;
@@ -99,7 +101,7 @@ export const getAttendanceSessionEndMs = (log = {}, user = null, now = Date.now(
   const online = user && isPresenceUserOnline(user, now);
   if (online) return now;
 
-  const dateKey = log.date || (start ? localDateKeyFromMs(start) : new Date().toLocaleDateString('en-CA'));
+  const dateKey = log.date || (start ? localDateKeyFromMs(start) : localDateKeyFromMs(Date.now()));
   const candidates = [
     toMs(log.logoutAt),
     toMs(log.lastTick),

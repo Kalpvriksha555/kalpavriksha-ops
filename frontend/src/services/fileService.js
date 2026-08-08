@@ -1,19 +1,138 @@
 import { authFetch, getCsrfToken } from './authService';
 import { API_BASE } from '../config/appConfig';
 
+export const MAX_PROJECT_UPLOAD_BYTES = 100 * 1024 * 1024;
+export const MAX_PROJECT_UPLOAD_FILES = 20;
+const PROJECT_UPLOAD_KINDS = new Set(['pdf', 'image', 'video', 'audio', 'text', 'office', 'cad', 'archive']);
+const PAYMENT_RECEIPT_KINDS = Object.freeze(['pdf', 'image']);
+const LEGACY_UPLOAD_MUTATION_STORAGE_KEY = 'kalpavriksha_upload_mutations_v2';
+const UPLOAD_MUTATION_STORAGE_KEYS = Object.freeze(['kalpavriksha_upload_mutations_v3_a', 'kalpavriksha_upload_mutations_v3_b']);
+const UPLOAD_MUTATION_MAX_RECORDS = 500;
+const UPLOAD_MUTATION_LOCK_KEY = 'kalpavriksha-upload-mutation-ledger-v3';
+const UPLOAD_IDENTITY_LOCK_TIMEOUT = 5000;
+let uploadMutationLedgerCache = null;
 const uploadMutationIds = new WeakMap();
-const uploadMutationIdFor = (file) => {
-  if (file && typeof file === 'object') {
-    const existing = uploadMutationIds.get(file);
-    if (existing) return existing;
-    const uuid = globalThis.crypto?.randomUUID?.();
-    const created = `upload:${uuid || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
-    uploadMutationIds.set(file, created);
-    return created;
-  }
-  const uuid = globalThis.crypto?.randomUUID?.();
-  return `upload:${uuid || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+
+const appendUploadMutationId = (form, mutation, mutationId) => {
+  // Keep the durable ledger identity authoritative. The explicit mutation.id path
+  // also documents the normal case, while the fallback preserves a verified alias.
+  if (mutationId === mutation.id) form.append('mutationId', mutation.id);
+  else form.append('mutationId', mutationId);
 };
+
+const makeFileError = (code, message) => Object.assign(new Error(message), { code });
+const fileExtension = (name = '') => String(name).split('.').pop()?.toLowerCase() || '';
+const kindFromFile = (file = {}) => {
+  const extension = fileExtension(file.name);
+  const mime = String(file.type || '').toLowerCase();
+  if (extension === 'pdf' || mime === 'application/pdf') return 'pdf';
+  if (/^(png|jpe?g|gif|webp|bmp)$/.test(extension) || mime.startsWith('image/')) return 'image';
+  if (/^(mp4|webm|mov|m4v)$/.test(extension) || mime.startsWith('video/')) return 'video';
+  if (/^(mp3|wav|m4a|ogg|aac|flac)$/.test(extension) || (extension === 'webm' && /(voice|audio)/.test(String(file.name || '').toLowerCase())) || mime.startsWith('audio/')) return 'audio';
+  if (/^(txt|csv|json|xml|md|log)$/.test(extension) || mime.startsWith('text/')) return 'text';
+  if (/^(docx?|xlsx?|pptx?|odt|ods|odp)$/.test(extension)) return 'office';
+  if (/^(dwg|dxf|dgn)$/.test(extension)) return 'cad';
+  if (/^(zip|rar|7z)$/.test(extension)) return 'archive';
+  return 'file';
+};
+
+export const validateProjectUploadSelection = (files, options = {}) => {
+  const list = Array.from(files || []);
+  const maxFiles = Math.max(1, Number(options.maxFiles || MAX_PROJECT_UPLOAD_FILES));
+  if (list.length > maxFiles) throw makeFileError('TOO_MANY_FILES', `Choose no more than ${maxFiles} files at once.`);
+  const allowedKinds = new Set(options.allowedKinds || PROJECT_UPLOAD_KINDS);
+  const seen = new Set();
+  for (const file of list) {
+    if (!Number(file?.size || 0)) throw makeFileError('FILE_EMPTY', `The selected file ${file?.name || ''} is empty.`);
+    if (Number(file.size) > MAX_PROJECT_UPLOAD_BYTES) throw makeFileError('FILE_TOO_LARGE', `${file.name} is larger than 100 MB.`);
+    const kind = kindFromFile(file);
+    if (!allowedKinds.has(kind)) throw makeFileError('FILE_TYPE_NOT_ALLOWED', `${file.name} is not an allowed file type.`);
+    const duplicateKey = `${String(file.name || '').toLowerCase()}::${file.size}::${file.lastModified || 0}`;
+    if (seen.has(duplicateKey)) throw makeFileError('DUPLICATE_FILE', `${file.name} was selected more than once.`);
+    seen.add(duplicateKey);
+  }
+  return list;
+};
+
+const uploadFingerprint = (file, projectId = '', type = '', uploadedBy = '', scope = '') => [
+  String(projectId), String(type), String(scope), String(uploadedBy).trim().toLowerCase(),
+  String(file?.name || '').trim().toLowerCase(), Number(file?.size || 0), Number(file?.lastModified || 0), String(file?.type || '').toLowerCase()
+].join('|');
+
+const readUploadMutationLedger = () => {
+  if (uploadMutationLedgerCache) return uploadMutationLedgerCache;
+  let selected = { generation: 0, records: {} };
+  try {
+    for (const key of UPLOAD_MUTATION_STORAGE_KEYS) {
+      const parsed = JSON.parse(localStorage.getItem(key) || 'null');
+      if (parsed?.schemaVersion === 3 && Number(parsed.generation || 0) >= selected.generation) selected = parsed;
+    }
+    const legacy = JSON.parse(localStorage.getItem(LEGACY_UPLOAD_MUTATION_STORAGE_KEY) || '{}');
+    if (!Object.keys(selected.records || {}).length && legacy && typeof legacy === 'object') selected.records = legacy;
+  } catch {}
+  uploadMutationLedgerCache = selected;
+  return selected;
+};
+
+const writeUploadMutationLedger = (records) => {
+  if (typeof localStorage === 'undefined') return false;
+  const current = readUploadMutationLedger();
+  const envelope = { schemaVersion: 3, generation: Number(current.generation || 0) + 1, writtenAt: Date.now(), records };
+  const raw = JSON.stringify(envelope);
+  let copies = 0;
+  for (const key of UPLOAD_MUTATION_STORAGE_KEYS) {
+    try { localStorage.setItem(key, raw); copies += 1; } catch {}
+  }
+  if (!copies) return false;
+  uploadMutationLedgerCache = envelope;
+  return true;
+};
+
+const createUploadMutation = (fingerprint, alternateFingerprints = []) => {
+  const current = readUploadMutationLedger();
+  const records = { ...(current.records || {}) };
+  const existingKey = [fingerprint, ...alternateFingerprints].find(key => records[key]?.id);
+  if (existingKey) return { ...records[existingKey], fingerprint: existingKey, durable: true };
+  const now = Date.now();
+  const next = Object.fromEntries(Object.entries(records).filter(([, value]) => now - Number(value?.createdAt || 0) < 7 * 86400000));
+  if (Object.keys(next).length >= UPLOAD_MUTATION_MAX_RECORDS) throw makeFileError('UPLOAD_IDENTITY_CAPACITY_REACHED', 'The durable upload identity queue is full. Please finish or clear older uploads.');
+  const id = `upload:${globalThis.crypto?.randomUUID?.() || `${now}-${Math.random().toString(36).slice(2)}`}`;
+  next[fingerprint] = { id, fingerprint, createdAt: now };
+  const durable = writeUploadMutationLedger(next);
+  return { ...next[fingerprint], durable };
+};
+
+const withUploadMutationLock = async (action) => {
+  if (globalThis.navigator?.locks?.request) return navigator.locks.request(UPLOAD_MUTATION_LOCK_KEY, action);
+  const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const deadline = Date.now() + UPLOAD_IDENTITY_LOCK_TIMEOUT;
+  while (Date.now() < deadline) {
+    try {
+      const existing = JSON.parse(localStorage.getItem(UPLOAD_MUTATION_LOCK_KEY) || 'null');
+      if (!existing || Number(existing.expiresAt || 0) < Date.now()) {
+        localStorage.setItem(UPLOAD_MUTATION_LOCK_KEY, JSON.stringify({ token, expiresAt: Date.now() + UPLOAD_IDENTITY_LOCK_TIMEOUT }));
+        const verified = JSON.parse(localStorage.getItem(UPLOAD_MUTATION_LOCK_KEY) || 'null');
+        if (verified?.token === token) {
+          try { return await action(); } finally {
+            const latest = JSON.parse(localStorage.getItem(UPLOAD_MUTATION_LOCK_KEY) || 'null');
+            if (latest?.token === token) localStorage.removeItem(UPLOAD_MUTATION_LOCK_KEY);
+          }
+        }
+      }
+    } catch {}
+    await new Promise(resolve => setTimeout(resolve, 40));
+  }
+  throw makeFileError('UPLOAD_IDENTITY_STORAGE_UNAVAILABLE', 'Could not safely reserve a durable upload identity across browser tabs.');
+};
+
+const clearUploadMutation = (fingerprint) => {
+  const current = readUploadMutationLedger();
+  const next = { ...(current.records || {}) };
+  delete next[fingerprint];
+  writeUploadMutationLedger(next);
+};
+
+try { globalThis.addEventListener?.('storage', event => { if (UPLOAD_MUTATION_STORAGE_KEYS.includes(event.key)) uploadMutationLedgerCache = null; }); } catch {}
 
 export const absoluteApiUrl = (url = '', version = '') => {
   let value = String(url || '').trim();
@@ -25,18 +144,42 @@ export const absoluteApiUrl = (url = '', version = '') => {
   return version ? `${full}${full.includes('?') ? '&' : '?'}v=${encodeURIComponent(version)}` : full;
 };
 
+export const isTrustedNetworkUrl = (value = '') => {
+  const raw = String(value || '').trim();
+  if (!raw) return false;
+  if (/^(blob:|data:)/i.test(raw)) return true;
+  try {
+    const base = API_BASE || globalThis.location?.origin || 'http://localhost';
+    const parsed = new URL(raw, base);
+    const apiOrigin = new URL(base, globalThis.location?.origin || 'http://localhost').origin;
+    const pageOrigin = globalThis.location?.origin || apiOrigin;
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? (parsed.origin === apiOrigin || parsed.origin === pageOrigin) : false;
+  } catch { return false; }
+};
 
-const getProjectFileName = (doc = {}) => String(doc?.name || doc?.fileName || doc?.filename || '').toLowerCase();
+export const isAllowedPrivateFileUrl = (value = '') => {
+  if (!isTrustedNetworkUrl(value)) return false;
+  if (/^(blob:|data:)/i.test(String(value))) return true;
+  try {
+    const parsed = new URL(value, API_BASE || globalThis.location?.origin || 'http://localhost');
+    const fileMatch = parsed.pathname.match(/^\/api\/files\/([^/]+)(?:\/(?:download|preview|preview-data))?\/?$/i);
+    const legacyMatch = parsed.pathname.match(/^\/(?:api\/)?uploads\/([^/]+)\/?$/i);
+    return Boolean(fileMatch || legacyMatch);
+  } catch { return false; }
+};
+
+
+const getProjectFileName = (doc = {}) => String(doc?.name || doc?.fileName || doc?.filename || '').trim();
 const getProjectFileMime = (doc = {}) => String(doc?.mime || doc?.mimeType || doc?.contentType || doc?.type || '').toLowerCase();
 
 export const isProjectFilePdf = (doc = {}) => {
-  const name = getProjectFileName(doc);
+  const name = getProjectFileName(doc).toLowerCase();
   const mime = getProjectFileMime(doc);
   return name.endsWith('.pdf') || mime.includes('pdf');
 };
 
 export const isProjectFileImage = (doc = {}) => {
-  const name = getProjectFileName(doc);
+  const name = getProjectFileName(doc).toLowerCase();
   const mime = getProjectFileMime(doc);
   return mime.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|bmp|svg)$/i.test(name);
 };
@@ -44,6 +187,14 @@ export const isProjectFileImage = (doc = {}) => {
 export const getProjectFileKind = (doc = {}) => {
   if (isProjectFilePdf(doc)) return 'pdf';
   if (isProjectFileImage(doc)) return 'image';
+  const extension = getProjectFileName(doc).split('.').pop()?.toLowerCase();
+  const mime = getProjectFileMime(doc);
+  if (extension === 'webm' && /(voice|audio)/.test(getProjectFileName(doc).toLowerCase())) return 'audio';
+  if (/^(mp4|webm|mov|m4v|avi|mkv)$/.test(extension) || mime.startsWith('video/')) return 'video';
+  if (/^(mp3|wav|m4a|ogg|aac|flac)$/.test(extension) || mime.startsWith('audio/')) return 'audio';
+  if (/^(txt|csv|json|xml|md|log)$/.test(extension) || mime.startsWith('text/')) return 'text';
+  if (/^(docx?|xlsx?|pptx?|odt|ods|odp)$/.test(extension)) return 'office';
+  if (/^(dwg|dxf|dgn)$/.test(extension)) return 'cad';
   return 'file';
 };
 
@@ -51,7 +202,9 @@ const normalizePreviewUrl = (url = '') => {
   const raw = String(url || '').trim();
   if (!raw) return '';
   if (/^(blob:|data:)/i.test(raw)) return raw;
+  if (!isTrustedNetworkUrl(raw)) return '';
   const absolute = absoluteApiUrl(raw);
+  if (!isAllowedPrivateFileUrl(absolute)) return '';
 
   // Never use a forced-download endpoint for preview. Some file cards have
   // only downloadUrl/url saved, so convert it to an inline preview endpoint.
@@ -91,12 +244,15 @@ const getPreviewDataUrl = (doc = {}) => {
 };
 
 const dataUrlToBlob = (dataUrl = '', fallbackType = 'application/octet-stream') => {
+  const MAX_INLINE_DATA_URL_BYTES = 15 * 1024 * 1024;
   const raw = String(dataUrl || '');
   const match = raw.match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
   if (!match) return null;
   const mime = match[1] || fallbackType;
   const isBase64 = Boolean(match[2]);
   const body = match[3] || '';
+  const estimatedBytes = isBase64 ? Math.floor((body.length * 3) / 4) : body.length;
+  if (estimatedBytes > MAX_INLINE_DATA_URL_BYTES) throw makeFileError('INLINE_PREVIEW_TOO_LARGE', 'This legacy inline preview is too large to decode safely. Download the file instead.');
   if (isBase64) {
     const binary = atob(body);
     const bytes = new Uint8Array(binary.length);
@@ -106,70 +262,91 @@ const dataUrlToBlob = (dataUrl = '', fallbackType = 'application/octet-stream') 
   return new Blob([decodeURIComponent(body)], { type: mime });
 };
 
-export const canPreviewProjectFile = (doc = {}) => getProjectFileKind(doc) !== 'file' && Boolean(getProjectFilePreviewUrl(doc));
+const MAX_INLINE_DATA_URL_BYTES = 15 * 1024 * 1024;
+const MAX_TEXT_PREVIEW_BYTES = 2 * 1024 * 1024;
+export const canPreviewProjectFile = (doc = {}) => Boolean(getProjectFilePreviewUrl(doc));
 
-export const fetchProjectFilePreview = async (doc = {}) => {
+export const fetchProjectFilePreview = async (doc = {}, options = {}) => {
   const kind = getProjectFileKind(doc);
-  if (kind === 'file') throw new Error('Preview is available only for PDF and image files.');
   const sourceUrl = getProjectFilePreviewUrl(doc);
   if (!sourceUrl) throw new Error('Preview link is not available for this file.');
-
-  // Use JSON/base64 preview-data instead of embedding /preview directly. This
-  // prevents IDM/browser download managers from treating Preview as a download.
-  const dataUrl = getPreviewDataUrl(doc);
-  if (/^(blob:|data:)/i.test(dataUrl)) {
-    if (dataUrl.startsWith('blob:')) return { kind, url: dataUrl, sourceUrl: dataUrl, mimeType: getProjectFileMime(doc), size: Number(doc.size || 0) };
-    const blob = dataUrlToBlob(dataUrl, kind === 'pdf' ? 'application/pdf' : 'image/*');
-    if (!blob || blob.size <= 0) throw new Error('Preview file is empty. Please download or re-upload this file.');
-    return { kind, url: URL.createObjectURL(blob), sourceUrl: dataUrl, mimeType: blob.type, size: blob.size };
+  const signal = options.signal;
+  if (/^blob:/i.test(sourceUrl)) return { kind, url: sourceUrl, sourceUrl, mimeType: getProjectFileMime(doc), size: Number(doc.size || 0), directStream: true };
+  if (/^data:/i.test(sourceUrl)) {
+    const blob = dataUrlToBlob(sourceUrl, getProjectFileMime(doc));
+    if (!blob?.size) throw new Error('Preview file is empty.');
+    const url = URL.createObjectURL(blob);
+    return { kind, url, objectUrl:url, sourceUrl, mimeType:blob.type, size:blob.size };
   }
 
-  const fetchPreviewBlobFallback = async () => {
-    // Last-resort inline preview fetch. Never expose this URL directly to iframe/window.open,
-    // because download managers can intercept /preview. We fetch it as a blob and render a blob URL.
-    const fallbackRes = await authFetch(sourceUrl, { method: 'GET', cache: 'no-store', timeoutMs:FILE_PREVIEW_TIMEOUT_MS, headers: { Accept: kind === 'pdf' ? 'application/pdf,*/*' : 'image/*,*/*' } });
-    if (!fallbackRes.ok) {
-      const text = await fallbackRes.text().catch(() => '');
-      throw new Error(text || `Preview failed (${fallbackRes.status})`);
+  if (['pdf', 'image', 'video', 'audio'].includes(kind)) {
+    const head = await authFetch(sourceUrl, { method: 'HEAD', cache: 'no-store', timeoutMs:FILE_PREVIEW_TIMEOUT_MS, signal });
+    if (!head.ok) throw new Error(await readServerMessage(head));
+    return {
+      kind,
+      url: sourceUrl,
+      sourceUrl,
+      mimeType: head.headers.get('content-type') || getProjectFileMime(doc),
+      size: Number(head.headers.get('content-length') || doc.size || 0),
+      directStream: true
+    };
+  }
+
+  if (kind !== 'text') return { kind, url:'', sourceUrl, mimeType:getProjectFileMime(doc), size:Number(doc.size || 0), metadataOnly:true, name:getProjectFileName(doc) };
+  const previewReadLimits = { maxBytes: kind === 'text' ? MAX_TEXT_PREVIEW_BYTES : 0 };
+  const maxBytes = previewReadLimits.maxBytes;
+  const response = await authFetch(sourceUrl, { method:'GET', cache:'no-store', timeoutMs:FILE_PREVIEW_TIMEOUT_MS, signal });
+  if (!response.ok) throw new Error(await readServerMessage(response));
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    const blob = await response.blob();
+    if (blob.size > maxBytes) throw makeFileError('TEXT_PREVIEW_TOO_LARGE', 'Text preview is larger than 2 MB. Download it instead.');
+    return { kind, text:await blob.text(), sourceUrl, mimeType:blob.type, size:blob.size };
+  }
+  const chunks = [];
+  let loaded = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    loaded += value?.byteLength || 0;
+    if (loaded > maxBytes) {
+      await reader.cancel();
+      throw makeFileError('TEXT_PREVIEW_TOO_LARGE', 'Text preview is larger than 2 MB. Download it instead.');
     }
-    const blob = await fallbackRes.blob();
-    if (!blob || blob.size <= 0) throw new Error('Preview file is empty. Please download or re-upload this file.');
-    return { kind, url: URL.createObjectURL(blob), sourceUrl, mimeType: blob.type || getProjectFileMime(doc), size: blob.size };
-  };
-
-  let res;
-  try {
-    res = await authFetch(dataUrl, { method: 'GET', cache: 'no-store', timeoutMs:FILE_PREVIEW_TIMEOUT_MS, headers: { Accept: 'application/json' } });
-  } catch (error) {
-    return fetchPreviewBlobFallback();
+    if (value) chunks.push(value);
   }
-  if (!res.ok) return fetchPreviewBlobFallback();
-  const payload = await res.json().catch(() => null);
-  if (!payload?.ok || !payload?.dataUrl) return fetchPreviewBlobFallback();
-  const blob = dataUrlToBlob(payload.dataUrl, payload.mimeType || (kind === 'pdf' ? 'application/pdf' : 'image/*'));
-  if (!blob || blob.size <= 0) throw new Error('Preview file is empty. Please download or re-upload this file.');
-  return {
-    kind: payload.kind || kind,
-    url: URL.createObjectURL(blob),
-    sourceUrl,
-    mimeType: blob.type || payload.mimeType,
-    size: blob.size || payload.size,
-  };
+  const blob = new Blob(chunks, { type:response.headers.get('content-type') || 'text/plain' });
+  return { kind, text:await blob.text(), sourceUrl, mimeType:blob.type, size:blob.size };
+};
+
+export const releaseProjectFilePreview = (preview = {}) => {
+  const objectUrl = preview?.objectUrl;
+  if (objectUrl && String(objectUrl).startsWith('blob:')) URL.revokeObjectURL(objectUrl);
 };
 
 export const getProjectFileDownloadUrl = (doc = {}) => {
   if (!doc) return '';
-  if (doc.downloadUrl) return absoluteApiUrl(doc.downloadUrl);
+  const sanitizePrivateFileUrl = (value = '') => {
+    if (!isTrustedNetworkUrl(value)) return '';
+    const absolute = absoluteApiUrl(value);
+    return isAllowedPrivateFileUrl(absolute) ? absolute : '';
+  };
+  if (doc.downloadUrl) {
+    const trusted = sanitizePrivateFileUrl(doc.downloadUrl);
+    if (trusted) return trusted;
+  }
 
   // Prefer the saved URL before guessing from the id. Some older browser-only
   // records used Date.now()+Math.random() as an id; forcing those ids through
   // /api/files/:id/download caused false "missing file" errors on mobile/desktop.
-  if (doc.url) return absoluteApiUrl(doc.url);
+  if (doc.url) {
+    const trusted = sanitizePrivateFileUrl(doc.url);
+    if (trusted) return trusted;
+  }
 
-  const id = String(doc.fileId || doc.id || '').trim();
-  const looksLikeServerFileId = /^[A-Za-z0-9_-]{6,40}$/.test(id) && !/^\d+(\.\d+)?$/.test(id);
-  if (looksLikeServerFileId) return `${API_BASE}/api/files/${encodeURIComponent(id)}/download`;
-  return '';
+  const authoritativeFileId = String(doc.fileId || doc.id || '').trim();
+  const looksLikeServerFileId = /^[A-Za-z0-9_-]{6,80}$/.test(authoritativeFileId) && !/^\d+(\.\d+)?$/.test(authoritativeFileId);
+  return looksLikeServerFileId ? `${API_BASE}/api/files/${encodeURIComponent(authoritativeFileId)}/download` : '';
 };
 
 export const normalizeProjectFileRecord = (doc = {}) => {
@@ -210,7 +387,7 @@ export const getProjectFileActionState = (doc = {}) => {
 
 
 export const getProjectFilePreviewUrl = (doc = {}) => {
-  if (!doc || getProjectFileKind(doc) === 'file') return '';
+  if (!doc) return '';
 
   if (doc.previewUrl) return normalizePreviewUrl(doc.previewUrl);
 
@@ -242,7 +419,7 @@ const UPLOAD_RESPONSE_TIMEOUT_MS = 5 * 60 * 1000;
 const FILE_PREVIEW_TIMEOUT_MS = 5 * 60 * 1000;
 const FILE_DOWNLOAD_TIMEOUT_MS = 35 * 60 * 1000;
 
-const uploadWithXhr = (url, form, onProgress) => new Promise((resolve, reject) => {
+const uploadWithXhr = (url, form, onProgress, signal) => new Promise((resolve, reject) => {
   const xhr = new XMLHttpRequest();
   let settled = false;
   let responseTimer = null;
@@ -289,11 +466,20 @@ const uploadWithXhr = (url, form, onProgress) => new Promise((resolve, reject) =
   };
   xhr.onerror = () => finish(reject, new Error('Upload failed. Please check internet connection and try again.'));
   xhr.ontimeout = () => finish(reject, new Error('Upload timed out. Please try again on a stable connection.'));
-  xhr.onabort = () => finish(reject, new Error('Upload was cancelled before the server confirmed it.'));
+  xhr.onabort = () => finish(reject, makeFileError('UPLOAD_CANCELLED', 'Upload was cancelled before the server confirmed it.'));
+  signal?.addEventListener?.('abort', () => {
+    try { xhr.abort(); } catch {}
+  }, { once:true });
   xhr.send(form);
 });
 
-export const uploadProjectFile = async (file, projectId, type, uploadedBy, onProgress) => {
+export const uploadProjectFile = async (file, projectId, type, uploadedBy, onProgress, options = {}) => {
+  if (onProgress && typeof onProgress === 'object') {
+    options = onProgress;
+    onProgress = options.onProgress;
+  }
+  const normalizedType = String(type || 'source').trim().toLowerCase();
+  validateProjectUploadSelection([file], normalizedType === 'payment-receipt' ? { allowedKinds: PAYMENT_RECEIPT_KINDS } : {});
   const baseDoc = {
     id: Date.now() + Math.random(),
     name: file.name,
@@ -304,21 +490,41 @@ export const uploadProjectFile = async (file, projectId, type, uploadedBy, onPro
     mimeType: file.type || 'application/octet-stream'
   };
 
-  const mutationId = uploadMutationIdFor(file);
+  const actorIdentity = options.actorId || options.actorUsername || uploadedBy;
+  const scopeParts = [options.chatScope, options.recipientId, options.recipientUsername, options.recipient, options.isVoiceNote ? 'voice-note' : ''].filter(Boolean);
+  const scope = scopeParts.join(':');
+  const fingerprint = uploadFingerprint(file, projectId, normalizedType, actorIdentity, scope);
+  const alternateFingerprints = [options.actorUsername, uploadedBy]
+    .filter(Boolean)
+    .map(actor => uploadFingerprint(file, projectId, normalizedType, actor, scope));
+  const mutation = await withUploadMutationLock(() => createUploadMutation(fingerprint, alternateFingerprints));
+  if (!mutation.durable) throw makeFileError('UPLOAD_IDENTITY_STORAGE_UNAVAILABLE', 'Upload recovery identity could not be stored durably. The file was not sent.');
+  const mutationId = uploadMutationIds.get(file) || mutation.id;
+  uploadMutationIds.set(file, mutationId);
   const form = new FormData();
   form.append('file', file);
   form.append('projectId', projectId || '');
-  form.append('type', type || 'source');
-  form.append('mutationId', mutationId);
+  form.append('type', normalizedType);
+  appendUploadMutationId(form, mutation, mutationId);
+  if (normalizedType === 'chat') {
+    if (options.chatScope) form.append('chatScope', String(options.chatScope));
+    if (options.recipientId) form.append('recipientId', String(options.recipientId));
+    if (options.recipientUsername) form.append('recipientUsername', String(options.recipientUsername));
+    if (options.recipient) form.append('recipient', String(options.recipient));
+    if (options.isVoiceNote) form.append('isVoiceNote', 'true');
+  }
 
   try {
-    const payload = await uploadWithXhr(`${API_BASE}/api/files/upload`, form, onProgress);
-    if (file && typeof file === 'object') uploadMutationIds.delete(file);
+    const payload = await uploadWithXhr(`${API_BASE}/api/files/upload`, form, onProgress, options.signal);
+    const authoritativeFileId = String(payload?.file?.id || payload?.file?.fileId || '').trim();
+    if (payload?.ok !== true || !authoritativeFileId) throw makeFileError('UPLOAD_RESPONSE_UNCONFIRMED', 'The server response did not confirm a durable uploaded file. Refresh before retrying.');
+    uploadMutationIds.delete(file);
+    clearUploadMutation(mutation.fingerprint);
     return {
       ...baseDoc,
       ...payload.file,
-      type,
-      folder: type,
+      type: normalizedType,
+      folder: normalizedType,
       uploadedBy,
       date: new Date().toLocaleDateString(),
       url: payload.file?.url || payload.file?.downloadUrl || '',
@@ -337,9 +543,27 @@ export const uploadProjectFile = async (file, projectId, type, uploadedBy, onPro
 
 const FILE_CACHE_DB_NAME = 'kalpavriksha-file-cache-v1';
 const FILE_CACHE_STORE = 'files';
-const FILE_CACHE_INDEX_KEY = 'kalpavriksha_downloaded_file_index_v1';
+const LEGACY_FILE_CACHE_INDEX_KEY = 'kalpavriksha_downloaded_file_index_v2';
+const FILE_CACHE_INDEX_KEY = 'kalpavriksha_downloaded_file_index_v3';
 const FILE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const nowMs = () => Date.now();
+let activeFileCacheActor = 'signed-out';
+
+const hashResourceIdentity = (value = '') => {
+  let hash = 0xcbf29ce484222325n;
+  for (const char of String(value)) {
+    hash ^= BigInt(char.codePointAt(0));
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  }
+  return hash.toString(36);
+};
+
+export const setProjectFileCacheActor = (actor = {}) => {
+  const nextActor = String(actor.id || actor.username || actor.name || 'signed-out').trim().toLowerCase() || 'signed-out';
+  if (nextActor === activeFileCacheActor) return activeFileCacheActor;
+  activeFileCacheActor = nextActor;
+  return activeFileCacheActor;
+};
 
 const isDesktopBridgeAvailable = () => typeof window !== 'undefined' && Boolean(window.kalpavrikshaDesktop?.isDesktop);
 
@@ -352,7 +576,9 @@ export const getProjectFileCacheKey = (doc = {}) => {
   const url = String(doc.downloadUrl || doc.url || '').trim();
   const name = String(doc.name || doc.fileName || 'file').trim();
   const size = String(doc.size || '').trim();
-  return [id || url || name, name, size].filter(Boolean).join('::');
+  const resourceIdentity = [id, url, name, size, String(doc.mimeType || '')].join('|');
+  const resourceKey = (id || url || name) ? `${id || name}::${hashResourceIdentity(resourceIdentity)}` : '';
+  return resourceKey ? `${activeFileCacheActor}::${resourceKey}` : '';
 };
 
 const readCacheIndex = () => {
@@ -535,7 +761,13 @@ const triggerBrowserDownload = (url, fileName = 'download') => {
   setTimeout(() => a.remove(), 1500);
 };
 
-export const downloadProjectFile = async (doc = {}, onProgress) => {
+const MAX_TRACKED_BROWSER_DOWNLOAD_BYTES = 32 * 1024 * 1024;
+export const downloadProjectFile = async (doc = {}, onProgress, options = {}) => {
+  if (onProgress && typeof onProgress === 'object') {
+    options = onProgress;
+    onProgress = options.onProgress;
+  }
+  const signal = options.signal;
   const url = getProjectFileDownloadUrl(doc);
   if (!url) {
     throw new Error('This file does not have a valid download link. Please re-upload it once.');
@@ -543,6 +775,7 @@ export const downloadProjectFile = async (doc = {}, onProgress) => {
 
   const fileName = doc.name || doc.fileName || 'download';
   const startedAt = Date.now();
+  const declaredSize = Number(doc.size || 0);
 
   if (isDesktopBridgeAvailable()) {
     const transferId = makeDesktopTransferId();
@@ -569,8 +802,16 @@ export const downloadProjectFile = async (doc = {}, onProgress) => {
     }
   }
 
+  if (declaredSize > MAX_TRACKED_BROWSER_DOWNLOAD_BYTES) {
+    triggerBrowserDownload(url, fileName);
+    return { ok:true, method: 'browser-native-large', cached:false, completionConfirmed:false };
+  }
+
   try {
-    const res = await authFetch(url, { cache: 'no-store', timeoutMs:FILE_DOWNLOAD_TIMEOUT_MS });
+    if (signal?.aborted) throw makeFileError('DOWNLOAD_CANCELLED', 'Download cancelled.');
+    const res = signal
+      ? await authFetch(url, { cache: 'no-store', timeoutMs:FILE_DOWNLOAD_TIMEOUT_MS, signal })
+      : await authFetch(url, { cache: 'no-store', timeoutMs:FILE_DOWNLOAD_TIMEOUT_MS });
     if (!res.ok) {
       const msg = await readServerMessage(res).catch(() => `Download failed (${res.status})`);
       throw new Error(msg);
@@ -579,18 +820,17 @@ export const downloadProjectFile = async (doc = {}, onProgress) => {
     const total = Number(res.headers.get('content-length') || doc.size || 0);
     const reader = res.body?.getReader?.();
     if (!reader) {
-      const blob = await res.blob();
-      if (typeof onProgress === 'function') onProgress({ percent: 100, loaded: blob.size || total, total: blob.size || total, speedBps: 0, etaSeconds: 0 });
-      await putCachedBlob(doc, blob).catch((cacheError) => console.warn('File downloaded but local cache failed:', cacheError));
-      const blobUrl = URL.createObjectURL(blob);
-      triggerBrowserDownload(blobUrl, fileName);
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 1500);
-      return { ok: true, method: 'blob', cached: true };
+      triggerBrowserDownload(url, fileName);
+      return { ok:true, method: 'browser-native', cached:false, completionConfirmed: false };
     }
 
     const chunks = [];
     let loaded = 0;
     while (true) {
+      if (signal?.aborted) {
+        await reader.cancel();
+        throw makeFileError('DOWNLOAD_CANCELLED', 'Download cancelled.');
+      }
       const { done, value } = await reader.read();
       if (done) break;
       if (value) {
@@ -609,20 +849,21 @@ export const downloadProjectFile = async (doc = {}, onProgress) => {
 
     const blob = new Blob(chunks, { type: res.headers.get('content-type') || doc.mimeType || 'application/octet-stream' });
     if (typeof onProgress === 'function') onProgress({ percent: 100, loaded: blob.size || loaded, total: total || blob.size || loaded, speedBps: 0, etaSeconds: 0 });
-    await putCachedBlob(doc, blob).catch((cacheError) => console.warn('File downloaded but local cache failed:', cacheError));
+    const cachedMeta = await putCachedBlob(doc, blob).catch((cacheError) => { console.warn('File downloaded but local cache failed:', cacheError); return null; });
     const blobUrl = URL.createObjectURL(blob);
     triggerBrowserDownload(blobUrl, fileName);
     setTimeout(() => URL.revokeObjectURL(blobUrl), 1500);
-    return { ok: true, method: 'blob', cached: true };
+    return { ok: true, method: 'blob', cached: Boolean(cachedMeta), completionConfirmed:true };
   } catch (error) {
     // If the browser/network blocks streamed fetch even though the file URL is valid,
     // fall back to the normal browser download flow instead of showing a false failure.
     // Real server errors above (404/500 with a response) still throw before this block.
-    if (error instanceof TypeError || /failed to fetch|network|load failed|aborted/i.test(String(error?.message || ''))) {
+    if (error?.code === 'DOWNLOAD_CANCELLED' || signal?.aborted) throw makeFileError('DOWNLOAD_CANCELLED', 'Download cancelled.');
+    if (error instanceof TypeError || /failed to fetch|network|load failed/i.test(String(error?.message || ''))) {
       console.warn('Tracked download stream failed; falling back to direct browser download:', error);
       if (typeof onProgress === 'function') onProgress({ percent: 100, loaded: Number(doc.size || 0), total: Number(doc.size || 0), speedBps: 0, etaSeconds: 0, fallback: true });
       triggerBrowserDownload(url, fileName);
-      return { ok: true, method: 'direct-fallback' };
+      return { ok: true, method: 'direct-fallback', cached:false, completionConfirmed:false };
     }
     console.error('Download failed:', error);
     throw error;

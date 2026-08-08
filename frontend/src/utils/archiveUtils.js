@@ -1,4 +1,5 @@
 import { getPaymentReceivedAmount, getPaymentTrackingStatus } from './paymentStatusUtils.js';
+import { formatDateKey } from './date.js';
 
 const LOCATION_ALIASES = Object.freeze({
   LKO: 'LUCKNOW', LKN: 'LUCKNOW', LUCKNOW: 'LUCKNOW',
@@ -23,8 +24,7 @@ export const getArchiveLocation = (project = {}) => {
 };
 
 export const getCompletedDateKey = (completedAt) => {
-  const date = new Date(completedAt);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  return formatDateKey(completedAt);
 };
 
 export const matchesArchiveSearch = (project = {}, query = '', extraValues = []) => {

@@ -82,7 +82,8 @@ if (requireBackup) {
   if (!backupRoot) throw new Error('KALPA_BACKUP_ROOT is required for release certification.');
   const status = inspectBackupManifests(backupRoot, { maxAgeHours: Number(process.env.BACKUP_MAX_AGE_HOURS || 26) });
   if (!status.ok) throw new Error(`Verified backup is not ready: ${status.status}.`);
-  backup = { id: status.latest?.id || '', status: status.latest?.status || '', ok: status.ok, createdAt: status.latest?.createdAt || '', manifestPath: status.latest?.manifestPath || '' };
+  const verifiedBackup = status.latestVerified || status.latest;
+  backup = { id: verifiedBackup?.id || '', status: verifiedBackup?.status || '', ok: status.ok, createdAt: verifiedBackup?.createdAt || '', manifestPath: verifiedBackup?.manifestPath || '' };
 }
 
 let database = null;

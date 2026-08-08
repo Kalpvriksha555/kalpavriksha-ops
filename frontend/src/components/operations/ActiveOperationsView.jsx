@@ -1,7 +1,7 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Calendar, List, KanbanSquare, Plus, Flag, Users, Clock, MessageSquare } from 'lucide-react';
 import { Badge } from '../shared';
-import { formatDateTime, formatLastSeenDateTime, formatDuration, formatMinutes } from '../../utils/date';
+import { formatDateKey, formatDateTime, formatLastSeenDateTime, formatDuration, formatMinutes } from '../../utils/date';
 import { formatTaskId, getTaskDescription, getEstimateDetails, getLatestCompletedFileName } from '../../utils/taskDisplayUtils';
 import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass } from '../../utils/paymentStatusUtils';
 import { getTaskBusySince, getUserActiveTasks, getDraftingElapsedMs, getUserFreeSince } from '../../utils/presenceAttendanceUtils';
@@ -183,12 +183,10 @@ const TeamActivityPanel = ({ users, projects, nowTick, ROLES, onSelectProject, g
         const designerOnline = isUserActuallyOnline(designer, nowTick);
         const activeTasks = designerOnline ? getUserActiveTasks(projects, designer.name) : [];
         const pausedTasks = projects.filter(p => p.assignedTo === designer.name && p.status === 'Drafting Paused');
-        const todayStart = new Date().setHours(0,0,0,0);
+        const todayKey = formatDateKey(nowTick);
         const submittedToday = projects.filter(p => {
           if (p.assignedTo !== designer.name) return false;
-          if (p.completedAt && p.completedAt >= todayStart) return true;
-          if (p.submittedAt && p.submittedAt >= todayStart) return true;
-          return false;
+          return formatDateKey(p.completedAt || p.submittedAt) === todayKey;
         }).length;
 
         let idleStatus = designerOnline ? 'Available' : `Unavailable${designer.lastSeenAt || designer.lastLogoutAt || designer.lastHeartbeatAt ? ` - Last seen ${formatLastSeenDateTime(designer.lastSeenAt || designer.lastLogoutAt || designer.lastHeartbeatAt)}` : ''}`;
@@ -295,7 +293,6 @@ export const ActiveOperationsView = ({
   activeUsers,
   setSelectedProject,
   onSelectProject,
-  nowTick,
   ROLES,
   getCustomerDisplayName,
   getDraftElapsed,
@@ -305,6 +302,12 @@ export const ActiveOperationsView = ({
   currentUser,
   onPaymentStatusChange,
 }) => {
+  const [nowTick, setNowTick] = useState(Date.now());
+  useEffect(() => {
+    const tick = () => setNowTick(Date.now());
+    const timer = setInterval(tick, 30000);
+    return () => clearInterval(timer);
+  }, []);
   const selectTask = (project) => {
     if (typeof onSelectProject === 'function') onSelectProject(project);
     else if (typeof setSelectedProject === 'function') setSelectedProject(project);

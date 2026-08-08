@@ -36,3 +36,29 @@ export function preserveDirtyPresenceAfterReload({
     attendanceLogs: liveState?.attendanceLogs || []
   };
 }
+
+export function isDeferredPersistenceOperation({ metadata = {}, reason = '' } = {}) {
+  const normalizedReason = String(reason || metadata?.reason || '').trim().toLowerCase();
+  return metadata?.background === true || normalizedReason.startsWith('presence_');
+}
+
+export function classifyPersistenceFailure({
+  metadata = {},
+  reason = '',
+  recoverySucceeded = false,
+  verifiedFallbackRestored = false,
+  usePostgres = true
+} = {}) {
+  const deferred = isDeferredPersistenceOperation({ metadata, reason });
+  const safelyRecovered = Boolean(recoverySucceeded || verifiedFallbackRestored);
+  return {
+    deferred,
+    safelyRecovered,
+    critical: !deferred && (!usePostgres || !safelyRecovered),
+    jobType: deferred ? 'PRESENCE_PERSISTENCE' : 'STATE_PERSISTENCE'
+  };
+}
+
+export function persistenceReadiness({ criticalFailure = null } = {}) {
+  return criticalFailure === null || criticalFailure === undefined;
+}

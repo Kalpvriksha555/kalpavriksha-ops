@@ -87,8 +87,14 @@ function shouldIgnoreTree(relativePath, entryName) {
   if (ignoredTreeNames.has(entryName)) return true;
   if (ignoredTreeNames.has(normalized)) return true;
   if (/(^|\/)node_modules(\/|$)/.test(normalized)) return true;
-  if (/(^|\/)dist(\/|$)/.test(normalized)) return true;
+  // Deployment swaps frontend builds through dist.next/dist.previous. Those are
+  // generated runtime build artifacts, never release source. Including them in
+  // sourceTreeHash makes an otherwise byte-identical certified source fail the
+  // permanent release gate immediately after the atomic frontend switch.
+  if (/(^|\/)dist(?:\.(?:next|previous))?(\/|$)/.test(normalized)) return true;
   if (/(^|\/)src\/(?:data|uploads)(\/|$)/.test(normalized)) return true;
+  if (/^(?:backend\/)?data(?:\/|$)/.test(normalized)) return true;
+  if (/^(?:private-files|backups)(?:\/|$)/.test(normalized)) return true;
   if (/\.log$/i.test(entryName) || /^\.env(?:\.|$)/.test(entryName)) return true;
   return false;
 }

@@ -1,4 +1,5 @@
 import { API_BASE } from '../config/appConfig';
+import { absoluteApiUrl, isAllowedPrivateFileUrl } from '../services/fileService';
 
 const CHAT_API_BASE = API_BASE;
 
@@ -6,9 +7,8 @@ export { CHAT_API_BASE };
 
 export const absoluteChatUrl = (value = '') => {
   if (!value) return '';
-  const str = String(value);
-  if (/^(blob:|data:|https?:)/i.test(str)) return str;
-  return str.startsWith('/') ? `${CHAT_API_BASE}${str}` : `${CHAT_API_BASE}/${str.replace(/^\/+/, '')}`;
+  const absolute = absoluteApiUrl(value);
+  return isAllowedPrivateFileUrl(absolute) ? absolute : '';
 };
 
 export const makeMessageId = () => Number(`${Date.now()}${String(Math.floor(Math.random() * 1000)).padStart(3, '0')}`);

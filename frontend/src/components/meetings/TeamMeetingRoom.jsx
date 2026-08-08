@@ -32,9 +32,12 @@ export const TeamMeetingRoom = ({ currentUser, safeAppId }) => {
     try { setMeetingNotes(localStorage.getItem('kalpa_team_meeting_notes') || ''); } catch(e) {}
   }, []);
   useEffect(() => {
-    const t = setInterval(() => setMeetingNow(Date.now()), 1000);
+    if (!meetingStartedAt || typeof document === 'undefined') return undefined;
+    const update = () => { if (!document.hidden) setMeetingNow(Date.now()); };
+    update();
+    const t = setInterval(update, 1000);
     return () => clearInterval(t);
-  }, []);
+  }, [meetingStartedAt]);
   const handleStartMeeting = () => {
     const now = Date.now();
     setMeetingStartedAt(now);
@@ -121,4 +124,3 @@ export const TeamMeetingRoom = ({ currentUser, safeAppId }) => {
     </div>
   );
 };
-

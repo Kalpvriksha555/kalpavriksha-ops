@@ -9,9 +9,10 @@ import { getVisibleNotifications } from '../../services/notificationService';
 import { formatTaskId } from '../../utils/taskDisplayUtils';
 import { CHAT_API_BASE, absoluteChatUrl, makeMessageId, QUICK_EMOJIS, isUserActuallyOnline, getOperationalUsers, identityKey, samePerson, readEntryName, ROLES, normalizeChannelKey, chatEmojiGroups, reactionEmojis } from '../../utils/chatUtils';
 import { authFetch } from '../../services/authService';
+import { uploadProjectFile } from '../../services/fileService';
 import { notifyUser, requestConfirmation } from '../../services/uiFeedback.js';
 
-export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onDeleteMessage, onUpdateMessage, onMarkMessagesRead, appId, projects = [], onOpenTaskReference, onPreviewFile }) => {
+export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onDeleteMessage, onUpdateMessage, onMarkMessagesRead, appId, projects = [], onOpenTaskReference, onPreviewFile, onDownloadFile }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [presenceNow, setPresenceNow] = useState(Date.now());
   const [activeChannel, setActiveChannel] = useState('global');
@@ -30,6 +31,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const [voiceStartedAt, setVoiceStartedAt] = useState(null);
   const [voiceNow, setVoiceNow] = useState(Date.now());
   const [uploadingAttachment, setUploadingAttachment] = useState(null);
+  const [attachmentRetry, setAttachmentRetry] = useState(null);
   const [forwardMessageData, setForwardMessageData] = useState(null);
   const [actionMenu, setActionMenu] = useState(null);
   const [reactionMenu, setReactionMenu] = useState(null);
@@ -38,6 +40,8 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const mediaRecorderRef = useRef(null);
   const voiceChunksRef = useRef([]);
   const voiceCancelRef = useRef(false);
+  const voiceTargetRef = useRef(null);
+  const attachmentUploadAbortRef = useRef(null);
   const chatEndRef = useRef(null);
   const chatScrollRef = useRef(null);
   const composerRef = useRef(null);
@@ -76,6 +80,13 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     return samePerson(value, channel) || (!!user && sameChatIdentity(value, user));
   };
   const activePeer = activeChannel === 'global' ? null : chatUsers.find(u => sameChatIdentity(activeChannel, u));
+  const captureAttachmentTarget = () => ({
+    channel: activeChannel,
+    chatScope: activeChannel === 'global' ? 'GLOBAL' : 'PRIVATE',
+    recipientId: activePeer?.id || '',
+    recipientUsername: activePeer?.username || '',
+    recipient: activePeer?.name || (activeChannel === 'global' ? 'global' : activeChannel)
+  });
   const activePeerOnline = activePeer ? isUserActuallyOnline(activePeer, presenceNow) : false;
   const activeCallRoom = activePeer ? createSafeMeetingRoomName('KalpaVriksha_DM', appId || 'kalpavriksha_production_v1', ...[currentUser.name, activePeer.name].sort()) : '';
   const activeCallUrl = activePeer ? buildJitsiUrl(activeCallRoom, currentUser.name, { audioOnly: callAudioOnly, shareScreen: callShareScreen }) : '';
@@ -178,18 +189,26 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     try { const saved = JSON.parse(localStorage.getItem(pinnedKey) || '[]'); setPinnedMessageIds(Array.isArray(saved) ? saved.map(String) : []); } catch(e) { setPinnedMessageIds([]); }
   }, [pinnedKey]);
   useEffect(() => {
-    const timer = setInterval(() => setPresenceNow(Date.now()), 30000);
+    if (!isOpen || typeof document === 'undefined') return undefined;
+    const timer = setInterval(() => { if (!document.hidden) setPresenceNow(Date.now()); }, 30000);
     return () => clearInterval(timer);
-  }, []);
+  }, [isOpen]);
   useEffect(() => {
-    const timer = setInterval(() => setCallNow(Date.now()), 1000);
+    if (!isOpen || !isCalling || !callStartedAt || typeof document === 'undefined') return undefined;
+    const timer = setInterval(() => { if (!document.hidden) setCallNow(Date.now()); }, 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [isOpen, isCalling, callStartedAt]);
   useEffect(() => {
-    if (!isRecordingVoice) return;
+    if (!isOpen || !isRecordingVoice) return undefined;
     const timer = setInterval(() => setVoiceNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [isRecordingVoice]);
+  }, [isOpen, isRecordingVoice]);
+  useEffect(() => {
+    if (!uploadingAttachment || uploadingAttachment.stage !== 'upload') return undefined;
+    const warnBeforeUnload = (event) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warnBeforeUnload);
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload);
+  }, [uploadingAttachment]);
   useEffect(() => {
     if (typeof document === 'undefined') return;
     document.body.classList.toggle('kalpa-mobile-chat-open', !!isOpen);
@@ -291,7 +310,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     return m.sender || 'global';
   };
 
-  const unreadMessages = (chatMessages || []).filter(m => {
+  const unreadMessages = React.useMemo(() => (chatMessages || []).filter(m => {
     if (!isMessageForCurrentUser(m)) return false;
     if (m.callType || m.roomUrl) return false;
     if (sameCurrentUser(m.sender)) return false;
@@ -303,7 +322,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     if (hasReadByCurrentUser(m)) return false;
     if (isOpen && isMessageInActiveChannel(m)) return false;
     return true;
-  });
+  }), [chatMessages, hiddenMessageIds, localReadState, isOpen, activeChannel, currentUser?.id, currentUser?.username, currentUser?.name]);
   const unreadGlobalCount = (isOpen && activeChannel === 'global') ? 0 : unreadMessages.filter(m => m.recipient === 'global' || !m.recipient).length;
 
   const getDirectUnreadCountForUser = (userName) => {
@@ -321,9 +340,15 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     }).length;
   };
 
-  const unreadDirectTotal = chatUsers.reduce((sum, u) => sum + getDirectUnreadCountForUser(u.name), 0);
-  const totalUnreadCount = unreadMessages.length;
-  const latestUnreadMessage = unreadMessages.slice().sort((a, b) => Number(b.sentAt || b.id || 0) - Number(a.sentAt || a.id || 0))[0];
+  const unreadSummary = React.useMemo(() => {
+    let directTotal = 0;
+    for (const user of chatUsers) directTotal += getDirectUnreadCountForUser(user.name);
+    const latest = unreadMessages.slice().sort((a, b) => Number(b.sentAt || b.id || 0) - Number(a.sentAt || a.id || 0))[0];
+    return { directTotal, total: unreadMessages.length, latest };
+  }, [chatUsers, unreadMessages, chatMessages, hiddenMessageIds, localReadState, isOpen, activeChannel]);
+  const unreadDirectTotal = unreadSummary.directTotal;
+  const totalUnreadCount = unreadSummary.total;
+  const latestUnreadMessage = unreadSummary.latest;
 
   const getConversationLabel = (channel = activeChannel) => {
     if (channel === 'global') return 'Global Chat';
@@ -443,14 +468,18 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   };
 
 
-  const uploadChatFileToServer = async (file, type = 'chat') => {
-    const form = new FormData();
-    form.append('file', file);
-    form.append('type', type);
-    const res = await authFetch(`${CHAT_API_BASE}/api/files/upload`, { method: 'POST', body: form, timeoutMs:30 * 60 * 1000 });
-    if (!res.ok) throw new Error(await res.text());
-    const payload = await res.json();
-    return payload.file || {};
+  const uploadChatFileToServer = async (file, target, extra = {}, signal) => {
+    return uploadProjectFile(file, '', 'chat', currentUser.name, {
+      signal,
+      actorId: currentUser.id,
+      actorUsername: currentUser.username,
+      chatScope: target.chatScope,
+      recipientId: target.recipientId,
+      recipientUsername: target.recipientUsername,
+      recipient: target.recipient,
+      isVoiceNote: Boolean(extra.isVoiceNote),
+      timeoutMs:30 * 60 * 1000
+    });
   };
 
   const buildAttachmentMessage = (fileMeta = {}, fallback = {}, extra = {}) => {
@@ -470,7 +499,6 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       mime: fileType,
       mimeType: fileType,
       size: fileSize,
-      // url/previewUrl are always inline-safe; downloadUrl is the only attachment path.
       url: previewUrl || fileMeta.previewUrl || fileMeta.url || fallback.url || '',
       previewUrl: previewUrl || fileMeta.previewUrl || fileMeta.url || fallback.url || '',
       downloadUrl: downloadUrl || fileMeta.downloadUrl || ''
@@ -483,7 +511,6 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       fileType,
       fileSize,
       files: [fileRecord],
-      localPreviewOnly: !!extra.localPreviewOnly,
       uploadStatus: extra.uploadStatus || 'ready',
       taskRefs: extra.taskRefs || buildTaskRefsForMessage(extra.text || ''),
       replyTo: replyTo ? { id: replyTo.id, sender: replyTo.sender, text: replyTo.text || replyTo.fileName || 'Attachment' } : null,
@@ -491,20 +518,55 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     });
   };
 
+  const sendAttachmentWithRetry = async (file, target, extra = {}, uploadedFileMeta = null) => {
+    const controller = new AbortController();
+    if (attachmentUploadAbortRef.current) attachmentUploadAbortRef.current.abort();
+    attachmentUploadAbortRef.current = controller;
+    let fileMeta = uploadedFileMeta;
+    setUploadingAttachment({ stage:'upload', name:file?.name || fileMeta?.name || 'Attachment', size:file?.size || fileMeta?.size || 0, type:file?.type || fileMeta?.mimeType || '', voice:Boolean(extra.isVoiceNote), target });
+    try {
+      if (!fileMeta) fileMeta = await uploadChatFileToServer(file, target, extra, controller.signal);
+      setUploadingAttachment(previous => ({ ...(previous || {}), stage:'message' }));
+      await onSendMessage(buildAttachmentMessage(fileMeta, { name:file?.name, type:file?.type, size:file?.size }, { ...extra, recipient:target.channel }));
+      setAttachmentRetry(null);
+      setReplyTo(null);
+      return fileMeta;
+    } catch (error) {
+      if (fileMeta?.id) error.uploadedFileMeta = fileMeta;
+      if (!controller.signal.aborted) {
+        setAttachmentRetry({ file, target, extra, uploadedFileMeta:fileMeta || null });
+        console.error(fileMeta?.id ? 'Chat message delivery failed after file upload:' : 'Chat attachment upload failed:', error);
+      }
+      throw error;
+    } finally {
+      if (attachmentUploadAbortRef.current === controller) attachmentUploadAbortRef.current = null;
+      setUploadingAttachment(null);
+    }
+  };
+
+  const retryAttachmentDelivery = async () => {
+    const retry = attachmentRetry;
+    if (!retry) return;
+    try {
+      await sendAttachmentWithRetry(retry.file, retry.target, retry.extra, retry.uploadedFileMeta);
+    } catch (error) {
+      if (error?.name !== 'AbortError' && error?.code !== 'UPLOAD_CANCELLED') notifyUser(error?.message || 'Attachment could not be sent. Please retry.');
+    }
+  };
+
   const handleChatFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    const target = captureAttachmentTarget();
     const previewUrl = URL.createObjectURL(file);
-    setUploadingAttachment({ name: file.name, size: file.size || 0, type: file.type || '' });
+    setAttachmentRetry({ file, target: captureAttachmentTarget(), extra:{}, uploadedFileMeta:null });
     try {
-      const fileMeta = await uploadChatFileToServer(file, 'chat');
-      onSendMessage(buildAttachmentMessage(fileMeta, { name: file.name, type: file.type, size: file.size, url: previewUrl }));
+      await sendAttachmentWithRetry(file, target, {});
     } catch (error) {
-      console.error('Chat attachment upload failed, sending local preview only:', error);
-      onSendMessage(buildAttachmentMessage({}, { name: file.name, type: file.type, size: file.size, url: previewUrl }, { localPreviewOnly: true, uploadStatus: 'local-only', text: `Shared attachment: ${file.name}` }));
+      if (attachmentUploadAbortRef.current?.signal?.aborted || error?.name === 'AbortError') return;
+      notifyUser(error?.message || 'Attachment upload failed. Use Retry to continue.');
     } finally {
-      setUploadingAttachment(null);
-      setReplyTo(null);
+      URL.revokeObjectURL(previewUrl);
       if (e?.target) e.target.value = '';
     }
   };
@@ -516,6 +578,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
         return;
       }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      voiceTargetRef.current = captureAttachmentTarget();
       voiceCancelRef.current = false;
       voiceChunksRef.current = [];
       const recorder = new MediaRecorder(stream);
@@ -536,16 +599,13 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
         if (!blob.size) return;
         const createdAt = makeMessageId();
         const file = new File([blob], `voice-note-${createdAt}.webm`, { type: blob.type || 'audio/webm' });
-        const previewUrl = URL.createObjectURL(blob);
-        setUploadingAttachment({ name: file.name, size: blob.size, type: file.type, voice: true });
+        const target = voiceTargetRef.current || captureAttachmentTarget();
         try {
-          const fileMeta = await uploadChatFileToServer(file, 'chat');
-          onSendMessage(buildAttachmentMessage(fileMeta, { name: file.name, type: file.type, size: blob.size, url: previewUrl }, { id: createdAt, text: '🎙️ Shared voice note', sentAt: createdAt, isVoiceNote: true }));
+          await sendAttachmentWithRetry(file, target, { id: createdAt, text: '🎙️ Shared voice note', sentAt: createdAt, isVoiceNote: true });
         } catch (error) {
-          console.error('Voice note upload failed, sending local preview only:', error);
-          onSendMessage(buildAttachmentMessage({}, { name: file.name, type: file.type, size: blob.size, url: previewUrl }, { id: createdAt, text: '🎙️ Shared voice note', sentAt: createdAt, localPreviewOnly: true, uploadStatus: 'local-only', isVoiceNote: true }));
+          if (error?.name !== 'AbortError' && error?.code !== 'UPLOAD_CANCELLED') notifyUser(error?.message || 'Voice note upload failed. Use Retry to continue.');
         } finally {
-          setUploadingAttachment(null);
+          voiceTargetRef.current = null;
         }
       };
       recorder.start();
@@ -1028,16 +1088,15 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       }
       notifyUser('Preview is not ready yet. Please try again after the file finishes syncing.');
     };
-    const handleDownloadClick = (event) => {
+    const handleDownloadClick = async (event) => {
+      event.preventDefault();
       event.stopPropagation();
       if (!downloadUrl) return;
-      const anchor = document.createElement('a');
-      anchor.href = downloadUrl;
-      anchor.download = fileName;
-      anchor.rel = 'noopener noreferrer';
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
+      if (typeof onDownloadFile === 'function') {
+        await onDownloadFile({ ...fileRecord, downloadUrl, name:fileName });
+        return;
+      }
+      notifyUser('Tracked download is not available in this view. Open the file from its case instead.');
     };
     return (
       <div className={`kalpa-chat-attachment mt-3 rounded-2xl border overflow-hidden ${isMine ? 'border-indigo-300 bg-indigo-500/20' : 'border-slate-100 bg-slate-50'}`}>
@@ -1071,7 +1130,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
             <FileIcon className={`w-4 h-4 shrink-0 ${isMine ? 'text-white' : 'text-indigo-500'}`} />
             <div className="min-w-0">
               <p className={`text-xs font-black truncate ${isMine ? 'text-white' : 'text-slate-700'}`}>{fileName}</p>
-              <p className={`text-[10px] font-bold ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>{label} {getReadableFileSize(fileRecord.size) ? `• ${getReadableFileSize(fileRecord.size)}` : ''}{m.localPreviewOnly ? ' • local preview' : ''}</p>
+              <p className={`text-[10px] font-bold ${isMine ? 'text-indigo-100' : 'text-slate-400'}`}>{label} {getReadableFileSize(fileRecord.size) ? `• ${getReadableFileSize(fileRecord.size)}` : ''}</p>
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -1084,11 +1143,14 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     );
   };
 
-  const channelMessages = (chatMessages || []).filter(m => {
-    if (!isMessageForCurrentUser(m)) return false;
-    if (activeChannel === 'global') return isGlobalMessage(m);
-    return (sameCurrentUser(m.sender) && sameChannelIdentity(m.recipient, activeChannel)) || (sameChannelIdentity(m.sender, activeChannel) && sameCurrentUser(m.recipient));
-  }).sort((a, b) => Number(a.sentAt || a.id || 0) - Number(b.sentAt || b.id || 0));
+  const channelMessages = React.useMemo(() => {
+    if (!isOpen) return [];
+    return (chatMessages || []).filter(m => {
+      if (!isMessageForCurrentUser(m)) return false;
+      if (activeChannel === 'global') return isGlobalMessage(m);
+      return (sameCurrentUser(m.sender) && sameChannelIdentity(m.recipient, activeChannel)) || (sameChannelIdentity(m.sender, activeChannel) && sameCurrentUser(m.recipient));
+    }).sort((a, b) => Number(a.sentAt || a.id || 0) - Number(b.sentAt || b.id || 0));
+  }, [isOpen, chatMessages, hiddenMessageIds, activeChannel, currentUser?.id, currentUser?.username, currentUser?.name]);
   const searchKey = chatSearch.trim().toLowerCase();
   const displayMessages = searchKey
     ? channelMessages.filter(m => `${m.text || ''} ${m.fileName || ''} ${m.sender || ''}`.toLowerCase().includes(searchKey))
@@ -1284,7 +1346,8 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
             {!isCalling && (
               <div className="kalpa-chat-inputbar p-3 bg-white border-t-2 border-slate-100 flex flex-col gap-2 z-10 relative shrink-0">
                 {(replyTo || editingMessage) && <div className="flex items-center justify-between gap-3 bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-2"><div className="min-w-0"><p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">{editingMessage ? 'Editing message' : `Replying to ${replyTo?.sender}`}</p><p className="text-xs font-bold text-slate-600 truncate">{editingMessage?.text || replyTo?.text || replyTo?.fileName}</p></div><button type="button" onClick={clearComposerContext} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button></div>}
-                {uploadingAttachment && <div className="flex items-center justify-between gap-3 bg-slate-50 border border-slate-100 rounded-xl px-3 py-2"><div className="min-w-0"><p className="text-[10px] font-black uppercase tracking-widest text-slate-500">{uploadingAttachment.voice ? 'Saving voice note' : 'Uploading attachment'}</p><p className="text-xs font-bold text-slate-600 truncate">{uploadingAttachment.name} {getReadableFileSize(uploadingAttachment.size) ? `• ${getReadableFileSize(uploadingAttachment.size)}` : ''}</p></div><span className="w-4 h-4 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin shrink-0" /></div>}
+                {uploadingAttachment && <div className="flex items-center justify-between gap-3 bg-slate-50 border border-slate-100 rounded-xl px-3 py-2"><div className="min-w-0"><p className="text-[10px] font-black uppercase tracking-widest text-slate-500">{uploadingAttachment.stage === 'upload' ? (uploadingAttachment.voice ? 'Saving voice note' : 'Uploading attachment') : 'Sending message'}</p><p className="text-xs font-bold text-slate-600 truncate">{uploadingAttachment.name} {getReadableFileSize(uploadingAttachment.size) ? `• ${getReadableFileSize(uploadingAttachment.size)}` : ''}</p></div><div className="flex items-center gap-2"><span className="w-4 h-4 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin shrink-0" />{uploadingAttachment.stage === 'upload' && <button type="button" onClick={() => attachmentUploadAbortRef.current?.abort()} className="text-[11px] font-black text-red-600 bg-white border border-red-100 px-2 py-1 rounded-lg">Cancel</button>}</div></div>}
+                {!uploadingAttachment && attachmentRetry && <div className="flex items-center justify-between gap-3 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2"><p className="text-[11px] font-bold text-amber-700">{attachmentRetry.uploadedFileMeta ? 'Upload confirmed. Retry sends only the message.' : 'Attachment was not confirmed. Retry will safely reuse its upload identity.'}</p><button type="button" onClick={retryAttachmentDelivery} className="text-[11px] font-black text-amber-800 bg-white border border-amber-200 px-3 py-1.5 rounded-lg">Retry</button></div>}
                 {isRecordingVoice && <div className="kalpa-voice-recording-bar flex items-center justify-between gap-3 bg-red-50 border border-red-100 rounded-xl px-3 py-2"><div className="min-w-0"><p className="text-[10px] font-black uppercase tracking-widest text-red-600">Recording voice note</p><p className="text-xs font-bold text-red-500">{voiceStartedAt ? `${Math.floor((voiceNow - voiceStartedAt)/60000)}:${String(Math.floor(((voiceNow - voiceStartedAt)%60000)/1000)).padStart(2,'0')}` : '0:00'}</p></div><div className="flex items-center gap-2 shrink-0"><button type="button" onClick={cancelVoiceRecording} className="bg-white text-red-600 border border-red-100 px-3 py-1.5 rounded-lg text-[11px] font-black">Cancel</button><button type="button" onClick={stopVoiceRecording} className="bg-red-600 text-white px-3 py-1.5 rounded-lg text-[11px] font-black">Stop & Send</button></div></div>}
                 {showEmojiPicker && (
                   <div

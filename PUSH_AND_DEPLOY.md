@@ -1,51 +1,41 @@
-# Push and Deploy — Upload/Preview Safe Cutover
+# Push and Deploy — Current 1.9.30 Release
 
-## Push
+## Push from the local Git repository
 
-Extract the release over the existing local Git repository while preserving `.git`, review `git status`, commit the intended source changes and push `main`.
+Extract this complete ZIP over the existing local repository while preserving `.git`, then run:
 
-## Deploy only this latest upload/preview runtime
-
-Do **not** invoke `scripts/deploy-1.9.24-vps.sh` for this update. The correct deployment controller is:
-
-```text
-scripts/deploy-upload-preview-irregularity-closure-only-vps.sh
+```powershell
+git status
+git add -A
+git commit -m "Close case creation and file upload runtime integrity"
+git push origin main
 ```
 
-Connect to the VPS, then run:
+## Deploy on the VPS
+
+Do **not** run the deployment from `/var/www/kalpavriksha-ops`. Extract the release to a separate directory so the guarded deployer can snapshot and roll back the live tree safely.
 
 ```bash
 set -Eeuo pipefail
-cd /var/www/kalpavriksha-ops
-git fetch origin main
-TARGET_COMMIT="$(git rev-parse origin/main)"
-git show "${TARGET_COMMIT}:scripts/deploy-upload-preview-irregularity-closure-only-vps.sh" \
-  > /root/deploy-upload-preview-safe.sh
-chmod +x /root/deploy-upload-preview-safe.sh
-TARGET_COMMIT="$TARGET_COMMIT" bash /root/deploy-upload-preview-safe.sh
+REL=/var/www/kalpavriksha-release-1.9.30
+rm -rf "$REL"
+mkdir -p "$REL"
+unzip -q /root/Kalpavriksha_1.9.30_Full_Case_Upload_Repair_2026-08-08.zip -d "$REL"
+cd "$REL"
+chmod +x scripts/deploy-1.9.30-vps.sh scripts/launch-deploy-1.9.30-vps.sh
+bash scripts/launch-deploy-1.9.30-vps.sh
 ```
 
-The script performs the complete preflight and build before downtime. It changes only:
-
-- `backend/src/server.js`
-- `backend/src/services/fileStorageService.js`
-- `frontend/dist`
-
-It does not run the full matrix, migrations, database repair, a new full backup or backend dependency installation.
-
-A successful run ends with:
-
-```text
-UPLOAD/PREVIEW SAFE-CUTOVER LATEST-CHANGES DEPLOYMENT COMPLETED
-```
-
-## Optional zero-change preflight
-
-To prove the exact target can pass every check and build without stopping PM2:
+Follow the SSH-independent deployment with:
 
 ```bash
-KALPA_PREFLIGHT_ONLY=1 TARGET_COMMIT="$TARGET_COMMIT" \
-  bash /root/deploy-upload-preview-safe.sh
+journalctl -fu "$(cat /root/kalpavriksha-deploy-last-unit)"
 ```
 
-Running the normal command afterward reuses the validated lock-hash dependency cache. Re-running an already deployed target exits successfully without another cutover.
+Only treat deployment as successful when the log ends with:
+
+```text
+KALPAVRIKSHA 1.9.30 DEPLOYMENT COMPLETED SUCCESSFULLY
+```
+
+The deployer performs clean dependency installation, the complete verification suite, a verified pre-deployment backup, migrations/integrity checks, release certification, staged health checks, source-parity cutover, permanent health checks, final integrity validation, and a verified post-deployment backup. Any failed mandatory gate aborts or rolls back rather than silently continuing.

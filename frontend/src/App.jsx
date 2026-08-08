@@ -16,11 +16,13 @@ import { Button, IconButton, InlineAlert } from './components/ui/designSystem.js
 import { ActiveToasts } from './features/notifications';
 import { getStatusColor, getPriorityColor, fetchBackendState, createTaskApi, saveFinanceStatusApi, deleteTaskApi, isProjectDeletedError, mergeTaskLists, persistTasksToLocalCache } from './services/taskService';
 import { API_BASE, USE_BACKEND_STATE, ONLINE_STALE_MS, MAX_INLINE_DATA_URL_CHARS } from './config/appConfig';
-import { fileToBase64, cleanFileName } from './utils/fileUtils';
-import { absoluteApiUrl, getProjectFileDownloadUrl, getProjectFilePreviewUrl, getProjectFileActionState, isProjectFilePdf, isProjectFileImage, getProjectFileKind, canPreviewProjectFile, fetchProjectFilePreview, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile, getProjectFileCacheKey, listCachedProjectFiles, openCachedProjectFile, clearCachedProjectFile, pruneExpiredProjectFileCache } from './services/fileService';
+import { MAX_PROJECT_UPLOAD_FILES, absoluteApiUrl, getProjectFileDownloadUrl, getProjectFilePreviewUrl, getProjectFileActionState, isProjectFilePdf, isProjectFileImage, getProjectFileKind, canPreviewProjectFile, fetchProjectFilePreview, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile, getProjectFileCacheKey, listCachedProjectFiles, openCachedProjectFile, clearCachedProjectFile, pruneExpiredProjectFileCache, setProjectFileCacheActor, validateProjectUploadSelection } from './services/fileService';
+import { UnifiedFileViewer } from './components/files/UnifiedFileViewer.jsx';
+import { updateProfileApi } from './services/profileService';
 import { sendRealOtp, verifyRealOtp } from './services/otpService';
 import { authFetch, loginApi, clearBrowserSessionApi, logoutApi, changePasswordApi, requestPasswordRecoveryApi, resetPasswordRecoveryApi, createAuthUserApi, updateAuthUserApi, resetAuthUserPasswordApi } from './services/authService';
 import { sendChatMessageApi, updateChatMessageApi, deleteChatMessageApi, markChatReadApi, markNotificationReadApi, markAllNotificationsReadApi, createNotificationApi } from './services/chatService';
+import { FINANCE_FLUSH_EVENT, FINANCE_SYNC_EVENT, advanceFinanceOutboxAfterConfirmation, financeActorKey, getFinanceOutboxRecords, getFinanceSyncSnapshot, markFinanceOutboxAttempt, markFinanceOutboxError, queueFinanceDraft } from './services/financeOutboxService.js';
 import { buildNotification, getVisibleNotifications, NOTIFICATION_CATEGORIES, getNotificationCategory, getNotificationPriority, buildActivityTimeline, isNotificationForUser } from './services/notificationService';
 import { 
   Briefcase, CheckCircle, Clock, FileText, LayoutDashboard, LogOut, 
@@ -152,19 +154,18 @@ const createFinanceLedgerDraft = (project = {}) => ({
   screenshot: project.ledger?.screenshot || null
 });
 
-const FINANCE_AUTOSAVE_DELAY_MS = 650;
-
-const getFinanceDraftSignature = (draft = {}) => JSON.stringify({
-  estimate:String(draft.estimate ?? '').trim(),
-  amountIn:String(draft.amountIn ?? '').trim(),
-  expenses:String(draft.expenses ?? '').trim(),
-  refund:String(draft.refund ?? '').trim(),
-  date:String(draft.date ?? '').trim(),
-  receivedFrom:String(draft.receivedFrom ?? '').trim(),
-  txnId:String(draft.txnId ?? '').trim(),
-  mode:String(draft.mode ?? '').trim(),
-  note:String(draft.note ?? '').trim(),
-  screenshotId:draft.screenshot?.id || draft.screenshot || ''
+const financeOutboxDetails = (draft = {}) => ({
+  estimate: Number(String(draft.estimate || '').replace(/[^0-9.-]/g, '')) || 0,
+  amountIn: Number(String(draft.amountIn || '').replace(/[^0-9.-]/g, '')) || 0,
+  paymentDate: normalizeTaskDateKey(draft.date || getIndiaDateKey(), getIndiaDateKey()),
+  accountingPeriod: normalizeAccountingMonthKey(draft.date, getCurrentAccountingMonthKey()),
+  mode: draft.mode || '',
+  transactionId: draft.txnId || '',
+  payerName: draft.receivedFrom || '',
+  expenses: Number(String(draft.expenses || '').replace(/[^0-9.-]/g, '')) || 0,
+  refund: Number(String(draft.refund || '').replace(/[^0-9.-]/g, '')) || 0,
+  note: draft.note || '',
+  screenshot: draft.screenshot || null
 });
 
 const parseFinanceDraftAmount = (value, label) => {
@@ -407,31 +408,40 @@ const filterDeletedProjects = (projects = []) => {
 
 // Persist assignment changes in a small dedicated ledger. This prevents an older
 // unassigned project snapshot from winning after refresh/logout/login.
+let assignmentLedgerCache = null;
 const getAssignmentLedger = () => {
-  try { return JSON.parse(localStorage.getItem('kalpa_assignment_ledger') || '{}') || {}; } catch(e) { return {}; }
+  if (assignmentLedgerCache) return assignmentLedgerCache;
+  try { assignmentLedgerCache = JSON.parse(localStorage.getItem('kalpa_assignment_ledger') || '{}') || {}; } catch(e) { assignmentLedgerCache = {}; }
+  return assignmentLedgerCache;
 };
 const saveAssignmentLedger = (ledger) => {
+  assignmentLedgerCache = ledger || {};
   try { localStorage.setItem('kalpa_assignment_ledger', JSON.stringify(ledger || {})); } catch(e) {}
 };
-const recordAssignmentLedger = (project = {}) => {
-  if (!project?.id || !isAssignedValue(project.assignedTo)) return;
-  const ledger = getAssignmentLedger();
-  const previous = ledger[String(project.id)] || {};
-  const incomingVersion = Number(project.assignmentVersion || project.assignedAt || project.updatedAt || Date.now());
-  const previousVersion = Number(previous.assignmentVersion || previous.assignedAt || 0);
-  if (incomingVersion >= previousVersion) {
+const recordAssignmentLedgerBatch = (projects = []) => {
+  const ledger = { ...getAssignmentLedger() };
+  let changed = false;
+  for (const project of (Array.isArray(projects) ? projects : [])) {
+    if (!project?.id || !isAssignedValue(project.assignedTo)) continue;
+    const previous = ledger[String(project.id)] || {};
+    const incomingVersion = Number(project.assignmentVersion || project.assignedAt || project.updatedAt || Date.now());
+    const previousVersion = Number(previous.assignmentVersion || previous.assignedAt || 0);
+    if (incomingVersion < previousVersion) continue;
     ledger[String(project.id)] = {
       assignedTo: normalizePersonName(project.assignedTo),
       assignedBy: project.assignedBy || previous.assignedBy || '',
       assignedAt: project.assignedAt || previous.assignedAt || incomingVersion,
       assignmentVersion: incomingVersion
     };
-    saveAssignmentLedger(ledger);
+    changed = true;
   }
+  if (changed) saveAssignmentLedger(ledger);
+  return changed ? ledger : getAssignmentLedger();
 };
-const applyAssignmentLedgerToProject = (project = {}) => {
+const recordAssignmentLedger = (project = {}) => recordAssignmentLedgerBatch([project]);
+const applyAssignmentLedgerToProject = (project = {}, ledger = getAssignmentLedger()) => {
   if (!project?.id) return project;
-  const ledgerItem = getAssignmentLedger()[String(project.id)];
+  const ledgerItem = ledger[String(project.id)];
   if (!ledgerItem || !isAssignedValue(ledgerItem.assignedTo)) return project;
   const projectVersion = Number(project.assignmentVersion || project.assignedAt || 0);
   const ledgerVersion = Number(ledgerItem.assignmentVersion || ledgerItem.assignedAt || 0);
@@ -447,7 +457,11 @@ const applyAssignmentLedgerToProject = (project = {}) => {
   }
   return project;
 };
-const applyAssignmentLedgerToProjects = (projects = []) => (Array.isArray(projects) ? projects.map(applyAssignmentLedgerToProject) : []);
+const applyAssignmentLedgerToProjects = (projects = []) => {
+  const merged = Array.isArray(projects) ? projects : [];
+  const ledger = recordAssignmentLedgerBatch(merged);
+  return merged.map(project => applyAssignmentLedgerToProject(project, ledger));
+};
 
 const sanitizeChatMessageForCache = (message) => sanitizeFileLikeObjectForCache(message);
 const sanitizeChatsForCache = (messages) => (Array.isArray(messages) ? messages.map(sanitizeChatMessageForCache) : []);
@@ -546,7 +560,6 @@ const compactLargeLocalStoragePayloads = () => {
     } catch (e) {}
   });
 };
-compactLargeLocalStoragePayloads();
 
 let lastProjectsBroadcastAt = 0;
 const broadcastProjectsSync = (projects) => {
@@ -598,6 +611,16 @@ const ROLES = {
   ADMIN: 'Admin',
   MANAGER: 'Manager',
   DESIGNER: 'Designer'
+};
+const ADMIN_ONLY_TABS = new Set(['ledger', 'closing', 'settings']);
+const MANAGER_ALLOWED_TABS = new Set(['command', 'board', 'my_tasks', 'team', 'performance', 'chat', 'meeting', 'archive', 'calculator', 'profile']);
+const DESIGNER_ALLOWED_TABS = new Set(['command', 'my_tasks', 'chat', 'meeting', 'calculator', 'profile']);
+const isTabAllowedForRole = (tab, role) => {
+  if (!tab) return true;
+  if (role === ROLES.ADMIN) return true;
+  if (ADMIN_ONLY_TABS.has(tab)) return false;
+  if (role === ROLES.MANAGER) return MANAGER_ALLOWED_TABS.has(tab);
+  return DESIGNER_ALLOWED_TABS.has(tab);
 };
 const TEAM_ALIASES_TO_BLOCK = []; // no hardcoded staff aliases blocked; deleted/restricted users are filtered by status
 const isSystemPlaceholderUser = (u = {}) => {
@@ -979,7 +1002,6 @@ const mergeProjectRecordSafely = (existing = {}, incoming = {}) => {
     base.assignedAt = chosen.assignedAt || base.assignedAt;
     base.assignmentVersion = chosen.assignmentVersion || chosen.assignedAt || base.assignmentVersion;
     base.ownership = { ...(base.ownership || {}), assignedTo: base.assignedTo, assignedBy: base.assignedBy };
-    recordAssignmentLedger(base);
   } else {
     base.assignedTo = 'Unassigned';
   }
@@ -996,7 +1018,9 @@ const mergeProjectsByFreshness = (current = [], incoming = []) => {
       const existing = map.get(key);
       map.set(key, existing ? mergeProjectRecordSafely(existing, p) : p);
     });
-  return applyAssignmentLedgerToProjects(Array.from(map.values()).sort((a,b) => projectFreshness(b) - projectFreshness(a)));
+  const merged = Array.from(map.values()).sort((a,b) => projectFreshness(b) - projectFreshness(a));
+  const ledger = recordAssignmentLedgerBatch(merged);
+  return merged.map(project => applyAssignmentLedgerToProject(project, ledger));
 };
 
 const latestCollectionMarker = (items = []) => {
@@ -1046,11 +1070,35 @@ const reuseStableProjects = (current = [], next = []) => {
   return reused.length === previous.length && reused.every((project, index) => project === previous[index]) ? previous : reused;
 };
 
-const persistAndBroadcastProjects = (projects) => {
+const persistBackendProjectsCompatibility = (normalized) => {
+  // Some local actions do not yet carry row-delta metadata. In that narrow case,
+  // broadcast the compact normalized snapshot to sibling tabs without persisting
+  // the operational workspace to localStorage.
+  if (USE_BACKEND_STATE) {
+    broadcastProjectsSync(normalized);
+    return normalized;
+  }
+  return normalized;
+};
+
+const persistAndBroadcastProjects = (projects, options = {}) => {
   const normalized = filterDeletedProjects(applyAssignmentLedgerToProjects(normalizeProjectRecords(mergeTaskLists([], projects))));
   normalized.forEach(recordAssignmentLedger);
   if (USE_BACKEND_STATE) {
-    broadcastProjectsSync(normalized);
+    const changedProjects = Array.isArray(options.changedProjects) ? options.changedProjects : [];
+    const removedProjectIds = Array.isArray(options.removedProjectIds) ? options.removedProjectIds : [];
+    const replaceIds = options.replaceIds || [];
+    if (!changedProjects.length && !removedProjectIds.length && !replaceIds.length) return persistBackendProjectsCompatibility(normalized);
+    if (!opsBroadcast) return normalized;
+    try {
+      opsBroadcast.postMessage({
+        type: 'projects-delta',
+        changedProjects: sanitizeProjectsForCache(changedProjects),
+        removedProjectIds,
+        replaceIds,
+        source: OPS_TAB_ID
+      });
+    } catch(e) {}
     return normalized;
   }
   return persistTasksToLocalCache(normalized, {
@@ -1423,7 +1471,7 @@ const getDocumentReadiness = (project = {}) => {
   return { score, items };
 };
 
-const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetRecovery, passwordChangeSessionUser = null }) => {
+const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetRecovery, passwordChangeSessionUser = null, bootWarning = '' }) => {
   const [username, setUsername] = useState(passwordChangeSessionUser?.username || '');
   const [password, setPassword] = useState('');
   const [showPass, setShowPass] = useState(false);
@@ -1444,6 +1492,32 @@ const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetReco
   const [recoveryConfirmPass, setRecoveryConfirmPass] = useState('');
   const [recoveryMessage, setRecoveryMessage] = useState('');
   const [otpSent, setOtpSent] = useState(false);
+  const [isOnline, setIsOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine);
+  const [capsLockOn, setCapsLockOn] = useState(false);
+  const [recoverySending, setRecoverySending] = useState(false);
+  const [recoveryResetting, setRecoveryResetting] = useState(false);
+  const [recoveryCooldown, setRecoveryCooldown] = useState(0);
+  const loginInFlightRef = useRef(false);
+  const passwordChangeInFlightRef = useRef(false);
+  const recoverySendInFlightRef = useRef(false);
+  const recoveryResetInFlightRef = useRef(false);
+  const forcedNewPasswordInputRef = useRef(null);
+
+  useEffect(() => {
+    const updateOnlineState = () => setIsOnline(navigator.onLine);
+    window.addEventListener('online', updateOnlineState);
+    window.addEventListener('offline', updateOnlineState);
+    return () => {
+      window.removeEventListener('online', updateOnlineState);
+      window.removeEventListener('offline', updateOnlineState);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (recoveryCooldown <= 0) return undefined;
+    const timer = window.setTimeout(() => setRecoveryCooldown(value => Math.max(0, value - 1)), 1000);
+    return () => window.clearTimeout(timer);
+  }, [recoveryCooldown]);
 
   useEffect(() => {
     if (!passwordChangeSessionUser?.mustChangePassword) return;
@@ -1455,13 +1529,29 @@ const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetReco
   }, [passwordChangeSessionUser?.id, passwordChangeSessionUser?.mustChangePassword, passwordChangeSessionUser?.username]);
 
   const passwordPolicyMessage = 'Use at least 10 characters with uppercase, lowercase and a number.';
+  const passwordPolicyErrors = (value = '') => {
+    const errors = [];
+    if (String(value).length < 10) errors.push('Password must be at least 10 characters.');
+    if (/\s/.test(String(value))) errors.push('Password cannot contain spaces.');
+    if (!/[A-Z]/.test(String(value))) errors.push('Password must include an uppercase letter.');
+    if (!/[a-z]/.test(String(value))) errors.push('Password must include a lowercase letter.');
+    if (!/\d/.test(String(value))) errors.push('Password must include a number.');
+    return errors;
+  };
+  const trackCapsLock = (event) => setCapsLockOn(Boolean(event.getModifierState?.('CapsLock')));
 
   const handleLogin = async (event) => {
     event.preventDefault();
+    if (loginInFlightRef.current) return;
+    if (!navigator.onLine) {
+      setError('You appear to be offline. Reconnect and try again.');
+      return;
+    }
+    loginInFlightRef.current = true;
     setError('');
     setIsSubmitting(true);
     try {
-      const response = await onLogin({ username: username.trim(), password });
+      const response = await onLogin({ username: username.trim().toLowerCase(), password });
       if (response?.user?.mustChangePassword) {
         setCurrentPassword(password);
         setMustChangePassword(true);
@@ -1471,17 +1561,26 @@ const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetReco
     } catch (loginError) {
       setError(loginError?.message || 'Invalid username or password, or this account is restricted.');
     } finally {
+      loginInFlightRef.current = false;
       setIsSubmitting(false);
     }
   };
 
   const handleForcedPasswordChange = async (event) => {
     event.preventDefault();
+    if (passwordChangeInFlightRef.current) return;
     setError('');
     if (forcedNewPassword !== forcedConfirmPassword) {
       setError('New password and confirmation do not match.');
       return;
     }
+    const policyErrors = passwordPolicyErrors(forcedNewPassword);
+    if (policyErrors.length) {
+      setError(policyErrors[0]);
+      forcedNewPasswordInputRef.current?.focus();
+      return;
+    }
+    passwordChangeInFlightRef.current = true;
     setIsSubmitting(true);
     try {
       await onChangePassword({ currentPassword, newPassword: forcedNewPassword });
@@ -1492,16 +1591,20 @@ const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetReco
     } catch (changeError) {
       setError(changeError?.message || 'Password could not be changed.');
     } finally {
+      passwordChangeInFlightRef.current = false;
       setIsSubmitting(false);
     }
   };
 
   const handleSendRecoveryOtp = async () => {
+    if (recoverySendInFlightRef.current || recoveryCooldown > 0) return;
     setRecoveryMessage('');
     if (!recoveryUser.trim()) {
       setRecoveryMessage('Username is required.');
       return;
     }
+    recoverySendInFlightRef.current = true;
+    setRecoverySending(true);
     try {
       const response = await onRequestRecovery({
         username: recoveryUser.trim(),
@@ -1511,25 +1614,42 @@ const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetReco
       });
       setRecoveryChallengeId(response.challengeId || '');
       setOtpSent(Boolean(response.challengeId));
+      setRecoveryCooldown(30);
       if (response.devOtp) setRecoveryMessage(`Local testing OTP: ${response.devOtp}`);
       else setRecoveryMessage(`OTP sent to the registered ${recoveryMethod}.`);
     } catch (recoveryError) {
       setOtpSent(false);
       setRecoveryChallengeId('');
       setRecoveryMessage(recoveryError?.message || 'Unable to send recovery OTP.');
+    } finally {
+      recoverySendInFlightRef.current = false;
+      setRecoverySending(false);
     }
   };
 
-  const handlePasswordRecovery = async () => {
+  const handlePasswordRecovery = async (event) => {
+    event?.preventDefault?.();
+    if (recoveryResetInFlightRef.current) return;
     setRecoveryMessage('');
     if (!otpSent || !recoveryChallengeId) {
       setRecoveryMessage('Send the OTP first.');
+      return;
+    }
+    if (recoveryOtp.length !== 6) {
+      setRecoveryMessage('Enter the complete 6-digit OTP.');
       return;
     }
     if (recoveryNewPass !== recoveryConfirmPass) {
       setRecoveryMessage('New password and confirmation do not match.');
       return;
     }
+    const policyErrors = passwordPolicyErrors(recoveryNewPass);
+    if (policyErrors.length) {
+      setRecoveryMessage(policyErrors[0]);
+      return;
+    }
+    recoveryResetInFlightRef.current = true;
+    setRecoveryResetting(true);
     try {
       await onResetRecovery({ challengeId: recoveryChallengeId, otp: recoveryOtp, newPassword: recoveryNewPass });
       setRecoveryMessage('Password reset successfully. Sign in with the new password.');
@@ -1542,6 +1662,9 @@ const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetReco
       setRecoveryConfirmPass('');
     } catch (recoveryError) {
       setRecoveryMessage(recoveryError?.message || 'Password could not be reset.');
+    } finally {
+      recoveryResetInFlightRef.current = false;
+      setRecoveryResetting(false);
     }
   };
 
@@ -1556,7 +1679,9 @@ const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetReco
           <p className="text-slate-500 mt-2 font-medium">Secure Team Portal</p>
         </div>
 
-        {error && <div className={`${mustChangePassword ? 'bg-amber-50 text-amber-800 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'} p-4 rounded-xl mb-6 text-sm font-bold text-center border`}>{error}</div>}
+        {bootWarning && <div aria-live="polite" className="bg-amber-50 text-amber-800 border border-amber-100 p-3 rounded-xl mb-4 text-sm font-bold text-center">{bootWarning} You can retry sign-in now.</div>}
+        {!isOnline && <div aria-live="polite" className="bg-red-50 text-red-700 border border-red-100 p-3 rounded-xl mb-4 text-sm font-bold text-center">Offline: secure sign-in will resume when your connection returns.</div>}
+        {error && <div aria-live="polite" className={`${mustChangePassword ? 'bg-amber-50 text-amber-800 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'} p-4 rounded-xl mb-6 text-sm font-bold text-center border`}>{error}</div>}
 
         {mustChangePassword ? (
           <form onSubmit={handleForcedPasswordChange} className="space-y-4">
@@ -1569,11 +1694,11 @@ const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetReco
             </div>
             <div>
               <label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">New Password</label>
-              <input required type="password" value={forcedNewPassword} onChange={event => setForcedNewPassword(event.target.value)} className="w-full border-2 border-slate-100 px-4 py-3.5 rounded-xl focus:border-indigo-500 outline-none font-bold text-slate-800" />
+              <input ref={forcedNewPasswordInputRef} required type="password" autoComplete="new-password" value={forcedNewPassword} onKeyUp={trackCapsLock} onChange={event => setForcedNewPassword(event.target.value)} className="w-full border-2 border-slate-100 px-4 py-3.5 rounded-xl focus:border-indigo-500 outline-none font-bold text-slate-800" />
             </div>
             <div>
               <label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Confirm New Password</label>
-              <input required type="password" value={forcedConfirmPassword} onChange={event => setForcedConfirmPassword(event.target.value)} className="w-full border-2 border-slate-100 px-4 py-3.5 rounded-xl focus:border-indigo-500 outline-none font-bold text-slate-800" />
+              <input required type="password" autoComplete="new-password" value={forcedConfirmPassword} onKeyUp={trackCapsLock} onChange={event => setForcedConfirmPassword(event.target.value)} className="w-full border-2 border-slate-100 px-4 py-3.5 rounded-xl focus:border-indigo-500 outline-none font-bold text-slate-800" />
             </div>
             <p className="text-xs font-semibold text-slate-400">{passwordPolicyMessage}</p>
             <button disabled={isSubmitting} type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-black py-3.5 rounded-xl shadow-lg shadow-indigo-100 transition-all">
@@ -1581,24 +1706,25 @@ const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetReco
             </button>
           </form>
         ) : (
-          <form onSubmit={handleLogin} className="space-y-4">
+          <form onSubmit={handleLogin} className="space-y-4" aria-busy={isSubmitting}>
             <div>
               <label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Username</label>
               <div className="relative">
                 <User className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
-                <input required type="text" autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} className="w-full border-2 border-slate-100 pl-12 pr-4 py-3.5 rounded-xl focus:border-indigo-500 outline-none font-bold text-slate-800" placeholder="Enter username" />
+                <input required type="text" autoComplete="username" autoCapitalize="none" spellCheck={false} enterKeyHint="go" value={username} onChange={event => setUsername(event.target.value)} className="w-full border-2 border-slate-100 pl-12 pr-4 py-3.5 rounded-xl focus:border-indigo-500 outline-none font-bold text-slate-800" placeholder="Enter username" />
               </div>
             </div>
             <div>
               <label className="text-xs font-black text-slate-500 uppercase tracking-widest block mb-2">Password</label>
               <div className="relative">
                 <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
-                <input required autoComplete="current-password" type={showPass ? 'text' : 'password'} value={password} onChange={event => setPassword(event.target.value)} className="w-full border-2 border-slate-100 pl-12 pr-12 py-3.5 rounded-xl focus:border-indigo-500 outline-none font-bold text-slate-800" placeholder="••••••••" />
+                <input required autoComplete="current-password" enterKeyHint="go" type={showPass ? 'text' : 'password'} value={password} onKeyUp={trackCapsLock} onChange={event => setPassword(event.target.value)} className="w-full border-2 border-slate-100 pl-12 pr-12 py-3.5 rounded-xl focus:border-indigo-500 outline-none font-bold text-slate-800" placeholder="••••••••" />
                 <button type="button" onClick={() => setShowPass(value => !value)} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-indigo-600" aria-label={showPass ? 'Hide password' : 'Show password'}>{showPass ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}</button>
               </div>
             </div>
+            {capsLockOn && <p aria-live="polite" className="text-xs font-bold text-amber-700">Caps Lock is on</p>}
             <button disabled={isSubmitting} type="submit" className="w-full bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white font-black py-3.5 rounded-xl shadow-lg transition-all">
-              {isSubmitting ? 'Signing in...' : 'Secure Sign In'}
+              {isSubmitting ? 'Verifying securely…' : 'Secure Sign In'}
             </button>
             <button type="button" onClick={() => { setShowRecovery(true); setRecoveryMessage(''); }} className="w-full text-sm font-black text-indigo-600 hover:text-indigo-700">Forgot password?</button>
           </form>
@@ -1609,25 +1735,25 @@ const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onResetReco
             <div className="bg-white rounded-3xl p-6 w-full max-w-lg shadow-2xl border border-slate-100">
               <div className="flex items-center justify-between mb-4">
                 <div><h2 className="text-xl font-black text-slate-800">Password Recovery</h2><p className="text-xs font-semibold text-slate-400 mt-1">Recovery details must exactly match the registered profile.</p></div>
-                <button type="button" onClick={() => setShowRecovery(false)} className="text-slate-400 hover:text-slate-700"><X className="w-5 h-5" /></button>
+                <button type="button" aria-label="Close password recovery" onClick={() => setShowRecovery(false)} className="text-slate-400 hover:text-slate-700"><X className="w-5 h-5" /></button>
               </div>
-              <div className="space-y-3">
+              <form className="space-y-3" onSubmit={handlePasswordRecovery}>
                 <input value={recoveryUser} onChange={event => setRecoveryUser(event.target.value)} placeholder="Username" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
                 <div className="grid grid-cols-2 gap-2">
                   <button type="button" onClick={() => setRecoveryMethod('email')} className={`${recoveryMethod === 'email' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'} py-2.5 rounded-xl font-black text-sm`}>Email OTP</button>
                   <button type="button" onClick={() => setRecoveryMethod('mobile')} className={`${recoveryMethod === 'mobile' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'} py-2.5 rounded-xl font-black text-sm`}>Mobile OTP</button>
                 </div>
                 {recoveryMethod === 'email' ? <input type="email" value={recoveryEmail} onChange={event => setRecoveryEmail(event.target.value)} placeholder="Registered email" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" /> : <input value={recoveryMobile} onChange={event => setRecoveryMobile(event.target.value)} placeholder="Registered mobile" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />}
-                <button type="button" onClick={handleSendRecoveryOtp} className="w-full bg-indigo-50 text-indigo-700 border border-indigo-100 py-3 rounded-xl font-black">Send Recovery OTP</button>
+                <button type="button" disabled={recoverySending || recoveryCooldown > 0} onClick={handleSendRecoveryOtp} className="w-full bg-indigo-50 text-indigo-700 border border-indigo-100 py-3 rounded-xl font-black disabled:opacity-60">{recoverySending ? 'Sending…' : recoveryCooldown > 0 ? `Resend available in ${recoveryCooldown}s` : 'Send Recovery OTP'}</button>
                 {otpSent && <>
-                  <input value={recoveryOtp} onChange={event => setRecoveryOtp(event.target.value)} placeholder="Enter OTP" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
-                  <input type="password" value={recoveryNewPass} onChange={event => setRecoveryNewPass(event.target.value)} placeholder="New password" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
-                  <input type="password" value={recoveryConfirmPass} onChange={event => setRecoveryConfirmPass(event.target.value)} placeholder="Confirm new password" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
+                  <input autoComplete="one-time-code" inputMode="numeric" maxLength={6} value={recoveryOtp} onChange={event => setRecoveryOtp(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="Enter OTP" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
+                  <input type="password" autoComplete="new-password" value={recoveryNewPass} onChange={event => setRecoveryNewPass(event.target.value)} placeholder="New password" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
+                  <input type="password" autoComplete="new-password" value={recoveryConfirmPass} onChange={event => setRecoveryConfirmPass(event.target.value)} placeholder="Confirm new password" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
                   <p className="text-xs font-semibold text-slate-400">{passwordPolicyMessage}</p>
-                  <button type="button" onClick={handlePasswordRecovery} className="w-full bg-slate-900 text-white py-3 rounded-xl font-black">Reset Password</button>
+                  <button type="submit" disabled={recoveryResetting} className="w-full bg-slate-900 text-white py-3 rounded-xl font-black disabled:opacity-60">{recoveryResetting ? 'Resetting…' : 'Reset Password'}</button>
                 </>}
                 {recoveryMessage && <div className="bg-slate-50 border border-slate-100 rounded-xl p-3 text-sm font-bold text-slate-600">{recoveryMessage}</div>}
-              </div>
+              </form>
             </div>
           </PortalLayer>
         )}
@@ -1641,13 +1767,16 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, onCreateUser, onUp
   const [newUser, setNewUser] = useState({ name: '', username: '', password: '', role: ROLES.DESIGNER });
   const [showAddForm, setShowAddForm] = useState(false);
   const [accessMessage, setAccessMessage] = useState('');
+  const [isCreatingUser, setIsCreatingUser] = useState(false);
 
   const isAdmin = currentUser.role === ROLES.ADMIN;
 
   const handleAddUser = async (e) => {
     e.preventDefault();
+    if (isCreatingUser) return;
     setAccessMessage('');
     if (!newUser.name || !newUser.username || !newUser.password) return;
+    setIsCreatingUser(true);
     try {
       await onCreateUser?.(newUser);
       setNewUser({ name: '', username: '', password: '', role: ROLES.DESIGNER });
@@ -1655,6 +1784,8 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, onCreateUser, onUp
       setAccessMessage('Employee account created. The employee must change the temporary password at first sign-in.');
     } catch (error) {
       setAccessMessage(error?.message || 'Employee account could not be created.');
+    } finally {
+      setIsCreatingUser(false);
     }
   };
 
@@ -1776,7 +1907,7 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, onCreateUser, onUp
           <div className="bg-indigo-50 border border-indigo-100 p-5 rounded-2xl mb-8 animate-in slide-in-from-top-4">
              <div className="flex justify-between items-center mb-4">
                 <h3 className="font-extrabold text-indigo-900">Create New Account</h3>
-                <button onClick={() => setShowAddForm(false)} className="text-indigo-400 hover:text-indigo-600"><X className="w-5 h-5"/></button>
+                <button type="button" aria-label="Close new employee form" onClick={() => setShowAddForm(false)} className="text-indigo-400 hover:text-indigo-600"><X className="w-5 h-5"/></button>
              </div>
              <form onSubmit={handleAddUser} className="grid grid-cols-1 sm:grid-cols-5 gap-4 items-end">
                 <div><label className="text-xs font-bold text-indigo-600 uppercase mb-1 block">Full Name</label><input required value={newUser.name} onChange={e=>setNewUser({...newUser, name: e.target.value})} className="w-full border-2 border-white rounded-xl p-2.5 font-bold outline-none focus:border-indigo-400"/></div>
@@ -1789,7 +1920,7 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, onCreateUser, onUp
                      <option value={ROLES.MANAGER}>Manager</option>
                   </select>
                 </div>
-                <button type="submit" className="bg-indigo-600 text-white font-bold py-3 rounded-xl shadow-md hover:bg-indigo-700 transition-colors">Create</button>
+                <button type="submit" disabled={isCreatingUser} className="bg-indigo-600 text-white font-bold py-3 rounded-xl shadow-md hover:bg-indigo-700 transition-colors disabled:cursor-wait disabled:opacity-60">{isCreatingUser ? 'Creating…' : 'Create'}</button>
                 <p className="text-[10px] text-indigo-500 col-span-full mt-2">Temporary passwords require at least 10 characters with uppercase, lowercase and a number. The employee must replace it at first sign-in.</p>
              </form>
           </div>
@@ -2642,34 +2773,17 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   const [ledgerDraft, setLedgerDraft] = useState(() => createFinanceLedgerDraft(project));
   const [ledgerDirty, setLedgerDirty] = useState(false);
   const [isSavingLedger, setIsSavingLedger] = useState(false);
-  const [ledgerSaveMessage, setLedgerSaveMessage] = useState('All payment changes are saved automatically.');
-  const [ledgerSaveState, setLedgerSaveState] = useState('saved');
+  const [ledgerSaveMessage, setLedgerSaveMessage] = useState('');
   const [isUploadingLedgerReceipt, setIsUploadingLedgerReceipt] = useState(false);
   const ledgerMutationRef = useRef({ signature:'', id:'' });
-  const ledgerDraftRef = useRef(ledgerDraft);
-  const ledgerDirtyRef = useRef(false);
-  const ledgerAutosaveTimerRef = useRef(null);
-  const ledgerSavePromiseRef = useRef(null);
-  const ledgerQueuedSaveRef = useRef(false);
-  const ledgerAutosaveBlockedSignatureRef = useRef('');
-  const ledgerNavigationDetachedRef = useRef(false);
   const latestProjectRef = useRef(project);
+  const fileTransferAbortRef = useRef(null);
+  const fileTransferGenerationRef = useRef(0);
+  const financeActorId = String(user?.id || user?.username || user?.name || '').trim().toLowerCase();
 
   useEffect(() => {
     latestProjectRef.current = project;
   }, [project]);
-
-  useEffect(() => {
-    ledgerDraftRef.current = ledgerDraft;
-  }, [ledgerDraft]);
-
-  useEffect(() => {
-    ledgerDirtyRef.current = ledgerDirty;
-  }, [ledgerDirty]);
-
-  useEffect(() => () => {
-    if (ledgerAutosaveTimerRef.current) clearTimeout(ledgerAutosaveTimerRef.current);
-  }, []);
 
   const acceptServerProject = useCallback((serverProject) => {
     if (!serverProject) return;
@@ -2679,12 +2793,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
 
   useEffect(() => {
     if (ledgerDirty || isSavingLedger) return;
-    const nextDraft = createFinanceLedgerDraft(project);
-    ledgerDraftRef.current = nextDraft;
-    ledgerAutosaveBlockedSignatureRef.current = '';
-    setLedgerDraft(nextDraft);
-    setLedgerSaveState('saved');
-    setLedgerSaveMessage('All payment changes are saved automatically.');
+    setLedgerDraft(createFinanceLedgerDraft(project));
   }, [project.id, project.financeVersion, project.paymentTrackingUpdatedAt, project.ledger?.updatedAt, ledgerDirty, isSavingLedger]);
 
   const closeFilePreview = useCallback(() => {
@@ -2741,6 +2850,21 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   const canRevertTask = (canManage || canDesignerRevertOwnTask) && project.status !== 'Lead Received';
   const showFinancials = user.role === ROLES.ADMIN;
   const activeDraftingForUser = (usersProjects = []) => (usersProjects || []).find(p => samePerson(p.assignedTo, project.assignedTo || user.name) && p.status === 'Drafting' && String(p.id) !== String(project.id));
+
+  useEffect(() => {
+    if (!ledgerDirty) return undefined;
+    const warnUnsavedFinance = (event) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnUnsavedFinance);
+    return () => window.removeEventListener('beforeunload', warnUnsavedFinance);
+  }, [ledgerDirty]);
+
+  const handleTaskBack = async () => {
+    if (ledgerDirty && !(await requestConfirmation('Payment details have unsaved changes. Leave this task and discard them?', { title:'Discard finance changes?', tone:'danger', confirmLabel:'Discard changes' }))) return;
+    onBack();
+  };
 
   const handleSaveCaseEdit = (event) => {
     event.preventDefault();
@@ -2952,8 +3076,11 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     }
   };
 
-  const resetFileTransferLater = (delay = 2200) => {
-    window.setTimeout(() => setFileTransfer(prev => prev.active ? prev : { active: false, phase: '', label: '', fileName: '', progress: 0, message: '', loaded: 0, total: 0, speedBps: 0, etaSeconds: 0, startedAt: 0, transferType: '', fileId: '' }), delay);
+  const resetFileTransferLater = (delay = 2200, generation = fileTransferGenerationRef.current) => {
+    window.setTimeout(() => {
+      if (fileTransferGenerationRef.current !== generation) return;
+      resetFileTransfer();
+    }, delay);
   };
 
   const updateFileTransfer = (patch = {}) => {
@@ -3028,6 +3155,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
             </div>
           </div>
           {isUpload && <p className="text-[11px] font-bold text-indigo-600 mt-3">Keep this page open. Do not select the same file again while upload is running.</p>}
+          {isWorking && <button type="button" onClick={() => fileTransferAbortRef.current?.abort()} className="mt-3 rounded-xl border border-red-100 bg-red-50 px-3 py-1.5 text-xs font-black text-red-600">Cancel {isDownload ? 'download' : 'upload'}</button>}
         </div>
       </div>
     );
@@ -3105,19 +3233,27 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     };
   }, [openUnifiedFilePreview]);
 
-  const handleTrackedDownload = async (doc) => {
+  const handleTrackedDownload = async (doc, options = {}) => {
     const fileName = doc?.name || doc?.fileName || 'file';
     if (isDocDownloaded(doc)) {
-      await handleOpenDownloadedFile(doc);
-      return;
+      return handleOpenDownloadedFile(doc);
     }
     if (fileTransfer.active && fileTransfer.phase !== 'complete' && fileTransfer.phase !== 'error') {
       notifyUser(`${fileTransfer.label || 'File transfer'} is already in progress. Please wait until it completes before starting another upload/download.`);
-      return;
+      return { ok:false, error:new Error('Another transfer is in progress.'), cancelled:false };
     }
+    const generation = fileTransferGenerationRef.current + 1;
+    fileTransferGenerationRef.current = generation;
+    const controller = new AbortController();
+    const externalSignal = options?.signal;
+    const relayAbort = () => controller.abort();
+    if (externalSignal?.aborted) controller.abort();
+    else externalSignal?.addEventListener?.('abort', relayAbort, { once:true });
+    fileTransferAbortRef.current = controller;
     updateFileTransfer({ active: true, phase: 'downloading', label: 'Downloading file', fileName, fileId: doc?.id || doc?.fileId || '', transferType: 'download', progress: 1, loaded: 0, total: Number(doc?.size || 0), speedBps: 0, etaSeconds: 0, startedAt: Date.now(), message: 'Preparing download...' });
     try {
-      await downloadProjectFile(doc, (info) => {
+      const result = await downloadProjectFile(doc, { signal:controller.signal, onProgress:(info) => {
+        if (fileTransferGenerationRef.current !== generation) return;
         const meta = normalizeTransferProgress(info);
         const safePct = Math.max(1, Math.min(99, Number(meta.percent) || 1));
         updateFileTransfer({
@@ -3134,12 +3270,21 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
           etaSeconds: meta.etaSeconds || 0,
           message: meta.total ? `${safePct}% downloaded` : 'Downloading file...',
         });
-      });
+      }});
       refreshDownloadedFileMap();
-      updateFileTransfer({ active: true, phase: 'complete', label: 'Download complete', fileName, fileId: doc?.id || doc?.fileId || '', transferType: 'download', progress: 100, etaSeconds: 0, message: 'Saved for quick open in this browser for 7 days.' });
-      window.setTimeout(() => resetFileTransfer(), 2600);
+      const completionMessage = result?.completionConfirmed === false
+        ? 'Browser download started. Confirm completion in your browser downloads list.'
+        : result?.cached ? 'Saved for quick open in this browser for 7 days.' : 'Download completed. Browser storage was unavailable for an offline copy.';
+      updateFileTransfer({ active: true, phase: 'complete', label: result?.completionConfirmed === false ? 'Browser download started' : 'Download complete', fileName, fileId: doc?.id || doc?.fileId || '', transferType: 'download', progress: 100, etaSeconds: 0, message: completionMessage });
+      resetFileTransferLater(2600, generation);
+      return { ok:true, ...result };
     } catch (error) {
-      updateFileTransfer({ active: true, phase: 'error', label: 'Download needs attention', fileName, fileId: doc?.id || doc?.fileId || '', transferType: 'download', progress: 100, etaSeconds: 0, message: error?.message || 'Could not start download. Please try again.' });
+      const cancelled = controller.signal.aborted || error?.code === 'DOWNLOAD_CANCELLED';
+      updateFileTransfer({ active: true, phase: 'error', label: cancelled ? 'Download cancelled' : 'Download needs attention', fileName, fileId: doc?.id || doc?.fileId || '', transferType: 'download', progress: cancelled ? 0 : 100, etaSeconds: 0, message: cancelled ? 'Download cancelled.' : (error?.message || 'Could not start download. Please try again.') });
+      return { ok:false, error, cancelled };
+    } finally {
+      externalSignal?.removeEventListener?.('abort', relayAbort);
+      if (fileTransferGenerationRef.current === generation) fileTransferAbortRef.current = null;
     }
   };
 
@@ -3148,11 +3293,13 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     try {
       updateFileTransfer({ active: true, phase: 'complete', label: 'Opening downloaded file', fileName, fileId: doc?.id || doc?.fileId || '', transferType: 'download', progress: 100, etaSeconds: 0, message: 'Opening saved copy from this browser.' });
       await openCachedProjectFile(doc);
-      window.setTimeout(() => resetFileTransfer(), 1400);
+      resetFileTransferLater(1400);
+      return { ok:true, cached:true };
     } catch (error) {
       await clearCachedProjectFile(doc).catch(() => {});
       refreshDownloadedFileMap();
       updateFileTransfer({ active: true, phase: 'error', label: 'Saved copy missing', fileName, fileId: doc?.id || doc?.fileId || '', transferType: 'download', progress: 100, etaSeconds: 0, message: 'Saved copy is missing or older than 7 days. Please download again.' });
+      return { ok:false, error, cancelled:false };
     }
   };
 
@@ -3207,6 +3354,8 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     const totalUploadBytes=files.reduce((sum,file)=>sum+Number(file.size || 0),0);
     const transferStartedAt=Date.now();
     const currentLabel=type === 'completed' ? 'Uploading final file' : type === 'working' ? 'Uploading work file' : 'Uploading source file';
+    const generation=fileTransferGenerationRef.current + 1;
+    fileTransferGenerationRef.current=generation;
     updateFileTransfer({active:true,phase:'uploading',label:currentLabel,fileName:files[0]?.name || 'file',transferType:type,progress:1,loaded:0,total:totalUploadBytes,speedBps:0,etaSeconds:0,startedAt:transferStartedAt,message:totalFiles > 1 ? `Uploading 1 of ${totalFiles}` : 'Upload started. Please do not upload again.'});
 
     try {
@@ -3251,7 +3400,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       if (fallbackProject) await onUpdateProject(fallbackProject,latestProjectRef.current || project);
       if (e?.target) e.target.value='';
       updateFileTransfer({active:true,phase:'complete',label:'Upload complete',progress:100,message:`${totalFiles} file${totalFiles > 1 ? 's' : ''} uploaded and linked successfully.`});
-      window.setTimeout(()=>resetFileTransfer(),2600);
+      resetFileTransferLater(2600, generation);
     } catch(error) {
       console.error('File upload failed:',error);
       updateFileTransfer({active:true,phase:'error',label:'Upload failed',progress:100,message:error?.message || 'Please check your internet connection and try again.'});
@@ -3268,6 +3417,8 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     const files = Array.from(event?.target?.files || []);
     if (files.length === 0) return;
     setUploading(true);
+    const generation=fileTransferGenerationRef.current + 1;
+    fileTransferGenerationRef.current=generation;
     updateFileTransfer({ active: true, phase: 'uploading', label: attachmentType === 'revision' ? 'Uploading revision attachment' : 'Uploading attachment', fileName: files[0]?.name || 'attachment', transferType: attachmentType, progress: 1, loaded: 0, total: files.reduce((sum, f) => sum + Number(f.size || 0), 0), speedBps: 0, etaSeconds: 0, startedAt: Date.now(), message: 'Upload started. Please wait.' });
     try {
       const uploadedDocs = [];
@@ -3291,7 +3442,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       }
       setAttachments(prev => [...prev, ...uploadedDocs]);
       updateFileTransfer({ active: true, phase: 'complete', label: 'Upload complete', progress: 100, message: `${uploadedDocs.length} attachment${uploadedDocs.length > 1 ? 's' : ''} uploaded successfully.` });
-      window.setTimeout(() => resetFileTransfer(), 2200);
+      resetFileTransferLater(2200, generation);
     } catch (error) {
       console.error(`${attachmentType} attachment upload failed:`, error);
       updateFileTransfer({ active: true, phase: 'error', label: 'Upload failed', progress: 100, message: error?.message || 'Please check your internet connection and try again.' });
@@ -3370,25 +3521,18 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   const handleLedgerScreenshot = async (event) => {
     const file = event?.target?.files?.[0];
     if (!file || !showFinancials || isUploadingLedgerReceipt) return;
+    validateProjectUploadSelection(event?.target?.files, { maxFiles: 1, allowedKinds: ['pdf', 'image'] });
     setIsUploadingLedgerReceipt(true);
     setLedgerSaveMessage('Uploading payment receipt…');
     try {
-      const uploaded = await uploadProjectFile(file, project.id || project.caseId, 'payment-receipt', user.name);
+      const uploaded = await uploadProjectFile(file, project.id || project.caseId, 'payment-receipt', user.name, { actorId:user.id, actorUsername:user.username });
       const receipt={...uploaded};
       delete receipt._serverCase;
       delete receipt._persistence;
-      setLedgerDraft(previous => {
-        const next = { ...previous, screenshot:receipt };
-        ledgerDraftRef.current = next;
-        return next;
-      });
-      ledgerDirtyRef.current = true;
+      setLedgerDraft(previous => ({ ...previous, screenshot:receipt }));
       setLedgerDirty(true);
-      ledgerQueuedSaveRef.current = true;
-      ledgerAutosaveBlockedSignatureRef.current = '';
       ledgerMutationRef.current = { signature:'', id:'' };
-      setLedgerSaveState('pending');
-      setLedgerSaveMessage('Receipt uploaded. Linking it to the ledger automatically…');
+      setLedgerSaveMessage('Receipt uploaded. Select Save payment details to link it to the ledger.');
     } catch (error) {
       console.error('Payment receipt upload failed:', error);
       setLedgerSaveMessage(error?.message || 'Payment receipt upload failed.');
@@ -3482,104 +3626,76 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   };
 
   const updateLedger = (field, value) => {
-    if (!showFinancials) return;
-    setLedgerDraft(previous => {
-      const next = { ...previous, [field]:value };
-      ledgerDraftRef.current = next;
-      return next;
-    });
-    ledgerDirtyRef.current = true;
+    if (!showFinancials || isSavingLedger) return;
+    setLedgerDraft(previous => ({ ...previous, [field]:value }));
     setLedgerDirty(true);
-    ledgerQueuedSaveRef.current = Boolean(ledgerSavePromiseRef.current);
-    ledgerAutosaveBlockedSignatureRef.current = '';
-    setLedgerSaveState('pending');
-    setLedgerSaveMessage('Waiting to save automatically…');
+    setLedgerSaveMessage('Unsaved finance changes');
     ledgerMutationRef.current = { signature:'', id:'' };
   };
 
-  const handleSaveLedger = async ({ reason = 'automatic' } = {}) => {
-    if (!showFinancials || isUploadingLedgerReceipt) return false;
-    if (ledgerSavePromiseRef.current) {
-      ledgerQueuedSaveRef.current = true;
-      return ledgerSavePromiseRef.current;
-    }
-    if (!ledgerDirtyRef.current) return true;
-
-    const draftSnapshot = { ...ledgerDraftRef.current };
-    const draftSignature = getFinanceDraftSignature(draftSnapshot);
-    const baseProject = latestProjectRef.current || project;
+  const handleSaveLedger = async () => {
+    if (!showFinancials || isSavingLedger || !ledgerDirty) return;
     let estimate;
     let amountIn;
     let expenses;
     let refund;
     try {
-      estimate = parseFinanceDraftAmount(draftSnapshot.estimate, 'Estimate');
-      amountIn = parseFinanceDraftAmount(draftSnapshot.amountIn, 'Amount received');
-      expenses = parseFinanceDraftAmount(draftSnapshot.expenses, 'Expenses');
-      refund = parseFinanceDraftAmount(draftSnapshot.refund, 'Refund');
+      estimate = parseFinanceDraftAmount(ledgerDraft.estimate, 'Estimate');
+      amountIn = parseFinanceDraftAmount(ledgerDraft.amountIn, 'Amount received');
+      expenses = parseFinanceDraftAmount(ledgerDraft.expenses, 'Expenses');
+      refund = parseFinanceDraftAmount(ledgerDraft.refund, 'Refund');
     } catch (error) {
-      ledgerAutosaveBlockedSignatureRef.current = draftSignature;
-      setLedgerSaveState('error');
       setLedgerSaveMessage(error.message);
       notifyUser(error.message);
-      return false;
+      return;
     }
 
     if (refund > amountIn) {
       const message = 'Refund cannot be greater than the total amount received.';
-      ledgerAutosaveBlockedSignatureRef.current = draftSignature;
-      setLedgerSaveState('error');
       setLedgerSaveMessage(message);
       notifyUser(message);
-      return false;
+      return;
     }
 
     const now = Date.now();
-    const paymentDate = String(draftSnapshot.date || '').trim();
+    const paymentDate = String(ledgerDraft.date || '').trim();
     if (amountIn > 0 && !paymentDate) {
-      const message = 'Select the actual payment date before recording a received amount.';
-      ledgerAutosaveBlockedSignatureRef.current = draftSignature;
-      setLedgerSaveState('error');
+      const message = 'Select the actual payment date before saving a received amount.';
       setLedgerSaveMessage(message);
       notifyUser(message);
-      return false;
+      return;
     }
     const normalizedPaymentDate = normalizeTaskDateKey(paymentDate || getIndiaDateKey(now), '');
     if (paymentDate && normalizedPaymentDate !== paymentDate) {
       const message = 'Select a valid payment date.';
-      ledgerAutosaveBlockedSignatureRef.current = draftSignature;
-      setLedgerSaveState('error');
       setLedgerSaveMessage(message);
       notifyUser(message);
-      return false;
+      return;
     }
     if (paymentDate && paymentDate > getIndiaDateKey(now)) {
       const message = 'Payment date cannot be in the future.';
-      ledgerAutosaveBlockedSignatureRef.current = draftSignature;
-      setLedgerSaveState('error');
       setLedgerSaveMessage(message);
       notifyUser(message);
-      return false;
+      return;
     }
-
-    const accountingPeriod = normalizeAccountingMonthKey(getProjectFinanceMonthKey(baseProject), getCurrentAccountingMonthKey(now));
+    const accountingPeriod = normalizeAccountingMonthKey(getProjectFinanceMonthKey(project), getCurrentAccountingMonthKey(now));
     const nextLedger = {
-      ...(baseProject.ledger || {}),
+      ...(project.ledger || {}),
       amountIn,
       expenses,
       refund,
-      date:paymentDate || baseProject.ledger?.date || baseProject.paymentDate || getIndiaDateKey(now),
+      date:paymentDate || project.ledger?.date || project.paymentDate || getIndiaDateKey(now),
       accountingPeriod,
-      receivedFrom:String(draftSnapshot.receivedFrom || '').trim(),
-      txnId:String(draftSnapshot.txnId || '').trim(),
-      mode:String(draftSnapshot.mode || '').trim(),
-      note:String(draftSnapshot.note || '').trim(),
-      screenshot:draftSnapshot.screenshot || null,
+      receivedFrom:String(ledgerDraft.receivedFrom || '').trim(),
+      txnId:String(ledgerDraft.txnId || '').trim(),
+      mode:String(ledgerDraft.mode || '').trim(),
+      note:String(ledgerDraft.note || '').trim(),
+      screenshot:ledgerDraft.screenshot || null,
       updatedAt:now,
       updatedBy:user?.name || 'Admin'
     };
     const draftProject = {
-      ...baseProject,
+      ...project,
       estimate,
       financeAccountingPeriod:accountingPeriod,
       ledger:nextLedger,
@@ -3598,131 +3714,38 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       paymentStatus:computedStatus === 'Paid' ? 'YES' : (computedStatus === 'Pending' ? 'PENDING' : 'NOT_UPDATED'),
       paymentReceived:amountIn > 0 ? (computedStatus === 'Paid' ? 'YES' : 'PARTIAL') : 'NO'
     };
-    const mutationSignature = JSON.stringify({
-      taskId:baseProject.id || baseProject.caseId,
-      financeVersion:Number(baseProject.financeVersion || 0),
+    const signature = JSON.stringify({
+      taskId:project.id || project.caseId,
+      financeVersion:Number(project.financeVersion || 0),
       estimate,amountIn,expenses,refund,
       date:nextLedger.date,receivedFrom:nextLedger.receivedFrom,txnId:nextLedger.txnId,
       mode:nextLedger.mode,note:nextLedger.note,screenshotId:nextLedger.screenshot?.id || nextLedger.screenshot || ''
     });
-    if (ledgerMutationRef.current.signature !== mutationSignature) {
-      ledgerMutationRef.current = { signature:mutationSignature, id:createFinanceMutationId() };
+    if (ledgerMutationRef.current.signature !== signature) {
+      ledgerMutationRef.current = { signature, id:createFinanceMutationId() };
     }
-    const financeMutationId = ledgerMutationRef.current.id;
 
-    ledgerQueuedSaveRef.current = false;
     setIsSavingLedger(true);
-    setLedgerSaveState('saving');
-    const backgroundFinance = ledgerNavigationDetachedRef.current || reason === 'background-navigation';
-    setLedgerSaveMessage(backgroundFinance ? 'Saving payment changes in the background…' : 'Saving automatically…');
-
-    const savePromise = (async () => {
-      try {
-        const confirmed = await onUpdateProject(updatedProject, baseProject, {
-          financeOnly:true,
-          backgroundFinance,
-          backgroundFinanceRef:ledgerNavigationDetachedRef,
-          financeMutationId
-        });
-        if (!confirmed) {
-          ledgerAutosaveBlockedSignatureRef.current = draftSignature;
-          setLedgerSaveState('error');
-          setLedgerSaveMessage('Automatic save was not confirmed. Your entered values are still here.');
-          return false;
-        }
-
-        latestProjectRef.current = confirmed;
-        const confirmedDraft = createFinanceLedgerDraft(confirmed);
-        const currentDraftSignature = getFinanceDraftSignature(ledgerDraftRef.current);
-        ledgerAutosaveBlockedSignatureRef.current = '';
-
-        if (currentDraftSignature === draftSignature) {
-          ledgerDraftRef.current = confirmedDraft;
-          ledgerDirtyRef.current = false;
-          setLedgerDraft(confirmedDraft);
-          setLedgerDirty(false);
-          ledgerMutationRef.current = { signature:'', id:'' };
-          setLedgerSaveState('saved');
-          setLedgerSaveMessage(`Saved automatically at ${new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' })}`);
-        } else {
-          ledgerDirtyRef.current = true;
-          ledgerQueuedSaveRef.current = true;
-          setLedgerDirty(true);
-          setLedgerSaveState('pending');
-          setLedgerSaveMessage('Saving your latest payment changes automatically…');
-        }
-        return true;
-      } catch (error) {
-        ledgerAutosaveBlockedSignatureRef.current = draftSignature;
-        ledgerDirtyRef.current = true;
-        setLedgerDirty(true);
-        setLedgerSaveState('error');
-        setLedgerSaveMessage(error?.message || 'Automatic payment save failed. Your entered values are still available.');
-        notifyUser(error?.message || 'Automatic payment save failed.');
-        return false;
-      } finally {
-        ledgerSavePromiseRef.current = null;
-        setIsSavingLedger(false);
+    setLedgerSaveMessage('Saving payment securely…');
+    try {
+      const confirmed = await onUpdateProject(updatedProject, project, {
+        financeOnly:true,
+        financeMutationId:ledgerMutationRef.current.id
+      });
+      if (!confirmed) {
+        setLedgerSaveMessage('Payment was not saved. Your entered values are still here; refresh the task before retrying if another admin changed it.');
+        return;
       }
-    })();
-
-    ledgerSavePromiseRef.current = savePromise;
-    return savePromise;
-  };
-
-  useEffect(() => {
-    if (!showFinancials || !ledgerDirty || isSavingLedger || isUploadingLedgerReceipt) return undefined;
-    const signature = getFinanceDraftSignature(ledgerDraft);
-    if (signature === ledgerAutosaveBlockedSignatureRef.current) return undefined;
-    if (ledgerAutosaveTimerRef.current) clearTimeout(ledgerAutosaveTimerRef.current);
-    ledgerAutosaveTimerRef.current = setTimeout(() => {
-      ledgerAutosaveTimerRef.current = null;
-      void handleSaveLedger({ reason:'automatic' });
-    }, FINANCE_AUTOSAVE_DELAY_MS);
-    return () => {
-      if (ledgerAutosaveTimerRef.current) clearTimeout(ledgerAutosaveTimerRef.current);
-      ledgerAutosaveTimerRef.current = null;
-    };
-  }, [ledgerDraft, ledgerDirty, isSavingLedger, isUploadingLedgerReceipt, showFinancials]);
-
-  const flushFinanceAutosave = () => {
-    if (ledgerAutosaveTimerRef.current) {
-      clearTimeout(ledgerAutosaveTimerRef.current);
-      ledgerAutosaveTimerRef.current = null;
+      setLedgerDraft(createFinanceLedgerDraft(confirmed));
+      setLedgerDirty(false);
+      ledgerMutationRef.current = { signature:'', id:'' };
+      setLedgerSaveMessage(`Saved at ${new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' })}`);
+    } catch (error) {
+      setLedgerSaveMessage(error?.message || 'Payment save failed. Your entered values are still available.');
+      notifyUser(error?.message || 'Payment save failed.');
+    } finally {
+      setIsSavingLedger(false);
     }
-    if (ledgerDirtyRef.current && !ledgerSavePromiseRef.current && !isUploadingLedgerReceipt) {
-      ledgerAutosaveBlockedSignatureRef.current = '';
-      void handleSaveLedger({ reason:'field-blur' });
-    }
-  };
-
-  const handleTaskBack = () => {
-    ledgerNavigationDetachedRef.current = true;
-    if (ledgerAutosaveTimerRef.current) {
-      clearTimeout(ledgerAutosaveTimerRef.current);
-      ledgerAutosaveTimerRef.current = null;
-    }
-
-    const finishFinanceInBackground = async () => {
-      try {
-        if (ledgerSavePromiseRef.current) await ledgerSavePromiseRef.current;
-        let attempts = 0;
-        while (ledgerDirtyRef.current && attempts < 2) {
-          attempts += 1;
-          ledgerAutosaveBlockedSignatureRef.current = '';
-          const saved = await handleSaveLedger({ reason:'background-navigation' });
-          if (!saved) break;
-        }
-        if (ledgerDirtyRef.current) {
-          notifyUser('Payment changes are still pending. Open this task again to retry; confirmed finance data was not overwritten.');
-        }
-      } catch (error) {
-        notifyUser(error?.message || 'Payment changes could not finish saving in the background.');
-      }
-    };
-
-    onBack();
-    void Promise.resolve().then(finishFinanceInBackground);
   };
   
   const handlePrintReceipt = () => {
@@ -3812,6 +3835,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   };
 
   const shareCompletedFileOnWhatsApp = async () => {
+    const MAX_NATIVE_SHARE_BYTES = 32 * 1024 * 1024;
     const completedDocs = getCompletedDocuments(project);
     if (completedDocs.length === 0) {
       notifyUser('No completed file found for WhatsApp sharing. Please upload the completed PDF/DWG first.');
@@ -3821,55 +3845,62 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     const docToShare = completedDocs[completedDocs.length - 1];
     const fileName = docToShare.name || docToShare.fileName || `${project.id || project.caseId || 'completed'}-file.pdf`;
     const downloadUrl = getProjectFileDownloadUrl(docToShare);
-
     if (!downloadUrl) {
       notifyUser('This completed file does not have a valid server download link. Please re-upload the final PDF once.');
       return;
     }
 
     try {
-      const response = await authFetch(downloadUrl, { cache: 'no-store' });
-      if (!response.ok) {
-        const serverText = await response.text().catch(() => '');
-        throw new Error(serverText || `Download failed (${response.status})`);
+      let declaredBytes = Number(docToShare.size || 0);
+      if (!declaredBytes) {
+        const head = await authFetch(downloadUrl, { method:'HEAD', cache:'no-store', timeoutMs:60_000 });
+        if (head.ok) declaredBytes = Number(head.headers.get('content-length') || 0);
       }
-
-      const contentType = (response.headers.get('content-type') || docToShare.mimeType || docToShare.mime || '').toLowerCase();
-      const blob = await response.blob();
-      const looksLikePdf = /\.pdf$/i.test(fileName) || contentType.includes('pdf');
-      const looksLikeServerError = contentType.includes('text/html') || contentType.includes('application/json') || contentType.includes('text/plain');
-
-      if (looksLikeServerError && looksLikePdf) {
-        throw new Error('Server returned an error page instead of the PDF. Please re-upload the completed file.');
-      }
-      if (looksLikePdf && blob.size < 1200) {
-        throw new Error('The PDF received from server is too small and may be corrupt. Please re-upload the completed PDF once.');
-      }
-
-      const shareType = looksLikePdf ? 'application/pdf' : (blob.type || docToShare.mimeType || docToShare.mime || 'application/octet-stream');
-      const file = new File([blob], fileName, { type: shareType });
-
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file], title: fileName, text: `Kalpvriksha Designs completed file: ${project.id || project.caseId || ''}`.trim() });
-        await recordCompletedFileSent(fileName, 'WhatsApp / native file share');
+      if (declaredBytes > MAX_NATIVE_SHARE_BYTES) {
+        await handleTrackedDownload(docToShare);
+        window.open('https://web.whatsapp.com/', '_blank', 'noopener,noreferrer');
+        notifyUser('The file is too large for a memory-safe native share. Attach the downloaded file in WhatsApp, then use “Mark as sent” to record actual delivery.');
         return;
       }
 
-      const objectUrl = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = objectUrl;
-      link.download = fileName;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
-      await recordCompletedFileSent(fileName, 'WhatsApp Web');
+      const response = await authFetch(downloadUrl, { cache:'no-store', timeoutMs:5 * 60 * 1000 });
+      if (!response.ok) throw new Error(await response.text().catch(() => `Download failed (${response.status})`));
+      const contentType = (response.headers.get('content-type') || docToShare.mimeType || docToShare.mime || '').toLowerCase();
+      const contentLength = Number(response.headers.get('content-length') || declaredBytes || 0);
+      if (contentLength > MAX_NATIVE_SHARE_BYTES) {
+        try { await response.body?.cancel?.(); } catch {}
+        await handleTrackedDownload(docToShare);
+        window.open('https://web.whatsapp.com/', '_blank', 'noopener,noreferrer');
+        notifyUser('The file is too large for a memory-safe native share. Attach the downloaded file in WhatsApp, then use “Mark as sent” to record actual delivery.');
+        return;
+      }
+      const blob = await response.blob();
+      if (blob.size > MAX_NATIVE_SHARE_BYTES) {
+        await handleTrackedDownload(docToShare);
+        window.open('https://web.whatsapp.com/', '_blank', 'noopener,noreferrer');
+        notifyUser('Attach the downloaded file in WhatsApp, then use “Mark as sent” to record actual delivery.');
+        return;
+      }
+      const looksLikePdf = /\.pdf$/i.test(fileName) || contentType.includes('pdf');
+      const looksLikeServerError = contentType.includes('text/html') || contentType.includes('application/json') || contentType.includes('text/plain');
+      if (looksLikeServerError && looksLikePdf) throw new Error('Server returned an error page instead of the PDF. Please re-upload the completed file.');
+      if (looksLikePdf && blob.size < 1200) throw new Error('The PDF received from server is too small and may be corrupt. Please re-upload the completed PDF once.');
+      const shareType = looksLikePdf ? 'application/pdf' : (blob.type || docToShare.mimeType || docToShare.mime || 'application/octet-stream');
+      const file = new File([blob], fileName, { type: shareType });
+      if (navigator.canShare && navigator.canShare({ files:[file] })) {
+        await navigator.share({ files:[file], title:fileName, text:`Kalpvriksha Designs completed file: ${project.id || project.caseId || ''}`.trim() });
+        await recordCompletedFileSent(fileName, 'Native file share completed');
+        return;
+      }
+      await handleTrackedDownload(docToShare);
       window.open('https://web.whatsapp.com/', '_blank', 'noopener,noreferrer');
+      notifyUser('WhatsApp Web opened. Attach the downloaded file, then use “Mark as sent” to record actual delivery.');
     } catch (e) {
       console.error('WhatsApp PDF share failed:', e);
       notifyUser(`Unable to prepare this PDF for WhatsApp. ${e?.message || 'Please re-upload the completed PDF and try again.'}`);
     }
   };
+
 
   const completedDocs = getCompletedDocuments(project);
   const completedDocsCount = completedDocs.length;
@@ -3920,7 +3951,8 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
 
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in duration-200">
-      {filePreview && (
+      <UnifiedFileViewer file={filePreview?.doc || null} onClose={closeFilePreview} onDownload={handleTrackedDownload} onDownloadFile={handleTrackedDownload} />
+      {false && filePreview && (
         <PortalLayer isOpen={Boolean(filePreview)} className="kalpa-preview-layer fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center" lockScrollClass="kalpa-preview-open" role="dialog" ariaModal={true} ariaLabel="File preview" onEscape={closeFilePreview} initialFocusSelector="button">
           <div className="kalpa-preview-card bg-white shadow-2xl border border-slate-200 overflow-hidden flex flex-col">
             <div className="kalpa-preview-header border-b border-slate-100 bg-white/95">
@@ -4464,24 +4496,24 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
               </div>
               
               <div className="space-y-4 text-sm relative z-10">
-                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Total Estimate Amount</label><input type="number" min="0" step="0.01" value={ledgerDraft.estimate} onChange={e => updateLedger('estimate', e.target.value)} onBlur={flushFinanceAutosave} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Total Estimate Amount</label><input type="number" min="0" step="0.01" value={ledgerDraft.estimate} onChange={e => updateLedger('estimate', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
                 
                 <div className="grid grid-cols-2 gap-3">
-                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Amount Received</label><input type="number" min="0" step="0.01" value={ledgerDraft.amountIn} onChange={e => updateLedger('amountIn', e.target.value)} onBlur={flushFinanceAutosave} className="w-full border-2 border-emerald-100 p-2.5 rounded-xl bg-white font-bold text-emerald-700 outline-none focus:border-emerald-400 disabled:opacity-60" /></div>
-                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Actual Expenses</label><input type="number" min="0" step="0.01" value={ledgerDraft.expenses} onChange={e => updateLedger('expenses', e.target.value)} onBlur={flushFinanceAutosave} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold text-amber-700 outline-none focus:border-amber-400 disabled:opacity-60" placeholder="e.g. print cost" /></div>
+                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Amount Received</label><input type="number" min="0" step="0.01" value={ledgerDraft.amountIn} onChange={e => updateLedger('amountIn', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-emerald-100 p-2.5 rounded-xl bg-white font-bold text-emerald-700 outline-none focus:border-emerald-400 disabled:opacity-60" /></div>
+                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Actual Expenses</label><input type="number" min="0" step="0.01" value={ledgerDraft.expenses} onChange={e => updateLedger('expenses', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold text-amber-700 outline-none focus:border-amber-400 disabled:opacity-60" placeholder="e.g. print cost" /></div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
-                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Date Paid</label><input type="date" value={ledgerDraft.date} onChange={e => updateLedger('date', e.target.value)} onBlur={flushFinanceAutosave} max={getIndiaDateKey()} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
-                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Refund</label><input type="number" min="0" step="0.01" value={ledgerDraft.refund} onChange={e => updateLedger('refund', e.target.value)} onBlur={flushFinanceAutosave} className="w-full border-2 border-red-100 p-2.5 rounded-xl bg-white font-bold text-red-600 outline-none focus:border-red-400 disabled:opacity-60" /></div>
+                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Date Paid</label><input type="date" value={ledgerDraft.date} onChange={e => updateLedger('date', e.target.value)} max={getIndiaDateKey()} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Refund</label><input type="number" min="0" step="0.01" value={ledgerDraft.refund} onChange={e => updateLedger('refund', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-red-100 p-2.5 rounded-xl bg-white font-bold text-red-600 outline-none focus:border-red-400 disabled:opacity-60" /></div>
                 </div>
                 
-                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Received From</label><input type="text" value={ledgerDraft.receivedFrom} onChange={e => updateLedger('receivedFrom', e.target.value)} onBlur={flushFinanceAutosave} placeholder="Sender Name" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Received From</label><input type="text" value={ledgerDraft.receivedFrom} onChange={e => updateLedger('receivedFrom', e.target.value)} disabled={isSavingLedger} placeholder="Sender Name" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Transaction ID</label><input type="text" value={ledgerDraft.txnId} onChange={e => updateLedger('txnId', e.target.value)} onBlur={flushFinanceAutosave} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
-                  <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Payment Mode</label><input type="text" value={ledgerDraft.mode} onChange={e => updateLedger('mode', e.target.value)} onBlur={flushFinanceAutosave} placeholder="Cash / UPI / Bank Transfer / Cheque" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                  <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Transaction ID</label><input type="text" value={ledgerDraft.txnId} onChange={e => updateLedger('txnId', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                  <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Payment Mode</label><input type="text" value={ledgerDraft.mode} onChange={e => updateLedger('mode', e.target.value)} disabled={isSavingLedger} placeholder="Cash / UPI / Bank Transfer / Cheque" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
                 </div>
-                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Remarks</label><textarea rows={2} value={ledgerDraft.note} onChange={e => updateLedger('note', e.target.value)} onBlur={flushFinanceAutosave} placeholder="Optional payment remarks" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60 resize-none" /></div>
+                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Remarks</label><textarea rows={2} value={ledgerDraft.note} onChange={e => updateLedger('note', e.target.value)} disabled={isSavingLedger} placeholder="Optional payment remarks" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60 resize-none" /></div>
 
                 <div className="col-span-2 mt-2 border-t-2 border-amber-100 pt-4">
                   <label className="text-amber-800 block mb-3 text-xs font-black uppercase tracking-widest">Payment Screenshot (Optional)</label>
@@ -4508,14 +4540,13 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                     <div>
                       <p className="text-[10px] font-black uppercase tracking-widest text-amber-600">Calculated status</p>
                       <p className="font-black text-slate-800 mt-1">{derivePaymentTrackingStatusFromData({ ...project, estimate:ledgerDraft.estimate, ledger:{ ...(project.ledger || {}), amountIn:ledgerDraft.amountIn, expenses:ledgerDraft.expenses, refund:ledgerDraft.refund, date:ledgerDraft.date } })}</p>
-                      <p className={`text-xs font-bold mt-1 ${ledgerSaveState === 'error' ? 'text-red-600' : (ledgerSaveState === 'saved' ? 'text-emerald-600' : 'text-amber-600')}`}>{ledgerSaveMessage}</p>
+                      <p className={`text-xs font-bold mt-1 ${ledgerDirty ? 'text-amber-600' : 'text-emerald-600'}`}>{ledgerSaveMessage || (ledgerDirty ? 'Unsaved finance changes' : 'Finance is saved')}</p>
                     </div>
-                    <div className={`px-4 py-2.5 rounded-xl border font-black text-xs flex items-center whitespace-nowrap ${ledgerSaveState === 'error' ? 'bg-red-50 text-red-700 border-red-100' : (ledgerSaveState === 'saved' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-amber-50 text-amber-700 border-amber-100')}`}>
-                      <RefreshCcw className={`w-4 h-4 mr-2 ${isSavingLedger ? 'animate-spin' : ''}`} />
-                      {isSavingLedger ? 'Auto-saving' : (ledgerSaveState === 'error' ? 'Needs attention' : 'Automatic save')}
-                    </div>
+                    <button type="button" onClick={handleSaveLedger} disabled={!ledgerDirty || isSavingLedger || isUploadingLedgerReceipt} className="px-5 py-3 rounded-xl bg-slate-900 text-white font-black hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed min-w-[190px]">
+                      {isSavingLedger ? 'Saving Payment…' : 'Save Payment Details'}
+                    </button>
                   </div>
-                  <p className="text-[11px] font-semibold text-slate-500 mt-3">Changes save automatically after you pause typing or leave a field. An estimate without payment becomes Pending; a received amount reaching the estimate becomes Paid.</p>
+                  <p className="text-[11px] font-semibold text-slate-500 mt-3">Typing does not write to the server. One durable finance transaction is created only when Save Payment Details is selected.</p>
                 </div>
               </div>
             </div>
@@ -4667,14 +4698,50 @@ class AppErrorBoundary extends React.Component {
   }
 }
 
+const SecureWorkspaceErrorScreen = ({ error = '' }) => (
+  <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+    <div className="max-w-lg w-full bg-white border-2 border-red-100 rounded-3xl p-8 text-center shadow-xl">
+      <AlertCircle className="w-14 h-14 text-red-500 mx-auto mb-4" />
+      <h1 className="text-2xl font-black text-slate-800">Secure workspace could not be loaded</h1>
+      <p className="mt-3 text-slate-600 font-semibold">No cached production records are being shown. Your existing server data has not been replaced.</p>
+      {error && <p className="mt-4 rounded-xl bg-red-50 border border-red-100 p-3 text-sm font-bold text-red-700">{error}</p>}
+      <button type="button" onClick={() => window.location.reload()} className="mt-6 bg-slate-900 text-white px-5 py-3 rounded-xl font-black">Retry secure connection</button>
+    </div>
+  </div>
+);
+
 function AppShell() {
   const [currentUser, setCurrentUser] = useState(null);
+  const [workspaceFilePreview, setWorkspaceFilePreview] = useState(null);
+  const openWorkspaceFilePreview = useCallback((doc = {}) => setWorkspaceFilePreview(doc), []);
+  const handleWorkspaceFileDownload = useCallback(async (doc = {}, options = {}) => {
+    try {
+      const result = await downloadProjectFile(doc, options);
+      if (result?.completionConfirmed === false) notifyUser('Browser download started. Confirm completion in your browser downloads list.');
+      else if (!result?.cached) notifyUser('Download completed, but Browser storage was unavailable for an offline copy.');
+      return result;
+    } catch (error) {
+      notifyUser(error?.message || 'Download failed.');
+      return { ok:false, error };
+    }
+  }, []);
+  useEffect(() => {
+    if (USE_BACKEND_STATE) return undefined;
+    const compact = () => compactLargeLocalStoragePayloads();
+    if (typeof window.requestIdleCallback === 'function') {
+      const idleId = window.requestIdleCallback(compact, { timeout: 2500 });
+      return () => window.cancelIdleCallback?.(idleId);
+    }
+    const timer = window.setTimeout(compact, 1000);
+    return () => window.clearTimeout(timer);
+  }, []);
   const [passwordChangeSessionUser, setPasswordChangeSessionUser] = useState(null);
   const currentUserRef = useRef(null);
   const heartbeatRequestInFlightRef = useRef(false);
   const workspaceRefreshInFlightRef = useRef(false);
   const pendingCreateFlushInFlightRef = useRef(false);
   const financeSaveInFlightRef = useRef(new Set());
+  const [financeSyncRevision, setFinanceSyncRevision] = useState(0);
   const workspaceStateVersionRef = useRef(-1);
   const workspaceDataRevisionRef = useRef(-1);
   const workspacePresenceGenerationRef = useRef(-1);
@@ -4684,9 +4751,11 @@ function AppShell() {
   const [isDbReady, setIsDbReady] = useState(false);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [authError, setAuthError] = useState(null);
+  const [authBootWarning, setAuthBootWarning] = useState('');
+  const [authBootStage, setAuthBootStage] = useState('Preparing secure sign-in');
   const [dbError, setDbError] = useState(null);
   
-  const [users, setUsers] = useState([]);
+  const [users, setUsers] = useState(USE_BACKEND_STATE ? [] : INITIAL_USERS);
   const [projects, setProjects] = useState([]);
   const [chatMessages, setChatMessages] = useState([]);
   const [notifications, setNotifications] = useState([]);
@@ -4739,18 +4808,6 @@ function AppShell() {
   }, [activeTab, selectedProject]);
   const [boardViewMode, setBoardViewMode] = useState('list'); // 'list' or 'kanban'
   const [selectedBoardDate, setSelectedBoardDate] = useState(formatDateKey());
-  const [nowTick, setNowTick] = useState(Date.now());
-  // Lightweight live clock for elapsed drafting/free/break timers.
-  // Keep this interval modest so multi-tab usage stays low CPU, but timers
-  // still update while a designer/manager is on break.
-  useEffect(() => {
-    const nonLiveTabs = new Set(['command','productivity','closing','reports','settings','qa','ledger','archive','team','attendance','profile','calculator','meeting']);
-    if (selectedProject || nonLiveTabs.has(activeTab)) return undefined;
-    const tick = () => setNowTick(Date.now());
-    tick();
-    const timer = setInterval(tick, 30000);
-    return () => clearInterval(timer);
-  }, [activeTab, selectedProject]);
   const [showNotifs, setShowNotifs] = useState(false);
   const [showProfilePanel, setShowProfilePanel] = useState(false);
   const [showNewLead, setShowNewLead] = useState(false);
@@ -4851,6 +4908,8 @@ function AppShell() {
   const [leadFiles, setLeadFiles] = useState([]);
   const [isSubmittingLead, setIsSubmittingLead] = useState(false);
   const [createTaskError, setCreateTaskError] = useState('');
+  const createdTaskUploadAbortRef = useRef(null);
+  const [createdTaskUpload, setCreatedTaskUpload] = useState({ active:false, project:null, total:0, confirmedFiles:[], failedFiles:[], currentFile:'', cancelled:false });
   
   const [showLocalBanner, setShowLocalBanner] = useState(false);
 
@@ -4881,12 +4940,8 @@ function AppShell() {
     }
   }, []);
   const [globalSearch, setGlobalSearch] = useState('');
-  const [savedGlobalFilters, setSavedGlobalFilters] = useState(() => {
-    try {
-      const parsed = JSON.parse(localStorage.getItem('kalpa_saved_global_filters') || '[]');
-      return Array.isArray(parsed) ? parsed.filter(f => f && f.query).slice(0, 12) : [];
-    } catch (e) { return []; }
-  });
+  const [, setLiveClockTick] = useState(0);
+  const [savedGlobalFilters, setSavedGlobalFilters] = useState([]);
   const [savedFilterName, setSavedFilterName] = useState('');
   const [darkMode, setDarkMode] = useState(() => {
     try { return localStorage.getItem('kalpa_ui_dark_mode') === 'true'; } catch(e) { return false; }
@@ -4896,9 +4951,27 @@ function AppShell() {
     try { document.documentElement.classList.toggle('kd-dark-root', !!darkMode); } catch(e) {}
   }, [darkMode]);
   
+  useEffect(() => { setProjectFileCacheActor(currentUser || {}); }, [currentUser?.id, currentUser?.username, currentUser?.name]);
+  const savedFiltersStorageKey = `kalpa_saved_global_filters::${operationalActorKey(currentUser) || 'signed-out'}`;
+  useEffect(() => {
+    if (!currentUser) { setSavedGlobalFilters([]); return; }
+    try {
+      const parsed = JSON.parse(localStorage.getItem(savedFiltersStorageKey) || '[]');
+      setSavedGlobalFilters(Array.isArray(parsed) ? parsed.filter(f => f && f.query).slice(0, 12) : []);
+    } catch (e) { setSavedGlobalFilters([]); }
+  }, [savedFiltersStorageKey, currentUser?.id]);
   useEffect(() => {
     if (currentUser?.role === ROLES.DESIGNER && activeTab === 'board') setActiveTab('command');
   }, [currentUser?.role, activeTab]);
+  useEffect(() => {
+    if (currentUser && !isTabAllowedForRole(activeTab, currentUser.role)) setActiveTab('command');
+  }, [currentUser?.role, activeTab]);
+  useEffect(() => {
+    const nonLiveTabs = new Set(['profile', 'calculator', 'meeting', 'chat', 'ledger', 'closing', 'archive']);
+    if (selectedProject || nonLiveTabs.has(activeTab)) return undefined;
+    const timer = window.setInterval(() => setLiveClockTick(value => value + 1), 60_000);
+    return () => window.clearInterval(timer);
+  }, [activeTab, selectedProject?.id]);
 
   const activeUsers = useMemo(() => normalizeTeamUsers(users && users.length > 0 ? users : INITIAL_USERS), [users]);
   const deferredGlobalSearch = React.useDeferredValue(globalSearch);
@@ -5042,6 +5115,54 @@ function AppShell() {
     });
   }, [USE_BACKEND_STATE, currentUser?.id, currentUser?.username, currentUser?.name]);
 
+  const runCreatedTaskSourceUploads = useCallback(async (confirmedTask, files = [], uploadOverride = null) => {
+    const pendingFiles = Array.from(files || []).filter(Boolean);
+    if (!confirmedTask || pendingFiles.length === 0) return { confirmedFiles:[], failedFiles:[] };
+    if (createdTaskUploadAbortRef.current) {
+      try { createdTaskUploadAbortRef.current.abort(); } catch {}
+    }
+    const controller = new AbortController();
+    createdTaskUploadAbortRef.current = controller;
+    let latestConfirmed = confirmedTask;
+    const confirmedFiles = [];
+    const failedFiles = [];
+    setCreatedTaskUpload({ active:true, project:confirmedTask, total:pendingFiles.length, confirmedFiles:[], failedFiles:[], currentFile:pendingFiles[0]?.name || '', cancelled:false });
+    for (const file of pendingFiles) {
+      if (controller.signal.aborted) { failedFiles.push(file); continue; }
+      setCreatedTaskUpload(previous => ({ ...previous, active:true, project:latestConfirmed, currentFile:file.name, confirmedFiles:[...confirmedFiles], failedFiles:[...failedFiles] }));
+      try {
+        const uploaded = typeof uploadOverride === 'function'
+          ? await uploadOverride(file, latestConfirmed, controller.signal)
+          : await uploadProjectFile(file, latestConfirmed.id || latestConfirmed.caseId, 'source', currentUser.name, {
+              signal:controller.signal,
+              actorId:currentUser.id,
+              actorUsername:currentUser.username
+            });
+        confirmedFiles.push(file);
+        if (uploaded?._serverCase) {
+          latestConfirmed = uploaded._serverCase;
+          rememberRecentCreatedProject(latestConfirmed);
+          applyProjectSnapshot([latestConfirmed], { source:'create-source-file-confirmed' });
+        }
+      } catch (error) {
+        console.warn('Source file attach failed after task creation:', error);
+        failedFiles.push(file);
+      }
+    }
+    const cancelled = controller.signal.aborted;
+    if (createdTaskUploadAbortRef.current === controller) createdTaskUploadAbortRef.current = null;
+    setCreatedTaskUpload({ active:false, project:latestConfirmed, total:pendingFiles.length, confirmedFiles:[...confirmedFiles], failedFiles:[...failedFiles], currentFile:'', cancelled });
+    if (failedFiles.length && !cancelled) notifyUser(`${failedFiles.length} source file${failedFiles.length > 1 ? 's' : ''} still need upload. Use Retry in the upload status bar.`);
+    return { confirmedFiles, failedFiles, cancelled, project:latestConfirmed };
+  }, [applyProjectSnapshot, currentUser?.id, currentUser?.username, currentUser?.name]);
+
+  useEffect(() => {
+    if (!createdTaskUpload.active) return undefined;
+    const warnBeforeUnload = (event) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warnBeforeUnload);
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload);
+  }, [createdTaskUpload.active]);
+
   // Central production persistence: operational data is hydrated only after
   // the backend has verified the secure session. Cached business data is never
   // used as an unauthenticated production fallback.
@@ -5050,6 +5171,7 @@ function AppShell() {
     let cancelled = false;
     setBackendStateReady(false);
     setIsDbReady(false);
+    setAuthBootStage('Loading your authorised workspace');
     const hydrate = async () => {
       try {
         const data = await fetchBackendState({ apiBase: API_BASE, headers: financeSafeHeaders, includePerformance:false, compact:true });
@@ -5072,6 +5194,7 @@ function AppShell() {
         if (data.collectionRevisions && typeof data.collectionRevisions === 'object') workspaceCollectionRevisionsRef.current = data.collectionRevisions;
         setBackendStateReady(true);
         setIsDbReady(true);
+        setAuthBootStage('');
         setDbError(null);
         setShowLocalBanner(data.database === 'json-file');
       } catch (err) {
@@ -5102,8 +5225,9 @@ function AppShell() {
         setAttendanceLogs([]);
         setPerformanceRecords([]);
         setPerformanceSummary(null);
-        setBackendStateReady(true);
-        setIsDbReady(true);
+        setBackendStateReady(false);
+        setIsDbReady(false);
+        setAuthBootStage('');
       }
     };
     hydrate();
@@ -5168,6 +5292,65 @@ function AppShell() {
     hiddenIntervalMs: 5 * 60_000,
   });
 
+  const financeSyncSnapshot = useMemo(
+    () => getFinanceSyncSnapshot(financeActorKey(currentUser), financeSaveInFlightRef.current.size),
+    [currentUser?.id, currentUser?.username, currentUser?.name, financeSyncRevision]
+  );
+  useEffect(() => {
+    if (!USE_BACKEND_STATE || !backendStateReady || !isDbReady || !currentUser || currentUser.role !== ROLES.ADMIN) return undefined;
+    let cancelled = false;
+    const flush = async () => {
+      const actorId = financeActorKey(currentUser);
+      const records = getFinanceOutboxRecords(actorId).filter(record => record.retryable !== false);
+      if (!records.length) return false;
+      let attempted = false;
+      for (const record of records) {
+        if (cancelled || financeSaveInFlightRef.current.has(record.taskId)) continue;
+        attempted = true;
+        financeSaveInFlightRef.current.add(record.taskId);
+        markFinanceOutboxAttempt(record.key, record.mutationId);
+        try {
+          const response = await saveFinanceStatusApi({
+            apiBase: API_BASE,
+            headers: jsonFinanceSafeHeaders,
+            taskId: record.taskId,
+            status: record.status || 'Pending',
+            expectedFinanceVersion: Number(record.expectedFinanceVersion || 0),
+            mutationId: record.mutationId,
+            details: financeOutboxDetails(record.draft)
+          });
+          const confirmed = response?.project || response?.case;
+          if (!confirmed || (!response?.persistence?.database && !response?.idempotent)) throw new Error('The finance retry was not confirmed by durable storage.');
+          advanceFinanceOutboxAfterConfirmation({ key: record.key, mutationId: record.mutationId, confirmedFinanceVersion: confirmed.financeVersion, actorId });
+          applyProjectSnapshot([confirmed], { source: 'finance-outbox-confirmed' });
+        } catch (error) {
+          const conflict = String(error?.code || '') === 'FINANCE_VERSION_CONFLICT';
+          markFinanceOutboxError(record.key, record.mutationId, error, { retryable: !conflict });
+          if (conflict) void refreshWorkspaceSnapshot();
+        } finally {
+          financeSaveInFlightRef.current.delete(record.taskId);
+        }
+      }
+      if (attempted) setFinanceSyncRevision(value => value + 1);
+      return attempted;
+    };
+    const handleChanged = () => setFinanceSyncRevision(value => value + 1);
+    void flush();
+    const timer = financeSyncSnapshot.total > 0 ? setInterval(flush, 15000) : null;
+    window.addEventListener('online', flush);
+    window.addEventListener('focus', flush);
+    window.addEventListener(FINANCE_FLUSH_EVENT, flush);
+    window.addEventListener(FINANCE_SYNC_EVENT, handleChanged);
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+      window.removeEventListener('online', flush);
+      window.removeEventListener('focus', flush);
+      window.removeEventListener(FINANCE_FLUSH_EVENT, flush);
+      window.removeEventListener(FINANCE_SYNC_EVENT, handleChanged);
+    };
+  }, [USE_BACKEND_STATE, backendStateReady, isDbReady, currentUser?.id, currentUser?.role, jsonFinanceSafeHeaders, financeSyncSnapshot.total, applyProjectSnapshot, refreshWorkspaceSnapshot]);
+
   // Phase 4: chat, notification, presence, task and finance changes use dedicated authorised endpoints.
   // Whole-state browser writes are intentionally disabled.
 
@@ -5195,13 +5378,16 @@ function AppShell() {
               headers:jsonFinanceSafeHeaders,
               task:sanitizeProjectForCache(project),
               expectedTaskVersion:Number(record.expectedTaskVersion ?? project.taskVersion ?? 0),
-              mutationId:record.mutationId
+              mutationId:record.mutationId,
+              operation:record.operation
             });
             const savedProject=data.project || data.case;
             if (savedProject && (!record.mutationId || String(savedProject.lastTaskMutationId || '')===String(record.mutationId) || data.idempotent)) {
               forgetPendingCreatedProjects(project.id,project.caseId,project.displayId);
+              const replaceIds=projectIdentityMatches(savedProject,project) ? [] : [project.id,project.caseId,project.displayId];
+              if (replaceIds.length) forgetRecentCreatedProjects(replaceIds);
               rememberRecentCreatedProject(savedProject);
-              applyProjectSnapshot([savedProject],{source:'pending-task-confirmed'});
+              applyProjectSnapshot([savedProject],{source:'pending-task-confirmed',replaceIds});
             }
           } catch(e) {
             if (isProjectDeletedError(e)) {
@@ -5292,6 +5478,18 @@ function AppShell() {
     };
 
     const handleBroadcast = (event) => {
+      if (event?.data?.type === 'projects-delta' && event.data.source !== OPS_TAB_ID) {
+        const removedIds = Array.isArray(event.data.removedProjectIds) ? event.data.removedProjectIds : [];
+        if (removedIds.length) {
+          rememberDeletedProjectsForce(removedIds);
+          const removedSet = new Set(removedIds.map(String));
+          setProjects(previous => filterDeletedProjects((previous || []).filter(project => !removedSet.has(String(project.id)) && !removedSet.has(String(project.caseId || '')))));
+        }
+        if (Array.isArray(event.data.changedProjects) && event.data.changedProjects.length) {
+          applyProjectSnapshot(event.data.changedProjects, { persistCache:false, source:'cross-tab-delta', replaceIds:event.data.replaceIds || [] });
+        }
+        return;
+      }
       if (event?.data?.type === 'projects-updated' && event.data.source !== OPS_TAB_ID) {
         if (Array.isArray(event.data.deletedProjectIds)) { rememberDeletedProjects(event.data.deletedProjectIds); setProjects(prev => filterDeletedProjects(prev)); }
         applyIncomingProjects(event.data.projects);
@@ -5299,6 +5497,10 @@ function AppShell() {
     };
 
     const handleStorage = (event = {}) => {
+      if (USE_BACKEND_STATE) {
+        void refreshWorkspaceSnapshot();
+        return;
+      }
       // Only the lightweight ping should trigger a reload. Do not react to every
       // kalpa_projects write, otherwise two tabs can keep waking each other up.
       if (event.key !== 'kalpa_projects_sync_ping') return;
@@ -5319,7 +5521,7 @@ function AppShell() {
       try { opsBroadcast?.removeEventListener('message', handleBroadcast); } catch (e) {}
       window.removeEventListener('storage', handleStorage);
     };
-  }, [applyProjectSnapshot]);
+  }, [applyProjectSnapshot, refreshWorkspaceSnapshot]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -5343,18 +5545,21 @@ function AppShell() {
     if (USE_BACKEND_STATE) {
       let cancelled = false;
       setFirebaseUser({ uid: 'backend-state-user' });
+      setAuthBootStage('Clearing any stale browser session');
       // Security policy: every page instance begins signed out. Refreshing or
       // reopening the website revokes the previous browser session before any
       // operational data can be hydrated.
       clearBrowserSessionApi()
         .catch((error) => {
           console.warn('Previous browser session could not be cleared cleanly:', error?.message || error);
+          setAuthBootWarning(error?.message || 'The previous session cleanup could not be confirmed.');
         })
         .finally(() => {
           if (cancelled) return;
           clearAuthenticatedWorkspace({ clearCache: true });
           setPasswordChangeSessionUser(null);
           setIsAuthReady(true);
+          setAuthBootStage('');
         });
       return () => { cancelled = true; };
     }
@@ -5450,18 +5655,9 @@ function AppShell() {
 
         unsubs.push(onSnapshot(collection(db, 'artifacts', safeAppId, 'public', 'data', 'users'), snap => {
           const fetchedUsers = snap.docs.map(doc => doc.data());
-          
-          const needsUpdate = fetchedUsers.length === 0 || fetchedUsers.some(u => !u.username);
-          
-          if (needsUpdate) {
-            try {
-                INITIAL_USERS.forEach(u => {
-                  setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'users', u.id.toString()), u).catch(e => console.error(e));
-                });
-            } catch(e){}
-          } else {
-            setUsers(normalizeTeamUsers(fetchedUsers));
-          }
+          // Never seed or overwrite shared user records from a browser client.
+          // The authenticated backend is the only authority for account creation.
+          setUsers(normalizeTeamUsers(fetchedUsers));
         }, handleDbError));
 
         unsubs.push(onSnapshot(collection(db, 'artifacts', safeAppId, 'public', 'data', 'chats'), snap => {
@@ -5676,22 +5872,34 @@ function AppShell() {
     updatedProject = normalizeProjectRecord({ ...updatedProject, updatedAt: Date.now(), syncVersion: Date.now() });
 
     const financeChanged = previousProject && financeSignature(previousProject) !== financeSignature(updatedProject);
-    const isBackgroundFinance = () => options?.backgroundFinance === true || options?.backgroundFinanceRef?.current === true;
     if (financeChanged && currentUser?.role === ROLES.ADMIN && USE_BACKEND_STATE && backendStateReady && isDbReady) {
       const financeTaskKey = String(updatedProject.id || updatedProject.caseId || '').trim();
+      const financeMutationId = options?.financeMutationId || createFinanceMutationId();
+      const queuedFinanceRecord = queueFinanceDraft({
+        project: updatedProject,
+        draft: createFinanceLedgerDraft(updatedProject),
+        user: currentUser,
+        mutationId: financeMutationId,
+        expectedFinanceVersion: Number(previousProject.financeVersion || 0)
+      });
+      if (!queuedFinanceRecord) {
+        notifyUser('Payment changes could not be placed in durable browser recovery storage. Nothing was sent.');
+        return null;
+      }
       if (financeSaveInFlightRef.current.has(financeTaskKey)) {
-        notifyUser('A payment update for this task is already being saved. Please wait for it to finish.');
+        notifyUser('This newer payment update is safely queued and will follow the save already in progress.');
         return null;
       }
       financeSaveInFlightRef.current.add(financeTaskKey);
+      markFinanceOutboxAttempt(queuedFinanceRecord.key, queuedFinanceRecord.mutationId);
       try {
         const financeResponse = await saveFinanceStatusApi({
           apiBase: API_BASE,
           headers: jsonFinanceSafeHeaders,
           taskId: financeTaskKey,
           status: getPaymentTrackingStatus(updatedProject),
-          expectedFinanceVersion: Number(previousProject.financeVersion || 0),
-          mutationId: options?.financeMutationId || createFinanceMutationId(),
+          expectedFinanceVersion: Number(queuedFinanceRecord.expectedFinanceVersion || 0),
+          mutationId: queuedFinanceRecord.mutationId,
           details: {
             estimate: getPaymentEstimateAmount(updatedProject),
             amountIn: getPaymentReceivedAmount(updatedProject),
@@ -5712,27 +5920,34 @@ function AppShell() {
           throw new Error('The finance update was not confirmed by durable storage.');
         }
         updatedProject = normalizeProjectRecord(financeOnly ? { ...updatedProject, ...confirmed } : applyConfirmedFinance(updatedProject, confirmed));
+        advanceFinanceOutboxAfterConfirmation({
+          key: queuedFinanceRecord.key,
+          mutationId: queuedFinanceRecord.mutationId,
+          confirmedFinanceVersion: confirmed.financeVersion,
+          actorId: queuedFinanceRecord.actorId
+        });
+        setFinanceSyncRevision(value => value + 1);
 
         if (financeOnly) {
-          if (!isBackgroundFinance()) {
-            setSelectedProject(current => current && String(current.id || current.caseId) === financeTaskKey ? updatedProject : current);
-          }
+          setSelectedProject(updatedProject);
           setProjects(prev => {
             const next = filterDeletedProjects(mergeProjectsByFreshness(prev || [], [updatedProject]));
-            persistAndBroadcastProjects(next);
+            persistAndBroadcastProjects(next, { changedProjects: [updatedProject], replaceIds: options.replaceIds || [] });
             return next;
           });
           return updatedProject;
         }
       } catch (error) {
         console.error('Finance save blocked:', error);
+        markFinanceOutboxError(queuedFinanceRecord.key, queuedFinanceRecord.mutationId, error, { retryable: String(error?.code || '') !== 'FINANCE_VERSION_CONFLICT' });
+        setFinanceSyncRevision(value => value + 1);
         const message = error?.code === 'FINANCE_VERSION_CONFLICT'
           ? 'Finance changed on another screen. Your entry was not overwritten. Refresh this task and save again.'
           : (error?.message || 'Finance could not be saved to the server. No local finance change was accepted.');
         notifyUser(message);
-        if (previousProject && !financeOnly && !isBackgroundFinance()) {
+        if (previousProject) {
           applyProjectSnapshot([previousProject], { source: 'finance-save-reverted' });
-          setSelectedProject(current => current && String(current.id || current.caseId) === financeTaskKey ? previousProject : current);
+          setSelectedProject(previousProject);
         }
         return null;
       } finally {
@@ -5776,7 +5991,7 @@ function AppShell() {
     setProjects(previous=>{
       const ids=new Set(projectsToSave.flatMap(item=>[item.id,item.caseId,item.displayId]).map(value=>String(value || '')).filter(Boolean));
       const next=filterDeletedProjects(mergeProjectsByFreshness((previous || []).filter(item=>!ids.has(String(item.id || '')) && !ids.has(String(item.caseId || '')) && !ids.has(String(item.displayId || ''))),projectsToSave));
-      persistAndBroadcastProjects(next);
+      persistAndBroadcastProjects(next, { changedProjects:projectsToSave, replaceIds:options.replaceIds || [] });
       return next;
     });
 
@@ -5806,12 +6021,15 @@ function AppShell() {
             headers:jsonFinanceSafeHeaders,
             task:sanitizeProjectForCache(projectToSave),
             expectedTaskVersion,
-            mutationId
+            mutationId,
+            operation:isCreate ? 'create' : 'update'
           });
           const confirmed=data?.project || data?.case;
           forgetPendingCreatedProjects(projectToSave.id,projectToSave.caseId,projectToSave.displayId);
           if (confirmed) {
-            applyProjectSnapshot([confirmed],{source:'task-update-confirmed'});
+            const replaceIds=isCreate && !projectIdentityMatches(confirmed,projectToSave) ? [projectToSave.id,projectToSave.caseId,projectToSave.displayId] : [];
+            if (replaceIds.length) forgetRecentCreatedProjects(replaceIds);
+            applyProjectSnapshot([confirmed],{source:'task-update-confirmed',replaceIds});
             if (index===0) confirmedPrimary=confirmed;
           }
         } catch(error) {
@@ -5932,7 +6150,7 @@ function AppShell() {
      setProjects(prev => {
        const deleteSet = new Set(deleteIds);
        const next = filterDeletedProjects((prev || []).filter(p => !deleteSet.has(String(p.id)) && !deleteSet.has(String(p.caseId || ''))));
-       persistAndBroadcastProjects(next);
+       persistAndBroadcastProjects(next, { removedProjectIds:deleteIds, replaceIds:[] });
        return next;
      });
      try {
@@ -6159,6 +6377,16 @@ function AppShell() {
     try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'users', normalizedUser.id.toString()), normalizedUser); } catch(e){}
   };
 
+  const handleSaveOwnProfile = async (patch) => {
+    const response = await updateProfileApi(patch);
+    if (!response?.user) throw new Error('The backend did not confirm the profile update.');
+    const confirmed = normalizeTeamUser(response.user);
+    setCurrentUser(previous => previous ? { ...previous, ...confirmed } : confirmed);
+    currentUserRef.current = { ...(currentUserRef.current || {}), ...confirmed };
+    setUsers(previous => normalizeTeamUsers((previous || []).map(user => String(user.id) === String(confirmed.id) ? { ...user, ...confirmed } : user)));
+    return response;
+  };
+
 
   const recordLoginAttendance = async (user, loginNow = Date.now()) => {
     if (!user) return;
@@ -6333,8 +6561,16 @@ function AppShell() {
   };
 
   const handleLeadFileChange = (e) => {
-      if (e.target.files) {
-          setLeadFiles([...leadFiles, ...Array.from(e.target.files)]);
+      if (!e.target.files) return;
+      try {
+        const remainingSlots = MAX_PROJECT_UPLOAD_FILES - (leadFiles || []).length;
+        const selected = validateProjectUploadSelection(e.target.files, { maxFiles: remainingSlots });
+        validateProjectUploadSelection([...(leadFiles || []), ...selected], { maxFiles: MAX_PROJECT_UPLOAD_FILES });
+        setLeadFiles([...(leadFiles || []), ...selected]);
+      } catch (error) {
+        notifyUser(error?.message || 'These files cannot be attached.');
+      } finally {
+        e.target.value = '';
       }
   };
 
@@ -6362,7 +6598,7 @@ function AppShell() {
   }
 
   if (!isAuthReady || (!USE_BACKEND_STATE && !firebaseUser)) {
-    return <PageLoadingScreen />;
+    return <PageLoadingScreen title="Preparing secure sign-in" subtitle={authBootStage || 'Clearing any stale browser session'} />;
   }
 
   if (!currentUser) {
@@ -6372,10 +6608,12 @@ function AppShell() {
       onRequestRecovery={handleRequestPasswordRecovery}
       onResetRecovery={handleResetPasswordRecovery}
       passwordChangeSessionUser={passwordChangeSessionUser}
+      bootWarning={authBootWarning}
     />;
   }
 
-  if (!isDbReady) return <PageLoadingScreen />;
+  if (dbError && !isDbReady) return <SecureWorkspaceErrorScreen error={dbError} />;
+  if (!isDbReady) return <PageLoadingScreen title="Loading your authorised workspace" subtitle={authBootStage || 'Verifying role permissions and current records'} />;
 
   const canManage = currentUser.role === ROLES.ADMIN || currentUser.role === ROLES.MANAGER;
 
@@ -6383,7 +6621,7 @@ function AppShell() {
   const persistSavedGlobalFilters = (nextFilters) => {
     const clean = (nextFilters || []).filter(f => f && f.query).slice(0, 12);
     setSavedGlobalFilters(clean);
-    try { localStorage.setItem('kalpa_saved_global_filters', JSON.stringify(clean)); } catch (e) {}
+    try { localStorage.setItem(savedFiltersStorageKey, JSON.stringify(clean)); } catch (e) {}
   };
   const saveCurrentGlobalFilter = () => {
     const query = globalSearch.trim();
@@ -6403,6 +6641,7 @@ function AppShell() {
   };
   const applySavedGlobalFilter = (filter) => {
     if (!filter?.query) return;
+    if (filter.tab && !isTabAllowedForRole(filter.tab, currentUser?.role)) return;
     setSelectedProject(null);
     setGlobalSearch(filter.query);
     if (filter.tab && filter.tab !== 'board') setActiveTab(filter.tab);
@@ -6421,6 +6660,22 @@ function AppShell() {
       <ActiveToasts notifications={notifications} currentUser={currentUser} />{showLocalBanner && <LocalModeBanner onClose={() => setShowLocalBanner(false)} />}
 
       {dbError === 'permission-denied' && <DatabasePermissionBanner />}
+
+      {(createdTaskUpload.active || createdTaskUpload.failedFiles.length > 0) && (
+        <div className="fixed left-1/2 top-3 z-[90] w-[min(94vw,720px)] -translate-x-1/2 rounded-2xl border border-indigo-100 bg-white px-4 py-3 shadow-2xl">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+              <p className="text-sm font-black text-slate-800">{createdTaskUpload.active ? `Attaching ${createdTaskUpload.currentFile || 'source file'}…` : 'Source file upload needs attention'}</p>
+              <p className="text-xs font-semibold text-slate-500">{createdTaskUpload.confirmedFiles.length} confirmed file{createdTaskUpload.confirmedFiles.length === 1 ? '' : 's'} • {createdTaskUpload.failedFiles.length} failed. Keep this browser tab open while uploads are active.</p>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              {createdTaskUpload.active && <button type="button" onClick={() => createdTaskUploadAbortRef.current?.abort()} className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-black text-slate-600">Cancel</button>}
+              {!createdTaskUpload.active && createdTaskUpload.failedFiles.length > 0 && <button type="button" onClick={() => runCreatedTaskSourceUploads(createdTaskUpload.project, createdTaskUpload.failedFiles)} className="rounded-xl bg-indigo-600 px-3 py-2 text-xs font-black text-white">Retry {createdTaskUpload.failedFiles.length}</button>}
+              {!createdTaskUpload.active && <button type="button" onClick={() => setCreatedTaskUpload({ active:false, project:null, total:0, confirmedFiles:[], failedFiles:[], currentFile:'', cancelled:false })} className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-black text-slate-500">Dismiss</button>}
+            </div>
+          </div>
+        </div>
+      )}
 
       <TopNavigation
         currentUser={currentUser}
@@ -6457,7 +6712,7 @@ function AppShell() {
               <button type="button" onClick={() => setShowProfilePanel(false)} className="bg-white text-slate-700 px-4 py-2 rounded-xl font-black shadow-lg border border-slate-100 hover:bg-slate-50 flex items-center"><X className="w-4 h-4 mr-2" /> Close Profile</button>
             </div>
             <React.Suspense fallback={<PageLoadingScreen title="Loading profile" subtitle="Preparing account settings…" />}>
-              <ProfileView currentUser={currentUser} onUpdateUser={handleUpdateUser} setCurrentUser={setCurrentUser} fileToBase64={fileToBase64} sendRealOtp={sendRealOtp} verifyRealOtp={verifyRealOtp} onChangePassword={handleChangePassword} />
+              <ProfileView currentUser={currentUser} onUpdateUser={handleSaveOwnProfile} setCurrentUser={setCurrentUser} sendRealOtp={sendRealOtp} verifyRealOtp={verifyRealOtp} onChangePassword={handleChangePassword} />
             </React.Suspense>
           </div>
         </div>
@@ -6569,7 +6824,7 @@ function AppShell() {
         ) : activeTab === 'command' ? (
           <CommandCentreView projects={projects} users={activeUsers} attendanceLogs={attendanceLogs} currentUser={currentUser} onOpenPerformance={() => setActiveTab('productivity')} onSelectProject={(p) => openTaskDetail(p, 'command')} onNavigate={(target) => { if (target === 'newCase') { setShowNewLead(true); return; } if (target === 'notifications') { setShowNotifs(true); return; } setActiveTab(target); }} />
         ) : activeTab === 'productivity' ? (
-          <ProductivityDashboard users={activeUsers} projects={projects} performanceRecords={performanceRecords} performanceSummary={performanceSummary} currentUser={currentUser} />
+          <ProductivityDashboard users={activeUsers} projects={projects} performanceRecords={performanceRecords} performanceSummary={performanceSummary} />
         ) : activeTab === 'closing' && currentUser.role === ROLES.ADMIN ? (
           <DailyClosingReport projects={projects} currentUser={currentUser} />
         ) : activeTab === 'reports' && currentUser.role === ROLES.ADMIN ? (
@@ -6595,7 +6850,7 @@ function AppShell() {
         ) : activeTab === 'attendance' ? (
           <AttendanceView attendanceLogs={attendanceLogs} users={activeUsers} projects={projects} />
         ) : activeTab === 'profile' ? (
-          <ProfileView currentUser={currentUser} onUpdateUser={handleUpdateUser} setCurrentUser={setCurrentUser} fileToBase64={fileToBase64} sendRealOtp={sendRealOtp} verifyRealOtp={verifyRealOtp} onChangePassword={handleChangePassword} />
+          <ProfileView currentUser={currentUser} onUpdateUser={handleSaveOwnProfile} setCurrentUser={setCurrentUser} sendRealOtp={sendRealOtp} verifyRealOtp={verifyRealOtp} onChangePassword={handleChangePassword} />
         ) : activeTab === 'calculator' ? (
           <CalculatorView />
         ) : activeTab === 'meeting' ? (
@@ -6615,7 +6870,6 @@ function AppShell() {
             activeUsers={activeUsers}
             setSelectedProject={setSelectedProject}
             onSelectProject={(p) => openTaskDetail(p, activeTab || 'board')}
-            nowTick={nowTick}
             ROLES={ROLES}
             currentUser={currentUser}
             getCustomerDisplayName={getCustomerDisplayName}
@@ -6703,7 +6957,8 @@ function AppShell() {
         </PortalLayer>
       )}
 
-      {!showNewLead && <React.Suspense fallback={null}><CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} projects={projects} onOpenTaskReference={openTaskReferenceFromChat} onPreviewFile={openUnifiedFilePreview} /></React.Suspense>}
+      <UnifiedFileViewer file={workspaceFilePreview} onClose={() => setWorkspaceFilePreview(null)} onDownload={handleWorkspaceFileDownload} />
+      {!showNewLead && <React.Suspense fallback={null}><CommunicationHub currentUser={currentUser} users={activeUsers} chatMessages={chatMessages} onSendMessage={handleSendMessage} onDeleteMessage={handleDeleteMessage} onUpdateMessage={handleUpdateMessage} onMarkMessagesRead={handleMarkMessagesRead} appId={safeAppId} projects={projects} onOpenTaskReference={openTaskReferenceFromChat} onPreviewFile={openWorkspaceFilePreview} onDownloadFile={handleWorkspaceFileDownload} /></React.Suspense>}
 
       {!selectedProject && !showNewLead && <MobileBottomNavigation currentUser={currentUser} ROLES={ROLES} activeTab={activeTab} setActiveTab={setActiveTab} unreadNotifs={unreadNotifs} />}
 
@@ -6804,6 +7059,7 @@ function AppShell() {
                setActiveTab('board');
                if (!USE_BACKEND_STATE) { try { window.localStorage.setItem('kalpa_projects', JSON.stringify(sanitizeProjectsForCache(filterDeletedProjects(nextProjects)))); } catch(e) {} }
                let confirmedProject = newP;
+               let uploadConfirmedSourceFile = null;
                let projectConfirmedByBackend = !USE_BACKEND_STATE;
                if (USE_BACKEND_STATE && backendStateReady && isDbReady) {
                  try {
@@ -6812,14 +7068,19 @@ function AppShell() {
                      headers: jsonFinanceSafeHeaders,
                      task: sanitizeProjectForCache(newP),
                      expectedTaskVersion:0,
-                     mutationId:createMutationId
+                     mutationId:createMutationId,
+                     operation:'create'
                    });
                    if (saveData?.project || saveData?.case) {
                      confirmedProject = saveData.project || saveData.case;
                      projectConfirmedByBackend = true;
                      forgetPendingCreatedProjects(newP.id, newP.caseId);
+                     const replaceIds=projectIdentityMatches(confirmedProject,newP) ? [] : [newP.id,newP.caseId,newP.displayId];
+                     if (replaceIds.length) forgetRecentCreatedProjects(replaceIds);
                      rememberRecentCreatedProject(confirmedProject);
-                     applyProjectSnapshot([confirmedProject], { source: 'create-confirmed' });
+                     applyProjectSnapshot([confirmedProject], { source: 'create-confirmed', replaceIds });
+                     // Use only the server-confirmed identity for subsequent source uploads.
+                     uploadConfirmedSourceFile = (file, _serverTask, signal) => uploadProjectFile(file,confirmedProject.id || confirmedProject.caseId,'source',currentUser.name,{ signal, actorId:currentUser.id, actorUsername:currentUser.username });
                    }
                  } catch (saveErr) {
                    const versionRejected=['TASK_VERSION_CONFLICT','TASK_VERSION_REQUIRED'].includes(String(saveErr?.code || ''));
@@ -6845,22 +7106,7 @@ function AppShell() {
                setNewTaskCategory(TASK_CATEGORIES[0]);
 
                if (filesToAttach.length && projectConfirmedByBackend && USE_BACKEND_STATE) {
-                 const failedFiles=[];
-                 for (const file of filesToAttach) {
-                   try {
-                     const uploaded=await uploadProjectFile(file,confirmedProject.id || confirmedProject.caseId,'source',currentUser.name);
-                     if (uploaded?._serverCase) {
-                       confirmedProject=uploaded._serverCase;
-                       rememberRecentCreatedProject(confirmedProject);
-                       applyProjectSnapshot([confirmedProject],{source:'create-source-file-confirmed'});
-                     }
-                   } catch(fileErr) {
-                     console.warn('Source file attach failed after task creation:',fileErr);
-                     failedFiles.push(file.name);
-                   }
-                 }
-                 if (failedFiles.length) notifyUser(`Task ${taskId} was created, but these files did not upload and need to be tried again: ${failedFiles.join(', ')}`);
-
+                 void runCreatedTaskSourceUploads(confirmedProject, filesToAttach, uploadConfirmedSourceFile);
                } else if (filesToAttach.length && USE_BACKEND_STATE && !projectConfirmedByBackend) {
                  notifyUser(`Task ${taskId} is saved locally and waiting for server sync. Its source files were not uploaded; attach them after the task appears online.`);
                }

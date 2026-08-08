@@ -39,10 +39,11 @@ test('hot task and file paths sync only their changed relational collections', (
   assert.match(repository, /syncRelationalParts\(client, preparedWrite\.writeParts, metadata\.collections, preparedWrite\.rowSelections, preparedWrite\.rowDeletions/);
   assert.match(repository, /Unknown relational collection selection/);
   assert.match(repository, /prepareFastSelectedRelationalWrite/);
-  assert.match(repository, /committedState = selectedCollections \? recomposeState\(committedParts\) : normalized/);
+  assert.match(repository, /readPhysicalStateAfterWrite/);
+  assert.match(repository, /assertSelectedCollectionsMatchPhysical/);
   assert.match(server, /collectionRowIds:\{[\s\S]*cases:\[String\(saved\.id \|\| saved\.caseId\)\]/);
   assert.match(server, /collectionRowIds=\{files:\[String\(file\.id\)\]\}/);
-  assert.match(repository, /JSON\.stringify\(committedState\)/);
+  assert.match(repository, /stateSnapshotHash\(committedState, \{ cacheTopLevel:true \}\)/);
 });
 
 test('foreground writes block background heartbeat flush from taking queue priority', () => {

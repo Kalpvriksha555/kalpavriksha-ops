@@ -8,6 +8,7 @@ export const formatLastSeenDateTime = (value) => {
     year: 'numeric',
     hour: '2-digit',
     minute: '2-digit'
+    ,timeZone:'Asia/Kolkata'
   });
 };
 
@@ -22,8 +23,8 @@ export const formatCallDuration = (startedAt, nowMs = Date.now()) => {
 export const formatDateKey = (value = Date.now()) => {
   try {
     const d = new Date(value);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  } catch(e) { return new Date().toLocaleDateString('en-CA'); }
+    return new Intl.DateTimeFormat('en-CA', { timeZone:'Asia/Kolkata', year:'numeric', month:'2-digit', day:'2-digit' }).format(d);
+  } catch(e) { return new Intl.DateTimeFormat('en-CA', { timeZone:'Asia/Kolkata' }).format(new Date()); }
 };
 
 export const formatDateTime = (value) => {
@@ -37,11 +38,19 @@ export const formatDateTime = (value) => {
       year: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
-      hour12: true
+      hour12: true,
+      timeZone:'Asia/Kolkata'
     });
   } catch (e) {
     return '-';
   }
+};
+
+export const formatMonthLabel = (value) => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleString('en-IN', { month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata' });
 };
 
 export const formatDuration = (start, end = Date.now()) => {

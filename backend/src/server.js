@@ -20,7 +20,7 @@ import { buildFileReconciliationReport, createFileStorage, FileValidationError }
 import { createOperationalJobStore, filesystemUsage, inspectBackupManifests, recordOperationalEvent, requestLogMiddleware, structuredLog } from './services/operationalReliabilityService.js';
 import { readAndVerifyReleaseCertificate } from './services/releaseCertificationService.js';
 import { createCorsOriginPolicy, parseCorsOrigins } from './config/corsPolicy.js';
-import { mergeLatestPresenceIntoSnapshot, preserveDirtyPresenceAfterReload } from './services/persistenceBackpressureService.js';
+import { classifyPersistenceFailure, isDeferredPersistenceOperation, mergeLatestPresenceIntoSnapshot, persistenceReadiness, preserveDirtyPresenceAfterReload } from './services/persistenceBackpressureService.js';
 import { getRequestStateSnapshot } from './services/requestStateService.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -57,6 +57,7 @@ const SESSION_TTL_HOURS = boundedEnvNumber('SESSION_TTL_HOURS', 12, 1, 168);
 const SESSION_TTL_MS = SESSION_TTL_HOURS * 60 * 60 * 1000;
 const LOGIN_LOCK_MINUTES = boundedEnvNumber('LOGIN_LOCK_MINUTES', 15, 1, 120);
 const LOGIN_MAX_ATTEMPTS = boundedEnvNumber('LOGIN_MAX_ATTEMPTS', 5, 3, 20);
+const DUMMY_LOGIN_PASSWORD_HASH = 'scrypt-v1$32768$8$1$_22jkmO6P8qKfqeryLWkqg$TUFN-xwufhuSxnscEG42MCZQeJQ0rZhDfWs6pM1ika1JU9JkB8PPpdmsmQfTTvQHrLRUdY51ZKh5BGiUIm26nw';
 const JSON_BODY_LIMIT = String(process.env.JSON_BODY_LIMIT || '8mb');
 const MAX_STATE_PROJECTS_PER_WRITE = boundedEnvNumber('MAX_STATE_PROJECTS_PER_WRITE', 1500, 1, 5000);
 const MAX_CHAT_TEXT_LENGTH = boundedEnvNumber('MAX_CHAT_TEXT_LENGTH', 10000, 100, 50000);
@@ -102,6 +103,9 @@ let otpCleanupTimer = null;
 let authCleanupTimer = null;
 let unhandledRejectionTimes = [];
 let lastPersistenceFailure = null;
+let lastCriticalPersistenceFailure = null;
+let lastDeferredPersistenceFailure = null;
+let lastPersistenceRecovery = null;
 let lastPersistenceSuccess = null;
 let memoryState = null;
 let relationalShadowState = null;
@@ -147,9 +151,9 @@ if (pool) {
   });
 }
 
-const safeName = (name='file') => String(name).replace(/[^a-zA-Z0-9.\-_]/g, '_');
-const MAX_UPLOAD_SIZE_MB = boundedEnvNumber('MAX_UPLOAD_SIZE_MB', 100, 1, 500);
-const MAX_UPLOAD_FILES = boundedEnvNumber('MAX_UPLOAD_FILES', 20, 1, 100);
+const safeName = (name='file') => String(name).replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '').replace(/[^a-zA-Z0-9.\-_]/g, '_');
+const MAX_UPLOAD_SIZE_MB = boundedEnvNumber('MAX_UPLOAD_SIZE_MB', 100, 1, 100);
+const MAX_UPLOAD_FILES = boundedEnvNumber('MAX_UPLOAD_FILES', 20, 1, 20);
 const MAX_INLINE_PREVIEW_MB = boundedEnvNumber('MAX_INLINE_PREVIEW_MB', 15, 1, 50);
 const MAX_INLINE_PREVIEW_BYTES = MAX_INLINE_PREVIEW_MB * 1024 * 1024;
 const FILE_STORAGE_GC_GRACE_MS = boundedEnvNumber('FILE_STORAGE_GC_GRACE_MS', 24 * 60 * 60 * 1000, 0, 30 * 24 * 60 * 60 * 1000);
@@ -292,7 +296,8 @@ function uploadAny(req, res, next) {
     req.files = Array.isArray(req.files) ? req.files : [];
     let tempsCleaned=false;
     const cleanupTemps=()=>{ if (tempsCleaned) return; tempsCleaned=true; cleanupRequestTempUploads(req); };
-    res.once('finish',()=>{ cleanupTemps(); releaseRequestStorageLeases(req); });
+    const cleanupAll=()=>{ cleanupTemps(); releaseRequestStorageLeases(req); };
+    res.once('finish',cleanupAll);
     res.once('close',cleanupTemps);
     next();
   });
@@ -307,7 +312,8 @@ function uploadSingle(fieldName) {
       }
       let tempsCleaned=false;
       const cleanupTemps=()=>{ if (tempsCleaned) return; tempsCleaned=true; cleanupRequestTempUploads(req); };
-      res.once('finish',()=>{ cleanupTemps(); releaseRequestStorageLeases(req); });
+      const cleanupAll=()=>{ cleanupTemps(); releaseRequestStorageLeases(req); };
+      res.once('finish',cleanupAll);
       res.once('close',cleanupTemps);
       next();
     });
@@ -415,7 +421,7 @@ async function initStore(){
     if (loaded.legacyState) captureLegacyCredentialCandidates(loaded.legacyState);
     else captureLegacyCredentialCandidates(loaded.state);
     memoryState = norm(loaded.state);
-    relationalShadowState = structuredClone(loaded.persistedState || loaded.state);
+    relationalShadowState = ownRelationalShadow(loaded.persistedState || loaded.state);
     stateVersion = Number(loaded.stateVersion || 0);
   } else {
     const rawState = readJsonFallback();
@@ -442,6 +448,19 @@ function db(){
   snapshotVersions.set(snapshot, stateVersion);
   snapshotPresenceGenerations.set(snapshot, presenceMutationGeneration);
   return snapshot;
+}
+
+const frozenRelationalShadowObjects = new WeakSet();
+function freezeRelationalShadow(value) {
+  if (!value || typeof value !== 'object' || frozenRelationalShadowObjects.has(value)) return value;
+  frozenRelationalShadowObjects.add(value);
+  for (const child of Object.values(value)) freezeRelationalShadow(child);
+  return Object.freeze(value);
+}
+
+function ownRelationalShadow(value, { alreadyOwned = false } = {}) {
+  const owned = alreadyOwned ? value : structuredClone(value || {});
+  return freezeRelationalShadow(owned);
 }
 
 function recordMatchesCollectionRow(collection = '', record = {}, selectedIds = new Set()) {
@@ -578,18 +597,14 @@ function requestTaskDb(req = {}, options = {}) {
   return getRequestStateSnapshot(req,()=>taskDb(target,options).snapshot);
 }
 
-async function reloadCommittedState(){
-  if (!USE_POSTGRES) return;
-  const liveStateBeforeReload = memoryState;
-  const loaded = await reloadRelationalState(pool, { normalizeState: norm });
-  relationalShadowState = structuredClone(loaded.persistedState || loaded.state);
+function publishCommittedState({ committedState, version, liveStateBeforeReload = memoryState } = {}) {
   memoryState = norm(preserveDirtyPresenceAfterReload({
-    committedState:loaded.state,
+    committedState,
     liveState:liveStateBeforeReload,
     mutationGeneration:presenceMutationGeneration,
     persistedGeneration:persistedPresenceGeneration
   }));
-  stateVersion = Number(loaded.stateVersion || 0);
+  stateVersion = Number(version || 0);
   workspaceDataRevision = Math.max(workspaceDataRevision + 1, stateVersion);
   workspaceCollectionRevisions = Object.fromEntries(WORKSPACE_SYNC_COLLECTIONS.map(collection => [
     collection,
@@ -598,6 +613,31 @@ async function reloadCommittedState(){
   performanceDataRevision += 1;
   leaderboardAggregateCache.clear();
   resetWorkspaceCollectionChangeLog(workspaceDataRevision);
+}
+
+async function reloadCommittedState(){
+  if (!USE_POSTGRES) return;
+  const liveStateBeforeReload = memoryState;
+  const loaded = await reloadRelationalState(pool, { normalizeState: norm });
+  relationalShadowState = ownRelationalShadow(loaded.persistedState || loaded.state);
+  publishCommittedState({
+    committedState:loaded.state,
+    version:loaded.stateVersion,
+    liveStateBeforeReload
+  });
+}
+
+function restoreVerifiedShadowAfterDeferredFailure(expectedVersion = stateVersion) {
+  if (!USE_POSTGRES || !relationalShadowState) return false;
+  publishCommittedState({
+    // The relational shadow is deeply frozen and represents the most recent
+    // verified commit. Clone only on this exceptional rollback path, then keep
+    // the newer presence slice dirty so it can retry without losing telemetry.
+    committedState:structuredClone(relationalShadowState),
+    version:expectedVersion,
+    liveStateBeforeReload:memoryState
+  });
+  return true;
 }
 
 function resetWorkspaceCollectionChangeLog(revision = workspaceDataRevision) {
@@ -760,6 +800,7 @@ function save(d, metadata = {}){
     : metadata;
   const normalized = normalizeStateForSelectiveSave(latestPresence.state, effectiveMetadata);
   const persistenceReason = String(effectiveMetadata.reason || (effectiveMetadata.financeEvent ? 'finance_update' : effectiveMetadata.authOperations?.length ? 'authentication_update' : 'state_update'));
+  const deferredPersistence = isDeferredPersistenceOperation({ metadata:effectiveMetadata, reason:persistenceReason });
   if (metadataAffectsPerformance(effectiveMetadata)) {
     performanceDataRevision += 1;
     leaderboardAggregateCache.clear();
@@ -809,29 +850,55 @@ function save(d, metadata = {}){
           persistedBaseState: relationalShadowState
         });
         if (result?.committedState) {
-          relationalShadowState = result.committedStateOwned === true
-            ? result.committedState
-            : structuredClone(result.committedState);
+          relationalShadowState = ownRelationalShadow(result.committedState, {
+            alreadyOwned:result.committedStateOwned === true
+          });
         }
         if (process.env.WRITE_JSON_BACKUP === 'true') writeJsonAtomic(DB_FILE,normalized);
         return result;
       } catch (error) {
+        let recoverySucceeded = false;
+        let verifiedFallbackRestored = false;
+        let reloadFailure = null;
         try {
           await reloadCommittedState();
+          recoverySucceeded = true;
         } catch (reloadError) {
-          startupFailure={
-            code:reloadError?.code || 'RUNTIME_STATE_RECOVERY_FAILED',
-            message:reloadError?.message || String(reloadError),
-            at:new Date().toISOString(),
-            retryable:isRetryableStartupFailure(reloadError)
-          };
-          scheduleStartupRecovery();
-          structuredLog('fatal','runtime_state_recovery_blocked',{
-            persistenceCode:error?.code || '',
-            persistenceError:error?.message || String(error),
-            recovery:startupFailurePayload()
-          });
+          reloadFailure = reloadError;
+          verifiedFallbackRestored = deferredPersistence
+            && restoreVerifiedShadowAfterDeferredFailure(expectedVersion);
+          if (verifiedFallbackRestored) {
+            structuredLog('warn','runtime_deferred_recovery_preserved',{
+              persistenceCode:error?.code || '',
+              persistenceError:error?.message || String(error),
+              reloadCode:reloadError?.code || 'RUNTIME_STATE_RECOVERY_FAILED',
+              reloadError:reloadError?.message || String(reloadError),
+              reason:persistenceReason,
+              restoredVersion:expectedVersion
+            });
+          } else {
+            startupFailure={
+              code:reloadError?.code || 'RUNTIME_STATE_RECOVERY_FAILED',
+              message:reloadError?.message || String(reloadError),
+              at:new Date().toISOString(),
+              retryable:isRetryableStartupFailure(reloadError),
+              phase:'runtime'
+            };
+            scheduleStartupRecovery();
+            structuredLog('fatal','runtime_state_recovery_blocked',{
+              persistenceCode:error?.code || '',
+              persistenceError:error?.message || String(error),
+              recovery:startupFailurePayload()
+            });
+          }
         }
+        error.persistenceRecovery={
+          ok:recoverySucceeded || verifiedFallbackRestored,
+          databaseReloaded:recoverySucceeded,
+          verifiedFallbackRestored,
+          reloadCode:reloadFailure?.code || '',
+          reloadError:reloadFailure?.message || ''
+        };
         throw error;
       }
     } finally {
@@ -842,6 +909,7 @@ function save(d, metadata = {}){
   };
 
   const queued = persistenceQueue.then(persist, persist).then(async result => {
+    const committedDeferredPresence = includedPresenceGeneration > persistedPresenceGeneration;
     persistedPresenceGeneration = Math.max(persistedPresenceGeneration, includedPresenceGeneration);
     clearPersistedPresenceRowsThrough(persistedPresenceGeneration);
     lastPersistenceSuccess = {
@@ -852,10 +920,59 @@ function save(d, metadata = {}){
       reason:persistenceReason
     };
     lastPersistenceFailure = null;
+    lastPersistenceRecovery = { at:now(), ok:true, method:'commit', reason:persistenceReason, stateVersion:targetVersion };
+    if (deferredPersistence || committedDeferredPresence) lastDeferredPersistenceFailure = null;
+    if (!deferredPersistence) lastCriticalPersistenceFailure = null;
+    const persistenceJobType = deferredPersistence ? 'PRESENCE_PERSISTENCE' : 'STATE_PERSISTENCE';
+    await operationalJobs.resolveFailures(persistenceJobType, {
+      recoveredAt:now(),
+      stateVersion:targetVersion,
+      reason:persistenceReason
+    }).catch(() => {});
+    if (committedDeferredPresence && persistenceJobType !== 'PRESENCE_PERSISTENCE') {
+      await operationalJobs.resolveFailures('PRESENCE_PERSISTENCE', {
+        recoveredAt:now(),
+        stateVersion:targetVersion,
+        reason:'presence_folded_into_foreground_commit'
+      }).catch(() => {});
+    }
     return result;
   }, async error => {
-    lastPersistenceFailure = { at:now(), code:error?.code || 'PERSISTENCE_FAILED', message:error?.message || String(error), expectedVersion, targetVersion, reason:persistenceReason, durationMs:lastPersistenceDurationMs };
-    await operationalJobs.recordFailure('STATE_PERSISTENCE', error, { expectedVersion, targetVersion, reason:persistenceReason }, { maxAttempts:5 }).catch(() => {});
+    const recovery = error?.persistenceRecovery || {};
+    const disposition = classifyPersistenceFailure({
+      metadata:effectiveMetadata,
+      reason:persistenceReason,
+      recoverySucceeded:recovery.databaseReloaded === true,
+      verifiedFallbackRestored:recovery.verifiedFallbackRestored === true,
+      usePostgres:USE_POSTGRES
+    });
+    lastPersistenceRecovery = {
+      at:now(),
+      ok:disposition.safelyRecovered,
+      method:recovery.databaseReloaded ? 'database_reload' : recovery.verifiedFallbackRestored ? 'verified_shadow' : 'unrecovered',
+      reason:persistenceReason,
+      reloadCode:recovery.reloadCode || ''
+    };
+    lastPersistenceFailure = {
+      at:now(),
+      code:error?.code || 'PERSISTENCE_FAILED',
+      message:error?.message || String(error),
+      expectedVersion,
+      targetVersion,
+      reason:persistenceReason,
+      durationMs:lastPersistenceDurationMs,
+      deferred:disposition.deferred,
+      recovered:disposition.safelyRecovered,
+      critical:disposition.critical
+    };
+    if (disposition.deferred) lastDeferredPersistenceFailure = lastPersistenceFailure;
+    if (disposition.critical) lastCriticalPersistenceFailure = lastPersistenceFailure;
+    await operationalJobs.recordFailure(
+      disposition.jobType,
+      error,
+      { expectedVersion, targetVersion, reason:persistenceReason, recovered:disposition.safelyRecovered },
+      { maxAttempts:5, dedupKey:persistenceReason }
+    ).catch(() => {});
     await recordOperationalEvent(pool, USE_POSTGRES, { eventType:'STATE_PERSISTENCE_FAILED', severity:'ERROR', actor:effectiveMetadata.actor || effectiveMetadata.financeEvent?.actor || 'system', details:lastPersistenceFailure }).catch(() => {});
     throw error;
   }).finally(() => {
@@ -967,7 +1084,7 @@ async function buildReliabilityStatus({ detailed = false } = {}) {
   });
   const diskCritical = [storageDisk,backupDisk].some(item => item.ok && item.usedPercent >= DISK_CRITICAL_PERCENT);
   const diskWarning = [storageDisk,backupDisk].some(item => item.ok && item.usedPercent >= DISK_WARNING_PERCENT);
-  const persistenceHealthy = !lastPersistenceFailure || (lastPersistenceSuccess && new Date(lastPersistenceSuccess.at).getTime() >= new Date(lastPersistenceFailure.at).getTime());
+  const persistenceHealthy = persistenceReadiness({ criticalFailure:lastCriticalPersistenceFailure });
   const checks = {
     shuttingDown:!shuttingDown,
     startup:!startupFailure,
@@ -979,6 +1096,11 @@ async function buildReliabilityStatus({ detailed = false } = {}) {
     persistence:persistenceHealthy
   };
   const ok = Object.values(checks).every(Boolean);
+  const reliabilityWarnings = [];
+  if (diskWarning && !diskCritical) reliabilityWarnings.push(`Disk usage is above ${DISK_WARNING_PERCENT}%.`);
+  if (lastDeferredPersistenceFailure) reliabilityWarnings.push('Presence persistence is temporarily deferred; foreground operations remain available while it retries.');
+  else if (lastPersistenceFailure?.recovered) reliabilityWarnings.push('The most recent failed write was rolled back and verified state was recovered safely.');
+  if (backups.warning === 'LATEST_BACKUP_ATTEMPT_FAILED') reliabilityWarnings.push('The latest backup attempt failed, but a recent verified recovery point remains available.');
   const base = {
     ok,
     status:ok ? 'READY' : 'NOT_READY',
@@ -986,14 +1108,9 @@ async function buildReliabilityStatus({ detailed = false } = {}) {
     uptimeSeconds:Math.round(process.uptime()),
     startedAt:serverStartedAt,
     checks,
-    warning:diskWarning && !diskCritical ? `Disk usage is above ${DISK_WARNING_PERCENT}%.` : '',
+    warning:reliabilityWarnings.join(' '),
     failedJobCount:failedJobs.length,
-    startupFailure:startupFailure ? {
-      code:startupFailure.code || 'STARTUP_FAILED',
-      message:startupFailure.message || 'Backend startup validation failed.',
-      at:startupFailure.at || serverStartedAt,
-      retryable:Boolean(startupFailure.retryable)
-    } : null
+    startupFailure:startupFailurePayload()
   };
   if (!detailed) return base;
   return {
@@ -1006,6 +1123,9 @@ async function buildReliabilityStatus({ detailed = false } = {}) {
     persistence:{
       lastSuccess:lastPersistenceSuccess,
       lastFailure:lastPersistenceFailure,
+      lastCriticalFailure:lastCriticalPersistenceFailure,
+      lastDeferredFailure:lastDeferredPersistenceFailure,
+      lastRecovery:lastPersistenceRecovery,
       stateVersion,
       queueDepth:persistenceQueueDepth,
       inFlight:persistenceInFlight,
@@ -1025,7 +1145,9 @@ function startupFailurePayload() {
     code:startupFailure.code || 'BACKEND_STARTUP_MAINTENANCE',
     message:startupFailure.message || 'Backend startup validation failed.',
     at:startupFailure.at || serverStartedAt,
-    retryable:Boolean(startupFailure.retryable)
+    retryable:Boolean(startupFailure.retryable),
+    phase:startupFailure.phase || 'startup',
+    readOnlyAvailable:Boolean(startupFailure.phase === 'runtime' && memoryState)
   };
 }
 
@@ -1042,6 +1164,7 @@ function isRetryableStartupFailure(error = {}) {
 async function attemptStartupRecovery() {
   if (!startupFailure || shuttingDown || startupRecoveryInFlight) return startupRecoveryInFlight;
   if (!startupFailure.retryable) return null;
+  const recoveryPhase=startupFailure.phase || 'runtime';
   startupRecoveryInFlight=(async()=>{
     try {
       postgresReady=false;
@@ -1049,6 +1172,12 @@ async function attemptStartupRecovery() {
       await migrateLegacyCredentials();
       const recovered=startupFailurePayload();
       startupFailure=null;
+      lastCriticalPersistenceFailure=null;
+      await operationalJobs.resolveFailures('STATE_PERSISTENCE', {
+        recoveredAt:now(),
+        stateVersion,
+        reason:'runtime_integrity_recovered'
+      }).catch(() => {});
       if (startupRecoveryTimer) { clearInterval(startupRecoveryTimer); startupRecoveryTimer=null; }
       structuredLog('info','server_startup_recovered',{previousFailure:recovered,stateVersion});
       return true;
@@ -1057,7 +1186,8 @@ async function attemptStartupRecovery() {
         code:error?.code || 'STARTUP_RECOVERY_FAILED',
         message:error?.message || String(error),
         at:new Date().toISOString(),
-        retryable:isRetryableStartupFailure(error)
+        retryable:isRetryableStartupFailure(error),
+        phase:recoveryPhase
       };
       if (!startupFailure.retryable && startupRecoveryTimer) { clearInterval(startupRecoveryTimer); startupRecoveryTimer=null; }
       structuredLog('warn','server_startup_recovery_waiting',startupFailurePayload());
@@ -1251,6 +1381,21 @@ async function recordAuthEvent({ userId = '', username = '', eventType = '', req
   writeLocalAuthStore(store);
 }
 
+async function recordAuthEventBestEffort(args = {}) {
+  try {
+    await recordAuthEvent(args);
+    return true;
+  } catch (error) {
+    structuredLog('warn','auth_event_record_failed',{
+      eventType:String(args?.eventType || 'AUTH_EVENT'),
+      userId:String(args?.userId || ''),
+      requestId:String(args?.req?.requestId || ''),
+      code:error?.code || 'AUTH_EVENT_WRITE_FAILED'
+    });
+    return false;
+  }
+}
+
 async function updateLoginFailure(credential = {}, req = null) {
   const nextAttempts = Number(credential.failed_attempts || 0) + 1;
   const lockedUntil = nextAttempts >= LOGIN_MAX_ATTEMPTS ? new Date(Date.now() + LOGIN_LOCK_MINUTES * 60 * 1000).toISOString() : null;
@@ -1261,20 +1406,25 @@ async function updateLoginFailure(credential = {}, req = null) {
     store.credentials = store.credentials.map(item => String(item.user_id) === String(credential.user_id) ? { ...item, failed_attempts: nextAttempts, locked_until: lockedUntil, updated_at: now() } : item);
     writeLocalAuthStore(store);
   }
-  await recordAuthEvent({ userId: credential.user_id, username: credential.username, eventType: lockedUntil ? 'LOGIN_LOCKED' : 'LOGIN_FAILED', req, details: { failedAttempts: nextAttempts } });
+  void recordAuthEventBestEffort({ userId: credential.user_id, username: credential.username, eventType: lockedUntil ? 'LOGIN_LOCKED' : 'LOGIN_FAILED', req, details: { failedAttempts: nextAttempts } });
+  return { ...credential, failed_attempts:nextAttempts, locked_until:lockedUntil };
 }
 
 async function clearLoginFailures(credential = {}) {
+  const cleared = { ...credential, failed_attempts:0, locked_until:null };
+  const alreadyClear = Number(credential.failed_attempts || 0) === 0 && !credential.locked_until;
+  if (alreadyClear) return cleared;
   if (USE_POSTGRES) await pool.query('UPDATE auth_credentials SET failed_attempts=0, locked_until=NULL, updated_at=now() WHERE user_id=$1', [credential.user_id]);
   else {
     const store = readLocalAuthStore();
     store.credentials = store.credentials.map(item => String(item.user_id) === String(credential.user_id) ? { ...item, failed_attempts: 0, locked_until: null, updated_at: now() } : item);
     writeLocalAuthStore(store);
   }
+  return cleared;
 }
 
-async function updateCredentialPassword(userId = '', passwordHash = '', mustChangePassword = false) {
-  const existing = await findCredentialByUserId(userId);
+async function updateCredentialPassword(userId = '', passwordHash = '', mustChangePassword = false, existingCredential = null) {
+  const existing = existingCredential || await findCredentialByUserId(userId);
   if (!existing) throw new Error('Authentication credential was not found.');
   const nextVersion = Number(existing.password_version || 1) + 1;
   const changedAt = now();
@@ -1289,7 +1439,7 @@ async function updateCredentialPassword(userId = '', passwordHash = '', mustChan
     store.credentials = store.credentials.map(item => String(item.user_id) === String(userId) ? { ...item, password_hash: passwordHash, must_change_password: Boolean(mustChangePassword), password_version: nextVersion, failed_attempts: 0, locked_until: null, password_changed_at: changedAt, updated_at: changedAt } : item);
     writeLocalAuthStore(store);
   }
-  return { ...existing, password_hash: passwordHash, must_change_password: Boolean(mustChangePassword), password_version: nextVersion, password_changed_at: changedAt };
+  return { ...existing, password_hash: passwordHash, must_change_password: Boolean(mustChangePassword), password_version: nextVersion, failed_attempts:0, locked_until:null, password_changed_at: changedAt };
 }
 
 async function createAuthSession(credential = {}, req = null) {
@@ -2003,6 +2153,27 @@ function getCaseIdentitySet(c = {}) {
     .filter(Boolean);
 }
 
+function nextAvailableCaseIdentity(cases = [], requestedId = '', deletedProjectIds = []) {
+  const requested=String(requestedId || '').trim();
+  const used=new Set([
+    ...(cases || []).flatMap(record=>getCaseIdentitySet(record)),
+    ...(deletedProjectIds || []).map(value=>String(value || '').trim())
+  ].filter(Boolean));
+  if (requested && !used.has(requested)) return requested;
+  const numbered=requested.match(/^(.*?)-(\d+)$/);
+  const prefix=numbered?.[1] || requested || 'TASK';
+  const width=Math.max(2,numbered?.[2]?.length || 0);
+  const startingSerial=Math.max(1,Number(numbered?.[2] || 1));
+  for (let serial=startingSerial + 1; serial < startingSerial + 100000; serial+=1) {
+    const candidate=`${prefix}-${String(serial).padStart(width,'0')}`;
+    if (!used.has(candidate)) return candidate;
+  }
+  const error=new Error('A unique task reference could not be allocated. Please retry.');
+  error.statusCode=409;
+  error.code='TASK_ID_ALLOCATION_FAILED';
+  throw error;
+}
+
 function assertCaseDisplayIdentityAvailable(cases = [], candidate = {}, existing = null) {
   const immutableId=String(existing?.id || candidate?.id || '').trim();
   const requested=String(candidate?.displayId || candidate?.caseId || candidate?.id || '').trim();
@@ -2648,7 +2819,7 @@ function upsertInlinePaymentLedger(d, c, status, body = {}) {
   c.paymentAmountIn = amount;
   c.refundAmount = refund;
   c.paymentDate = paymentDate;
-  c.paymentTime = body.paymentTime || c.paymentTime || new Date().toTimeString().slice(0, 5);
+  c.paymentTime = body.paymentTime || c.paymentTime || localClock24FromMsServer(Date.now());
   c.payerName = body.payerName || body.receivedFrom || c.payerName || '';
   c.transactionId = body.transactionId || body.txnId || c.transactionId || '';
   c.ledger = {
@@ -2868,6 +3039,23 @@ function sanitizePresenceUsers(users = []) {
   const nowMs = Date.now();
   return cleanTeamUsers(users || []).map(u => sanitizePresenceUser(u, nowMs));
 }
+function publicTeamUser(user = {}) {
+  const u = sanitizePresenceUser(user);
+  return {
+    id:u.id || '', username:u.username || '', name:u.name || '', role:u.role || '', status:u.status || '',
+    designation:u.designation || '', profilePhoto:u.profilePhoto || '', profilePhotoVersion:u.profilePhotoVersion || '',
+    isOnline:Boolean(u.isOnline), availability:u.availability || 'Unavailable', lastSeenAt:u.lastSeenAt || null,
+    lastHeartbeatAt:u.lastHeartbeatAt || null, lastLoginAt:u.lastLoginAt || null, lastLogoutAt:u.lastLogoutAt || null,
+    availabilityUpdatedAt:u.availabilityUpdatedAt || null, breakStartedAt:u.breakStartedAt || null
+  };
+}
+function scopedUsers(d = {}, req = {}) {
+  const actor = requestActor(req);
+  return sanitizePresenceUsers(d.users || []).map(user => {
+    const own = String(user.id || '') === String(actor.id || '') || normalizeUsername(user.username) === normalizeUsername(actor.username || '');
+    return own ? stripCredentialFields(user) : publicTeamUser(user);
+  });
+}
 function mergeUsersPreservingLatestPresence(existing = [], incoming = []) {
   const byId = new Map();
   const nowMs = Date.now();
@@ -2902,10 +3090,21 @@ function mergeUsersPreservingLatestPresence(existing = [], incoming = []) {
   return sanitizePresenceUsers([...byId.values()]);
 }
 
-function localDateKeyFromMsServer(value) {
-  const ms = toMs(value);
-  if (!ms) return '';
-  try { return new Date(ms).toLocaleDateString('en-CA'); } catch { return ''; }
+const INDIA_DATE_KEY_FORMATTER_SERVER = new Intl.DateTimeFormat('en-CA', { timeZone:'Asia/Kolkata', year:'numeric', month:'2-digit', day:'2-digit' });
+const INDIA_CLOCK_24_FORMATTER_SERVER = new Intl.DateTimeFormat('en-GB', { timeZone:'Asia/Kolkata', hour:'2-digit', minute:'2-digit', hour12:false });
+function localClock24FromMsServer(value = Date.now()) {
+  const timestamp = value instanceof Date ? value.getTime() : new Date(value).getTime();
+  return INDIA_CLOCK_24_FORMATTER_SERVER.format(new Date(Number.isFinite(timestamp) ? timestamp : Date.now()));
+}
+
+function localDateKeyFromMsServer(value = Date.now()) {
+  const timestamp = value instanceof Date ? value.getTime() : new Date(value).getTime();
+  const safeTimestamp = Number.isFinite(timestamp) ? timestamp : Date.now();
+  const parts = INDIA_DATE_KEY_FORMATTER_SERVER.formatToParts(new Date(safeTimestamp));
+  const year = parts.find(part => part.type === 'year')?.value;
+  const month = parts.find(part => part.type === 'month')?.value;
+  const day = parts.find(part => part.type === 'day')?.value;
+  return year && month && day ? `${year}-${month}-${day}` : new Date(safeTimestamp).toISOString().slice(0,10);
 }
 function parseAttendanceClockServer(dateKey, clockValue = '') {
   if (!dateKey || !clockValue || clockValue === '-') return 0;
@@ -3005,12 +3204,8 @@ function mergeAttendanceLogsPreservingLatest(existingLogs = [], incomingLogs = [
 }
 
 
-function serverTodayKey(ms = Date.now()) {
-  try { return new Date(ms).toLocaleDateString('en-CA', { timeZone: process.env.ATTENDANCE_TIMEZONE || 'Asia/Kolkata' }); } catch { return localDateKeyFromMsServer(ms); }
-}
-function serverClockTime(ms = Date.now()) {
-  try { return new Date(ms).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', timeZone: process.env.ATTENDANCE_TIMEZONE || 'Asia/Kolkata' }); } catch { return new Date(ms).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' }); }
-}
+function serverTodayKey(ms = Date.now()) { return localDateKeyFromMsServer(ms); }
+function serverClockTime(ms = Date.now()) { return localClock24FromMsServer(ms); }
 function findAttendanceLogIndex(logs = [], user = {}, dateKey = serverTodayKey()) {
   const id = `${user.id || user.username || user.name}_${dateKey}`;
   const nameKey = String(user.name || '').toLowerCase().trim();
@@ -3587,6 +3782,12 @@ function normalizePersistedFileLinks(d){
   }
   return d;
 }
+function credentialSafeProfileUser(user = {}) {
+  const credentialSafeUser = stripCredentialFields(user);
+  for (const field of Object.keys(user)) if (!Object.hasOwn(credentialSafeUser,field)) delete user[field];
+  return user;
+}
+
 function sanitize(d, role){
   const out=structuredClone(d);
   const normalizedRole = normalizeAuthRole(role);
@@ -3796,7 +3997,8 @@ function leaderboardAggregateStats(d = readDb(), options = {}) {
   const config = performanceScopeConfig(options);
   const nowMs = Date.now();
   const todayKey = serverTodayKey(nowMs);
-  const cacheKey = `${performanceDataRevision}:${config.key}:${todayKey}`;
+  const rangeKey = config.key;
+  const cacheKey = `${performanceDataRevision}:${rangeKey}:${todayKey}`;
   const cached = leaderboardAggregateCache.get(cacheKey);
   if (cached) return cached;
 
@@ -3813,11 +4015,11 @@ function leaderboardAggregateStats(d = readDb(), options = {}) {
     [user.id, user.userId].filter(Boolean).forEach(value => userKeyById.set(String(value).trim().toLowerCase(), canonical));
     [user.name, user.username].filter(Boolean).forEach(value => userKeyByName.set(String(value).trim().toLowerCase(), canonical));
   });
-  const resolveCanonicalOwner = (record = {}) => {
-    const byId = [record.userId, record.assigneeId, record.assignedUserId, record.ownerId]
+  const resolveCanonicalOwner = (c = {}) => {
+    const byId = [c.userId, c.assigneeId, c.assignedUserId, c.ownerId]
       .map(value => String(value || '').trim().toLowerCase())
       .find(value => value && userKeyById.has(value));
-    const ownerName = String(record.userName || record.assigneeName || record.assignedTo || record.designerName || record.completedBy || perfOwner(record) || '').trim().toLowerCase();
+    const ownerName = String(c.userName || c.assigneeName || c.assignedTo || c.designerName || c.completedBy || perfOwner(c) || '').trim().toLowerCase();
     return (byId && userKeyById.get(byId)) || userKeyByName.get(ownerName) || ownerName;
   };
 
@@ -3990,7 +4192,7 @@ function scopedState(d = {}, req = {}, options = {}) {
   const safeCases = sanitizeCasesForRole(visibleCases, role);
   const chatMessages = scopedTeamChat(d, req);
   const payload = {
-    users:sanitizePresenceUsers(d.users || []),
+    users:scopedUsers(d, req),
     projects:safeCases,
     deletedProjectIds:[...(d.deletedProjectIds || [])],
     chatMessages,
@@ -4028,7 +4230,7 @@ function scopedStateCollections(d = {}, req = {}, collections = [], rowChanges =
   const payload = {};
   if (requested.has('users')) {
     const rows = filterCollectionRows('users', d.users || [], rowChanges?.users);
-    payload.users = sanitizePresenceUsers(rows);
+    payload.users = scopedUsers({ ...d, users:rows }, req);
   }
   if (requested.has('cases')) {
     const candidateCases = filterCollectionRows('cases', filterDeletedCases(d.cases || [], d.deletedProjectIds || []), rowChanges?.cases);
@@ -4050,12 +4252,12 @@ function teamStatus(d){
     const lastDone=d.cases.filter(c=>c.assigneeId===u.id && c.completedAt && !isActiveCase(c)).sort((a,b)=>toMs(b.completedAt)-toMs(a.completedAt))[0];
     const freeSince=active.length?null:(lastDone?.completedAt || null);
     const busySince=active.length?active.map(caseBusySince).filter(Boolean).sort((a,b)=>a-b)[0]:null;
-    const completedToday=d.cases.filter(c=>c.assigneeId===u.id && c.completedAt && new Date(c.completedAt).toDateString()===new Date().toDateString()).length;
+    const completedToday=d.cases.filter(c=>c.assigneeId===u.id && c.completedAt && localDateKeyFromMsServer(c.completedAt)===localDateKeyFromMsServer(Date.now())).length;
     return {id:u.id,name:u.name,role:u.role,phone:u.phone,status:active.length?'BUSY':'FREE',activeTasks:active.map(c=>({id:c.id,caseId:c.caseId,customerName:c.customerName,status:c.status,busySince:caseBusySince(c)})),freeSince,freeForMinutes:freeSince?Math.max(0,Math.floor((Date.now()-new Date(freeSince).getTime())/60000)):0,busySince,busyForMinutes:busySince?Math.max(0,Math.floor((Date.now()-Number(busySince))/60000)):0,completedToday};
   });
 }
-function dailyLedger(d, dateStr=new Date().toISOString().slice(0,10)){
-  const same=(iso)=>String(iso||'').slice(0,10)===dateStr;
+function dailyLedger(d, dateStr=localDateKeyFromMsServer(Date.now())){
+  const same=(iso)=>localDateKeyFromMsServer(iso)===dateStr;
   const byLocation={};
   d.cases.filter(c=>same(c.createdAt)).forEach(c=>{ byLocation[c.city||'Unknown']=(byLocation[c.city||'Unknown']||0)+1; });
   const pays=(d.payments || []).filter(Boolean).filter(p=>same(p.paymentDate||p.createdAt));
@@ -4108,11 +4310,16 @@ app.use('/api', (req,res,next) => {
   if (!startupFailure) return next();
   const publicDuringMaintenance=new Set(['/health','/health/live','/health/ready','/meta']);
   if (publicDuringMaintenance.has(req.path)) return next();
+  const runtimeReadOnly = startupFailure.phase === 'runtime' && memoryState && isSafeMethod(req.method);
+  const runtimeAuthPaths = new Set(['/auth/login','/auth/session','/auth/logout','/auth/clear-browser-session','/auth/recovery/request','/auth/recovery/reset','/otp/send','/otp/verify']);
+  if (runtimeReadOnly || (startupFailure.phase === 'runtime' && runtimeAuthPaths.has(req.path))) return next();
   res.setHeader('Retry-After', startupFailure.retryable ? '30' : '300');
   return res.status(503).json({
     ok:false,
     code:'BACKEND_STARTUP_MAINTENANCE',
-    error:'The backend is online but startup validation has not completed. No operational write has been accepted.',
+    error:startupFailure.phase === 'runtime'
+      ? 'A runtime integrity recovery is incomplete. Read-only access remains available, but operational writes are temporarily blocked.'
+      : 'The backend is online but startup validation has not completed. No operational write has been accepted.',
     startupFailure:startupFailurePayload()
   });
 });
@@ -4152,43 +4359,62 @@ app.post('/api/auth/clear-browser-session', async (req, res) => {
 });
 
 app.post('/api/auth/login', loginRateLimiter, async (req, res) => {
+  const startedAt = process.hrtime.bigint();
   const username = normalizeUsername(req.body?.username || '');
   const password = String(req.body?.password || '');
+  const previousRawToken = parseRequestCookies(req)[SESSION_COOKIE_NAME] || '';
+  const setLoginTiming = () => {
+    const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+    res.setHeader('Server-Timing', `login;dur=${elapsedMs.toFixed(1)}`);
+  };
   try {
-    if (!username || !password) return res.status(400).json({ ok: false, code: 'LOGIN_FIELDS_REQUIRED', error: 'Username and password are required.' });
+    if (!username || !password) {
+      setLoginTiming();
+      return res.status(400).json({ ok: false, code: 'LOGIN_FIELDS_REQUIRED', error: 'Username and password are required.' });
+    }
     const credential = await findCredentialByUsername(username);
     const lockedUntil = credential?.locked_until ? new Date(credential.locked_until).getTime() : 0;
-    const valid = credential ? await verifyPassword(password, credential.password_hash) : false;
+    // Always perform scrypt verification, including unknown usernames, so account
+    // existence cannot be inferred from a materially faster failure path.
+    const valid = await verifyPassword(password, credential?.password_hash || DUMMY_LOGIN_PASSWORD_HASH);
     if (!credential || !valid) {
       if (credential && lockedUntil > Date.now()) {
-        await recordAuthEvent({ userId: credential.user_id, username, eventType: 'LOGIN_BLOCKED_LOCK', req });
-        return res.status(423).json({ ok: false, code: 'LOGIN_LOCKED', error: `Too many failed attempts. Use the correct password or try again after ${new Date(lockedUntil).toLocaleTimeString()}.` });
+        void recordAuthEventBestEffort({ userId: credential.user_id, username, eventType: 'LOGIN_BLOCKED_LOCK', req });
+        setLoginTiming();
+        return res.status(423).json({ ok: false, code: 'LOGIN_LOCKED', error: 'Too many failed attempts. Try again later or use password recovery.' });
       }
       if (credential) await updateLoginFailure(credential, req);
-      else await recordAuthEvent({ username, eventType: 'LOGIN_FAILED_UNKNOWN_USER', req });
+      else void recordAuthEventBestEffort({ username, eventType: 'LOGIN_FAILED_UNKNOWN_USER', req });
+      setLoginTiming();
       return res.status(401).json({ ok: false, code: 'LOGIN_FAILED', error: 'Invalid username or password.' });
     }
+
+    let refreshedCredential = credential;
     if (lockedUntil > Date.now()) {
-      // A correct credential proves account ownership. Clear only the automatic
-      // failed-attempt lock; intentionally RESTRICTED accounts are still denied below.
-      await clearLoginFailures(credential);
-      await recordAuthEvent({ userId: credential.user_id, username, eventType: 'LOGIN_UNLOCKED_WITH_VALID_PASSWORD', req });
+      refreshedCredential = await clearLoginFailures(credential);
+      void recordAuthEventBestEffort({ userId: credential.user_id, username, eventType: 'LOGIN_UNLOCKED_WITH_VALID_PASSWORD', req });
     }
-    const stateUser = findStateUserByIdOrUsername(credential.user_id, credential.username);
-    const approved = stateUser && normalizeAuthStatus(stateUser.status || credential.status) === 'APPROVED' && normalizeAuthStatus(credential.status) === 'APPROVED';
+    const stateUser = findStateUserByIdOrUsername(refreshedCredential.user_id, refreshedCredential.username);
+    const approved = stateUser && normalizeAuthStatus(stateUser.status || refreshedCredential.status) === 'APPROVED' && normalizeAuthStatus(refreshedCredential.status) === 'APPROVED';
     if (!approved) {
-      await recordAuthEvent({ userId: credential.user_id, username, eventType: 'LOGIN_BLOCKED_RESTRICTED', req });
+      void recordAuthEventBestEffort({ userId: refreshedCredential.user_id, username, eventType: 'LOGIN_BLOCKED_RESTRICTED', req });
+      setLoginTiming();
       return res.status(403).json({ ok: false, code: 'ACCOUNT_RESTRICTED', error: 'This account is restricted. Ask the administrator to allow login.' });
     }
-    await clearLoginFailures(credential);
-    const refreshedCredential = await findCredentialByUserId(credential.user_id) || credential;
+    refreshedCredential = await clearLoginFailures(refreshedCredential);
+    if (previousRawToken) await revokeAuthSession(tokenHash(previousRawToken)).catch(() => {});
     const session = await createAuthSession(refreshedCredential, req);
     setSessionCookie(res, session.rawToken);
     const user = publicSessionUser(stateUser, refreshedCredential);
-    await recordAuthEvent({ userId: user.id, username: user.username, eventType: 'LOGIN_SUCCEEDED', req, details: { mustChangePassword: user.mustChangePassword } });
+    setLoginTiming();
     res.json({ ok: true, authenticated: true, user, csrfToken: session.csrf_token, expiresAt: session.expires_at, sessionHours: SESSION_TTL_HOURS });
+    void recordAuthEventBestEffort({ userId: user.id, username: user.username, eventType: 'LOGIN_SUCCEEDED', req, details: { mustChangePassword: user.mustChangePassword } });
   } catch (error) {
-    res.status(500).json({ ok: false, code: 'LOGIN_ERROR', error: error.message || 'Login failed.' });
+    structuredLog('error','login_request_failed',{requestId:req.requestId,username,code:error?.code || 'LOGIN_FAILURE'});
+    if (!res.headersSent) {
+      setLoginTiming();
+      res.status(503).json({ ok: false, code: 'LOGIN_TEMPORARILY_UNAVAILABLE', error: 'Sign in is temporarily unavailable. Please try again.', requestId:req.requestId });
+    }
   }
 });
 
@@ -4201,7 +4427,8 @@ app.get('/api/auth/session', async (req, res) => {
     }
     res.json({ ok: true, authenticated: true, user: auth.user, csrfToken: auth.session.csrf_token, expiresAt: auth.session.expires_at, sessionHours: SESSION_TTL_HOURS });
   } catch (error) {
-    res.status(500).json({ ok: false, authenticated: false, error: error.message || 'Session check failed.' });
+    structuredLog('error','session_check_failed',{requestId:req.requestId,code:error?.code || 'SESSION_CHECK_UNAVAILABLE'});
+    res.status(503).json({ ok: false, authenticated: false, code:'SESSION_CHECK_UNAVAILABLE', error:'Session check is temporarily unavailable.', requestId:req.requestId });
   }
 });
 
@@ -4225,22 +4452,23 @@ app.post('/api/auth/change-password', async (req, res) => {
     const newPassword = String(req.body?.newPassword || '');
     const errors = passwordPolicyErrors(newPassword);
     if (errors.length) return res.status(400).json({ ok: false, code: 'PASSWORD_POLICY_FAILED', error: errors.join(' '), errors });
+    if (newPassword === currentPassword) return res.status(400).json({ ok:false, code:'PASSWORD_REUSE', error:'Choose a password different from the current password.' });
     const credential = await findCredentialByUserId(req.auth.user.id);
     if (!credential || !(await verifyPassword(currentPassword, credential.password_hash))) {
-      await recordAuthEvent({ userId: req.auth.user.id, username: req.auth.user.username, eventType: 'PASSWORD_CHANGE_FAILED', req });
+      void recordAuthEventBestEffort({ userId: req.auth.user.id, username: req.auth.user.username, eventType: 'PASSWORD_CHANGE_FAILED', req });
       return res.status(401).json({ ok: false, code: 'CURRENT_PASSWORD_INVALID', error: 'Current password is incorrect.' });
     }
-    if (await verifyPassword(newPassword, credential.password_hash)) return res.status(400).json({ ok: false, code: 'PASSWORD_REUSE', error: 'Choose a password different from the current password.' });
-    const updated = await updateCredentialPassword(req.auth.user.id, await hashPassword(newPassword), false);
+    const updated = await updateCredentialPassword(req.auth.user.id, await hashPassword(newPassword), false, credential);
     await revokeAllUserSessions(req.auth.user.id);
     const nextSession = await createAuthSession(updated, req);
     setSessionCookie(res, nextSession.rawToken);
     const stateUser = findStateUserByIdOrUsername(updated.user_id, updated.username);
     const user = publicSessionUser(stateUser, updated);
-    await recordAuthEvent({ userId: user.id, username: user.username, eventType: 'PASSWORD_CHANGED', req });
     res.json({ ok: true, user, csrfToken: nextSession.csrf_token, expiresAt: nextSession.expires_at });
+    void recordAuthEventBestEffort({ userId: user.id, username: user.username, eventType: 'PASSWORD_CHANGED', req });
   } catch (error) {
-    res.status(500).json({ ok: false, code: 'PASSWORD_CHANGE_ERROR', error: error.message || 'Password could not be changed.' });
+    structuredLog('error','password_change_failed',{requestId:req.requestId,userId:req.auth?.user?.id || '',code:error?.code || 'PASSWORD_CHANGE_ERROR'});
+    if (!res.headersSent) res.status(500).json({ ok: false, code: 'PASSWORD_CHANGE_ERROR', error: 'Password could not be changed. Please try again.', requestId:req.requestId });
   }
 });
 
@@ -4271,7 +4499,8 @@ app.post('/api/auth/recovery/request', recoveryRateLimiter, async (req, res) => 
     await recordAuthEvent({ userId: credential.user_id, username, eventType: 'PASSWORD_RECOVERY_REQUESTED', req, details: { channel } });
     res.json(response);
   } catch (error) {
-    res.status(503).json({ ok: false, code: 'RECOVERY_SEND_FAILED', error: error.message || 'Recovery OTP could not be sent.' });
+    structuredLog('error','password_recovery_send_failed',{requestId:req.requestId,code:error?.code || 'RECOVERY_SEND_FAILED'});
+    res.status(503).json({ ok: false, code: 'RECOVERY_SEND_FAILED', error: 'Recovery OTP could not be sent. Please try again.', requestId:req.requestId });
   }
 });
 
@@ -4300,7 +4529,8 @@ app.post('/api/auth/recovery/reset', recoveryRateLimiter, async (req, res) => {
     await recordAuthEvent({ userId: record.userId, username: record.username, eventType: 'PASSWORD_RECOVERED', req });
     res.json({ ok: true, username: updated.username });
   } catch (error) {
-    res.status(500).json({ ok: false, code: 'RECOVERY_RESET_FAILED', error: error.message || 'Password could not be reset.' });
+    structuredLog('error','password_recovery_reset_failed',{requestId:req.requestId,code:error?.code || 'RECOVERY_RESET_FAILED'});
+    res.status(500).json({ ok: false, code: 'RECOVERY_RESET_FAILED', error: 'Password could not be reset. Please try again.', requestId:req.requestId });
   }
 });
 
@@ -4349,7 +4579,7 @@ app.post('/api/auth/users', requireAdminSession, async (req, res) => {
       collections:['users'],
       collectionRowIds:{users:[userId]}
     });
-    await recordAuthEvent({ userId, username, eventType: 'USER_CREDENTIAL_CREATED', req, details: { role, createdBy: req.auth.user.name } });
+    void recordAuthEventBestEffort({ userId, username, eventType: 'USER_CREDENTIAL_CREATED', req, details: { role, createdBy: req.auth.user.name } });
     res.status(201).json({ ok: true, user: publicSessionUser(user, credential), persistence });
   } catch (error) {
     res.status(error.statusCode || 500).json({ ok: false, code: error.code || '', error: error.message || 'User could not be created.' });
@@ -4421,27 +4651,33 @@ function sendProfilePhotoPlaceholder(res) {
   res.send(`<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160"><rect width="160" height="160" rx="28" fill="#f1f5f9"/><circle cx="80" cy="60" r="28" fill="#cbd5e1"/><path d="M34 138c6-28 27-44 46-44s40 16 46 44" fill="#cbd5e1"/></svg>`);
 }
 
-function resolveProfilePhotoPath(requestedName = '') {
+function resolveProfilePhotoRecord(requestedName = '') {
   const requested = String(requestedName || '').trim();
   const d = readDb();
   const user = (d.users || []).find(item => [item.id, item.username, item.name, fileBaseName(item.profilePhoto || ''), fileBaseName(item.profilePhotoFile || '')]
     .filter(Boolean).some(value => String(value) === requested || safeName(String(value)) === safeName(requested)));
-  if (!user) return '';
+  if (!user) return null;
   const resolved = fileStorage.resolve({
-    storageKey: user.profilePhotoStorageKey || user.profilePhotoFile || '',
-    storedName: user.profilePhotoFile || '',
-    name: user.profilePhotoOriginalName || fileBaseName(user.profilePhoto || '')
+    storageKey:user.profilePhotoStorageKey || user.profilePhotoFile || '',
+    storedName:user.profilePhotoFile || '',
+    name:user.profilePhotoOriginalName || fileBaseName(user.profilePhoto || '')
   });
-  return resolved?.fp && isResolvedStoragePathAllowed(resolved.fp) ? resolved.fp : '';
+  if (!resolved?.fp || !isResolvedStoragePathAllowed(resolved.fp)) return null;
+  const profilePhotoMime = String(user.profilePhotoMime || '').toLowerCase();
+  const mimeType = profilePhotoMime.startsWith('image/') ? profilePhotoMime : 'application/octet-stream';
+  return { fp:resolved.fp, mimeType, fileName:user.profilePhotoOriginalName || 'profile-photo' };
 }
+function resolveProfilePhotoPath(requestedName = '') { return resolveProfilePhotoRecord(requestedName)?.fp || ''; }
 
 app.get('/api/profile/photo/:filename', async (req, res) => {
   try {
-    const fp = resolveProfilePhotoPath(req.params.filename || '');
-    if (!fp) return sendProfilePhotoPlaceholder(res);
+    const photo = resolveProfilePhotoRecord(req.params.filename || '');
+    if (!photo) return sendProfilePhotoPlaceholder(res);
     res.setHeader('Cache-Control', 'private, max-age=86400');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.sendFile(fp);
+    res.setHeader('Content-Type', photo.mimeType);
+    res.setHeader('Content-Disposition', contentDispositionValue('inline', photo.fileName));
+    res.sendFile(photo.fp);
   } catch {
     sendProfilePhotoPlaceholder(res);
   }
@@ -4468,7 +4704,7 @@ app.get('/api/health', async (_req, res) => {
 });
 app.get('/api/health/live', (_req, res) => {
   const processAlive=!shuttingDown;
-  const healthy=processAlive && !startupFailure;
+  const healthy=processAlive;
   res.status(healthy ? 200 : 503).json({
     ok:healthy,
     processAlive,
@@ -4524,42 +4760,56 @@ app.post('/api/email/test', requireAdminSession, emailTestRateLimiter, async (re
 
 app.post('/api/otp/send', otpRateLimiter, async (req,res)=>{
   try {
-    const username = String(req.body.username || '').trim().toLowerCase();
+    const actor = requestActor(req);
+    const username = normalizeUsername(req.body.username || actor.username || '');
     const mobile = normalizeMobile(req.body.mobile || '');
     const email = normalizeEmail(req.body.email || '');
     const purpose = String(req.body.purpose || 'otp');
     const channel = String(req.body.channel || (email ? 'email' : 'mobile')).toLowerCase();
-    if (!username) return res.status(400).json({ ok:false, error:'Username is required.' });
+    if (username && actor.username && username !== normalizeUsername(actor.username)) return res.status(403).json({ok:false,code:'OTP_ACTOR_MISMATCH',error:'OTP registration must belong to the signed-in account.'});
+    if (!['email_registration','mobile_registration','otp'].includes(purpose)) return res.status(400).json({ok:false,code:'OTP_PURPOSE_INVALID',error:'Unsupported OTP purpose.'});
     if (channel === 'email' && !email.includes('@')) return res.status(400).json({ ok:false, error:'A valid registered email address is required.' });
     if (channel !== 'email' && mobile.length < 10) return res.status(400).json({ ok:false, error:'A valid registered mobile number is required.' });
     const otp = randomOtp();
     const delivery = channel === 'email' ? await sendOtpEmail(email, otp) : await sendOtpSms(mobile, otp);
     const challengeId = nanoid(12);
-    storeOtpChallenge(challengeId, { username, channel, mobileSuffix: mobile.slice(-10), email, purpose, otp, expiresAt: Date.now() + 5*60*1000, attempts: 0 });
+    storeOtpChallenge(challengeId, { actorId:actor.id, actorUsername:actor.username, username, channel, mobile, mobileSuffix:mobile.slice(-10), email, purpose, otp, expiresAt:Date.now()+5*60*1000, attempts:0 });
     const response = { ok:true, channel, challengeId, expiresInSeconds:300 };
-    if (delivery?.localOnly && localEmailOtpAllowed()) {
-      response.localOnly = true;
-      response.devOtp = otp;
-      response.warning = delivery.warning || 'Local email OTP mode used.';
-    }
+    if (delivery?.localOnly && localEmailOtpAllowed()) { response.localOnly=true; response.devOtp=otp; response.warning=delivery.warning || 'Local email OTP mode used.'; }
     res.json(response);
   } catch (err) {
-    res.status(503).json({ ok:false, error: err.message || 'Could not send OTP.' });
+    structuredLog('error','otp_send_failed',{requestId:req.requestId,code:err?.code || 'OTP_SEND_FAILED'});
+    res.status(503).json({ ok:false, code:'OTP_SEND_FAILED', error:'Could not send OTP. Please try again.' });
   }
 });
 app.post('/api/otp/verify', otpRateLimiter, async (req,res)=>{
-  const challengeId = String(req.body.challengeId || '');
-  const otp = String(req.body.otp || '').trim();
-  const purpose = String(req.body.purpose || 'otp');
-  const record = otpStore.get(challengeId);
-  if (!record) return res.status(400).json({ ok:false, error:'OTP session not found. Please send OTP again.' });
-  if (record.expiresAt < Date.now()) { otpStore.delete(challengeId); return res.status(400).json({ ok:false, error:'OTP expired. Please send OTP again.' }); }
-  if (record.purpose !== purpose) return res.status(400).json({ ok:false, error:'OTP purpose mismatch.' });
-  record.attempts += 1;
-  if (record.attempts > 5) { otpStore.delete(challengeId); return res.status(429).json({ ok:false, error:'Too many incorrect attempts. Please send OTP again.' }); }
-  if (record.otp !== otp) return res.status(400).json({ ok:false, error:'Invalid OTP.' });
-  otpStore.delete(challengeId);
-  res.json({ ok:true });
+  try {
+    const actor = requestActor(req);
+    const challengeId = String(req.body.challengeId || '');
+    const otp = String(req.body.otp || '').trim();
+    const purpose = String(req.body.purpose || 'otp');
+    const record = otpStore.get(challengeId);
+    if (!record) return res.status(400).json({ ok:false, error:'OTP session not found. Please send OTP again.' });
+    if (String(record.actorId || '') !== String(actor.id || '') || normalizeUsername(record.actorUsername || '') !== normalizeUsername(actor.username || '')) return res.status(403).json({ok:false,code:'OTP_ACTOR_MISMATCH',error:'This OTP belongs to a different signed-in account.'});
+    if (record.expiresAt < Date.now()) { otpStore.delete(challengeId); return res.status(400).json({ ok:false, error:'OTP expired. Please send OTP again.' }); }
+    if (record.purpose !== purpose) return res.status(400).json({ ok:false, error:'OTP purpose mismatch.' });
+    record.attempts += 1;
+    if (record.attempts > 5) { otpStore.delete(challengeId); return res.status(429).json({ ok:false, error:'Too many incorrect attempts. Please send OTP again.' }); }
+    if (record.otp !== otp) return res.status(400).json({ ok:false, error:'Invalid OTP.' });
+    const d = selectiveDb({collections:['users'], collectionRowIds:{users:[String(actor.id)]}});
+    const user = findStateUserByIdOrUsername(actor.id,actor.username,d);
+    if (!user) return res.status(404).json({ok:false,code:'PROFILE_NOT_FOUND',error:'Signed-in user record was not found.'});
+    if (purpose === 'email_registration') { user.email=record.email; user.emailRegistered=true; }
+    if (purpose === 'mobile_registration') { user.phone=record.mobile; user.mobile=record.mobile; user.mobileRegistered=true; }
+    user.updatedAt=Date.now();
+    credentialSafeProfileUser(user);
+    const persistence = await save(d,{actor:actor.name,reason:`${purpose}_verified`,collections:['users'],collectionRowIds:{users:[String(user.id)]}});
+    otpStore.delete(challengeId);
+    res.json({ ok:true, user:publicSessionUser(user,req.auth.credential || {}), emailRegistered:true, mobileRegistered:true, persistence });
+  } catch (error) {
+    structuredLog('error','otp_verify_failed',{requestId:req.requestId,code:error?.code || 'OTP_VERIFY_FAILED'});
+    if (!res.headersSent) res.status(500).json({ok:false,code:'OTP_VERIFY_FAILED',error:'OTP verification could not be completed.'});
+  }
 });
 
 app.get('/',async (_req,res)=>res.json({ok:true,app:'Kalpvriksha Designs ERP'}));
@@ -4598,7 +4848,7 @@ app.get('/api/state', requireCapability('state:read'), async (req,res)=>{
       ok:true,
       partial:'presence',
       database:USE_POSTGRES ? 'postgresql' : 'json-file',
-      users:sanitizePresenceUsers(d.users || []),
+      users:scopedUsers(d, req),
       attendanceLogs:scopedAttendance(d, req),
       savedAt:now(),
       ...sync
@@ -4814,14 +5064,32 @@ app.post('/api/state/projects', async (req, res) => {
     const projectId = textValue(incoming.id || incoming.caseId, 'Project id', 200, { required:true });
     const taskSnapshot=taskDb(projectId,{audit:true,notifications:true});
     const d=taskSnapshot.snapshot;
+    const mutationId = taskMutationId(req.body || {}, incoming);
+    // Older clients already prefix new-task mutation IDs with "create-". Keep
+    // that compatibility while newer clients send an explicit operation.
+    const createIntent=String(req.body?.operation || '').trim().toLowerCase()==='create'
+      || req.body?.createOnly === true
+      || mutationId.startsWith('create-');
+    if (createIntent) {
+      if (!hasCapability(req.auth?.user || {}, 'task:create')) return authorizationDenied(req, res, 'TASK_CREATE_FORBIDDEN', 'Only Admins and Managers can create tasks.');
+      const committedReplay=mutationId ? (d.cases || []).find(record=>String(record?.lastTaskMutationId || '')===mutationId) : null;
+      if (committedReplay) {
+        const visibleReplay=sanitizeCasesForRole([committedReplay],actor.role)[0] || committedReplay;
+        return res.json({ok:true,idempotent:true,project:visibleReplay,case:visibleReplay,deletedProjectIds:d.deletedProjectIds || [],counts:{cases:(d.cases || []).length}});
+      }
+    }
     const incomingIds = getCaseIdentitySet(incoming);
     const tombstones = new Set((d.deletedProjectIds || []).map(String));
-    if (incomingIds.some(id => tombstones.has(id))) {
+    if (!createIntent && incomingIds.some(id => tombstones.has(id))) {
       return res.status(409).json({ ok:false, code:'PROJECT_DELETED', error:'This task was permanently deleted and cannot be restored by a stale client.', deletedProjectIds:d.deletedProjectIds || [] });
     }
 
-    const existing = findCaseByAnyId(d.cases || [], projectId) || findCaseByAnyId(d.cases || [], incoming.caseId || '');
-    const mutationId = taskMutationId(req.body || {}, incoming);
+    let existing = findCaseByAnyId(d.cases || [], projectId) || findCaseByAnyId(d.cases || [], incoming.caseId || '') || findCaseByAnyId(d.cases || [], incoming.displayId || '');
+    const createIdentityCollision=createIntent && (Boolean(existing) || incomingIds.some(id=>tombstones.has(id) || Boolean(findCaseByAnyId(d.cases || [],id))));
+    const allocatedProjectId=createIdentityCollision
+      ? nextAvailableCaseIdentity(d.cases || [],incoming.displayId || incoming.caseId || projectId,d.deletedProjectIds || [])
+      : projectId;
+    if (createIntent) existing=null;
 
     let safeIncoming;
     if (existing) {
@@ -4840,7 +5108,6 @@ app.post('/api/state/projects', async (req, res) => {
       safeIncoming.lastTaskMutationId = mutationId || nanoid(16);
       safeIncoming.lastTaskMutationAt = now();
     } else {
-      if (!hasCapability(req.auth?.user || {}, 'task:create')) return authorizationDenied(req, res, 'TASK_CREATE_FORBIDDEN', 'Only Admins and Managers can create tasks.');
       safeIncoming = preserveFinanceFields({}, structuredClone(incoming));
       const recordedAt = Date.now();
       const todayTaskDate = indiaDateKey(recordedAt);
@@ -4851,8 +5118,8 @@ app.post('/api/state/projects', async (req, res) => {
         error.code = 'TASK_DATE_IN_FUTURE';
         throw error;
       }
-      safeIncoming.id = projectId;
-      safeIncoming.displayId = incoming.displayId || incoming.caseId || projectId;
+      safeIncoming.id = allocatedProjectId;
+      safeIncoming.displayId = createIdentityCollision ? allocatedProjectId : (incoming.displayId || incoming.caseId || allocatedProjectId);
       safeIncoming.caseId = safeIncoming.displayId;
       safeIncoming.taskDate = requestedTaskDate;
       safeIncoming.taskAccountingPeriod = normalizeFinanceAccountingPeriod(requestedTaskDate, recordedAt);
@@ -4875,7 +5142,7 @@ app.post('/api/state/projects', async (req, res) => {
 
     assertCaseDisplayIdentityAvailable(d.cases || [],safeIncoming,existing);
     d.cases = mergeCasesPreservingFreshest(d.cases || [], [safeIncoming], d.deletedProjectIds || []);
-    const saved = findCaseByAnyId(d.cases || [], safeIncoming.id || projectId) || findCaseByAnyId(d.cases || [], safeIncoming.caseId || projectId) || safeIncoming;
+    const saved = findCaseByAnyId(d.cases || [], safeIncoming.id || allocatedProjectId) || findCaseByAnyId(d.cases || [], safeIncoming.caseId || allocatedProjectId) || safeIncoming;
     const auditEntry = addAudit(d, actor.name, existing ? 'Task updated' : 'Task created', saved.caseId || saved.id);
     const notificationEntries=[];
     const assignmentChanged = String(existing?.assignedTo || 'Unassigned') !== String(saved.assignedTo || 'Unassigned');
@@ -4909,7 +5176,7 @@ app.post('/api/state/projects', async (req, res) => {
       collectionRowIds
     });
     const visible = sanitizeCasesForRole([saved], actor.role)[0] || saved;
-    res.json({ ok:true, project:visible, case:visible, notifications:notificationEntries, deletedProjectIds:d.deletedProjectIds || [], counts:{ cases:(d.cases || []).length }, persistence });
+    res.json({ ok:true, project:visible, case:visible, requestedProjectId:projectId, taskIdAllocated:createIdentityCollision, notifications:notificationEntries, deletedProjectIds:d.deletedProjectIds || [], counts:{ cases:(d.cases || []).length }, persistence });
   } catch (e) {
     res.status(e.statusCode || 500).json({ ok:false, code:e.code || '', error:e.message || 'Project save failed.', currentTaskVersion:e.currentTaskVersion, requestId:req.requestId || '' });
   }
@@ -4942,6 +5209,7 @@ app.delete('/api/state/projects/:id', requireAnyRole('ADMIN','MANAGER'), require
   });
   res.json({ok:true, deleted:before - d.cases.length, deletedProjectIds:d.deletedProjectIds || [], counts:{cases:d.cases.length}});
 });
+
 
 app.post('/api/presence', requireCapability('presence:self'), async (req, res) => {
   try {
@@ -4995,13 +5263,41 @@ app.post('/api/presence', requireCapability('presence:self'), async (req, res) =
       users:[String(user.id || user.username || actor.id)].filter(Boolean),
       attendanceLogs:[String(attendanceLog?.id || attendanceId)].filter(Boolean)
     };
-    const persistence = await save(presenceState, {
-      actor:actor.name,
-      reason:`presence_${safeAction}`,
-      skipRevisionSnapshot:true,
-      collections:['users','attendanceLogs'],
-      collectionRowIds:rowIds
-    });
+    let persistence;
+    try {
+      persistence = await save(presenceState, {
+        actor:actor.name,
+        reason:`presence_${safeAction}`,
+        skipRevisionSnapshot:true,
+        collections:['users','attendanceLogs'],
+        collectionRowIds:rowIds
+      });
+    } catch (error) {
+      // Presence is operational telemetry, not a reason to deny the complete
+      // workspace. A failed transaction is rolled back and reloadCommittedState()
+      // preserves the dirty presence slice. Retry it in the coalesced background
+      // queue unless the independent integrity reload placed the API in protected mode.
+      if (!startupFailure) {
+        schedulePresenceFlush(PRESENCE_FLUSH_RETRY_MS);
+        structuredLog('warn','presence_persistence_deferred',{
+          action:safeAction,
+          userId:actor.id,
+          code:error?.code || 'PRESENCE_PERSISTENCE_FAILED',
+          error:error?.message || String(error),
+          retryWithinMs:PRESENCE_FLUSH_RETRY_MS
+        });
+        return res.status(202).json({
+          ok:true,
+          temporarilyDeferred:true,
+          code:'PRESENCE_PERSISTENCE_DEFERRED',
+          user,
+          attendanceLog,
+          presenceGeneration:presenceMutationGeneration,
+          retryWithinMs:PRESENCE_FLUSH_RETRY_MS
+        });
+      }
+      throw error;
+    }
     res.json({ ok:true, user, attendanceLog, presenceGeneration:presenceMutationGeneration, persistence });
   } catch (e) {
     res.status(e.statusCode || 500).json({ ok:false, code:e.code || '', error:e.message || 'Presence update failed.' });
@@ -5431,7 +5727,7 @@ app.post('/api/cases/:id/payment', async (req,res)=>{
       refundAmount:refund,
       paymentDate,
       accountingPeriod,
-      paymentTime:textValue(req.body.paymentTime||new Date().toTimeString().slice(0,5),'Payment time',20),
+      paymentTime:textValue(req.body.paymentTime||localClock24FromMsServer(Date.now()),'Payment time',20),
       payerName:textValue(req.body.payerName||'','Payer name',200),
       transactionId:textValue(req.body.transactionId||'','Transaction ID',200),
       mode:textValue(req.body.mode||'','Payment mode',100),
@@ -5563,54 +5859,78 @@ app.get('/api/finance/health', async (req, res) => {
 });
 
 
-app.post('/api/profile/photo', uploadSingle('photo'), async (req, res) => {
+const SELF_PROFILE_FIELDS = Object.freeze(new Set(['phone','mobile','email','designation','aadharNumber','panNumber','emergencyContact','address','bankDetails']));
+app.patch('/api/profile', async (req,res)=>{
+  try {
+    const actor = requestActor(req);
+    const d = selectiveDb({collections:['users'],collectionRowIds:{users:[String(actor.id)]}});
+    const user = findStateUserByIdOrUsername(actor.id, actor.username, d);
+    if (!user) return res.status(404).json({ok:false,code:'PROFILE_NOT_FOUND',error:'Signed-in user record was not found.'});
+    const patch=req.body && typeof req.body==='object' ? req.body : {};
+    for (const field of Object.keys(patch)) {
+      if (!SELF_PROFILE_FIELDS.has(field) && !['emailRegistered','mobileRegistered'].includes(field)) return res.status(400).json({ok:false,code:'SELF_PROFILE_FIELD_FORBIDDEN',error:`${field} cannot be changed from My Profile.`});
+    }
+    for (const field of SELF_PROFILE_FIELDS) if (Object.hasOwn(patch,field)) user[field]=String(patch[field] ?? '').trim();
+    // Registration flags can only remain true after the OTP verifier has already
+    // established them; a profile PATCH can never promote an unverified contact.
+    if (patch.emailRegistered === false) user.emailRegistered=false;
+    if (patch.mobileRegistered === false) user.mobileRegistered=false;
+    user.updatedAt=Date.now();
+    credentialSafeProfileUser(user);
+    const persistence=await save(d,{actor:actor.name,reason:'self_profile_update',collections:['users'],collectionRowIds:{users:[String(user.id)]}});
+    res.json({ok:true,user:publicSessionUser(user,req.auth.credential || {}),persistence});
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ok:false,code:error.code || 'PROFILE_UPDATE_FAILED',error:error.message || 'Profile could not be updated.'});
+  }
+});
+
+const PROFILE_PHOTO_MAX_MB = 5;
+const PROFILE_PHOTO_UPLOAD_CONTRACT = Object.freeze({maxMb:PROFILE_PHOTO_MAX_MB,allowedMimeTypes:['image/png','image/jpeg','image/gif','image/webp','image/bmp']});
+const profilePhotoUpload = uploadSingle('photo');
+app.post('/api/profile/photo', profilePhotoUpload, async (req, res) => {
   let preparedUploads=[];
   let persistenceCommitted=false;
   let rollbackActor='system';
   try {
     if (!req.file) return res.status(400).json({ ok:false, code:'FILE_REQUIRED', error:'No photo uploaded.' });
-    if (Number(req.file.size || 0) > 5 * 1024 * 1024) { cleanupRequestTempUploads(req); return res.status(413).json({ok:false,code:'PROFILE_PHOTO_TOO_LARGE',error:'Profile photos must be no larger than 5 MB.'}); }
+    if (Number(req.file.size || 0) > PROFILE_PHOTO_MAX_MB * 1024 * 1024) { cleanupRequestTempUploads(req); return res.status(413).json({ok:false,code:'PROFILE_PHOTO_TOO_LARGE',error:'Profile photos must be no larger than 5 MB.'}); }
     const actor = requestActor(req);
-    const d = selectiveDb({ collections:['users'], collectionRowIds:{ users:[String(actor.id)] } });
+    const d = selectiveDb({collections:['users'],collectionRowIds:{users:[String(actor.id)]}});
     rollbackActor=actor.name;
     const user = findStateUserByIdOrUsername(actor.id, actor.username, d);
-    if (!user) { cleanupRequestTempUploads(req); return res.status(404).json({ ok:false, error:'Signed-in user record was not found.' }); }
+    if (!user) { cleanupRequestTempUploads(req); return res.status(404).json({ok:false,error:'Signed-in user record was not found.'}); }
     req.files=[req.file];
     preparedUploads=await prepareSecureUploads(req,'PROFILE',{imagesOnly:true});
-    const previousKey = user.profilePhotoStorageKey || user.profilePhotoFile || '';
-    const profilePhoto = `/api/profile/photo/${encodeURIComponent(user.id || user.username)}`;
-    user.profilePhoto = profilePhoto;
-    user.profilePhotoFile = req.file.storageKey;
-    user.profilePhotoStorageKey = req.file.storageKey;
-    user.profilePhotoSha256 = req.file.sha256;
-    user.profilePhotoMime = req.file.mimetype;
-    user.profilePhotoOriginalName = req.file.originalname;
-    user.profileUpdatedAt = Date.now();
-    user.profilePhotoUpdatedAt = Date.now();
-    await save(d, { actor:actor.name, reason:'profile_photo_update', collections:['users'], collectionRowIds:{users:[String(user.id)]} });
+    if (!PROFILE_PHOTO_UPLOAD_CONTRACT.allowedMimeTypes.includes(String(req.file.mimetype || '').toLowerCase())) throw new FileValidationError('PROFILE_PHOTO_INVALID','Profile photos must be PNG, JPEG, GIF, WebP or BMP.',400);
+    const previousKey=user.profilePhotoStorageKey || user.profilePhotoFile || '';
+    const profilePhoto=`/api/profile/photo/${encodeURIComponent(user.id || user.username)}`;
+    if (user.profilePhotoSha256 && user.profilePhotoSha256 === req.file.sha256 && previousKey) {
+      const confirmed=publicSessionUser(user,req.auth.credential || {});
+      persistenceCommitted=true;
+      return res.json({ok:true,idempotent:true,updated:false,user:confirmed,profilePhoto,url:profilePhoto,storedName:path.basename(previousKey),storageKey:previousKey,sha256:user.profilePhotoSha256});
+    }
+    user.profilePhoto=profilePhoto;
+    user.profilePhotoFile=req.file.storageKey;
+    user.profilePhotoStorageKey=req.file.storageKey;
+    user.profilePhotoSha256=req.file.sha256;
+    user.profilePhotoMime=req.file.mimetype;
+    user.profilePhotoOriginalName=req.file.originalname;
+    user.profileUpdatedAt=Date.now();
+    user.profilePhotoUpdatedAt=Date.now();
+    credentialSafeProfileUser(user);
+    const persistence=await save(d,{actor:actor.name,reason:'profile_photo_update',collections:['users'],collectionRowIds:{users:[String(user.id)]}});
     persistenceCommitted=true;
     if (previousKey && previousKey !== req.file.storageKey) {
-      // Content-addressed objects can be shared by profile photos and task
-      // attachments. Immediate physical deletion has a race with another
-      // upload that has validated the same hash but has not committed its row
-      // yet. Keep the private object for a later grace-period garbage-collection
-      // pass; the old profile URL is already unreachable after the row commit.
-      await recordFileStorageEvent({
-        action:'PROFILE_PHOTO_REPLACED',
-        actor:actor.name,
-        storageKey:previousKey,
-        details:{ userId:user.id, physicalAction:'retained-for-safe-gc' }
-      });
+      await recordFileStorageEvent({action:'PROFILE_PHOTO_REPLACED',actor:actor.name,storageKey:previousKey,details:{userId:user.id,physicalAction:'retained-for-safe-gc'}});
     }
-    res.json({ ok:true, profilePhoto, url:profilePhoto, storedName:path.basename(req.file.storageKey), storageKey:req.file.storageKey, sha256:req.file.sha256, updated:true });
+    res.json({ok:true,user:publicSessionUser(user,req.auth.credential || {}),profilePhoto,url:profilePhoto,storedName:path.basename(req.file.storageKey),storageKey:req.file.storageKey,sha256:req.file.sha256,updated:true,persistence});
   } catch (error) {
     cleanupRequestTempUploads(req);
     if (!persistenceCommitted) rollbackPreparedUploads(preparedUploads,{reason:'PROFILE_PHOTO_PERSISTENCE_FAILED',actor:rollbackActor});
     if (error instanceof FileValidationError) return fileUploadFailure(res,error,'Profile photo upload failed.');
-    res.status(error.statusCode || 500).json({ ok:false, code:error.code || '', error:error.message || 'Profile photo upload failed' });
+    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'Profile photo upload failed'});
   }
 });
-
 
 function normalizeFilePurposeType(value = '') {
   return String(value || 'source').trim().toLowerCase();
@@ -5674,50 +5994,45 @@ app.post('/api/files/upload', uploadAny, async (req, res) => {
   let rollbackActor='system';
   let rollbackCaseId='';
   try {
-    const incomingFiles = req.files || [];
-    if (!incomingFiles.length) return res.status(400).json({ ok:false, code:'FILE_REQUIRED', error:'No file uploaded.' });
+    const incomingFiles=req.files || [];
+    if (!incomingFiles.length) return res.status(400).json({ok:false,code:'FILE_REQUIRED',error:'No file uploaded.'});
     if (incomingFiles.length !== 1) { cleanupRequestTempUploads(req); return res.status(400).json({ok:false,code:'SINGLE_FILE_REQUIRED',error:'This endpoint accepts one file at a time.'}); }
-    const actor = requestActor(req);
+    const actor=requestActor(req);
     rollbackActor=actor.name;
     const type=normalizeFilePurposeType(req.body.type || 'source');
     const purpose=storedFilePurpose(type);
     if (!purpose) { cleanupRequestTempUploads(req); return res.status(400).json({ok:false,code:'FILE_PURPOSE_INVALID',error:'Invalid file purpose.'}); }
     const projectId=textValue(req.body.projectId || req.body.caseId || '', 'Project id', 200);
     const uploadMutationId=textValue(req.body.mutationId || req.body.uploadMutationId || '', 'Upload mutation id', 200);
+    const uploadedById=String(actor.id || '').trim();
+    const requestedChatScope=type === 'chat' && String(req.body.chatScope || 'PRIVATE').toUpperCase() === 'GLOBAL' ? 'GLOBAL' : (type === 'chat' ? 'PRIVATE' : '');
+    const requestedChatParticipants=type === 'chat' ? [actor.id,actor.username,actor.name,req.body.recipientId,req.body.recipientUsername,req.body.recipient]
+      .map(value=>String(value || '').trim().toLowerCase()).filter(Boolean).filter((value,index,list)=>list.indexOf(value)===index).sort() : [];
+    const requestedVoiceNote=type === 'chat' && ['true','1','yes'].includes(String(req.body.isVoiceNote || '').toLowerCase());
     rollbackCaseId=projectId;
 
     const authorizeUpload=(state)=>{
       const record=projectId ? findCaseByAnyId(state.cases || [],projectId) : null;
-      if (projectId && !record) {
-        const error=new Error('The target task was not found.');
-        error.statusCode=404; error.code='CASE_NOT_FOUND'; throw error;
-      }
-      if (type === 'source' && !['ADMIN','MANAGER'].includes(actor.role)) {
-        const error=new Error('Only Admins and Managers can upload source files.');
-        error.statusCode=403; error.code='SOURCE_UPLOAD_FORBIDDEN'; throw error;
-      }
-      if (type === 'payment-receipt' && actor.role !== 'ADMIN') {
-        const error=new Error('Only an Admin can upload payment receipts.');
-        error.statusCode=403; error.code='PAYMENT_RECEIPT_FORBIDDEN'; throw error;
-      }
-      if (record && !['source','payment-receipt'].includes(type) && !canMutateCase(req.auth?.user || {},record,type === 'completed' ? 'upload-final' : 'upload-working')) {
-        const error=new Error('You cannot upload files to this task.');
-        error.statusCode=403; error.code='FILE_UPLOAD_FORBIDDEN'; throw error;
-      }
-      if (!projectId && type !== 'chat') {
-        const error=new Error('A task reference is required for this upload.');
-        error.statusCode=400; error.code='UNSCOPED_UPLOAD_FORBIDDEN'; throw error;
-      }
+      if (projectId && !record) { const error=new Error('The target task was not found.'); error.statusCode=404; error.code='CASE_NOT_FOUND'; throw error; }
+      if (type === 'source' && !['ADMIN','MANAGER'].includes(actor.role)) { const error=new Error('Only Admins and Managers can upload source files.'); error.statusCode=403; error.code='SOURCE_UPLOAD_FORBIDDEN'; throw error; }
+      if (type === 'payment-receipt' && actor.role !== 'ADMIN') { const error=new Error('Only an Admin can upload payment receipts.'); error.statusCode=403; error.code='PAYMENT_RECEIPT_FORBIDDEN'; throw error; }
+      if (record && !['source','payment-receipt'].includes(type) && !canMutateCase(req.auth?.user || {},record,type === 'completed' ? 'upload-final' : 'upload-working')) { const error=new Error('You cannot upload files to this task.'); error.statusCode=403; error.code='FILE_UPLOAD_FORBIDDEN'; throw error; }
+      if (!projectId && type !== 'chat') { const error=new Error('A task reference is required for this upload.'); error.statusCode=400; error.code='UNSCOPED_UPLOAD_FORBIDDEN'; throw error; }
       return record;
     };
     const findCommittedUpload=(state={})=>{
       if (!uploadMutationId) return null;
       const targetRecord=projectId ? findCaseByAnyId(state.cases || [],projectId) : null;
       const targetIds=new Set(targetRecord ? getCaseIdentitySet(targetRecord) : [String(projectId || '')]);
-      return (state.files || []).find(item=>
-        String(item?.uploadMutationId || '')===uploadMutationId
-        && (!projectId || targetIds.has(String(item?.caseId || '')))
-      ) || null;
+      return (state.files || []).find(item=>{
+        const sameActor=uploadedById ? String(item?.uploadedById || '') === uploadedById : normalizeUsername(item?.uploadedByUsername || item?.uploadedBy || '') === normalizeUsername(actor.username || actor.name || '');
+        const storedParticipants=[...(item?.chatParticipants || [])].map(value=>String(value || '').toLowerCase()).sort();
+        const sameParticipants=requestedChatParticipants.length === storedParticipants.length && requestedChatParticipants.every((value,index)=>value === storedParticipants[index]);
+        return String(item?.uploadMutationId || '') === uploadMutationId
+          && (!projectId || targetIds.has(String(item?.caseId || '')))
+          && sameActor
+          && (type !== 'chat' || (String(item?.chatScope || 'PRIVATE') === requestedChatScope && sameParticipants && Boolean(item?.isVoiceNote) === requestedVoiceNote));
+      }) || null;
     };
     const idempotentUploadResponse=(state,existingFile)=>{
       const linkedCase=projectId ? findCaseByAnyId(state.cases || [],projectId) : null;
@@ -5725,36 +6040,36 @@ app.post('/api/files/upload', uploadAny, async (req, res) => {
       return {ok:true,idempotent:true,file:existingFile,project:visibleCase,case:visibleCase,persistence:{mode:'idempotent',persisted:true}};
     };
 
-    authorizeUpload(readDb());
     const initialState=readDb();
+    authorizeUpload(initialState);
     const priorUpload=findCommittedUpload(initialState);
-    if (priorUpload) {
-      cleanupRequestTempUploads(req);
-      return res.status(200).json(idempotentUploadResponse(initialState,priorUpload));
-    }
+    if (priorUpload) { cleanupRequestTempUploads(req); return res.status(200).json(idempotentUploadResponse(initialState,priorUpload)); }
     preparedUploads=await prepareSecureUploads(req,purpose);
+    if (type === 'payment-receipt') {
+      const detected=String(req.file?.mimetype || '').toLowerCase();
+      if (!(detected === 'application/pdf' || detected.startsWith('image/'))) throw new FileValidationError('PAYMENT_RECEIPT_TYPE_INVALID','Payment receipts must be a PDF or supported image file.',400);
+    }
 
-    // File validation and antivirus work can take time. Re-read and re-authorise
-    // immediately before committing so an account restriction, reassignment or
-    // task deletion that happened during processing cannot be bypassed.
     const uploadSnapshot=taskDb(projectId,{files:true});
     const d=uploadSnapshot.snapshot;
     const caseRecord=authorizeUpload(d);
     const concurrentUpload=findCommittedUpload(d);
     if (concurrentUpload) {
       rollbackPreparedUploads(preparedUploads,{reason:'DUPLICATE_UPLOAD_MUTATION',actor:actor.name,caseId:projectId});
-      preparedUploads=[];
-      cleanupRequestTempUploads(req);
+      preparedUploads=[]; cleanupRequestTempUploads(req);
       return res.status(200).json(idempotentUploadResponse(d,concurrentUpload));
     }
     const file=docPayload(req.file,actor.name,actor.role,purpose,projectId);
     file.uploadMutationId=uploadMutationId || nanoid(16);
+    file.uploadedById=actor.id;
+    file.uploadedByUsername=actor.username;
     file.type=type;
     file.folder=type;
+    file.isVoiceNote=requestedVoiceNote;
     if (type === 'chat') {
-      file.chatScope=String(req.body.chatScope || 'PRIVATE').toUpperCase() === 'GLOBAL' ? 'GLOBAL' : 'PRIVATE';
-      file.chatParticipants=[actor.id,actor.username,actor.name,req.body.recipientId,req.body.recipientUsername,req.body.recipient]
-        .map(value=>String(value || '').trim().toLowerCase()).filter(Boolean);
+      file.chatScope=requestedChatScope;
+      file.chatParticipants=requestedChatParticipants;
+      if (requestedVoiceNote && String(file.name || '').toLowerCase().endsWith('.webm')) { file.mime='audio/webm'; file.mimeType='audio/webm'; }
     }
     addFileRegistryEntry(d,file);
     let updatedCase=null;
@@ -5765,19 +6080,8 @@ app.post('/api/files/upload', uploadAny, async (req, res) => {
     }
     const collections=['files'];
     const collectionRowIds={files:[String(file.id)]};
-    if (updatedCase) {
-      collections.push('cases');
-      collectionRowIds.cases=[String(updatedCase.id || updatedCase.caseId)];
-    }
-    const persistence=await save(d,{
-      actor:actor.name,
-      reason:'file_upload',
-      skipRevisionSnapshot:true,
-      periodicRevisionSnapshot:true,
-      takeSnapshotOwnership:true,
-      collections,
-      collectionRowIds
-    });
+    if (updatedCase) { collections.push('cases'); collectionRowIds.cases=[String(updatedCase.id || updatedCase.caseId)]; }
+    const persistence=await save(d,{actor:actor.name,reason:'file_upload',skipRevisionSnapshot:true,periodicRevisionSnapshot:true,takeSnapshotOwnership:true,collections,collectionRowIds});
     persistenceCommitted=true;
     await recordFileStorageEvent({fileId:file.id,caseId:projectId,action:'FILE_UPLOADED',actor:actor.name,storageKey:file.storageKey,sha256:file.sha256,details:{purpose,name:file.name}});
     const visibleCase=updatedCase ? (sanitizeCasesForRole([updatedCase],actor.role)[0] || updatedCase) : null;
@@ -5790,137 +6094,101 @@ app.post('/api/files/upload', uploadAny, async (req, res) => {
   }
 });
 
-app.get('/api/files/:id',async (req,res)=>{
-  const mode = String(req.query.mode || '').toLowerCase();
-  if(mode !== 'preview' && mode !== 'download') {
-    return res.status(400).json({ ok:false, error:'Use ?mode=preview or ?mode=download' });
-  }
-  const { doc, resolved, denied } = resolveAuthorizedFile(req, res, req.params.id);
-  if (denied) return;
-  if(!doc) return res.status(404).send('File record not found. It may be an older unsaved upload. Please refresh the page or re-upload the file.');
-  if(!resolved) return res.status(410).send('File unavailable on server. The record exists, but the physical file is missing. Please re-upload this file once.');
-  const { stored, fp } = resolved;
-  if(!isResolvedStoragePathAllowed(fp)) return res.status(400).send('Invalid file path');
-  const fileName = doc.name || doc.fileName || stored;
-  const mime = String(doc.mime || doc.mimeType || '').toLowerCase();
-  const lowerName = String(fileName || '').toLowerCase();
-  const isPdf = /\.pdf$/i.test(fileName) || mime.includes('pdf');
-  const imageMimeByExt = lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg') ? 'image/jpeg'
-    : lowerName.endsWith('.png') ? 'image/png'
-    : lowerName.endsWith('.gif') ? 'image/gif'
-    : lowerName.endsWith('.webp') ? 'image/webp'
-    : lowerName.endsWith('.bmp') ? 'image/bmp'
-    : '';
-  const isImage = mime.startsWith('image/') || Boolean(imageMimeByExt);
-  if(mode === 'preview' && !isPdf && !isImage) return res.status(415).send('Preview is available for PDF and image files only.');
-  const fileSize = fs.statSync(fp).size;
+function getStoredFilePreviewDescriptor(doc = {}, resolved = {}) {
+  const fileName=String(doc.name || doc.fileName || resolved.stored || 'file');
+  const extension=`.${fileName.split('.').pop()?.toLowerCase() || ''}`;
+  const mime=String(doc.mime || doc.mimeType || '').toLowerCase();
+  const purpose=String(doc.purpose || doc.type || doc.folder || fileName).toLowerCase();
+  const genericMime = !mime || mime === 'application/octet-stream';
+  const imageExtensions=new Set(['.jpg','.jpeg','.png','.gif','.webp','.bmp','.heic','.heif']);
+  const videoExtensions=new Set(['.mp4','.mov','.avi','.mkv','.webm']);
+  const audioExtensions=new Set(['.mp3','.wav','.m4a','.ogg','.webm']);
+  const textExtensions=new Set(['.txt','.csv','.json','.md','.log','.rtf']);
+  const officeExtensions=new Set(['.doc','.docx','.xls','.xlsx','.ppt','.pptx']);
+  const cadExtensions=new Set(['.dwg','.dxf']);
+  const extensionKind = imageExtensions.has(extension) ? 'image'
+    : videoExtensions.has(extension) ? 'video'
+    : audioExtensions.has(extension) ? 'audio'
+    : textExtensions.has(extension) ? 'text'
+    : officeExtensions.has(extension) ? 'office'
+    : cadExtensions.has(extension) ? 'cad' : 'file';
+  const kind = extension === '.webm' && /(voice|audio)/.test(purpose) ? 'audio'
+    : mime.includes('pdf') || extension === '.pdf' ? 'pdf'
+    : mime.startsWith('image/') ? 'image'
+    : mime.startsWith('video/') ? 'video'
+    : mime.startsWith('audio/') ? 'audio'
+    : mime.startsWith('text/') ? 'text'
+    : genericMime ? extensionKind
+    : officeExtensions.has(extension) ? 'office'
+    : cadExtensions.has(extension) ? 'cad' : 'file';
+  const inferredMimeByExtension={
+    '.jpg':'image/jpeg','.jpeg':'image/jpeg','.png':'image/png','.gif':'image/gif','.webp':'image/webp','.bmp':'image/bmp','.heic':'image/heic','.heif':'image/heif',
+    '.mp4':'video/mp4','.mov':'video/quicktime','.avi':'video/x-msvideo','.mkv':'video/x-matroska','.webm':kind === 'audio' ? 'audio/webm' : 'video/webm',
+    '.mp3':'audio/mpeg','.wav':'audio/wav','.m4a':'audio/mp4','.ogg':'audio/ogg',
+    '.txt':'text/plain; charset=utf-8','.csv':'text/csv; charset=utf-8','.json':'application/json; charset=utf-8','.md':'text/markdown; charset=utf-8','.log':'text/plain; charset=utf-8','.rtf':'application/rtf'
+  };
+  const mimeType = extension === '.webm' && kind === 'audio' ? 'audio/webm'
+    : (!genericMime ? mime : kind === 'pdf' ? 'application/pdf' : (inferredMimeByExtension[extension] || 'application/octet-stream'));
+  return {fileName,extension,mime,mimeType,kind,fp:resolved.fp,stored:resolved.stored};
+}
+function contentDispositionValue(mode = 'attachment', fileName = 'file') {
+  const raw=String(fileName || 'file').replace(/[\r\n\0]/g,'').slice(0,240) || 'file';
+  const ascii=raw.replace(/[^\x20-\x7e]/g,'_').replace(/["\\]/g,'_');
+  const encoded=encodeURIComponent(raw).replace(/['()*]/g,char=>`%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `${mode}; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+function applyPrivateFileResponseHeaders(res, descriptor = {}, mode = 'download', size = null) {
+  const fileName=descriptor.fileName;
   res.setHeader('Access-Control-Expose-Headers','Content-Disposition, Content-Length, Content-Type, Accept-Ranges');
-  res.setHeader('Cache-Control', 'private, no-store, max-age=0, must-revalidate');
+  res.setHeader('Cache-Control','private, no-store, max-age=0, must-revalidate');
   res.setHeader('X-Content-Type-Options','nosniff');
-  if (mode === 'preview') res.setHeader('Content-Security-Policy',"sandbox; default-src 'none'; img-src 'self' data: blob:; style-src 'unsafe-inline'");
-  res.setHeader('Content-Length', String(fileSize));
-  if(isPdf) res.type('application/pdf');
-  else if(isImage) res.type(mime.startsWith('image/') ? mime : imageMimeByExt || 'application/octet-stream');
-  else if(doc.mime || doc.mimeType) res.type(doc.mime || doc.mimeType);
-  res.setHeader('Content-Disposition', `${mode === 'preview' ? 'inline' : 'attachment'}; filename="${safeHeaderFileName(fileName)}"`);
+  res.setHeader('Accept-Ranges','bytes');
+  if (mode === 'preview') res.setHeader('Content-Security-Policy',"sandbox; default-src 'none'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'unsafe-inline'");
+  if (descriptor.mimeType) res.setHeader('Content-Type',descriptor.mimeType);
+  if (Number.isFinite(size)) res.setHeader('Content-Length',String(size));
+  res.setHeader('Content-Disposition',contentDispositionValue(mode === 'preview' ? 'inline' : 'attachment',fileName));
+}
+async function sendAuthorizedStoredFile(req,res,mode='download') {
+  const {doc,resolved,denied}=resolveAuthorizedFile(req,res,req.params.id);
+  if (denied) return;
+  if (!doc) return res.status(404).send('File record not found. It may be an older unsaved upload. Please refresh the page or re-upload the file.');
+  if (!resolved) return res.status(410).send('File unavailable on server. The record exists, but the physical file is missing. Please re-upload this file once.');
+  const descriptor=getStoredFilePreviewDescriptor(doc,resolved);
+  const fp=descriptor.fp;
+  if (!isResolvedStoragePathAllowed(fp)) return res.status(400).send('Invalid file path');
+  if (mode === 'preview' && !['pdf','image','video','audio','text'].includes(descriptor.kind)) return res.status(415).send('Inline preview is not available for this file type. Download the file instead.');
+  const stat=await fs.promises.stat(fp);
+  applyPrivateFileResponseHeaders(res,descriptor,mode,stat.size);
   return res.sendFile(fp);
+}
+
+app.get('/api/files/:id',async (req,res)=>{
+  const mode=String(req.query.mode || '').toLowerCase();
+  if (!['preview','download'].includes(mode)) return res.status(400).json({ok:false,error:'Use ?mode=preview or ?mode=download'});
+  return sendAuthorizedStoredFile(req,res,mode);
 });
 app.get('/api/files/:id/status',async (req,res)=>{
-  const { doc, resolved, denied } = resolveAuthorizedFile(req, res, req.params.id);
+  const {doc,resolved,denied}=resolveAuthorizedFile(req,res,req.params.id);
   if (denied) return;
-  res.json({
-    ok: true,
-    found: !!doc,
-    available: !!resolved,
-    id: req.params.id,
-    name: doc?.name || doc?.fileName || doc?.storedName || '',
-    previewUrl: doc ? `/api/files/${doc.id || req.params.id}/preview` : '',
-    previewDataUrl: doc ? `/api/files/${doc.id || req.params.id}/preview-data` : '',
-    downloadUrl: doc ? `/api/files/${doc.id || req.params.id}/download` : ''
-  });
+  const descriptor=doc && resolved ? getStoredFilePreviewDescriptor(doc,resolved) : null;
+  res.json({ok:true,found:!!doc,available:!!resolved,id:req.params.id,name:doc?.name || doc?.fileName || doc?.storedName || '',kind:descriptor?.kind || 'file',mimeType:descriptor?.mimeType || '',size:doc?.size || null,previewUrl:doc ? `/api/files/${doc.id || req.params.id}/preview` : '',previewDataUrl:doc ? `/api/files/${doc.id || req.params.id}/preview-data` : '',downloadUrl:doc ? `/api/files/${doc.id || req.params.id}/download` : ''});
 });
-
 app.get('/api/files/:id/preview-data',async (req,res)=>{
-  const { doc, resolved, denied } = resolveAuthorizedFile(req, res, req.params.id);
+  const {doc,resolved,denied}=resolveAuthorizedFile(req,res,req.params.id);
   if (denied) return;
-  if(!doc) return res.status(404).json({ ok:false, error:'File record not found. Please refresh the page or re-upload the file.' });
-  if(!resolved) return res.status(410).json({ ok:false, error:'File unavailable on server. Please re-upload this file once.' });
-  const { stored, fp } = resolved;
-  if(!isResolvedStoragePathAllowed(fp)) return res.status(400).json({ ok:false, error:'Invalid file path' });
-  const fileName = doc.name || doc.fileName || stored;
-  const mime = String(doc.mime || doc.mimeType || '').toLowerCase();
-  const lowerName = String(fileName || '').toLowerCase();
-  const isPdf = /\.pdf$/i.test(fileName) || mime.includes('pdf');
-  const imageMimeByExt = lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg') ? 'image/jpeg'
-    : lowerName.endsWith('.png') ? 'image/png'
-    : lowerName.endsWith('.gif') ? 'image/gif'
-    : lowerName.endsWith('.webp') ? 'image/webp'
-    : lowerName.endsWith('.bmp') ? 'image/bmp'
-    : '';
-  const isImage = mime.startsWith('image/') || Boolean(imageMimeByExt);
-  if(!isPdf && !isImage) return res.status(415).json({ ok:false, error:'Preview is available for PDF and image files only.' });
-  const stat = fs.statSync(fp);
+  if (!doc) return res.status(404).json({ok:false,error:'File record not found. Please refresh the page or re-upload the file.'});
+  if (!resolved) return res.status(410).json({ok:false,error:'File unavailable on server. Please re-upload this file once.'});
+  const descriptor=getStoredFilePreviewDescriptor(doc,resolved);
+  if (!['pdf','image'].includes(descriptor.kind)) return res.status(415).json({ok:false,error:'Legacy inline preview data is available only for PDF and image files.'});
+  const stat=await fs.promises.stat(descriptor.fp);
   if (stat.size > MAX_INLINE_PREVIEW_BYTES) return res.status(413).json({ok:false,code:'INLINE_PREVIEW_TOO_LARGE',error:`Inline preview data is limited to ${MAX_INLINE_PREVIEW_MB} MB. Use the streamed preview or download instead.`});
-  const mimeType = isPdf ? 'application/pdf' : (mime.startsWith('image/') ? mime : imageMimeByExt || 'application/octet-stream');
-  const base64 = fs.readFileSync(fp).toString('base64');
+  const bytes=await fs.promises.readFile(descriptor.fp);
   res.setHeader('Cache-Control','private, no-store, max-age=0, must-revalidate');
   res.setHeader('X-Content-Type-Options','nosniff');
-  return res.json({ ok:true, id: doc.id || req.params.id, name: fileName, kind: isPdf ? 'pdf' : 'image', mimeType, size: stat.size, dataUrl: `data:${mimeType};base64,${base64}` });
+  res.json({ok:true,id:doc.id || req.params.id,name:descriptor.fileName,kind:descriptor.kind,mimeType:descriptor.mimeType,size:stat.size,dataUrl:`data:${descriptor.mimeType};base64,${bytes.toString('base64')}`});
 });
-
-app.get('/api/files/:id/preview',async (req,res)=>{
-  const { doc, resolved, denied } = resolveAuthorizedFile(req, res, req.params.id);
-  if (denied) return;
-  if(!doc) {
-    return res.status(404).send('File record not found. It may be an older unsaved upload. Please refresh the page or re-upload the file.');
-  }
-  if(!resolved) {
-    return res.status(410).send('File unavailable on server. The record exists, but the physical file is missing. Please re-upload this file once.');
-  }
-  const { stored, fp } = resolved;
-  if(!isResolvedStoragePathAllowed(fp)) return res.status(400).send('Invalid file path');
-  const fileName = doc.name || doc.fileName || stored;
-  const mime = String(doc.mime || doc.mimeType || '').toLowerCase();
-  const lowerName = String(fileName || '').toLowerCase();
-  const isPdf = /\.pdf$/i.test(fileName) || mime.includes('pdf');
-  const imageMimeByExt = lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg') ? 'image/jpeg'
-    : lowerName.endsWith('.png') ? 'image/png'
-    : lowerName.endsWith('.gif') ? 'image/gif'
-    : lowerName.endsWith('.webp') ? 'image/webp'
-    : lowerName.endsWith('.bmp') ? 'image/bmp'
-    : '';
-  const isImage = mime.startsWith('image/') || Boolean(imageMimeByExt);
-  if(!isPdf && !isImage) return res.status(415).send('Preview is available for PDF and image files only.');
-  const fileSize = fs.statSync(fp).size;
-  res.setHeader('Access-Control-Expose-Headers','Content-Disposition, Content-Length, Content-Type');
-  res.setHeader('Cache-Control','private, no-store, max-age=0, must-revalidate');
-  res.setHeader('X-Content-Type-Options','nosniff');
-  res.setHeader('Content-Type', isPdf ? 'application/pdf' : (mime.startsWith('image/') ? mime : imageMimeByExt || 'application/octet-stream'));
-  res.setHeader('Content-Length', String(fileSize));
-  res.setHeader('Content-Disposition', `inline; filename="${safeHeaderFileName(fileName)}"`);
-  return res.sendFile(fp);
-});
-app.get('/api/files/:id/download',async (req,res)=>{
-  const { doc, resolved, denied } = resolveAuthorizedFile(req, res, req.params.id);
-  if (denied) return;
-  if(!doc) {
-    return res.status(404).send('File record not found. It may be an older unsaved upload. Please refresh the page or re-upload the file.');
-  }
-  if(!resolved) {
-    return res.status(410).send('File unavailable on server. The record exists, but the physical file is missing. Please re-upload this file once.');
-  }
-  const { stored, fp } = resolved;
-  if(!isResolvedStoragePathAllowed(fp)) return res.status(400).send('Invalid file path');
-  res.setHeader('Access-Control-Expose-Headers','Content-Disposition, Content-Length, Content-Type');
-  res.setHeader('Cache-Control','private, no-store, max-age=0, must-revalidate');
-  res.setHeader('X-Content-Type-Options','nosniff');
-  const fileSize = fs.statSync(fp).size;
-  const fileName = doc.name || doc.fileName || stored;
-  res.setHeader('Content-Length', String(fileSize));
-  if (/\.pdf$/i.test(fileName) || String(doc.mime || doc.mimeType || '').toLowerCase().includes('pdf')) res.type('application/pdf');
-  else if (doc.mime || doc.mimeType) res.type(doc.mime || doc.mimeType);
-  res.download(fp, safeHeaderFileName(fileName));
-});
+app.get('/api/files/:id/preview',async (req,res)=>sendAuthorizedStoredFile(req,res,'preview'));
+app.get('/api/files/:id/download',async (req,res)=>sendAuthorizedStoredFile(req,res,'download'));
 
 app.delete('/api/files/:id',async (req,res)=>{
   try {
@@ -6597,13 +6865,19 @@ async function startServer() {
   try {
     await initStore();
     await migrateLegacyCredentials();
+    await operationalJobs.resolveFailures('STATE_PERSISTENCE', {
+      recoveredAt:now(),
+      stateVersion,
+      reason:'startup_integrity_verified'
+    }).catch(() => {});
     startupFailure=null;
   } catch (error) {
     startupFailure={
       code:error?.code || 'STARTUP_VALIDATION_FAILED',
       message:error?.message || String(error),
       at:new Date().toISOString(),
-      retryable:isRetryableStartupFailure(error)
+      retryable:isRetryableStartupFailure(error),
+      phase:'startup'
     };
     // Keep one stable maintenance process listening instead of letting PM2
     // restart hundreds of times. Health endpoints remain available and every

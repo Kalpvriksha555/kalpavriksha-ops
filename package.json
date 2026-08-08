@@ -1,6 +1,6 @@
 {
   "name": "kalpavriksha-designs-ops",
-  "version": "1.9.24-overall-stability-data-safety",
+  "version": "1.9.30-runtime-persistence-recovery",
   "type": "module",
   "scripts": {
     "dev": "node scripts/start-all.mjs",
@@ -57,7 +57,7 @@
     "verify:live-stack": "node scripts/live-stack-check.mjs",
     "verify:matrix": "node scripts/full-release-verifier-matrix.mjs",
     "db:integrity:repair": "npm run db:integrity:repair --prefix backend",
-    "db:integrity:canonicalize-current": "npm run db:integrity:canonicalize-current --prefix backend"
+    "deploy:vps": "bash scripts/launch-deploy-1.9.30-vps.sh"
   },
   "dependencies": {
     "@vitejs/plugin-react": "6.0.3",

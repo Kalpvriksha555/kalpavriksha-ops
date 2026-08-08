@@ -96,7 +96,8 @@ test('multipart middleware cleans temporary files on parser errors and client di
   const end = server.indexOf("const roles =", start);
   const block = server.slice(start, end);
   assert.match(block, /if \(err\) \{[\s\S]*cleanupRequestTempUploads\(req\)/);
-  assert.match(block, /res\.once\('finish',\(\)=>\{ cleanupTemps\(\); releaseRequestStorageLeases\(req\); \}\)/);
+  assert.match(block, /const cleanupAll=\(\)=>\{ cleanupTemps\(\); releaseRequestStorageLeases\(req\); \}/);
+  assert.match(block, /res\.once\('finish',cleanupAll\)/);
   assert.match(block, /res\.once\('close',cleanupTemps\)/);
 });
 

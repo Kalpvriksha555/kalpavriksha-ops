@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Archive, Calendar, Check, ChevronDown, ChevronRight, Filter, MapPin, Search } from 'lucide-react';
-import { formatDateTime } from '../../utils/date';
+import { formatDateTime, formatMonthLabel } from '../../utils/date';
 import { formatTaskId, getEstimateDetails, getLatestCompletedFileName, getTaskDescription } from '../../utils/taskDisplayUtils';
 import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass } from '../../utils/paymentStatusUtils';
 import { getArchiveBank, getArchiveLocation, getCompletedDateKey, groupArchivedByLocation, matchesArchiveSearch } from '../../utils/archiveUtils.js';
@@ -86,14 +86,13 @@ export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, arc
   };
 
   const archived = useMemo(() => (projects || []).filter((project) => project.status === 'Completed' && !isRevisionWorkItem(project)).sort((a, b) => Number(b.completedAt || 0) - Number(a.completedAt || 0)), [projects]);
-  const months = useMemo(() => [...new Set(archived.map((project) => project.completedAt ? new Date(project.completedAt).toLocaleString('default', { month: 'long', year: 'numeric' }) : null).filter(Boolean))], [archived]);
+  const months = useMemo(() => [...new Set(archived.map((project) => project.completedAt ? formatMonthLabel(project.completedAt) : null).filter(Boolean))], [archived]);
   const banks = useMemo(() => [...new Set(archived.map(getArchiveBank))].sort(), [archived]);
   const locations = useMemo(() => [...new Set(archived.map(getArchiveLocation))].sort(), [archived]);
   const filtered = useMemo(() => archived.filter((project) => {
     if (!project.completedAt || !matchesArchiveSearch(project, state.searchText, getArchiveSearchExtras(project))) return false;
-    const date = new Date(project.completedAt);
     if (state.filterDate && getCompletedDateKey(project.completedAt) !== state.filterDate) return false;
-    if (state.filterMonth !== 'All' && date.toLocaleString('default', { month: 'long', year: 'numeric' }) !== state.filterMonth) return false;
+    if (state.filterMonth !== 'All' && formatMonthLabel(project.completedAt) !== state.filterMonth) return false;
     if (state.selectedBanks.length && !state.selectedBanks.includes(getArchiveBank(project))) return false;
     if (state.selectedLocations.length && !state.selectedLocations.includes(getArchiveLocation(project))) return false;
     return true;

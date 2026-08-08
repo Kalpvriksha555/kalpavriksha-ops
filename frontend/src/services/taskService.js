@@ -181,7 +181,7 @@ export const fetchBackendState = async ({ apiBase, headers = {}, includePerforma
 
 const TASK_WRITE_TIMEOUT_MS = 2 * 60 * 1000;
 
-export const createTaskApi = async ({ apiBase, headers = {}, task, expectedTaskVersion, mutationId }) => {
+export const createTaskApi = async ({ apiBase, headers = {}, task, expectedTaskVersion, mutationId, operation = '' }) => {
   let res;
   const normalizedTask=normalizeTaskRecord(task);
   const expected=expectedTaskVersion ?? normalizedTask.taskVersion ?? 0;
@@ -191,7 +191,7 @@ export const createTaskApi = async ({ apiBase, headers = {}, task, expectedTaskV
       method: 'POST',
       headers,
       timeoutMs:TASK_WRITE_TIMEOUT_MS,
-      body: JSON.stringify({ project: normalizedTask, expectedTaskVersion:expected, mutationId:stableMutationId })
+      body: JSON.stringify({ project: normalizedTask, expectedTaskVersion:expected, mutationId:stableMutationId, operation:String(operation || '').trim().toLowerCase() })
     });
   } catch (error) {
     if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
@@ -263,7 +263,7 @@ export const saveFinanceStatusApi = async ({ apiBase, headers = {}, taskId, stat
     return parseJsonSafe(res);
   } catch (error) {
     if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
-      const timeoutError = new Error('Finance auto-save took too long. Your values remain on screen. Leave the field again or make another edit to retry safely; the same mutation ID prevents duplicate posting if the first attempt completed.');
+      const timeoutError = new Error('Finance save took too long. Your values remain on screen. Select Save Payment Details again; the same mutation ID prevents duplicate posting if the first attempt completed.');
       timeoutError.name = 'FinanceTimeoutError';
       timeoutError.code = 'FINANCE_SAVE_TIMEOUT';
       throw timeoutError;

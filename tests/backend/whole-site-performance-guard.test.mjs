@@ -9,7 +9,8 @@ test('routine writes keep relational durability while reducing foreground recove
   assert.match(server, /STATE_REVISION_SNAPSHOT_INTERVAL[^\n]*100/);
   assert.match(server, /STATE_REVISION_SNAPSHOT_MAX_AGE_MINUTES[^\n]*60/);
   assert.match(server, /periodicRevisionSnapshot:metadata\.periodicRevisionSnapshot \?\? true/);
-  assert.match(repository, /UPDATE app_state_metadata SET state_version=\$2,snapshot_hash=\$3,entity_counts=\$4::jsonb/);
+  assert.match(repository, /SET state_version=\$2,snapshot_hash=\$3,entity_counts=\$4::jsonb/);
+  assert.match(repository, /WHERE key=\$1 AND state_version=\$5 AND snapshot_hash=\$6/);
 });
 
 test('case response shaping avoids repeated full deep clones', () => {
