@@ -22,7 +22,7 @@ import { updateProfileApi } from './services/profileService';
 import { sendRealOtp, verifyRealOtp } from './services/otpService';
 import { authFetch, loginApi, clearBrowserSessionApi, logoutApi, changePasswordApi, requestPasswordRecoveryApi, resetPasswordRecoveryApi, createAuthUserApi, updateAuthUserApi, resetAuthUserPasswordApi } from './services/authService';
 import { sendChatMessageApi, updateChatMessageApi, deleteChatMessageApi, markChatReadApi, markNotificationReadApi, markAllNotificationsReadApi, createNotificationApi } from './services/chatService';
-import { FINANCE_FLUSH_EVENT, FINANCE_SYNC_EVENT, advanceFinanceOutboxAfterConfirmation, financeActorKey, getFinanceOutboxRecords, getFinanceSyncSnapshot, markFinanceOutboxAttempt, markFinanceOutboxError, queueFinanceDraft } from './services/financeOutboxService.js';
+import { FINANCE_FLUSH_EVENT, FINANCE_SYNC_EVENT, advanceFinanceOutboxAfterConfirmation, financeActorKey, getFinanceOutboxRecord, getFinanceOutboxRecords, markFinanceOutboxAttempt, markFinanceOutboxError, queueFinanceDraft, requestFinanceOutboxFlush } from './services/financeOutboxService.js';
 import { buildNotification, getVisibleNotifications, NOTIFICATION_CATEGORIES, getNotificationCategory, getNotificationPriority, buildActivityTimeline, isNotificationForUser } from './services/notificationService';
 import {
   Briefcase, CheckCircle, Clock, FileText, LayoutDashboard, LogOut,
@@ -2800,14 +2800,17 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   const [filePreviewUi, setFilePreviewUi] = useState({ zoom: 1, rotation: 0, fitMode: 'width' });
   const [ledgerDraft, setLedgerDraft] = useState(() => createFinanceLedgerDraft(project));
   const [ledgerDirty, setLedgerDirty] = useState(false);
-  const [isSavingLedger, setIsSavingLedger] = useState(false);
+  const [ledgerDraftUnsafe, setLedgerDraftUnsafe] = useState(false);
   const [ledgerSaveMessage, setLedgerSaveMessage] = useState('');
   const [isUploadingLedgerReceipt, setIsUploadingLedgerReceipt] = useState(false);
-  const ledgerMutationRef = useRef({ signature:'', id:'' });
+  const ledgerDraftRef = useRef(createFinanceLedgerDraft(project));
+  const ledgerDraftUnsafeRef = useRef(false);
+  const ledgerAutoSaveTimerRef = useRef(null);
   const latestProjectRef = useRef(project);
   const fileTransferAbortRef = useRef(null);
   const fileTransferGenerationRef = useRef(0);
   const financeActorId = String(user?.id || user?.username || user?.name || '').trim().toLowerCase();
+  const showFinancials = user.role === ROLES.ADMIN;
 
   useEffect(() => {
     latestProjectRef.current = project;
@@ -2820,9 +2823,47 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   }, [onServerProjectConfirmed]);
 
   useEffect(() => {
-    if (ledgerDirty || isSavingLedger) return;
-    setLedgerDraft(createFinanceLedgerDraft(project));
-  }, [project.id, project.financeVersion, project.paymentTrackingUpdatedAt, project.ledger?.updatedAt, ledgerDirty, isSavingLedger]);
+    const queued = getFinanceOutboxRecord(project.id || project.caseId, financeActorId);
+    if (queued?.draft) {
+      ledgerDraftRef.current = queued.draft;
+      setLedgerDraft(queued.draft);
+      setLedgerDirty(true);
+      ledgerDraftUnsafeRef.current = false;
+      setLedgerDraftUnsafe(false);
+      setLedgerSaveMessage(queued.state === 'error' ? 'Needs attention • saved safely and will retry' : (queued.state === 'syncing' ? 'Syncing in background…' : 'Queued safely • auto-saving…'));
+      return;
+    }
+    if (ledgerDraftUnsafeRef.current) return;
+    const nextDraft = createFinanceLedgerDraft(project);
+    ledgerDraftRef.current = nextDraft;
+    setLedgerDraft(nextDraft);
+    setLedgerDirty(false);
+    setLedgerDraftUnsafe(false);
+    setLedgerSaveMessage(project.paymentTrackingUpdatedAt ? `Synced at ${new Date(Number(project.paymentTrackingUpdatedAt) || Date.now()).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' })}` : 'Finance is synced');
+  }, [project.id, project.caseId, project.financeVersion, project.paymentTrackingUpdatedAt, project.ledger?.updatedAt, financeActorId]);
+
+  useEffect(() => () => {
+    if (ledgerAutoSaveTimerRef.current) clearTimeout(ledgerAutoSaveTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    if (!showFinancials || !financeActorId) return undefined;
+    const reflectFinanceSyncState = () => {
+      const record = getFinanceOutboxRecord(project.id || project.caseId, financeActorId);
+      if (record) {
+        if (record.state === 'syncing') setLedgerSaveMessage('Syncing in background…');
+        else if (record.state === 'error') setLedgerSaveMessage(record.retryable === false ? 'Needs attention • server rejected this finance update' : 'Needs attention • saved safely and will retry');
+        else setLedgerSaveMessage('Queued safely • auto-saving…');
+        return;
+      }
+      if (!ledgerDraftUnsafeRef.current && ledgerDraftRef.current) {
+        setLedgerDirty(false);
+        setLedgerSaveMessage(`Synced at ${new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' })}`);
+      }
+    };
+    window.addEventListener(FINANCE_SYNC_EVENT, reflectFinanceSyncState);
+    return () => window.removeEventListener(FINANCE_SYNC_EVENT, reflectFinanceSyncState);
+  }, [showFinancials, financeActorId, project.id, project.caseId]);
 
   const closeFilePreview = useCallback(() => {
     setFilePreview((current) => {
@@ -2876,21 +2917,25 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   const isAssignedToMe = samePerson(project.assignedTo, user.name);
   const canDesignerRevertOwnTask = user.role === ROLES.DESIGNER && isAssignedToMe;
   const canRevertTask = (canManage || canDesignerRevertOwnTask) && project.status !== 'Lead Received';
-  const showFinancials = user.role === ROLES.ADMIN;
   const activeDraftingForUser = (usersProjects = []) => (usersProjects || []).find(p => samePerson(p.assignedTo, project.assignedTo || user.name) && p.status === 'Drafting' && String(p.id) !== String(project.id));
 
   useEffect(() => {
-    if (!ledgerDirty) return undefined;
+    if (!ledgerDraftUnsafe) return undefined;
     const warnUnsavedFinance = (event) => {
       event.preventDefault();
       event.returnValue = '';
     };
     window.addEventListener('beforeunload', warnUnsavedFinance);
     return () => window.removeEventListener('beforeunload', warnUnsavedFinance);
-  }, [ledgerDirty]);
+  }, [ledgerDraftUnsafe]);
 
   const handleTaskBack = async () => {
-    if (ledgerDirty && !(await requestConfirmation('Payment details have unsaved changes. Leave this task and discard them?', { title:'Discard finance changes?', tone:'danger', confirmLabel:'Discard changes' }))) return;
+    if (ledgerDraftUnsafeRef.current && !(await requestConfirmation('These payment details are not yet safely queued because one value is invalid or browser recovery storage is unavailable. Leave this task and discard them?', { title:'Discard unsynced finance changes?', tone:'danger', confirmLabel:'Discard changes' }))) return;
+    if (ledgerAutoSaveTimerRef.current) {
+      clearTimeout(ledgerAutoSaveTimerRef.current);
+      ledgerAutoSaveTimerRef.current = null;
+    }
+    if (ledgerDirty && !ledgerDraftUnsafeRef.current) requestFinanceOutboxFlush();
     onBack();
   };
 
@@ -3586,10 +3631,10 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       const receipt={...uploaded};
       delete receipt._serverCase;
       delete receipt._persistence;
-      setLedgerDraft(previous => ({ ...previous, screenshot:receipt }));
-      setLedgerDirty(true);
-      ledgerMutationRef.current = { signature:'', id:'' };
-      setLedgerSaveMessage('Receipt uploaded. Select Save payment details to link it to the ledger.');
+      const nextDraft = { ...(ledgerDraftRef.current || ledgerDraft), screenshot:receipt };
+      ledgerDraftRef.current = nextDraft;
+      setLedgerDraft(nextDraft);
+      queueLedgerDraftForBackgroundSync(nextDraft, { flush:true, message:'Receipt uploaded • syncing automatically…' });
     } catch (error) {
       console.error('Payment receipt upload failed:', error);
       setLedgerSaveMessage(error?.message || 'Payment receipt upload failed.');
@@ -3682,77 +3727,39 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     setNoteAttachments([]);
   };
 
-  const updateLedger = (field, value) => {
-    if (!showFinancials || isSavingLedger) return;
-    setLedgerDraft(previous => ({ ...previous, [field]:value }));
-    setLedgerDirty(true);
-    setLedgerSaveMessage('Unsaved finance changes');
-    ledgerMutationRef.current = { signature:'', id:'' };
-  };
-
-  const handleSaveLedger = async () => {
-    if (!showFinancials || isSavingLedger || !ledgerDirty) return;
-    let estimate;
-    let amountIn;
-    let expenses;
-    let refund;
-    try {
-      estimate = parseFinanceDraftAmount(ledgerDraft.estimate, 'Estimate');
-      amountIn = parseFinanceDraftAmount(ledgerDraft.amountIn, 'Amount received');
-      expenses = parseFinanceDraftAmount(ledgerDraft.expenses, 'Expenses');
-      refund = parseFinanceDraftAmount(ledgerDraft.refund, 'Refund');
-    } catch (error) {
-      setLedgerSaveMessage(error.message);
-      notifyUser(error.message);
-      return;
-    }
-
-    if (refund > amountIn) {
-      const message = 'Refund cannot be greater than the total amount received.';
-      setLedgerSaveMessage(message);
-      notifyUser(message);
-      return;
-    }
+  const buildFinanceProjectFromDraft = (draft = ledgerDraftRef.current) => {
+    const baseProject = latestProjectRef.current || project;
+    const estimate = parseFinanceDraftAmount(draft.estimate, 'Estimate');
+    const amountIn = parseFinanceDraftAmount(draft.amountIn, 'Amount received');
+    const expenses = parseFinanceDraftAmount(draft.expenses, 'Expenses');
+    const refund = parseFinanceDraftAmount(draft.refund, 'Refund');
+    if (refund > amountIn) throw new Error('Refund cannot be greater than the total amount received.');
 
     const now = Date.now();
-    const paymentDate = String(ledgerDraft.date || '').trim();
-    if (amountIn > 0 && !paymentDate) {
-      const message = 'Select the actual payment date before saving a received amount.';
-      setLedgerSaveMessage(message);
-      notifyUser(message);
-      return;
-    }
+    const paymentDate = String(draft.date || '').trim();
+    if (amountIn > 0 && !paymentDate) throw new Error('Select the actual payment date for a received amount.');
     const normalizedPaymentDate = normalizeTaskDateKey(paymentDate || getIndiaDateKey(now), '');
-    if (paymentDate && normalizedPaymentDate !== paymentDate) {
-      const message = 'Select a valid payment date.';
-      setLedgerSaveMessage(message);
-      notifyUser(message);
-      return;
-    }
-    if (paymentDate && paymentDate > getIndiaDateKey(now)) {
-      const message = 'Payment date cannot be in the future.';
-      setLedgerSaveMessage(message);
-      notifyUser(message);
-      return;
-    }
-    const accountingPeriod = normalizeAccountingMonthKey(getProjectFinanceMonthKey(project), getCurrentAccountingMonthKey(now));
+    if (paymentDate && normalizedPaymentDate !== paymentDate) throw new Error('Select a valid payment date.');
+    if (paymentDate && paymentDate > getIndiaDateKey(now)) throw new Error('Payment date cannot be in the future.');
+
+    const accountingPeriod = normalizeAccountingMonthKey(getProjectFinanceMonthKey(baseProject), getCurrentAccountingMonthKey(now));
     const nextLedger = {
-      ...(project.ledger || {}),
+      ...(baseProject.ledger || {}),
       amountIn,
       expenses,
       refund,
-      date:paymentDate || project.ledger?.date || project.paymentDate || getIndiaDateKey(now),
+      date:paymentDate || baseProject.ledger?.date || baseProject.paymentDate || getIndiaDateKey(now),
       accountingPeriod,
-      receivedFrom:String(ledgerDraft.receivedFrom || '').trim(),
-      txnId:String(ledgerDraft.txnId || '').trim(),
-      mode:String(ledgerDraft.mode || '').trim(),
-      note:String(ledgerDraft.note || '').trim(),
-      screenshot:ledgerDraft.screenshot || null,
+      receivedFrom:String(draft.receivedFrom || '').trim(),
+      txnId:String(draft.txnId || '').trim(),
+      mode:String(draft.mode || '').trim(),
+      note:String(draft.note || '').trim(),
+      screenshot:draft.screenshot || null,
       updatedAt:now,
       updatedBy:user?.name || 'Admin'
     };
     const draftProject = {
-      ...project,
+      ...baseProject,
       estimate,
       financeAccountingPeriod:accountingPeriod,
       ledger:nextLedger,
@@ -3763,7 +3770,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       paymentDate:nextLedger.date
     };
     const computedStatus = derivePaymentTrackingStatusFromData(draftProject);
-    const updatedProject = {
+    return {
       ...draftProject,
       paymentTrackingStatus:computedStatus,
       paymentTrackingUpdatedAt:now,
@@ -3771,38 +3778,59 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       paymentStatus:computedStatus === 'Paid' ? 'YES' : (computedStatus === 'Pending' ? 'PENDING' : 'NOT_UPDATED'),
       paymentReceived:amountIn > 0 ? (computedStatus === 'Paid' ? 'YES' : 'PARTIAL') : 'NO'
     };
-    const signature = JSON.stringify({
-      taskId:project.id || project.caseId,
-      financeVersion:Number(project.financeVersion || 0),
-      estimate,amountIn,expenses,refund,
-      date:nextLedger.date,receivedFrom:nextLedger.receivedFrom,txnId:nextLedger.txnId,
-      mode:nextLedger.mode,note:nextLedger.note,screenshotId:nextLedger.screenshot?.id || nextLedger.screenshot || ''
-    });
-    if (ledgerMutationRef.current.signature !== signature) {
-      ledgerMutationRef.current = { signature, id:createFinanceMutationId() };
-    }
+  };
 
-    setIsSavingLedger(true);
-    setLedgerSaveMessage('Saving payment securely…');
+  const queueLedgerDraftForBackgroundSync = (draft, { flush = false, message = '' } = {}) => {
+    if (!showFinancials) return null;
     try {
-      const confirmed = await onUpdateProject(updatedProject, project, {
-        financeOnly:true,
-        financeMutationId:ledgerMutationRef.current.id
-      });
-      if (!confirmed) {
-        setLedgerSaveMessage('Payment was not saved. Your entered values are still here; refresh the task before retrying if another admin changed it.');
-        return;
+      const financeProject = buildFinanceProjectFromDraft(draft);
+      const queued = queueFinanceDraft({ project: financeProject, draft, user });
+      if (!queued) throw new Error('Browser recovery storage is unavailable. These finance changes are not yet protected.');
+
+      ledgerDraftUnsafeRef.current = false;
+      setLedgerDraftUnsafe(false);
+      setLedgerDirty(true);
+      setLedgerSaveMessage(message || (flush ? 'Syncing in background…' : 'Queued safely • auto-saving…'));
+
+      if (ledgerAutoSaveTimerRef.current) clearTimeout(ledgerAutoSaveTimerRef.current);
+      ledgerAutoSaveTimerRef.current = null;
+      if (flush) {
+        requestFinanceOutboxFlush();
+      } else {
+        ledgerAutoSaveTimerRef.current = setTimeout(() => {
+          ledgerAutoSaveTimerRef.current = null;
+          setLedgerSaveMessage('Syncing in background…');
+          requestFinanceOutboxFlush();
+        }, 650);
       }
-      setLedgerDraft(createFinanceLedgerDraft(confirmed));
-      setLedgerDirty(false);
-      ledgerMutationRef.current = { signature:'', id:'' };
-      setLedgerSaveMessage(`Saved at ${new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' })}`);
+      return queued;
     } catch (error) {
-      setLedgerSaveMessage(error?.message || 'Payment save failed. Your entered values are still available.');
-      notifyUser(error?.message || 'Payment save failed.');
-    } finally {
-      setIsSavingLedger(false);
+      if (ledgerAutoSaveTimerRef.current) clearTimeout(ledgerAutoSaveTimerRef.current);
+      ledgerAutoSaveTimerRef.current = null;
+      ledgerDraftUnsafeRef.current = true;
+      setLedgerDraftUnsafe(true);
+      setLedgerDirty(true);
+      setLedgerSaveMessage(error?.message || 'Finish this finance entry before it can be safely queued.');
+      return null;
     }
+  };
+
+  const updateLedger = (field, value) => {
+    if (!showFinancials) return;
+    const nextDraft = { ...(ledgerDraftRef.current || ledgerDraft), [field]:value };
+    ledgerDraftRef.current = nextDraft;
+    setLedgerDraft(nextDraft);
+    queueLedgerDraftForBackgroundSync(nextDraft);
+  };
+
+  const flushLedgerOnFieldExit = () => {
+    if (!ledgerDirty || ledgerDraftUnsafeRef.current) return;
+    if (ledgerAutoSaveTimerRef.current) {
+      clearTimeout(ledgerAutoSaveTimerRef.current);
+      ledgerAutoSaveTimerRef.current = null;
+    }
+    setLedgerSaveMessage('Syncing in background…');
+    requestFinanceOutboxFlush();
   };
 
   const handlePrintReceipt = () => {
@@ -4552,32 +4580,32 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                  <button onClick={handlePrintReceipt} className="text-xs font-bold text-amber-700 bg-white border border-amber-200 px-3 py-1.5 rounded-lg hover:bg-amber-100 shadow-sm transition-colors">Print Receipt</button>
               </div>
 
-              <div className="space-y-4 text-sm relative z-10">
-                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Total Estimate Amount</label><input type="number" min="0" step="0.01" value={ledgerDraft.estimate} onChange={e => updateLedger('estimate', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+              <div className="space-y-4 text-sm relative z-10" onBlurCapture={flushLedgerOnFieldExit}>
+                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Total Estimate Amount</label><input type="number" min="0" step="0.01" value={ledgerDraft.estimate} onChange={e => updateLedger('estimate', e.target.value)} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
 
                 <div className="grid grid-cols-2 gap-3">
-                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Amount Received</label><input type="number" min="0" step="0.01" value={ledgerDraft.amountIn} onChange={e => updateLedger('amountIn', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-emerald-100 p-2.5 rounded-xl bg-white font-bold text-emerald-700 outline-none focus:border-emerald-400 disabled:opacity-60" /></div>
-                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Actual Expenses</label><input type="number" min="0" step="0.01" value={ledgerDraft.expenses} onChange={e => updateLedger('expenses', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold text-amber-700 outline-none focus:border-amber-400 disabled:opacity-60" placeholder="e.g. print cost" /></div>
+                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Amount Received</label><input type="number" min="0" step="0.01" value={ledgerDraft.amountIn} onChange={e => updateLedger('amountIn', e.target.value)} className="w-full border-2 border-emerald-100 p-2.5 rounded-xl bg-white font-bold text-emerald-700 outline-none focus:border-emerald-400 disabled:opacity-60" /></div>
+                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Actual Expenses</label><input type="number" min="0" step="0.01" value={ledgerDraft.expenses} onChange={e => updateLedger('expenses', e.target.value)} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold text-amber-700 outline-none focus:border-amber-400 disabled:opacity-60" placeholder="e.g. print cost" /></div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
-                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Date Paid</label><input type="date" value={ledgerDraft.date} onChange={e => updateLedger('date', e.target.value)} max={getIndiaDateKey()} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
-                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Refund</label><input type="number" min="0" step="0.01" value={ledgerDraft.refund} onChange={e => updateLedger('refund', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-red-100 p-2.5 rounded-xl bg-white font-bold text-red-600 outline-none focus:border-red-400 disabled:opacity-60" /></div>
+                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Date Paid</label><input type="date" value={ledgerDraft.date} onChange={e => updateLedger('date', e.target.value)} max={getIndiaDateKey()} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                   <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Refund</label><input type="number" min="0" step="0.01" value={ledgerDraft.refund} onChange={e => updateLedger('refund', e.target.value)} className="w-full border-2 border-red-100 p-2.5 rounded-xl bg-white font-bold text-red-600 outline-none focus:border-red-400 disabled:opacity-60" /></div>
                 </div>
 
-                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Received From</label><input type="text" value={ledgerDraft.receivedFrom} onChange={e => updateLedger('receivedFrom', e.target.value)} disabled={isSavingLedger} placeholder="Sender Name" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Received From</label><input type="text" value={ledgerDraft.receivedFrom} onChange={e => updateLedger('receivedFrom', e.target.value)} placeholder="Sender Name" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Transaction ID</label><input type="text" value={ledgerDraft.txnId} onChange={e => updateLedger('txnId', e.target.value)} disabled={isSavingLedger} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
-                  <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Payment Mode</label><input type="text" value={ledgerDraft.mode} onChange={e => updateLedger('mode', e.target.value)} disabled={isSavingLedger} placeholder="Cash / UPI / Bank Transfer / Cheque" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                  <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Transaction ID</label><input type="text" value={ledgerDraft.txnId} onChange={e => updateLedger('txnId', e.target.value)} className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
+                  <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Payment Mode</label><input type="text" value={ledgerDraft.mode} onChange={e => updateLedger('mode', e.target.value)} placeholder="Cash / UPI / Bank Transfer / Cheque" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60" /></div>
                 </div>
-                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Remarks</label><textarea rows={2} value={ledgerDraft.note} onChange={e => updateLedger('note', e.target.value)} disabled={isSavingLedger} placeholder="Optional payment remarks" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60 resize-none" /></div>
+                <div><label className="text-amber-800 block mb-1.5 text-xs font-black uppercase tracking-widest">Remarks</label><textarea rows={2} value={ledgerDraft.note} onChange={e => updateLedger('note', e.target.value)} placeholder="Optional payment remarks" className="w-full border-2 border-amber-100 p-2.5 rounded-xl bg-white font-bold outline-none focus:border-amber-400 disabled:opacity-60 resize-none" /></div>
 
                 <div className="col-span-2 mt-2 border-t-2 border-amber-100 pt-4">
                   <label className="text-amber-800 block mb-3 text-xs font-black uppercase tracking-widest">Payment Screenshot (Optional)</label>
                   <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-                    <label className={`cursor-pointer bg-white px-5 py-3 border-2 border-amber-200 text-amber-700 font-bold rounded-xl hover:bg-amber-100 transition-colors shadow-sm w-full sm:w-auto text-center flex justify-center items-center ${isUploadingLedgerReceipt || isSavingLedger ? 'opacity-60 pointer-events-none' : ''}`}>
+                    <label className={`cursor-pointer bg-white px-5 py-3 border-2 border-amber-200 text-amber-700 font-bold rounded-xl hover:bg-amber-100 transition-colors shadow-sm w-full sm:w-auto text-center flex justify-center items-center ${isUploadingLedgerReceipt ? 'opacity-60 pointer-events-none' : ''}`}>
                       <Upload className="w-5 h-5 mr-2 inline"/> {isUploadingLedgerReceipt ? 'Uploading Receipt…' : 'Upload Receipt'}
-                      <input type="file" className="hidden" accept="image/*,.pdf" disabled={isUploadingLedgerReceipt || isSavingLedger} onChange={handleLedgerScreenshot} />
+                      <input type="file" className="hidden" accept="image/*,.pdf" disabled={isUploadingLedgerReceipt} onChange={handleLedgerScreenshot} />
                     </label>
                     {ledgerDraft.screenshot && typeof ledgerDraft.screenshot === 'object' && (
                       <button type="button" onClick={() => handleTrackedDownload(ledgerDraft.screenshot)} className="text-sm font-black text-indigo-700 hover:text-indigo-800 bg-indigo-50 px-4 py-3 rounded-xl border border-indigo-100 flex items-center transition-colors">
@@ -4597,13 +4625,13 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                     <div>
                       <p className="text-[10px] font-black uppercase tracking-widest text-amber-600">Calculated status</p>
                       <p className="font-black text-slate-800 mt-1">{derivePaymentTrackingStatusFromData({ ...project, estimate:ledgerDraft.estimate, ledger:{ ...(project.ledger || {}), amountIn:ledgerDraft.amountIn, expenses:ledgerDraft.expenses, refund:ledgerDraft.refund, date:ledgerDraft.date } })}</p>
-                      <p className={`text-xs font-bold mt-1 ${ledgerDirty ? 'text-amber-600' : 'text-emerald-600'}`}>{ledgerSaveMessage || (ledgerDirty ? 'Unsaved finance changes' : 'Finance is saved')}</p>
+                      <p className={`text-xs font-bold mt-1 ${ledgerDraftUnsafe ? 'text-red-600' : (ledgerDirty ? 'text-amber-600' : 'text-emerald-600')}`}>{ledgerSaveMessage || (ledgerDraftUnsafe ? 'Needs attention' : (ledgerDirty ? 'Queued safely • auto-saving…' : 'Finance is synced'))}</p>
                     </div>
-                    <button type="button" onClick={handleSaveLedger} disabled={!ledgerDirty || isSavingLedger || isUploadingLedgerReceipt} className="px-5 py-3 rounded-xl bg-slate-900 text-white font-black hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed min-w-[190px]">
-                      {isSavingLedger ? 'Saving Payment…' : 'Save Payment Details'}
-                    </button>
+                    <div className={`px-4 py-2.5 rounded-xl text-xs font-black border ${ledgerDraftUnsafe ? 'bg-red-50 border-red-200 text-red-700' : (ledgerDirty ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-emerald-50 border-emerald-200 text-emerald-700')}`}>
+                      {ledgerDraftUnsafe ? 'Needs attention' : (ledgerDirty ? 'Background sync' : 'Synced')}
+                    </div>
                   </div>
-                  <p className="text-[11px] font-semibold text-slate-500 mt-3">Typing does not write to the server. One durable finance transaction is created only when Save Payment Details is selected.</p>
+                  <p className="text-[11px] font-semibold text-slate-500 mt-3">Changes are secured immediately in the durable browser outbox and sync automatically after a short pause or when you leave a field. You can keep working while the server sync runs.</p>
                 </div>
               </div>
             </div>
@@ -4811,7 +4839,6 @@ function AppShell() {
   const workspaceRefreshInFlightRef = useRef(false);
   const pendingCreateFlushInFlightRef = useRef(false);
   const financeSaveInFlightRef = useRef(new Set());
-  const [financeSyncRevision, setFinanceSyncRevision] = useState(0);
   const workspaceStateVersionRef = useRef(-1);
   const workspaceDataRevisionRef = useRef(-1);
   const workspacePresenceGenerationRef = useRef(-1);
@@ -5418,13 +5445,10 @@ function AppShell() {
     hiddenIntervalMs: 5 * 60_000,
   });
 
-  const financeSyncSnapshot = useMemo(
-    () => getFinanceSyncSnapshot(financeActorKey(currentUser), financeSaveInFlightRef.current.size),
-    [currentUser?.id, currentUser?.username, currentUser?.name, financeSyncRevision]
-  );
   useEffect(() => {
     if (!USE_BACKEND_STATE || !backendStateReady || !isDbReady || !currentUser || currentUser.role !== ROLES.ADMIN) return undefined;
     let cancelled = false;
+    let followUpTimer = null;
     const flush = async () => {
       const actorId = financeActorKey(currentUser);
       const records = getFinanceOutboxRecords(actorId).filter(record => record.retryable !== false);
@@ -5447,8 +5471,14 @@ function AppShell() {
           });
           const confirmed = response?.project || response?.case;
           if (!confirmed || (!response?.persistence?.database && !response?.idempotent)) throw new Error('The finance retry was not confirmed by durable storage.');
-          advanceFinanceOutboxAfterConfirmation({ key: record.key, mutationId: record.mutationId, confirmedFinanceVersion: confirmed.financeVersion, actorId });
+          const advancement = advanceFinanceOutboxAfterConfirmation({ key: record.key, mutationId: record.mutationId, confirmedFinanceVersion: confirmed.financeVersion, actorId });
           applyProjectSnapshot([confirmed], { source: 'finance-outbox-confirmed' });
+          if (advancement?.newerPending && !followUpTimer) {
+            followUpTimer = setTimeout(() => {
+              followUpTimer = null;
+              if (!cancelled) void flush();
+            }, 250);
+          }
         } catch (error) {
           const conflict = String(error?.code || '') === 'FINANCE_VERSION_CONFLICT';
           markFinanceOutboxError(record.key, record.mutationId, error, { retryable: !conflict });
@@ -5457,25 +5487,22 @@ function AppShell() {
           financeSaveInFlightRef.current.delete(record.taskId);
         }
       }
-      if (attempted) setFinanceSyncRevision(value => value + 1);
       return attempted;
     };
-    const handleChanged = () => setFinanceSyncRevision(value => value + 1);
     void flush();
-    const timer = financeSyncSnapshot.total > 0 ? setInterval(flush, 15000) : null;
+    const timer = setInterval(flush, 15000);
     window.addEventListener('online', flush);
     window.addEventListener('focus', flush);
     window.addEventListener(FINANCE_FLUSH_EVENT, flush);
-    window.addEventListener(FINANCE_SYNC_EVENT, handleChanged);
     return () => {
       cancelled = true;
       if (timer) clearInterval(timer);
+      if (followUpTimer) clearTimeout(followUpTimer);
       window.removeEventListener('online', flush);
       window.removeEventListener('focus', flush);
       window.removeEventListener(FINANCE_FLUSH_EVENT, flush);
-      window.removeEventListener(FINANCE_SYNC_EVENT, handleChanged);
     };
-  }, [USE_BACKEND_STATE, backendStateReady, isDbReady, currentUser?.id, currentUser?.role, jsonFinanceSafeHeaders, financeSyncSnapshot.total, applyProjectSnapshot, refreshWorkspaceSnapshot]);
+  }, [USE_BACKEND_STATE, backendStateReady, isDbReady, currentUser?.id, currentUser?.role, jsonFinanceSafeHeaders, applyProjectSnapshot, refreshWorkspaceSnapshot]);
 
   // Phase 4: chat, notification, presence, task and finance changes use dedicated authorised endpoints.
   // Whole-state browser writes are intentionally disabled.
@@ -6056,7 +6083,6 @@ function AppShell() {
           confirmedFinanceVersion: confirmed.financeVersion,
           actorId: queuedFinanceRecord.actorId
         });
-        setFinanceSyncRevision(value => value + 1);
 
         if (financeOnly) {
           setSelectedProject(updatedProject);
@@ -6070,7 +6096,6 @@ function AppShell() {
       } catch (error) {
         console.error('Finance save blocked:', error);
         markFinanceOutboxError(queuedFinanceRecord.key, queuedFinanceRecord.mutationId, error, { retryable: String(error?.code || '') !== 'FINANCE_VERSION_CONFLICT' });
-        setFinanceSyncRevision(value => value + 1);
         const message = error?.code === 'FINANCE_VERSION_CONFLICT'
           ? 'Finance changed on another screen. Your entry was not overwritten. Refresh this task and save again.'
           : (error?.message || 'Finance could not be saved to the server. No local finance change was accepted.');

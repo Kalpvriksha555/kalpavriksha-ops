@@ -58,11 +58,11 @@ test('large browser cache cleanup is deferred and skipped in production backend 
   assert.match(app, /if \(USE_BACKEND_STATE\) return undefined;[\s\S]*requestIdleCallback\(compact/);
 });
 
-test('idle finance synchronization does not repaint the application every fifteen seconds', () => {
+test('idle finance synchronization stays read-only and does not repaint the application every fifteen seconds', () => {
   assert.match(app, /if \(!records\.length\) return false/);
-  assert.match(app, /if \(attempted\) setFinanceSyncRevision/);
-  assert.match(app, /financeSyncSnapshot\.total > 0 \? setInterval\(flush, 15000\) : null/);
-  assert.doesNotMatch(app, /const timer = setInterval\(flush, 15000\)/);
+  assert.match(app, /const timer = setInterval\(flush, 15000\)/);
+  assert.doesNotMatch(app, /setFinanceSyncRevision/);
+  assert.doesNotMatch(app, /financeSyncSnapshot\.total/);
 });
 
 test('backend project synchronization sends row deltas and never reads stale task caches', () => {
