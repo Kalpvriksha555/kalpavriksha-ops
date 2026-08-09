@@ -17,6 +17,14 @@ test('PDF preview starts the authenticated stream without a blocking HEAD round 
   assert.doesNotMatch(fileService.slice(pdfBranch, mediaHeadBranch), /method:\s*['\"]HEAD['\"]/);
 });
 
+test('PDF preview recovery CSS is real CSS text, not escaped newline text', () => {
+  const marker = css.indexOf('/* 2026-08-09: unified PDF preview viewport recovery.');
+  assert.ok(marker >= 0, 'PDF viewport recovery CSS marker is missing');
+  const recoveryCss = css.slice(marker);
+  assert.doesNotMatch(recoveryCss, /\\n/, 'PDF viewport recovery CSS contains literal escaped newlines that PostCSS cannot parse');
+  assert.match(recoveryCss, /\.kalpa-unified-viewer-panel\s*\{\s*\n/);
+});
+
 test('unified PDF viewer has a deterministic near-full-viewport height independent of arbitrary utility generation', () => {
   assert.match(viewer, /kalpa-unified-viewer-panel/);
   assert.match(viewer, /kalpa-unified-pdf-stage/);
