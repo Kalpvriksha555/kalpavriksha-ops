@@ -396,14 +396,14 @@ export const UnifiedFileViewer = ({ file, onClose, onDownload }) => {
               )}
             </div>
           ) : isPdf ? (
-            <div className="w-full h-full bg-slate-900 overflow-hidden flex items-stretch justify-stretch">
+            <div className="kalpa-unified-pdf-stage w-full h-full bg-slate-900 overflow-hidden flex items-stretch justify-stretch">
               {active.url ? (
                 <div className="w-full h-full bg-slate-900 overflow-hidden" style={{ transform: `rotate(${view.rotation}deg)`, transformOrigin: 'center center' }}>
                   <iframe
                     key={`${String(active.url || '').slice(0, 80)}-${view.fit}-${zoomPercent}-${view.rotation}`}
                     title={active.title || title}
                     src={pdfViewerUrl}
-                    className="w-full h-full bg-white border-0 block"
+                    className="kalpa-unified-pdf-frame w-full h-full bg-white border-0 block"
                     style={{ minHeight: '100%', minWidth: '100%' }}
                   />
                 </div>

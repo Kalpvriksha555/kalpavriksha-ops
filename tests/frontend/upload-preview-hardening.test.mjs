@@ -49,8 +49,13 @@ test('uploads and downloads have progress, bounded deadlines and explicit cancel
 });
 
 test('large PDF and media previews stream directly rather than buffering the complete file', () => {
-  assert.match(fileService, /\['pdf', 'image', 'video', 'audio'\]\.includes\(kind\)/);
-  assert.match(fileService, /method: 'HEAD'/);
+  assert.match(fileService, /if \(kind === 'pdf'\)/);
+  assert.match(fileService, /\['image', 'video', 'audio'\]\.includes\(kind\)/);
+  const pdfStart = fileService.indexOf("if (kind === 'pdf')");
+  const mediaStart = fileService.indexOf("if (['image', 'video', 'audio'].includes(kind))");
+  assert.ok(pdfStart > 0 && mediaStart > pdfStart);
+  assert.doesNotMatch(fileService.slice(pdfStart, mediaStart), /method: 'HEAD'/);
+  assert.match(fileService.slice(mediaStart), /method: 'HEAD'/);
   assert.match(fileService, /directStream: true/);
   assert.doesNotMatch(fileService, /fetchProjectFilePreview[\s\S]*\/preview-data/);
   assert.match(fileService, /MAX_TEXT_PREVIEW_BYTES = 2 \* 1024 \* 1024/);

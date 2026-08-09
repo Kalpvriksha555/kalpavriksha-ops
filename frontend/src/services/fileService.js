@@ -282,7 +282,26 @@ export const fetchProjectFilePreview = async (doc = {}, options = {}) => {
     return { kind, url, objectUrl:url, sourceUrl, mimeType:blob.type, size:blob.size };
   }
 
-  if (['pdf', 'image', 'video', 'audio'].includes(kind)) {
+  // PDFs are already served by the authenticated private preview endpoint and
+  // the browser PDF renderer can start streaming them immediately.  Do not put
+  // a blocking HEAD round-trip in front of the iframe: that made every PDF
+  // preview wait for one full authenticated request before the real range/GET
+  // request could even begin.  Metadata from the saved record is sufficient for
+  // the initial viewer shell; the server remains authoritative when the iframe
+  // opens the URL.
+  if (kind === 'pdf') {
+    return {
+      kind,
+      url: sourceUrl,
+      sourceUrl,
+      mimeType: getProjectFileMime(doc) || 'application/pdf',
+      size: Number(doc?.size || 0),
+      directStream: true,
+      optimisticStream: true
+    };
+  }
+
+  if (['image', 'video', 'audio'].includes(kind)) {
     const head = await authFetch(sourceUrl, { method: 'HEAD', cache: 'no-store', timeoutMs:FILE_PREVIEW_TIMEOUT_MS, signal });
     if (!head.ok) throw new Error(await readServerMessage(head));
     return {

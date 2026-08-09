@@ -41,6 +41,7 @@ const FILE_QUARANTINE_RETENTION_MS = Number(process.env.FILE_QUARANTINE_RETENTIO
 const FILE_QUARANTINE_MAX_BYTES = Number(process.env.FILE_QUARANTINE_MAX_BYTES || 512 * 1024 * 1024);
 const FILE_STORAGE_HEALTH_CACHE_MS = Number(process.env.FILE_STORAGE_HEALTH_CACHE_MS || 30 * 1000);
 const FILE_INCOMING_RETENTION_MS = Number(process.env.FILE_INCOMING_RETENTION_MS || 60 * 60 * 1000);
+const FILE_TRASH_RETENTION_MS = Number(process.env.FILE_TRASH_RETENTION_MS || 24 * 60 * 60 * 1000);
 
 export class FileValidationError extends Error {
   constructor(code, message, statusCode = 400, details = {}) {
@@ -221,6 +222,7 @@ export function createFileStorage(options = {}) {
   const quarantineRetentionMs = Math.max(60_000, Number(options.quarantineRetentionMs || FILE_QUARANTINE_RETENTION_MS));
   const quarantineMaxBytes = Math.max(1024 * 1024, Number(options.quarantineMaxBytes || FILE_QUARANTINE_MAX_BYTES));
   const healthCacheMs = Math.max(1_000, Number(options.healthCacheMs || FILE_STORAGE_HEALTH_CACHE_MS));
+  const trashRetentionMs = Math.max(60_000, Number(options.trashRetentionMs || FILE_TRASH_RETENTION_MS));
   let objectCountCache = { at:0, value:0 };
 
   [root, tempRoot, objectsRoot, quarantineRoot, trashRoot, locksRoot].forEach(mkdirPrivate);
@@ -257,8 +259,36 @@ export function createFileStorage(options = {}) {
     }
   }
 
+  function pruneTrash(referenceTime = Date.now()) {
+    const cutoff = referenceTime - trashRetentionMs;
+    let deletedFiles = 0;
+    let freedBytes = 0;
+    const walk = directory => {
+      if (!fs.existsSync(directory)) return;
+      for (const entry of fs.readdirSync(directory, { withFileTypes:true })) {
+        const fp = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          walk(fp);
+          try { if (!fs.readdirSync(fp).length) fs.rmdirSync(fp); } catch {}
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        try {
+          const stat = fs.statSync(fp);
+          if (stat.mtimeMs >= cutoff) continue;
+          freedBytes += Number(stat.size || 0);
+          fs.unlinkSync(fp);
+          deletedFiles += 1;
+        } catch {}
+      }
+    };
+    walk(trashRoot);
+    return { deletedFiles, freedBytes, retentionMs:trashRetentionMs };
+  }
+
   pruneIncoming();
   pruneQuarantine();
+  pruneTrash();
 
   function tempDestination() {
     mkdirPrivate(tempRoot);
@@ -562,7 +592,7 @@ export function createFileStorage(options = {}) {
     }
   }
 
-  return { root, tempRoot, objectsRoot, quarantineRoot, trashRoot, locksRoot, allowedExtensions, antivirusMode, antivirusRequired, tempDestination, validateAndStore, resolve, importLegacyFile, listObjects, acquireLease, hasActiveLease, softDelete, health, quarantine, pruneIncoming, pruneQuarantine };
+  return { root, tempRoot, objectsRoot, quarantineRoot, trashRoot, locksRoot, allowedExtensions, antivirusMode, antivirusRequired, tempDestination, validateAndStore, resolve, importLegacyFile, listObjects, acquireLease, hasActiveLease, softDelete, health, quarantine, pruneIncoming, pruneQuarantine, pruneTrash };
 }
 
 export function buildFileReconciliationReport(state = {}, storage, options = {}) {

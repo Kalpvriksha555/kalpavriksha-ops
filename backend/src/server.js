@@ -22,6 +22,7 @@ import { readAndVerifyReleaseCertificate } from './services/releaseCertification
 import { createCorsOriginPolicy, parseCorsOrigins } from './config/corsPolicy.js';
 import { classifyPersistenceFailure, isDeferredPersistenceOperation, mergeLatestPresenceIntoSnapshot, persistenceReadiness, preserveDirtyPresenceAfterReload } from './services/persistenceBackpressureService.js';
 import { getRequestStateSnapshot } from './services/requestStateService.js';
+import { applyFileRetentionToState, DEFAULT_FILE_RETENTION_DAYS } from './services/storageRetentionService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -101,6 +102,8 @@ let startupRecoveryInFlight = null;
 let lastDatabasePoolError = null;
 let otpCleanupTimer = null;
 let authCleanupTimer = null;
+let storageRetentionTimer = null;
+let storageRetentionInitialTimer = null;
 let unhandledRejectionTimes = [];
 let lastPersistenceFailure = null;
 let lastCriticalPersistenceFailure = null;
@@ -157,6 +160,9 @@ const MAX_UPLOAD_FILES = boundedEnvNumber('MAX_UPLOAD_FILES', 20, 1, 20);
 const MAX_INLINE_PREVIEW_MB = boundedEnvNumber('MAX_INLINE_PREVIEW_MB', 15, 1, 50);
 const MAX_INLINE_PREVIEW_BYTES = MAX_INLINE_PREVIEW_MB * 1024 * 1024;
 const FILE_STORAGE_GC_GRACE_MS = boundedEnvNumber('FILE_STORAGE_GC_GRACE_MS', 24 * 60 * 60 * 1000, 0, 30 * 24 * 60 * 60 * 1000);
+const FILE_RETENTION_DAYS = boundedEnvNumber('FILE_RETENTION_DAYS', DEFAULT_FILE_RETENTION_DAYS, 30, 3650);
+const FILE_RETENTION_INTERVAL_MS = boundedEnvNumber('FILE_RETENTION_INTERVAL_MS', 24 * 60 * 60 * 1000, 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000);
+const FILE_RETENTION_START_DELAY_MS = boundedEnvNumber('FILE_RETENTION_START_DELAY_MS', 10 * 60 * 1000, 60_000, 60 * 60 * 1000);
 const fileStorage = createFileStorage({
   root: FILE_STORAGE_ROOT,
   legacyRoots: [LEGACY_UPLOAD_DIR]
@@ -3624,10 +3630,11 @@ function addFileRegistryEntry(d, doc={}){
     downloadUrl: `/api/files/${doc.id}/download`
   };
   const resolved = resolveStoredUploadFile(entry);
-  entry.storageStatus = String(entry.storageStatus || '').toUpperCase() === 'DELETED'
-    ? 'DELETED'
+  const requestedStorageStatus=String(entry.storageStatus || '').toUpperCase();
+  entry.storageStatus = ['DELETED','EXPIRED'].includes(requestedStorageStatus)
+    ? requestedStorageStatus
     : (resolved ? 'AVAILABLE' : 'MISSING');
-  if (entry.storageStatus === 'DELETED') entry.url = entry.previewUrl = entry.downloadUrl = '';
+  if (['DELETED','EXPIRED'].includes(entry.storageStatus)) entry.url = entry.previewUrl = entry.downloadUrl = '';
   if (existing) Object.assign(existing, entry);
   else d.files.unshift(entry);
   Object.assign(doc, {
@@ -3666,7 +3673,7 @@ function fileStorageKey(doc={}) {
 function activeFileStorageKeys(d={}) {
   const keys=new Set();
   for (const doc of allKnownFileDocs(d)) {
-    if (String(doc?.storageStatus || '').toUpperCase()==='DELETED') continue;
+    if (['DELETED','EXPIRED'].includes(String(doc?.storageStatus || '').toUpperCase())) continue;
     const key=fileStorageKey(doc);
     if (key.startsWith('objects/')) keys.add(key);
   }
@@ -3675,10 +3682,10 @@ function activeFileStorageKeys(d={}) {
 function deletedFileStorageCandidateTimes(d={}) {
   const times=new Map();
   for (const doc of d.files || []) {
-    if (String(doc?.storageStatus || '').toUpperCase()!=='DELETED') continue;
+    if (!['DELETED','EXPIRED'].includes(String(doc?.storageStatus || '').toUpperCase())) continue;
     const key=fileStorageKey(doc);
     if (!key.startsWith('objects/')) continue;
-    const deletedAt=parseDateMs(doc.deletedAt || doc.storageDeletedAt || 0);
+    const deletedAt=parseDateMs(doc.deletedAt || doc.storageDeletedAt || doc.expiredAt || 0);
     times.set(key, Math.max(times.get(key) || 0, deletedAt || 0));
   }
   return times;
@@ -3719,6 +3726,52 @@ async function collectFileStorageGarbage({ actor='system', graceMs=FILE_STORAGE_
   }
   return { ...result, ok:result.errors.length===0, graceMs:safeGraceMs, completedAt:now() };
 }
+async function runAutomaticFileRetention({ actor='storage-retention' } = {}) {
+  if (startupFailure || shuttingDown) return { ok:false, skipped:true, reason:startupFailure ? 'startup-maintenance' : 'shutting-down' };
+  const snapshot=db();
+  const retention=applyFileRetentionToState(snapshot,{nowMs:Date.now(),retentionDays:FILE_RETENTION_DAYS,actor});
+  if (retention.expiredIds.length) {
+    const collections=['files'];
+    const collectionRowIds={files:retention.expiredIds};
+    if (retention.changedCaseIds.length) { collections.push('cases'); collectionRowIds.cases=retention.changedCaseIds; }
+    if (retention.changedMessageIds.length) { collections.push('teamChat'); collectionRowIds.teamChat=retention.changedMessageIds; }
+    await save(snapshot,{actor,reason:'automatic_file_retention',takeSnapshotOwnership:true,collections,collectionRowIds});
+    for (const id of retention.expiredIds) {
+      const doc=(snapshot.files || []).find(item=>String(item?.id || '')===String(id));
+      await recordFileStorageEvent({fileId:id,caseId:doc?.caseId || '',action:'FILE_EXPIRED',actor,storageKey:fileStorageKey(doc || {}),sha256:doc?.sha256 || '',details:{retentionDays:FILE_RETENTION_DAYS,financeProtected:false}}).catch(()=>{});
+    }
+  }
+  // Once logical expiry has committed, objects with no remaining active references
+  // can move to recoverable trash. Trash itself is permanently purged after its
+  // own short safety window, so the disk is actually reclaimed rather than merely
+  // moving bytes to another directory on the same filesystem.
+  const gc=await collectFileStorageGarbage({actor,graceMs:0});
+  const trash=fileStorage.pruneTrash(Date.now());
+  const result={ok:gc.ok,completedAt:now(),retentionDays:FILE_RETENTION_DAYS,expiredRecords:retention.expiredIds.length,protectedFinancialOrProfileRecords:retention.protectedIds.length,unknownAgeRetained:retention.unknownAgeIds.length,movedToTrash:gc.movedToTrash,trashFilesPurged:trash.deletedFiles,bytesFreedFromTrash:trash.freedBytes,errors:gc.errors};
+  structuredLog(result.ok ? 'info' : 'warn','automatic_file_retention_completed',result);
+  await recordOperationalEvent(pool,USE_POSTGRES,{eventType:'STORAGE_RETENTION_COMPLETED',severity:result.ok ? 'INFO' : 'WARN',actor,details:result}).catch(()=>{});
+  return result;
+}
+
+function scheduleAutomaticFileRetention() {
+  if (storageRetentionInitialTimer || storageRetentionTimer) return;
+  storageRetentionInitialTimer=setTimeout(()=>{
+    storageRetentionInitialTimer=null;
+    runAutomaticFileRetention().catch(error=>{
+      structuredLog('error','automatic_file_retention_failed',{code:error?.code || '',error:error?.message || String(error)});
+      operationalJobs.recordFailure('STORAGE_RETENTION',error,{retentionDays:FILE_RETENTION_DAYS},{maxAttempts:1}).catch(()=>{});
+    });
+  },FILE_RETENTION_START_DELAY_MS);
+  storageRetentionInitialTimer.unref?.();
+  storageRetentionTimer=setInterval(()=>{
+    runAutomaticFileRetention().catch(error=>{
+      structuredLog('error','automatic_file_retention_failed',{code:error?.code || '',error:error?.message || String(error)});
+      operationalJobs.recordFailure('STORAGE_RETENTION',error,{retentionDays:FILE_RETENTION_DAYS},{maxAttempts:1}).catch(()=>{});
+    });
+  },FILE_RETENTION_INTERVAL_MS);
+  storageRetentionTimer.unref?.();
+}
+
 function resolveStoredUploadFile(doc={}){
   return fileStorage.resolve(doc);
 }
@@ -3757,8 +3810,13 @@ function resolveFileById(d, id){
 function resolveAuthorizedFile(req, res, id) {
   const d = readDb();
   const result = resolveFileById(d, id);
-  if (result.doc && String(result.doc.storageStatus || '').toUpperCase() === 'DELETED') {
+  const unavailableStatus=String(result.doc?.storageStatus || '').toUpperCase();
+  if (result.doc && unavailableStatus === 'DELETED') {
     res.status(410).json({ok:false,code:'FILE_DELETED',error:'This file was deleted and retained only as an audit record.'});
+    return { d, doc:null, resolved:null, denied:true };
+  }
+  if (result.doc && unavailableStatus === 'EXPIRED') {
+    res.status(410).json({ok:false,code:'FILE_RETENTION_EXPIRED',error:`This file expired under the ${Number(result.doc.retentionDays || FILE_RETENTION_DAYS)}-day storage-retention policy.`});
     return { d, doc:null, resolved:null, denied:true };
   }
   if (result.doc && !canAccessFileDocument(req.auth?.user || {}, result.doc, d.cases || [])) {
@@ -3771,7 +3829,7 @@ function normalizePersistedFileLinks(d){
   d.files ||= [];
   for (const doc of allKnownFileDocs(d)) {
     if (!doc || !doc.id) continue;
-    if (String(doc.storageStatus || '').toUpperCase() === 'DELETED') {
+    if (['DELETED','EXPIRED'].includes(String(doc.storageStatus || '').toUpperCase())) {
       doc.url=''; doc.downloadUrl=''; doc.previewUrl='';
     } else {
       doc.url = `/api/files/${doc.id}/download`;
@@ -6348,7 +6406,7 @@ app.post('/api/system/files/reconciliation', requireAdminSession, async (req,res
     const actor=requestActor(req);
     rollbackActor=actor.name;
     for (const registry of d.files) {
-      if (!registry?.id || String(registry.storageStatus || '').toUpperCase()==='DELETED') continue;
+      if (!registry?.id || ['DELETED','EXPIRED'].includes(String(registry.storageStatus || '').toUpperCase())) continue;
       const resolved=fileStorage.resolve(registry);
       if (resolved?.provider==='legacy-local') {
         try {
@@ -6861,6 +6919,8 @@ async function gracefulShutdown(signal, exitCode = 0) {
     if (startupRecoveryTimer) { clearInterval(startupRecoveryTimer); startupRecoveryTimer=null; }
     if (otpCleanupTimer) { clearInterval(otpCleanupTimer); otpCleanupTimer=null; }
     if (authCleanupTimer) { clearInterval(authCleanupTimer); authCleanupTimer=null; }
+    if (storageRetentionInitialTimer) { clearTimeout(storageRetentionInitialTimer); storageRetentionInitialTimer=null; }
+    if (storageRetentionTimer) { clearInterval(storageRetentionTimer); storageRetentionTimer=null; }
     if (presenceMutationGeneration > persistedPresenceGeneration) {
       await flushPresenceHeartbeatBatch({ force:true, reason:'presence_shutdown_flush' }).catch(error => {
         structuredLog('error','presence_shutdown_flush_failed',{code:error?.code || '',error:error?.message || String(error)});
@@ -6920,6 +6980,7 @@ async function startServer() {
     authCleanupTimer=setInterval(()=>cleanupExpiredAuthSessions().catch(error=>structuredLog('warn','auth_session_cleanup_failed',{code:error?.code || '',error:error?.message || String(error)})),15 * 60 * 1000);
     authCleanupTimer.unref?.();
     cleanupExpiredAuthSessions().catch(error=>structuredLog('warn','auth_session_cleanup_failed',{code:error?.code || '',error:error?.message || String(error)}));
+    scheduleAutomaticFileRetention();
     scheduleStartupRecovery();
     structuredLog('info',startupFailure ? 'server_started_maintenance' : 'server_started',{
       host:HOST,
