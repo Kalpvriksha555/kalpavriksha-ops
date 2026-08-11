@@ -43,6 +43,7 @@ LIVE_MUTATED=0
 DATABASE_SOURCE_UNCHANGED=0
 BACKEND_DEPS_UNCHANGED=0
 CURRENT_RUNTIME_READY_PROOF=0
+CURRENT_RUNTIME_BASELINE_MODE=""
 DEPENDENCY_TREE_REUSED=0
 LIVE_BACKEND_DEPS_REUSED=0
 POST_BACKUP_REUSED=0
@@ -113,6 +114,53 @@ wait_for_health() {
   for _ in $(seq 1 "$attempts"); do
     if curl --fail --silent --show-error --connect-timeout 2 --max-time 8 \
       "http://127.0.0.1:${PORT}${endpoint}" >"$output" 2>/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+release_certificate_only_not_ready() {
+  local payload="$1"
+  python3 - "$payload" <<'PYVERIFY'
+import json,sys
+try:
+    p=json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(1)
+checks=p.get('checks')
+if not isinstance(checks,dict) or not checks:
+    raise SystemExit(1)
+if p.get('ok') is not False or str(p.get('status') or '') != 'NOT_READY':
+    raise SystemExit(1)
+if checks.get('releaseCertificate') is not False:
+    raise SystemExit(1)
+for key,value in checks.items():
+    if key == 'releaseCertificate':
+        continue
+    if value is not True:
+        raise SystemExit(1)
+required={'shuttingDown','startup','database','privateStorage','diskSpace','backup','persistence'}
+if not required.issubset(checks):
+    raise SystemExit(1)
+PYVERIFY
+}
+
+wait_for_runtime_baseline() {
+  local output="$1"
+  local attempts="${2:-30}"
+  local code=""
+  CURRENT_RUNTIME_BASELINE_MODE=""
+  for _ in $(seq 1 "$attempts"); do
+    code="$(curl --silent --show-error --connect-timeout 2 --max-time 8 \
+      -o "$output" -w '%{http_code}' "http://127.0.0.1:${PORT}/api/health/ready" 2>/dev/null || true)"
+    if [[ "$code" == "200" ]]; then
+      CURRENT_RUNTIME_BASELINE_MODE="READY"
+      return 0
+    fi
+    if [[ "$code" == "503" ]] && release_certificate_only_not_ready "$output"; then
+      CURRENT_RUNTIME_BASELINE_MODE="RELEASE_CERTIFICATE_ONLY"
       return 0
     fi
     sleep 2
@@ -238,7 +286,13 @@ restore_previous_runtime() {
     set +a
     if pm2 start "$ROLLBACK_SCRIPT" --name "$PM2_NAME" --cwd "$ROLLBACK_CWD" --time --update-env --kill-timeout "$PM2_KILL_TIMEOUT_MS"; then
       wait_for_health "/api/health/live" "$WORK/rollback-live.json" 45 || rollback_ok=0
-      wait_for_health "/api/health/ready" "$WORK/rollback-ready.json" 45 || rollback_ok=0
+      if wait_for_runtime_baseline "$WORK/rollback-ready.json" 45; then
+        if [[ "$CURRENT_RUNTIME_BASELINE_MODE" == "RELEASE_CERTIFICATE_ONLY" ]]; then
+          echo "Rollback runtime is operationally healthy; readiness is blocked only by its restored release certificate. Database/storage/backup/persistence checks are all healthy." >&2
+        fi
+      else
+        rollback_ok=0
+      fi
       pm2 save || rollback_ok=0
     else
       rollback_ok=0
@@ -341,10 +395,18 @@ export npm_config_registry="https://registry.npmjs.org/"
 [[ "$PM2_KILL_TIMEOUT_MS" =~ ^[0-9]+$ ]] || fail "PM2_KILL_TIMEOUT_MS must be an integer number of milliseconds."
 (( PM2_KILL_TIMEOUT_MS >= 125000 && PM2_KILL_TIMEOUT_MS <= 300000 )) || fail "PM2_KILL_TIMEOUT_MS must be between 125000 and 300000 ms so it safely exceeds the backend graceful-shutdown ceiling."
 
-log "Proving the current production runtime is READY before planning any live mutation"
+log "Proving the current production runtime is operationally safe before planning any live mutation"
 wait_for_health "/api/health/live" "$WORK/current-live.json" 30 || fail "Current production backend is not live; deployment will not proceed from an unhealthy baseline."
-wait_for_health "/api/health/ready" "$WORK/current-ready.json" 30 || fail "Current production backend is not ready; deployment will not proceed from an unhealthy baseline."
-CURRENT_RUNTIME_READY_PROOF=1
+if ! wait_for_runtime_baseline "$WORK/current-ready.json" 30; then
+  fail "Current production backend has a readiness failure beyond release-certificate validity; deployment will not proceed from an unhealthy baseline."
+fi
+if [[ "$CURRENT_RUNTIME_BASELINE_MODE" == "READY" ]]; then
+  CURRENT_RUNTIME_READY_PROOF=1
+  log "Current production runtime is fully READY."
+else
+  CURRENT_RUNTIME_READY_PROOF=0
+  log "Current runtime is healthy except for its prior release certificate. Candidate certification may continue, but production database-integrity reuse is disabled and a fresh physical integrity scan is mandatory before cutover."
+fi
 
 log "Computing source-aware resume fingerprints for the current live release"
 node "$RELEASE_ROOT/scripts/phase-21-deployment-receipt.mjs" fingerprint --root "$LIVE" >"$WORK/current-live-fingerprints.json"
@@ -477,7 +539,11 @@ npm run backup:verify | tee "$WORK/pre-deployment-backup-verification.json"
 npm run backup:status | tee "$WORK/pre-deployment-backup-status.json"
 
 if [[ "$DATABASE_SOURCE_UNCHANGED" == "1" ]]; then
-  log "Backend/database functional input is unchanged; schema migration and duplicate full database scan are safely reused."
+  if [[ "$CURRENT_RUNTIME_READY_PROOF" == "1" ]]; then
+    log "Backend/database functional input is unchanged; schema migration and duplicate full database scan are safely reused."
+  else
+    log "Backend/database functional input is unchanged; schema migration is skipped, but a fresh physical database integrity scan will run because strict old-runtime READY evidence is unavailable."
+  fi
 else
   log "Backend/database functional input changed; applying schema migrations before production certification."
   npm run db:migrate --prefix backend
@@ -489,7 +555,7 @@ unset KALPA_DISABLE_AUTO_PRESENCE_WRITES
 
 log "Certifying the exact production environment while reusing the exact candidate source/build proof"
 rm -f "$RELEASE_CERTIFICATE_PATH"
-if [[ "$DATABASE_SOURCE_UNCHANGED" == "1" ]]; then
+if [[ "$DATABASE_SOURCE_UNCHANGED" == "1" && "$CURRENT_RUNTIME_READY_PROOF" == "1" ]]; then
   KALPA_RESUME_AWARE_CANDIDATE_RECEIPT="$CERTIFIED_RESULT_FILE" \
   KALPA_REUSE_DATABASE_INTEGRITY=true \
   KALPA_DATABASE_INPUT_HASH="$NEW_DATABASE_INPUT_HASH" \
@@ -497,6 +563,9 @@ if [[ "$DATABASE_SOURCE_UNCHANGED" == "1" ]]; then
   KALPA_CURRENT_RUNTIME_READY_PROOF=true \
   npm run release:certify | tee "$WORK/release-certification.json"
 else
+  if [[ "$DATABASE_SOURCE_UNCHANGED" == "1" ]]; then
+    log "Database source is unchanged, but the old runtime lacks a current strict READY proof; running a fresh physical PostgreSQL integrity scan instead of reusing old evidence."
+  fi
   KALPA_RESUME_AWARE_CANDIDATE_RECEIPT="$CERTIFIED_RESULT_FILE" \
   KALPA_REUSE_DATABASE_INTEGRITY=false \
   npm run release:certify | tee "$WORK/release-certification.json"
