@@ -50,5 +50,8 @@ assert.match(deployer,/release_certificate_only_not_ready\(\)/);
 assert.match(deployer,/required=\{'shuttingDown','startup','database','privateStorage','diskSpace','backup','persistence'\}/);
 assert.match(deployer,/DATABASE_SOURCE_UNCHANGED.*CURRENT_RUNTIME_READY_PROOF/s);
 assert.match(deployer,/KALPA_REUSE_DATABASE_INTEGRITY=false/);
+assert.match(deployer,/CANDIDATE_CLEAN_INSTALL_REPORT="\$RELEASE_ROOT\/\.release\/clean-install-report\.json"/);
+assert.match(deployer,/CLEAN_INSTALL_REPORT="\$CANDIDATE_CLEAN_INSTALL_REPORT"[\s\S]*npm run release:certify/);
+assert.match(deployer,/candidate-phase-verification\.before-production-certification\.json/);
 assert.match(deployer,/wait_for_runtime_baseline "\$WORK\/rollback-ready\.json" 45/);
 console.log('Phase 24 operator-safe certify/deploy closure PASS (current docs cannot point to obsolete deployers, exact GitHub candidate is launched outside live source, complete certification+deployment is SSH-independent, and a full-lifecycle lock prevents overlap).');

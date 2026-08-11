@@ -8,13 +8,20 @@ import { validateCandidateReceipt } from './deployment-receipt-utils.mjs';
 const root = process.cwd();
 const rootPackage = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const backendPackage = JSON.parse(fs.readFileSync(path.join(root, 'backend/package.json'), 'utf8'));
-const cleanReportPath = path.resolve(process.env.CLEAN_INSTALL_REPORT || '.release/clean-install-report.json');
+const resumeAwareReceiptPath = String(process.env.KALPA_RESUME_AWARE_CANDIDATE_RECEIPT || '').trim();
+// A resume-aware production certification must consume the clean-install artifact
+// from the already-certified candidate itself. Production backend.env may retain a
+// legacy CLEAN_INSTALL_REPORT path for the currently-live release; allowing that
+// inherited value to redirect certification would compare the new source tree to
+// an old report and fail after the fresh production backup has already completed.
+const cleanReportPath = resumeAwareReceiptPath
+  ? path.join(root, '.release/clean-install-report.json')
+  : path.resolve(process.env.CLEAN_INSTALL_REPORT || '.release/clean-install-report.json');
 const certificatePath = path.resolve(process.env.RELEASE_CERTIFICATE_PATH || 'release-certification.json');
 const maxAgeHours = Math.max(1, Number(process.env.RELEASE_CERTIFICATE_MAX_AGE_HOURS || 24));
 const requireProductionEnvironment = String(process.env.RELEASE_VALIDATE_PRODUCTION_ENV || process.env.NODE_ENV === 'production').toLowerCase() === 'true';
 const requireBackup = String(process.env.RELEASE_REQUIRE_BACKUP || process.env.NODE_ENV === 'production').toLowerCase() === 'true';
 const checks = [];
-const resumeAwareReceiptPath = String(process.env.KALPA_RESUME_AWARE_CANDIDATE_RECEIPT || '').trim();
 
 function resolveNpmInvocation(args = []) {
   const candidates = [

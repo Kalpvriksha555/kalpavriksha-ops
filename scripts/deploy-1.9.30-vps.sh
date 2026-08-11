@@ -554,8 +554,18 @@ sed -i '/^[[:space:]]*KALPA_DISABLE_AUTO_PRESENCE_WRITES[[:space:]]*=/d' "$ENV_F
 unset KALPA_DISABLE_AUTO_PRESENCE_WRITES
 
 log "Certifying the exact production environment while reusing the exact candidate source/build proof"
+CANDIDATE_CLEAN_INSTALL_REPORT="$RELEASE_ROOT/.release/clean-install-report.json"
+[[ -s "$CANDIDATE_CLEAN_INSTALL_REPORT" ]] || fail "Certified candidate clean-install report is missing: $CANDIDATE_CLEAN_INSTALL_REPORT"
+# Re-prove the candidate receipt immediately before production certification.
+# This verifies the clean-install report SHA-256 against the certified receipt
+# after the fresh backup window, without reinstalling dependencies or rerunning
+# the already-passed full verification chain.
+node scripts/phase-21-deployment-receipt.mjs verify-candidate \
+  --root "$RELEASE_ROOT" --receipt "$CERTIFIED_RESULT_FILE" --commit "$CURRENT_COMMIT" --require-artifacts true \
+  >"$WORK/candidate-phase-verification.before-production-certification.json"
 rm -f "$RELEASE_CERTIFICATE_PATH"
 if [[ "$DATABASE_SOURCE_UNCHANGED" == "1" && "$CURRENT_RUNTIME_READY_PROOF" == "1" ]]; then
+  CLEAN_INSTALL_REPORT="$CANDIDATE_CLEAN_INSTALL_REPORT" \
   KALPA_RESUME_AWARE_CANDIDATE_RECEIPT="$CERTIFIED_RESULT_FILE" \
   KALPA_REUSE_DATABASE_INTEGRITY=true \
   KALPA_DATABASE_INPUT_HASH="$NEW_DATABASE_INPUT_HASH" \
@@ -566,6 +576,7 @@ else
   if [[ "$DATABASE_SOURCE_UNCHANGED" == "1" ]]; then
     log "Database source is unchanged, but the old runtime lacks a current strict READY proof; running a fresh physical PostgreSQL integrity scan instead of reusing old evidence."
   fi
+  CLEAN_INSTALL_REPORT="$CANDIDATE_CLEAN_INSTALL_REPORT" \
   KALPA_RESUME_AWARE_CANDIDATE_RECEIPT="$CERTIFIED_RESULT_FILE" \
   KALPA_REUSE_DATABASE_INTEGRITY=false \
   npm run release:certify | tee "$WORK/release-certification.json"
