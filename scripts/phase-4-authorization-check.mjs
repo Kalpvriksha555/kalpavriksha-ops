@@ -225,11 +225,20 @@ try {
   assert((d2AfterReassign.payload.projects || []).some(task => task.id === 'AUTHZ-TASK-1'), 'Reassigned task was not visible to the new Designer.');
 
   const spoofedChat = await request('/api/chat', { method:'POST', session:designerTwo, body:{ text:'Private manager note', recipient:managerUser.id, sender:'Phase 4 Admin', role:'ADMIN' } });
-  assert(spoofedChat.response.status === 201 && spoofedChat.payload.sender === 'Designer Two' && spoofedChat.payload.senderRole === 'DESIGNER', 'Chat sender identity was accepted from the client.');
+  const spoofedChatMessage = spoofedChat.payload?.message && typeof spoofedChat.payload.message === 'object'
+    ? spoofedChat.payload.message
+    : spoofedChat.payload;
+  assert(
+    spoofedChat.response.status === 201
+      && spoofedChat.payload?.ok === true
+      && spoofedChatMessage?.sender === 'Designer Two'
+      && spoofedChatMessage?.senderRole === 'DESIGNER',
+    'Chat sender identity was accepted from the client.'
+  );
   const d1PrivateState = await request('/api/state', { session:designerOne });
-  assert(!(d1PrivateState.payload.chatMessages || []).some(message => message.id === spoofedChat.payload.id), 'Designer received another user’s direct message.');
+  assert(!(d1PrivateState.payload.chatMessages || []).some(message => message.id === spoofedChatMessage.id), 'Designer received another user’s direct message.');
   const managerPrivateState = await request('/api/state', { session:manager });
-  assert((managerPrivateState.payload.chatMessages || []).some(message => message.id === spoofedChat.payload.id), 'Direct-message recipient could not see the message.');
+  assert((managerPrivateState.payload.chatMessages || []).some(message => message.id === spoofedChatMessage.id), 'Direct-message recipient could not see the message.');
 
   const invalidRecipient = await request('/api/chat', { method:'POST', session:designerOne, body:{ text:'No target', recipient:'does-not-exist' } });
   assert(invalidRecipient.response.status === 400 && invalidRecipient.payload.code === 'CHAT_RECIPIENT_INVALID', 'Invalid direct-message recipient was accepted.');
