@@ -1,3 +1,4 @@
+import { asArray, asRecord } from './runtimeShapeUtils.js';
 export const NOTIFICATION_CATEGORIES = ['All', 'Task', 'Chat', 'Meeting', 'Attendance', 'System'];
 
 export const getNotificationCategory = (notification = {}) => {
@@ -34,6 +35,12 @@ const norm = (value = '') => String(value || '').trim().toLowerCase();
 const identityKey = (value = '') => norm(value).replace(/[^a-z0-9]/g, '');
 export const normalizeNotificationReadName = (entry) => typeof entry === 'string' ? entry : (entry?.name || entry?.username || entry?.id || '');
 
+export const normalizeNotificationReadBy = (value) => {
+  if (Array.isArray(value)) return value.filter(entry => entry !== null && entry !== undefined && entry !== '');
+  if (value === null || value === undefined || value === '') return [];
+  return [value];
+};
+
 export const notificationUserKeys = (user = {}) => [user?.name, user?.username, user?.id]
   .filter(Boolean)
   .flatMap(value => [norm(value), identityKey(value)])
@@ -43,7 +50,7 @@ export const isNotificationReadByUser = (notification = {}, user = {}) => {
   if (!notification || !user) return false;
   const keys = new Set(notificationUserKeys(user));
   if (!keys.size) return false;
-  return (notification?.readBy || []).some(entry => {
+  return normalizeNotificationReadBy(notification?.readBy).some(entry => {
     const name = normalizeNotificationReadName(entry);
     return keys.has(norm(name)) || keys.has(identityKey(name));
   });
@@ -53,8 +60,8 @@ export const addNotificationReadUser = (notification = {}, user = {}) => {
   if (!notification || !user?.name) return notification;
   if (isNotificationReadByUser(notification, user)) return notification;
   return {
-    ...(notification || {}),
-    readBy: [...(notification?.readBy || []), user?.name],
+    ...asRecord(notification),
+    readBy: [...normalizeNotificationReadBy(notification?.readBy), user?.name],
     readAt: Date.now()
   };
 };
@@ -63,19 +70,19 @@ const readByKey = (entry) => identityKey(normalizeNotificationReadName(entry));
 
 export const mergeNotificationRecords = (existing = {}, incoming = {}) => {
   const readMap = new Map();
-  [...(existing?.readBy || []), ...(incoming?.readBy || [])].forEach(entry => {
+  [...normalizeNotificationReadBy(existing?.readBy), ...normalizeNotificationReadBy(incoming?.readBy)].forEach(entry => {
     const key = readByKey(entry);
     if (key) readMap.set(key, entry);
   });
   const existingUpdated = Number(existing?.updatedAt || existing?.readAt || 0);
   const incomingUpdated = Number(incoming?.updatedAt || incoming?.readAt || 0);
-  const base = incomingUpdated >= existingUpdated ? { ...(existing || {}), ...incoming } : { ...(incoming || {}), ...existing };
+  const base = incomingUpdated >= existingUpdated ? { ...asRecord(existing), ...asRecord(incoming) } : { ...asRecord(incoming), ...asRecord(existing) };
   return { ...base, readBy: Array.from(readMap.values()) };
 };
 
 export const mergeNotificationsByStability = (current = [], incoming = []) => {
   const byId = new Map();
-  [...(current || []), ...(incoming || [])].forEach(n => {
+  [...asArray(current), ...asArray(incoming)].forEach(n => {
     if (!n?.id) return;
     const key = String(n.id);
     byId.set(key, byId.has(key) ? mergeNotificationRecords(byId.get(key), n) : n);
@@ -137,14 +144,14 @@ export const getVisibleNotifications = (notifications = [], user = {}, { unreadO
 };
 
 export const buildActivityTimeline = (projects = [], chatMessages = [], notifications = []) => {
-  const taskEvents = (projects || []).slice(0, 25).flatMap(p => {
+  const taskEvents = asArray(projects).slice(0, 25).flatMap(p => {
     const events = [];
     if (p.createdAt) events.push({ id: `task-created-${p.id}`, at: p.createdAt, label: `${p.id} created for ${p.customerName || p.client || 'customer'}`, type: 'Task' });
     if (p.completedAt) events.push({ id: `task-completed-${p.id}`, at: p.completedAt, label: `${p.id} completed by ${p.assignedTo || 'team'}`, type: 'Task' });
     return events;
   });
-  const chatEvents = (chatMessages || []).slice(-25).map(m => ({ id: `chat-${m.id}`, at: m.id || m.createdAt || Date.now(), label: `${m.sender || m.by || 'Team'} sent a chat message`, type: 'Chat' }));
-  const notifEvents = (notifications || []).slice(0, 30).map(n => ({ id: `notif-${n.id}`, at: n.id || Date.now(), label: n.title || 'Notification', type: getNotificationCategory(n) }));
+  const chatEvents = asArray(chatMessages).slice(-25).map(m => ({ id: `chat-${m.id}`, at: m.id || m.createdAt || Date.now(), label: `${m.sender || m.by || 'Team'} sent a chat message`, type: 'Chat' }));
+  const notifEvents = asArray(notifications).slice(0, 30).map(n => ({ id: `notif-${n.id}`, at: n.id || Date.now(), label: n.title || 'Notification', type: getNotificationCategory(n) }));
   return [...taskEvents, ...chatEvents, ...notifEvents]
     .filter(Boolean)
     .sort((a, b) => Number(b.at || 0) - Number(a.at || 0))

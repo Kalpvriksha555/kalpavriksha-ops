@@ -1,23 +1,28 @@
 import React from 'react';
 import { AlertTriangle, Loader2, X, Inbox, RefreshCw, CheckCircle, AlertCircle, Info, Bell, MessageSquare } from 'lucide-react';
 import { PortalLayer, LAYER_Z } from './LayerPortal';
+import { recordRuntimeDiagnostic } from '../../services/runtimeDiagnosticsService.js';
 
 const cx = (...parts) => parts.filter(Boolean).join(' ');
 
 export class AppErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
-    this.state = { hasError: false, error: null };
+    this.state = { hasError: false, error: null, diagnosticId: '' };
   }
 
   static getDerivedStateFromError(error) {
-    return { hasError: true, error };
+    return { hasError: true, error, diagnosticId: '' };
   }
 
   componentDidCatch(error, info) {
     if (typeof console !== 'undefined') {
       console.error('[Kalpavriksha Ops] UI boundary caught an error', error, info);
     }
+    try {
+      const diagnostic = recordRuntimeDiagnostic({ error, source:'root-ui-boundary', componentStack:info?.componentStack || '' });
+      if (diagnostic?.diagnosticId) this.setState({ diagnosticId:diagnostic.diagnosticId });
+    } catch {}
   }
 
   render() {
@@ -30,6 +35,7 @@ export class AppErrorBoundary extends React.Component {
           </div>
           <h1 className="text-2xl font-black text-slate-900">Something went wrong</h1>
           <p className="mt-2 text-sm font-bold text-slate-500">This screen failed safely. Refresh the page and continue working.</p>
+          {this.state.diagnosticId && <p className="mt-3 text-xs font-black font-mono text-slate-500">Diagnostic ID {this.state.diagnosticId}</p>}
           <button
             type="button"
             onClick={() => window.location.reload()}

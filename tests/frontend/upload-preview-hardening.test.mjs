@@ -19,7 +19,7 @@ test('upload preflight rejects empty, oversized, unsupported, duplicate and exce
   assert.match(fileService, /FILE_TYPE_NOT_ALLOWED/);
   assert.match(fileService, /was selected more than once/);
   assert.match(fileService, /Choose no more than/);
-  assert.match(app, /MAX_PROJECT_UPLOAD_FILES - \(leadFiles \|\| \[\]\)\.length/);
+  assert.match(app, /MAX_PROJECT_UPLOAD_FILES - asArray\(leadFiles\)\.length/);
 });
 
 test('upload response-loss retry identity survives File object recreation and clears only after confirmation', () => {

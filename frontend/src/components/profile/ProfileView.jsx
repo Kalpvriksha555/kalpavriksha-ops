@@ -86,6 +86,10 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, sendRea
       const updated = mergeConfirmedUser(data.user);
       const profilePhoto = updated.profilePhoto || data.profilePhoto || data.url || preview;
       setDraft(prev => ({ ...prev, profilePhoto }));
+      if (profilePhoto !== preview && localPhotoPreviewRef.current === preview) {
+        URL.revokeObjectURL(preview);
+        localPhotoPreviewRef.current = '';
+      }
       setPhotoMessage('Photo uploaded successfully.');
     } catch (err) {
       setPhotoMessage(err.message || 'Unable to upload photo. Please try again.');
@@ -255,7 +259,7 @@ export const ProfileView = ({ currentUser, onUpdateUser, setCurrentUser, sendRea
             </div>
             <label className="mt-4 inline-flex items-center justify-center bg-indigo-50 text-indigo-700 px-4 py-2 rounded-xl font-black text-sm cursor-pointer hover:bg-indigo-100 border border-indigo-100">
               <Upload className="w-4 h-4 mr-2" /> {photoUploading ? 'Uploading...' : 'Add Photo'}
-              <input type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,image/*" onChange={handlePhoto} disabled={photoUploading} className="hidden" />
+              <input type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp" onChange={handlePhoto} disabled={photoUploading} className="hidden" />
             </label>
             {photoUploading && <div className="mt-3"><div className="h-2 rounded-full bg-slate-100 overflow-hidden"><div className="h-full bg-indigo-500" style={{ width:`${photoProgress}%` }} /></div><button type="button" onClick={() => photoUploadAbortRef.current?.abort()} className="mt-2 text-xs font-black text-red-600">Cancel upload</button></div>}
             {photoMessage && <p className={`text-xs font-black mt-3 ${photoMessage.includes('success') ? 'text-emerald-600' : 'text-red-600'}`}>{photoMessage}</p>}

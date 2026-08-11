@@ -12,14 +12,15 @@ LOG_FILE="$RUN_ROOT/certification.log"
 RESULT_FILE="$RUN_ROOT/result.json"
 CERTIFIED_COMMIT_FILE="${KALPA_CERTIFIED_COMMIT_FILE:-/root/kalpavriksha-certified-candidate.commit}"
 CERTIFIED_RESULT_FILE="${KALPA_CERTIFIED_RESULT_FILE:-/root/kalpavriksha-certified-candidate.result.json}"
+PHASE_RECEIPT_FILE="$RUN_ROOT/phase-receipts.json"
 CERT_PG_HOST="${KALPA_CERT_PG_HOST:-${PGHOST:-/var/run/postgresql}}"
 CERT_PG_PORT="${KALPA_CERT_PG_PORT:-${PGPORT:-5432}}"
 CERT_DB_TCP_HOST="${KALPA_CERT_DB_TCP_HOST:-127.0.0.1}"
 CERT_PG_SUPERUSER="${KALPA_CERT_PG_SUPERUSER:-postgres}"
 
-EXPECTED_ROOT_VERSION="1.9.30-runtime-persistence-recovery"
-EXPECTED_BACKEND_VERSION="2.9.30-runtime-persistence-recovery"
-EXPECTED_FRONTEND_VERSION="2.9.30-runtime-persistence-recovery"
+EXPECTED_ROOT_VERSION="1.9.30-ssh-independent-certify-deploy-closure"
+EXPECTED_BACKEND_VERSION="2.9.30-ssh-independent-certify-deploy-closure"
+EXPECTED_FRONTEND_VERSION="2.9.30-ssh-independent-certify-deploy-closure"
 CREATE_MAX_SECONDS="${KALPA_CERT_CREATE_MAX_SECONDS:-5}"
 UPLOAD_MAX_SECONDS="${KALPA_CERT_UPLOAD_MAX_SECONDS:-20}"
 DOWNLOAD_MAX_SECONDS="${KALPA_CERT_DOWNLOAD_MAX_SECONDS:-10}"
@@ -93,11 +94,21 @@ log "Candidate commit: $COMMIT"
 log "Verifying packaged source manifest before dependency installation"
 sha256sum -c RELEASE_FILE_MANIFEST.sha256 >/dev/null
 
-log "Installing dependencies only inside the isolated candidate"
+log "Reusing the verified candidate dependency tree when it still matches package contracts"
 export npm_config_registry="https://registry.npmjs.org/"
-npm ci --include=dev --ignore-scripts --no-audit --no-fund
-npm ci --prefix backend --no-audit --no-fund
-npm ci --prefix frontend --include=dev --no-audit --no-fund
+DEPENDENCIES_REUSED=0
+if [[ -d node_modules && -d backend/node_modules && -d frontend/node_modules ]] \
+  && npm ls --depth=0 --include=dev >/dev/null 2>&1 \
+  && npm ls --prefix backend --depth=0 >/dev/null 2>&1 \
+  && npm ls --prefix frontend --depth=0 --include=dev >/dev/null 2>&1; then
+  DEPENDENCIES_REUSED=1
+  log "Existing dependency trees are complete; npm ci is skipped."
+else
+  log "Dependency tree is missing or stale; installing exactly from lockfiles."
+  npm ci --include=dev --ignore-scripts --no-audit --no-fund
+  npm ci --prefix backend --no-audit --no-fund
+  npm ci --prefix frontend --include=dev --no-audit --no-fund
+fi
 
 log "Confirming React and ReactDOM resolve from the same frontend dependency tree"
 node <<'NODE'
@@ -517,14 +528,26 @@ REPLAY_TIME="${REPLAY_STATS#* }"
 UPLOAD_TIME="${UPLOAD_STATS#* }"
 DOWNLOAD_TIME="${DOWNLOAD_STATS#* }"
 
-python3 - "$RESULT_FILE" "$COMMIT" "$CANONICAL_A" "$CANONICAL_B" "$FILE_ID" "$CREATE_A_TIME" "$CREATE_B_TIME" "$REPLAY_TIME" "$UPLOAD_TIME" "$DOWNLOAD_TIME" <<'PY'
+log "Recording content-hash phase receipts for resume-aware production deployment"
+node scripts/phase-21-deployment-receipt.mjs candidate-snapshot \
+  --root "$RELEASE_ROOT" \
+  --commit "$COMMIT" \
+  --output "$PHASE_RECEIPT_FILE" >/dev/null
+
+python3 - "$RESULT_FILE" "$COMMIT" "$CANONICAL_A" "$CANONICAL_B" "$FILE_ID" "$CREATE_A_TIME" "$CREATE_B_TIME" "$REPLAY_TIME" "$UPLOAD_TIME" "$DOWNLOAD_TIME" "$PHASE_RECEIPT_FILE" "$DEPENDENCIES_REUSED" <<'PY'
 import json,sys,datetime
-out,commit,a,b,fid,c1,c2,replay,upload,download=sys.argv[1:11]
+out,commit,a,b,fid,c1,c2,replay,upload,download,phase_path,deps_reused=sys.argv[1:13]
+phase=json.load(open(phase_path))
 payload={
   'ok':True,
   'status':'CERTIFIED_FOR_GUARDED_DEPLOYMENT',
   'certifiedAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),
   'commit':commit,
+  'phaseReceipts':phase,
+  'resumeAware':{
+    'dependencyTreeReused':deps_reused == '1',
+    'deploymentMayReuseCertifiedVerification':True
+  },
   'e2e':{
     'firstCanonicalTaskId':a,
     'collisionCanonicalTaskId':b,

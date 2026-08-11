@@ -11,7 +11,7 @@ import { fileURLToPath } from 'url';
 import pg from 'pg';
 import nodemailer from 'nodemailer';
 import { addCaseTimelineEvent, mergeTimelineEvents, normalizeCaseTimeline, normalizeTimelineEvent } from './services/timelineService.js';
-import { FINANCE_FIELDS, applyFreshestFinance, buildFinanceSnapshot, financeFreshness, financeSnapshotHash, mergePaymentRecords } from './services/financeIntegrityService.js';
+import { FINANCE_FIELDS, applyFreshestFinance, buildFinanceSnapshot, financeFreshness, financeMutationFingerprint, financeSnapshotHash, findFinanceMutationReceipt, mergePaymentRecords, rememberFinanceMutationReceipt } from './services/financeIntegrityService.js';
 import { hashPassword, verifyPassword, passwordPolicyErrors, randomOpaqueToken, tokenHash, randomOtp, normalizeUsername, normalizeAuthRole, normalizeAuthStatus, stripCredentialFields, publicSessionUser, reconcileLegacyCredential } from './services/authService.js';
 import { ROLE_CAPABILITIES, authorizationActor, canAccessCase, canMutateCase, canAccessFileDocument, canDeleteFileDocument, filterCasesForUser, hasCapability, isCaseAssignedToUser, normalizePermissionRole, notificationBelongsToUser } from './services/authorizationService.js';
 import { attachRequestId, createRateLimiter, rejectDangerousJson, requireJsonForBody, secureResponseHeaders } from './middleware/security.js';
@@ -20,9 +20,11 @@ import { buildFileReconciliationReport, createFileStorage, FileValidationError }
 import { createOperationalJobStore, filesystemUsage, inspectBackupManifests, recordOperationalEvent, requestLogMiddleware, structuredLog } from './services/operationalReliabilityService.js';
 import { readAndVerifyReleaseCertificate } from './services/releaseCertificationService.js';
 import { createCorsOriginPolicy, parseCorsOrigins } from './config/corsPolicy.js';
-import { classifyPersistenceFailure, isDeferredPersistenceOperation, mergeLatestPresenceIntoSnapshot, persistenceReadiness, preserveDirtyPresenceAfterReload } from './services/persistenceBackpressureService.js';
+import { classifyPersistenceFailure, isDeferredPersistenceOperation, mergeLatestPresenceIntoSnapshot, persistenceCommitEvidenceMatches, persistenceReadiness, preserveDirtyPresenceAfterReload, runtimeRecoveryCanRun } from './services/persistenceBackpressureService.js';
 import { getRequestStateSnapshot } from './services/requestStateService.js';
 import { applyFileRetentionToState, DEFAULT_FILE_RETENTION_DAYS } from './services/storageRetentionService.js';
+import { applyPresenceClientCommandMetadata, classifyPresenceClientCommand, computeAttendanceAccrual, normalizePresenceClientCommand, parseIndiaAttendanceClock } from './services/presenceProtocolService.js';
+import { normalizeClientDiagnostic, publicApiErrorPayload, sanitizeOperationalPath, serverErrorFingerprint } from './services/runtimeDiagnosticsService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -125,6 +127,8 @@ let workspaceDataRevision = 0;
 const WORKSPACE_SYNC_COLLECTIONS = Object.freeze(['users','cases','deletedProjectIds','teamChat','notifications','attendanceLogs']);
 let workspaceCollectionRevisions = Object.fromEntries(WORKSPACE_SYNC_COLLECTIONS.map(collection => [collection, 0]));
 const WORKSPACE_CHANGE_LOG_LIMIT = boundedEnvNumber('WORKSPACE_CHANGE_LOG_LIMIT', 250, 50, 2000);
+const WORKSPACE_COMPACT_CHAT_LIMIT = boundedEnvNumber('WORKSPACE_COMPACT_CHAT_LIMIT', 1500, 250, 10000);
+const WORKSPACE_COMPACT_NOTIFICATION_LIMIT = boundedEnvNumber('WORKSPACE_COMPACT_NOTIFICATION_LIMIT', 300, 100, 5000);
 let workspaceCollectionChangeLog = Object.fromEntries(WORKSPACE_SYNC_COLLECTIONS.map(collection => [collection, []]));
 let performanceBundleCache = { revision:-1, records:[], summary:null, diagnostics:null };
 let leaderboardAggregateCache = new Map();
@@ -622,7 +626,7 @@ function publishCommittedState({ committedState, version, liveStateBeforeReload 
 }
 
 async function reloadCommittedState(){
-  if (!USE_POSTGRES) return;
+  if (!USE_POSTGRES) return null;
   const liveStateBeforeReload = memoryState;
   const loaded = await reloadRelationalState(pool, { normalizeState: norm });
   relationalShadowState = ownRelationalShadow(loaded.persistedState || loaded.state);
@@ -631,14 +635,17 @@ async function reloadCommittedState(){
     version:loaded.stateVersion,
     liveStateBeforeReload
   });
+  return loaded;
 }
 
-function restoreVerifiedShadowAfterDeferredFailure(expectedVersion = stateVersion) {
+function restoreVerifiedShadowAfterPersistenceFailure(expectedVersion = stateVersion) {
   if (!USE_POSTGRES || !relationalShadowState) return false;
   publishCommittedState({
     // The relational shadow is deeply frozen and represents the most recent
     // verified commit. Clone only on this exceptional rollback path, then keep
     // the newer presence slice dirty so it can retry without losing telemetry.
+    // For a foreground failure this shadow is served read-only until PostgreSQL
+    // can be reloaded, because COMMIT outcome may still be ambiguous.
     committedState:structuredClone(relationalShadowState),
     version:expectedVersion,
     liveStateBeforeReload:memoryState
@@ -866,14 +873,39 @@ function save(d, metadata = {}){
         let recoverySucceeded = false;
         let verifiedFallbackRestored = false;
         let reloadFailure = null;
+        let recoveredState = null;
         try {
-          await reloadCommittedState();
+          recoveredState = await reloadCommittedState();
           recoverySucceeded = true;
+          if (persistenceCommitEvidenceMatches(error, recoveredState)) {
+            // COMMIT reached PostgreSQL but the acknowledgement was lost. The
+            // exact version+hash now present in a fresh repeatable-read snapshot
+            // proves this transaction committed, so report success instead of
+            // forcing the browser to retry an already durable mutation.
+            structuredLog('warn','relational_commit_ack_reconciled',{
+              reason:persistenceReason,
+              stateVersion:recoveredState.stateVersion,
+              snapshotHash:String(recoveredState.snapshotHash || '').slice(0,16)
+            });
+            return {
+              stateVersion:Number(recoveredState.stateVersion || targetVersion),
+              persistedAt:now(),
+              database:'postgresql-relational',
+              snapshotHash:recoveredState.snapshotHash || '',
+              counts:recoveredState.counts || {},
+              committedState:relationalShadowState,
+              committedStateOwned:true,
+              commitConfirmedAfterReconnect:true
+            };
+          }
         } catch (reloadError) {
           reloadFailure = reloadError;
-          verifiedFallbackRestored = deferredPersistence
-            && restoreVerifiedShadowAfterDeferredFailure(expectedVersion);
-          if (verifiedFallbackRestored) {
+          // Never expose the failed optimistic business state through read-only
+          // access. Restore the last physically verified shadow even for a
+          // foreground failure; foreground writes remain blocked until the
+          // database can be reloaded and the real commit outcome is known.
+          verifiedFallbackRestored = restoreVerifiedShadowAfterPersistenceFailure(expectedVersion);
+          if (deferredPersistence && verifiedFallbackRestored) {
             structuredLog('warn','runtime_deferred_recovery_preserved',{
               persistenceCode:error?.code || '',
               persistenceError:error?.message || String(error),
@@ -891,15 +923,16 @@ function save(d, metadata = {}){
               phase:'runtime'
             };
             scheduleStartupRecovery();
-            structuredLog('fatal','runtime_state_recovery_blocked',{
+            structuredLog('fatal',verifiedFallbackRestored ? 'runtime_state_recovery_read_only_shadow' : 'runtime_state_recovery_blocked',{
               persistenceCode:error?.code || '',
               persistenceError:error?.message || String(error),
+              verifiedFallbackRestored,
               recovery:startupFailurePayload()
             });
           }
         }
         error.persistenceRecovery={
-          ok:recoverySucceeded || verifiedFallbackRestored,
+          ok:recoverySucceeded || (deferredPersistence && verifiedFallbackRestored),
           databaseReloaded:recoverySucceeded,
           verifiedFallbackRestored,
           reloadCode:reloadFailure?.code || '',
@@ -915,6 +948,17 @@ function save(d, metadata = {}){
   };
 
   const queued = persistenceQueue.then(persist, persist).then(async result => {
+    if (USE_POSTGRES && result?.committedState && Number(stateVersion) < Number(targetVersion)) {
+      // A recovery reload can temporarily move the published runtime version
+      // behind later writes that were already queued. As those durable commits
+      // finish, republish their verified committed state in order so memory can
+      // never remain behind PostgreSQL after the queue drains.
+      publishCommittedState({
+        committedState:result.committedState,
+        version:targetVersion,
+        liveStateBeforeReload:memoryState
+      });
+    }
     const committedDeferredPresence = includedPresenceGeneration > persistedPresenceGeneration;
     persistedPresenceGeneration = Math.max(persistedPresenceGeneration, includedPresenceGeneration);
     clearPersistedPresenceRowsThrough(persistedPresenceGeneration);
@@ -1109,6 +1153,7 @@ async function buildReliabilityStatus({ detailed = false } = {}) {
   if (backups.warning === 'LATEST_BACKUP_ATTEMPT_FAILED') reliabilityWarnings.push('The latest backup attempt failed, but a recent verified recovery point remains available.');
   const base = {
     ok,
+    backendVersion:BACKEND_PACKAGE_VERSION,
     status:ok ? 'READY' : 'NOT_READY',
     checkedAt:now(),
     uptimeSeconds:Math.round(process.uptime()),
@@ -1171,11 +1216,32 @@ async function attemptStartupRecovery() {
   if (!startupFailure || shuttingDown || startupRecoveryInFlight) return startupRecoveryInFlight;
   if (!startupFailure.retryable) return null;
   const recoveryPhase=startupFailure.phase || 'runtime';
+  if (recoveryPhase === 'runtime' && !runtimeRecoveryCanRun({
+    queueDepth:persistenceQueueDepth,
+    inFlight:persistenceInFlight,
+    activeForegroundWrites:activeForegroundWriteRequests
+  })) {
+    structuredLog('warn','runtime_recovery_waiting_for_write_drain',{
+      queueDepth:persistenceQueueDepth,
+      inFlight:persistenceInFlight,
+      activeForegroundWrites:activeForegroundWriteRequests
+    });
+    return false;
+  }
   startupRecoveryInFlight=(async()=>{
     try {
       postgresReady=false;
-      await initStore();
-      await migrateLegacyCredentials();
+      if (recoveryPhase === 'runtime' && memoryState) {
+        // Runtime recovery must not call initStore(): doing so clears dirty
+        // presence bookkeeping and reinitializes workspace revisions. Reconnect,
+        // then reload one verified relational snapshot while preserving any
+        // newer unsaved presence rows for their normal deferred retry.
+        await ensurePostgres();
+        await reloadCommittedState();
+      } else {
+        await initStore();
+        await migrateLegacyCredentials();
+      }
       const recovered=startupFailurePayload();
       startupFailure=null;
       lastCriticalPersistenceFailure=null;
@@ -1184,8 +1250,9 @@ async function attemptStartupRecovery() {
         stateVersion,
         reason:'runtime_integrity_recovered'
       }).catch(() => {});
+      if (presenceMutationGeneration > persistedPresenceGeneration) schedulePresenceFlush(PRESENCE_FLUSH_RETRY_MS);
       if (startupRecoveryTimer) { clearInterval(startupRecoveryTimer); startupRecoveryTimer=null; }
-      structuredLog('info','server_startup_recovered',{previousFailure:recovered,stateVersion});
+      structuredLog('info','server_startup_recovered',{previousFailure:recovered,stateVersion,recoveryPhase});
       return true;
     } catch(error) {
       startupFailure={
@@ -1468,15 +1535,32 @@ async function createAuthSession(credential = {}, req = null) {
   };
   if (USE_POSTGRES) {
     await ensurePostgres();
-    await pool.query(
-      `INSERT INTO auth_sessions(token_hash,user_id,csrf_token,password_version,created_at,expires_at,last_seen_at,ip_address,user_agent)
-       VALUES($1,$2,$3,$4,$5,$6,$5,$7,$8)`,
-      [session.token_hash, session.user_id, session.csrf_token, session.password_version, session.created_at, session.expires_at, session.ip_address || null, session.user_agent || null]
-    );
+    // One account has exactly one live session. Serialize concurrent sign-ins on
+    // the credential row so two devices cannot both pass a revoke-then-insert
+    // race and remain active together. The newest completed sign-in owns the
+    // account session; the previous device fails closed on its next request.
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT user_id FROM auth_credentials WHERE user_id=$1 FOR UPDATE', [session.user_id]);
+      await client.query('UPDATE auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE user_id=$1 AND revoked_at IS NULL', [session.user_id]);
+      await client.query(
+        `INSERT INTO auth_sessions(token_hash,user_id,csrf_token,password_version,created_at,expires_at,last_seen_at,ip_address,user_agent)
+         VALUES($1,$2,$3,$4,$5,$6,$5,$7,$8)`,
+        [session.token_hash, session.user_id, session.csrf_token, session.password_version, session.created_at, session.expires_at, session.ip_address || null, session.user_agent || null]
+      );
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
   } else {
     const store = readLocalAuthStore();
+    store.sessions = store.sessions.map(item => String(item.user_id) === session.user_id && !item.revoked_at ? { ...item, revoked_at:createdAt } : item);
     store.sessions.push(session);
-    store.sessions = store.sessions.filter(item => !item.revoked_at && new Date(item.expires_at).getTime() > Date.now() - 24 * 60 * 60 * 1000).slice(-5000);
+    store.sessions = store.sessions.filter(item => new Date(item.expires_at).getTime() > Date.now() - 24 * 60 * 60 * 1000).slice(-5000);
     writeLocalAuthStore(store);
   }
   return { rawToken, ...session };
@@ -1621,16 +1705,75 @@ async function authenticationGate(req, res, next) {
     if (auth.user.mustChangePassword && !['/auth/change-password', '/auth/logout', '/auth/session'].includes(String(req.path || ''))) {
       return res.status(428).json({ ok: false, code: 'PASSWORD_CHANGE_REQUIRED', error: 'Change the administrator-issued temporary password before continuing.', user: auth.user });
     }
+    const suppliedSessionContext = String(req.get?.('x-csrf-token') || '');
+    const expectedSessionContext = String(auth.session.csrf_token || '');
+    const suppliedContextMismatch = Boolean(
+      suppliedSessionContext
+      && expectedSessionContext
+      && (
+        suppliedSessionContext.length !== expectedSessionContext.length
+        || !crypto.timingSafeEqual(Buffer.from(suppliedSessionContext), Buffer.from(expectedSessionContext))
+      )
+    );
+    // Browsers share cookies across tabs. A second tab can therefore replace the
+    // cookie while an older tab still has a different in-memory page token. Treat
+    // that as a stale page context on both reads and writes, but do not clear the
+    // shared cookie: the newer tab legitimately owns it.
+    if (suppliedContextMismatch) {
+      res.setHeader('X-Auth-Session-Context', 'changed');
+      return res.status(409).json({
+        ok:false,
+        code:'AUTH_SESSION_CONTEXT_CHANGED',
+        error:'This browser tab no longer owns the active sign-in. Reload this tab before continuing.'
+      });
+    }
     if (!isSafeMethod(req.method)) {
-      const supplied = String(req.get?.('x-csrf-token') || '');
-      const expected = String(auth.session.csrf_token || '');
-      if (!supplied || !expected || supplied.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) {
+      if (!suppliedSessionContext || !expectedSessionContext) {
         return res.status(403).json({ ok: false, code: 'CSRF_TOKEN_INVALID', error: 'The security token is missing or invalid. Refresh the page and try again.' });
       }
     }
     next();
   } catch (error) {
     next(error);
+  }
+}
+
+
+async function requireFreshAuthenticatedRequestAfterBody(req, res, next) {
+  try {
+    const originalSessionHash = String(req.auth?.session?.token_hash || '');
+    const originalUserId = String(req.auth?.user?.id || '');
+    const refreshed = await resolveRequestAuthentication(req);
+    const refreshedSessionHash = String(refreshed?.session?.token_hash || '');
+    const refreshedUserId = String(refreshed?.user?.id || '');
+
+    // Multipart parsing can legitimately take many minutes on a slow link. The
+    // request was authenticated before multer began consuming the body, so the
+    // original session may have been logged out/replaced while bytes were still
+    // arriving. Re-resolve the exact cookie token before any persistent mutation.
+    if (!refreshed || !originalSessionHash || refreshedSessionHash !== originalSessionHash || refreshedUserId !== originalUserId) {
+      cleanupRequestTempUploads(req);
+      res.setHeader('X-Auth-Session-Context', 'changed');
+      return res.status(401).json({
+        ok: false,
+        code: 'AUTH_SESSION_EXPIRED_DURING_REQUEST',
+        error: 'Your sign-in changed while this upload was in progress. The upload was not committed. Sign in again and retry.'
+      });
+    }
+
+    req.auth = refreshed;
+    return next();
+  } catch (error) {
+    cleanupRequestTempUploads(req);
+    structuredLog('error', 'multipart_session_revalidation_failed', {
+      requestId: req.requestId || '',
+      code: error?.code || 'AUTH_REVALIDATION_FAILED'
+    });
+    return res.status(503).json({
+      ok: false,
+      code: 'AUTH_REVALIDATION_FAILED',
+      error: 'The upload session could not be revalidated. Nothing was committed.'
+    });
   }
 }
 
@@ -2268,6 +2411,19 @@ function requestActor(req = {}) {
   return authorizationActor(req.auth?.user || {});
 }
 
+function sendApiFailure(res, req, error, fallback = 'The request could not be completed.', extra = {}) {
+  const status = Number(error?.statusCode || error?.status || 500) || 500;
+  const safePath = sanitizeOperationalPath(req?.originalUrl || req?.url || '');
+  const fingerprint = serverErrorFingerprint(error, { method:req?.method || '', path:safePath, code:error?.code || '' });
+  const payload = publicApiErrorPayload({ error, status, fallback, requestId:req?.requestId || '', extra, fingerprint });
+  if (status >= 500) {
+    try { res.setHeader('X-Error-Fingerprint', fingerprint); } catch {}
+    structuredLog('error','api_route_failure',{ requestId:req?.requestId || '', method:req?.method || '', path:safePath, status, code:error?.code || '', errorFingerprint:fingerprint, error:error?.message || 'Unexpected server error.' });
+    operationalJobs.recordFailure('API_REQUEST', error, { requestId:req?.requestId || '', method:req?.method || '', path:safePath, errorFingerprint:fingerprint }, { maxAttempts:1 }).catch(()=>{});
+  }
+  return res.status(status).json(payload);
+}
+
 function authorizationDenied(req, res, code = 'FORBIDDEN', error = 'You do not have permission to perform this action.') {
   const actor = requestActor(req);
   recordAuthEvent({
@@ -2275,7 +2431,7 @@ function authorizationDenied(req, res, code = 'FORBIDDEN', error = 'You do not h
     username: actor.username,
     eventType: 'AUTHORIZATION_DENIED',
     req,
-    details: { code, method: req.method, path: req.originalUrl || req.url || '', role: actor.role }
+    details: { code, method: req.method, path: sanitizeOperationalPath(req.originalUrl || req.url || ''), role: actor.role }
   }).catch(() => {});
   return res.status(403).json({ ok:false, code, error, requestId:req.requestId || '' });
 }
@@ -2354,6 +2510,42 @@ function mergeAppendOnly(existing = [], incoming = []) {
     if (!map.has(key)) map.set(key, structuredClone(record));
   });
   return [...map.values()];
+}
+
+function normalizeReadByEntries(value) {
+  if (Array.isArray(value)) return value.filter(entry => entry !== null && entry !== undefined && entry !== '');
+  if (value === null || value === undefined || value === '') return [];
+  return [value];
+}
+
+function readByEntryKeys(entry) {
+  const raw = typeof entry === 'string'
+    ? [entry]
+    : [entry?.userId, entry?.id, entry?.username, entry?.name];
+  return raw.map(value => String(value || '').trim().toLowerCase()).filter(Boolean);
+}
+
+function actorReadKeys(actor = {}) {
+  return [actor?.id, actor?.username, actor?.name]
+    .map(value => String(value || '').trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function readByIncludesActor(value, actor = {}) {
+  const actorKeys = new Set(actorReadKeys(actor));
+  if (!actorKeys.size) return false;
+  return normalizeReadByEntries(value).some(entry => readByEntryKeys(entry).some(key => actorKeys.has(key)));
+}
+
+function appendReadByActor(value, actor = {}, readAt = now()) {
+  const entries = normalizeReadByEntries(value);
+  if (readByIncludesActor(entries, actor)) return entries;
+  return [...entries, { name:actor?.name || '', username:actor?.username || '', userId:actor?.id || '', time:readAt }];
+}
+
+function normalizeNotificationForClient(notification = {}) {
+  if (!notification || typeof notification !== 'object' || Array.isArray(notification)) return notification;
+  return { ...notification, readBy:normalizeReadByEntries(notification.readBy) };
 }
 
 const DESIGNER_MUTABLE_TASK_FIELDS = Object.freeze([
@@ -2482,6 +2674,52 @@ function preauthorizeCaseAction(action = 'read') {
   };
 }
 
+function financeMutationId(body = {}) {
+  return String(body?.mutationId || body?.clientMutationId || '').trim().slice(0, 200);
+}
+
+function assertFinanceMutationReplayMatches(record = {}, mutationId = '', fingerprint = '', operation = '') {
+  if (!mutationId) return null;
+  const receipt = findFinanceMutationReceipt(record, mutationId);
+  if (!receipt) return null;
+  const storedFingerprint = String(receipt?.fingerprint || '').trim();
+  const storedOperation = String(receipt?.operation || '').trim().toLowerCase();
+  const requestedOperation = String(operation || '').trim().toLowerCase();
+  if ((storedFingerprint && fingerprint && storedFingerprint !== fingerprint)
+      || (storedOperation && requestedOperation && storedOperation !== requestedOperation)) {
+    const error = new Error('This finance mutation ID was already used for a different payment change. Generate a new mutation ID and retry from the latest finance state.');
+    error.statusCode = 409;
+    error.code = 'FINANCE_MUTATION_ID_REUSE';
+    error.currentFinanceVersion = Number(record?.financeVersion || 0);
+    throw error;
+  }
+  return receipt;
+}
+
+async function resolveCommittedFinanceReplay({ caseId = '', mutationId = '', fingerprint = '', operation = '' } = {}) {
+  if (!mutationId) return null;
+  const readCommitted = () => {
+    const committedState = USE_POSTGRES ? relationalShadowState : readDb();
+    const committedCase = findCaseByAnyId(committedState?.cases || [], caseId);
+    const receipt = committedCase ? assertFinanceMutationReplayMatches(committedCase, mutationId, fingerprint, operation) : null;
+    return receipt ? { committedState, committedCase, receipt } : null;
+  };
+  const immediate = readCommitted();
+  if (immediate) return immediate;
+
+  // A retry can arrive while the first request is still inside the serialized
+  // persistence queue. memoryState deliberately exposes queued writes so later
+  // requests see current state, but that must not turn an uncommitted mutation
+  // into success. If the exact mutation is pending, wait only for the queue that
+  // already existed at this point, then re-check durable committed state.
+  const pendingCase = findCaseByAnyId(memoryState?.cases || [], caseId);
+  const pendingReceipt = pendingCase ? assertFinanceMutationReplayMatches(pendingCase, mutationId, fingerprint, operation) : null;
+  if (!pendingReceipt) return null;
+  const pendingQueue = persistenceQueue;
+  await pendingQueue.catch(() => {});
+  return readCommitted();
+}
+
 function assertExpectedFinanceVersion(record = {}, body = {}) {
   if (body.expectedFinanceVersion === undefined || body.expectedFinanceVersion === null || body.expectedFinanceVersion === '') return;
   const expected = Number(body.expectedFinanceVersion);
@@ -2529,6 +2767,55 @@ function taskMutationId(body = {}, incoming = {}) {
     incoming.clientMutationId
   ].find(value => String(value || '').trim());
   return String(supplied || '').trim().slice(0, 200);
+}
+
+const TASK_MUTATION_FINGERPRINT_IGNORED_FIELDS = new Set([
+  'mutationId','clientMutationId','expectedTaskVersion','taskVersion',
+  'lastTaskMutationId','lastTaskMutationAt','lastTaskMutationFingerprint','lastTaskMutationOperation',
+  'updatedAt','syncVersion'
+]);
+
+function canonicalTaskMutationValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalTaskMutationValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().filter(key=>!TASK_MUTATION_FINGERPRINT_IGNORED_FIELDS.has(key)).map(key=>[key,canonicalTaskMutationValue(value[key])]));
+}
+
+function taskMutationFingerprint(operation = 'update', payload = {}) {
+  const canonical=JSON.stringify({operation:String(operation || 'update').trim().toLowerCase(),payload:canonicalTaskMutationValue(payload || {})});
+  return crypto.createHash('sha256').update(canonical).digest('hex');
+}
+
+function assertTaskMutationReplayMatches(record = {}, mutationId = '', fingerprint = '', operation = '') {
+  if (!mutationId || String(record.lastTaskMutationId || '') !== String(mutationId)) return false;
+  const storedFingerprint=String(record.lastTaskMutationFingerprint || '').trim();
+  const storedOperation=String(record.lastTaskMutationOperation || '').trim().toLowerCase();
+  const requestedOperation=String(operation || '').trim().toLowerCase();
+  if ((storedFingerprint && fingerprint && storedFingerprint !== fingerprint) || (storedOperation && requestedOperation && storedOperation !== requestedOperation)) {
+    const error=new Error('This mutation ID was already used for a different task change. Generate a new mutation ID and retry from the latest task state.');
+    error.statusCode=409;
+    error.code='TASK_MUTATION_ID_REUSE';
+    error.currentTaskVersion=currentTaskVersion(record);
+    throw error;
+  }
+  return true;
+}
+
+function prepareDedicatedTaskMutation(req = {}, record = {}, operation = 'update') {
+  const mutationId=taskMutationId(req.body || {}, {});
+  const fingerprint=taskMutationFingerprint(operation,req.body || {});
+  if (assertTaskMutationReplayMatches(record,mutationId,fingerprint,operation)) return { replay:true, mutationId, fingerprint, operation };
+  assertExpectedTaskVersion(record,{},req.body || {});
+  return { replay:false, mutationId:mutationId || `${operation}:${record.id || record.caseId}:${nanoid(12)}`, fingerprint, operation };
+}
+
+function commitDedicatedTaskMutation(record = {}, previous = {}, mutation = {}) {
+  record.taskVersion=nextTaskVersion(previous || {});
+  record.lastTaskMutationId=String(mutation.mutationId || '').slice(0,200);
+  record.lastTaskMutationFingerprint=String(mutation.fingerprint || '').slice(0,128);
+  record.lastTaskMutationOperation=String(mutation.operation || 'update').trim().toLowerCase().slice(0,80);
+  record.lastTaskMutationAt=now();
+  return record;
 }
 
 function completedTaskDocuments(record = {}) {
@@ -2737,7 +3024,7 @@ function nonNegativeFinanceNumber(value, fallback = 0) {
 function hasOwnFinanceValue(body = {}, ...keys) {
   return keys.some(key => Object.prototype.hasOwnProperty.call(body || {}, key));
 }
-function upsertInlinePaymentLedger(d, c, status, body = {}) {
+function upsertInlinePaymentLedger(d, c, status, body = {}, mutation = {}) {
   d.payments ||= [];
   c.ledger ||= {};
   c.history ||= [];
@@ -2850,10 +3137,9 @@ function upsertInlinePaymentLedger(d, c, status, body = {}) {
     financeLedgerLinked:amount > 0,
     financeLedgerId:existing?.id || c.ledger?.financeLedgerId || (amount > 0 ? nanoid(8) : c.ledger?.financeLedgerId)
   };
-  if (body.mutationId) {
-    c.lastFinanceMutationId = String(body.mutationId).trim().slice(0, 200);
-    c.lastFinanceMutationAt = nowIso;
-  }
+  const committedMutationId = String(mutation?.mutationId || financeMutationId(body)).trim().slice(0, 200);
+  const committedMutationFingerprint = String(mutation?.fingerprint || '').trim();
+  const committedMutationOperation = String(mutation?.operation || 'payment-status').trim().toLowerCase();
 
   const auditNote = body.note || (amount > 0
     ? (computedStatus === 'Paid' ? 'Admin recorded full payment from inline payment control' : 'Admin recorded a partial payment from inline payment control')
@@ -2901,7 +3187,7 @@ function upsertInlinePaymentLedger(d, c, status, body = {}) {
       updatedBy:by,
       note:auditNote,
       receiptFileId:c.ledger?.screenshot && typeof c.ledger.screenshot === 'object' ? (c.ledger.screenshot.id || '') : '',
-      financeMutationId:c.lastFinanceMutationId || ''
+      financeMutationId:committedMutationId || c.lastFinanceMutationId || ''
     };
     if (existing) {
       Object.assign(existing, paymentValues);
@@ -2924,6 +3210,17 @@ function upsertInlinePaymentLedger(d, c, status, body = {}) {
     existing.updatedBy = by;
     existing.accountingPeriod = accountingPeriod;
     c.ledger.financeLedgerLinked = false;
+  }
+
+  if (committedMutationId) {
+    rememberFinanceMutationReceipt(c, {
+      mutationId:committedMutationId,
+      fingerprint:committedMutationFingerprint,
+      operation:committedMutationOperation,
+      financeVersion:c.financeVersion,
+      paymentId:String(c.ledger?.financeLedgerId || existing?.id || ''),
+      committedAt:nowIso
+    });
   }
 
   const amountMovement = amount - previousAmountIn;
@@ -2949,7 +3246,8 @@ function upsertInlinePaymentLedger(d, c, status, body = {}) {
   return c;
 }
 
-const PRESENCE_STALE_MS = boundedEnvNumber('PRESENCE_STALE_MS', 90000, 30000, 30 * 60 * 1000);
+const PRESENCE_STALE_MS = boundedEnvNumber('PRESENCE_STALE_MS', 2 * 60 * 1000, 60_000, 30 * 60 * 1000);
+const PRESENCE_ATTENDANCE_MAX_GAP_MS = boundedEnvNumber('PRESENCE_ATTENDANCE_MAX_GAP_MS', 10 * 60 * 1000, 2 * 60 * 1000, 60 * 60 * 1000);
 const toMs = (value) => {
   if (!value) return 0;
   if (typeof value === 'number') return value;
@@ -3113,17 +3411,7 @@ function localDateKeyFromMsServer(value = Date.now()) {
   return year && month && day ? `${year}-${month}-${day}` : new Date(safeTimestamp).toISOString().slice(0,10);
 }
 function parseAttendanceClockServer(dateKey, clockValue = '') {
-  if (!dateKey || !clockValue || clockValue === '-') return 0;
-  const raw = String(clockValue || '').trim();
-  if (!raw) return 0;
-  const direct = new Date(`${dateKey} ${raw}`).getTime();
-  if (!Number.isNaN(direct)) return direct;
-  const match24 = raw.match(/^(\d{1,2}):(\d{2})$/);
-  if (match24) {
-    const ms = new Date(`${dateKey}T${String(match24[1]).padStart(2, '0')}:${match24[2]}:00`).getTime();
-    return Number.isNaN(ms) ? 0 : ms;
-  }
-  return 0;
+  return parseIndiaAttendanceClock(dateKey, clockValue);
 }
 function normalizeAttendanceLogsForSave(logs = [], users = []) {
   const userMap = new Map((users || []).map(u => [String(u.id), u]));
@@ -3139,6 +3427,15 @@ function normalizeAttendanceLogsForSave(logs = [], users = []) {
     if (logoutAt && localDateKeyFromMsServer(logoutAt) !== dateKey) logoutAt = 0;
     if (loginAt && logoutAt && logoutAt < loginAt) logoutAt = loginAt;
     const id = raw.id || `${raw.userId || user.id || raw.name}_${dateKey}`;
+    let firstLoginAt = toMs(raw.firstLoginAt) || loginAt;
+    if (firstLoginAt && localDateKeyFromMsServer(firstLoginAt) !== dateKey) firstLoginAt = loginAt || parsedLogin || 0;
+    const explicitBreakMinutes = (Array.isArray(raw.breakEvents) ? raw.breakEvents : []).reduce((sum, ev) => {
+      const explicit = Number(ev?.minutes);
+      const start = toMs(ev?.start);
+      const end = toMs(ev?.end);
+      const derived = start && end ? (end - start) / 60000 : 0;
+      return sum + Math.max(0, Math.floor(Number.isFinite(explicit) ? explicit : derived));
+    }, 0);
     const normalized = {
       ...raw,
       id,
@@ -3147,16 +3444,18 @@ function normalizeAttendanceLogsForSave(logs = [], users = []) {
       role: normalizeRole(raw.role || user.role || 'Designer'),
       date: dateKey,
       loginAt: loginAt || null,
-      firstLoginAt: toMs(raw.firstLoginAt) || loginAt || null,
-      loginTime: raw.loginTime || (loginAt ? new Date(loginAt).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' }) : ''),
-      firstLogin: raw.firstLogin || raw.loginTime || (loginAt ? new Date(loginAt).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' }) : ''),
+      firstLoginAt: firstLoginAt || loginAt || null,
+      loginTime: raw.loginTime || (loginAt ? new Date(loginAt).toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Kolkata' }) : ''),
+      firstLogin: raw.firstLogin || raw.loginTime || (loginAt ? new Date(loginAt).toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Kolkata' }) : ''),
       logoutAt: logoutAt || null,
-      logoutTime: raw.logoutTime || (logoutAt && logoutAt !== loginAt ? new Date(logoutAt).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' }) : ''),
+      logoutTime: raw.logoutTime || (logoutAt && logoutAt !== loginAt ? new Date(logoutAt).toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Kolkata' }) : ''),
       totalLoggedInMinutes: Math.max(0, Math.floor(Number(raw.totalLoggedInMinutes) || 0)),
       activeMinutes: Math.max(0, Math.floor(Number(raw.activeMinutes) || 0)),
-      totalBreakMinutes: Math.max(0, Math.floor(Number(raw.totalBreakMinutes || raw.breakMinutes || 0) || 0), (Array.isArray(raw.breakEvents) ? raw.breakEvents : []).reduce((sum, ev) => sum + Math.max(0, Math.floor(Number(ev?.minutes || 0) || ((toMs(ev?.end) && toMs(ev?.start)) ? (toMs(ev.end) - toMs(ev.start)) / 60000 : 0))), 0)),
+      totalBreakMinutes: Math.max(0, Math.floor(Number(raw.totalBreakMinutes || raw.breakMinutes || 0) || 0), explicitBreakMinutes),
       breakEvents: Array.isArray(raw.breakEvents) ? raw.breakEvents : [],
       currentBreakStartedAt: raw.currentBreakStartedAt || null,
+      attendanceAccrualRemainderMs: Math.max(0, Math.min(59_999, Math.floor(Number(raw.attendanceAccrualRemainderMs) || 0))),
+      presenceGapMinutes: Math.max(0, Math.floor(Number(raw.presenceGapMinutes) || 0)),
       lastTick: toMs(raw.lastTick) && localDateKeyFromMsServer(raw.lastTick) === dateKey ? raw.lastTick : (logoutAt || loginAt || null)
     };
     const prev = byId.get(id);
@@ -3217,7 +3516,7 @@ function findAttendanceLogIndex(logs = [], user = {}, dateKey = serverTodayKey()
   const nameKey = String(user.name || '').toLowerCase().trim();
   return (logs || []).findIndex(l => String(l.id) === id || (String(l.userId || '') && String(l.userId) === String(user.id || '') && l.date === dateKey) || (nameKey && String(l.name || '').toLowerCase().trim() === nameKey && l.date === dateKey));
 }
-function upsertAttendanceFromPresence(d, user = {}, action = 'heartbeat', nowMs = Date.now()) {
+function upsertAttendanceFromPresence(d, user = {}, action = 'heartbeat', nowMs = Date.now(), previousUser = {}) {
   d.attendanceLogs = Array.isArray(d.attendanceLogs) ? d.attendanceLogs : [];
   const role = normalizeRole(user.role || 'Designer');
   if (role === 'Admin') return null;
@@ -3225,12 +3524,24 @@ function upsertAttendanceFromPresence(d, user = {}, action = 'heartbeat', nowMs 
   const timeStr = serverClockTime(nowMs);
   const idx = findAttendanceLogIndex(d.attendanceLogs, user, dateKey);
   const existing = idx >= 0 ? d.attendanceLogs[idx] : null;
-  const lastTick = toMs(existing?.lastTick) || toMs(existing?.logoutAt) || toMs(existing?.loginAt) || nowMs;
-  const loginAt = toMs(existing?.loginAt) || toMs(existing?.firstLoginAt) || (action === 'login' ? nowMs : toMs(user.lastLoginAt)) || nowMs;
-  const previousBreakStart = toMs(existing?.currentBreakStartedAt) || toMs(user.breakStartedAt);
-  const wasOnBreak = !!previousBreakStart || String(existing?.status || '').toLowerCase().includes('break');
+  // A daily row begins on the first accepted presence command for that India
+  // calendar day. Never carry yesterday's login clock into a new row: after a
+  // suspended laptop or overnight network gap that inflated today's attendance.
+  const loginAt = toMs(existing?.loginAt) || toMs(existing?.firstLoginAt) || nowMs;
+  const lastTick = toMs(existing?.lastTick) || toMs(existing?.logoutAt) || loginAt;
+  const previousBreakStart = toMs(existing?.currentBreakStartedAt) || toMs(previousUser?.breakStartedAt) || toMs(user.breakStartedAt);
+  const wasOnBreak = !!previousBreakStart || String(existing?.status || '').toLowerCase().includes('break') || String(previousUser?.availability || '').toLowerCase() === 'break';
   const isBreakAction = action === 'break' || String(user.availability || '').toLowerCase() === 'break';
-  const elapsed = Math.max(0, Math.floor((nowMs - Math.max(lastTick, loginAt)) / 60000));
+  const accrual = existing && action !== 'login'
+    ? computeAttendanceAccrual({
+        lastTick,
+        loginAt,
+        nowMs,
+        remainderMs:existing?.attendanceAccrualRemainderMs,
+        maxGapMs:PRESENCE_ATTENDANCE_MAX_GAP_MS
+      })
+    : { wholeMinutes:0, remainderMs:0, ignoredGapMinutes:0 };
+  const elapsed = Math.max(0, Math.floor(Number(accrual.wholeMinutes) || 0));
   let totalLoggedInMinutes = Math.max(0, Math.floor(Number(existing?.totalLoggedInMinutes) || 0));
   let activeMinutes = Math.max(0, Math.floor(Number(existing?.activeMinutes) || 0));
   let totalBreakMinutes = Math.max(0, Math.floor(Number(existing?.totalBreakMinutes || existing?.breakMinutes || 0) || 0));
@@ -3238,16 +3549,33 @@ function upsertAttendanceFromPresence(d, user = {}, action = 'heartbeat', nowMs 
     totalLoggedInMinutes += elapsed;
     if (wasOnBreak) totalBreakMinutes += elapsed; else activeMinutes += elapsed;
   }
-  const events = Array.isArray(existing?.breakEvents) ? [...existing.breakEvents] : [];
+  const events = Array.isArray(existing?.breakEvents) ? existing.breakEvents.map(ev => ({ ...ev })) : [];
+  // Break-event minutes are accumulated from the same bounded heartbeat delta as
+  // the daily counters. Do not derive a completed break from wall-clock start/end:
+  // a suspended laptop or disconnected browser could otherwise turn an ignored
+  // presence gap back into hours of break time when Resume finally arrives.
+  if (existing && wasOnBreak && action !== 'login') {
+    for (const ev of events) {
+      if (ev.start && !ev.end) {
+        const savedMinutes = Number(ev.minutes);
+        ev.minutes = Math.max(0, Math.floor((Number.isFinite(savedMinutes) ? savedMinutes : 0) + elapsed));
+        ev.lastAccruedAt = nowMs;
+        ev.source = ev.source || 'presence';
+      }
+    }
+  }
   if (action === 'break' && !events.some(ev => ev.start && !ev.end)) {
-    events.push({ id: `break_${nowMs}`, start: nowMs, startTime: timeStr, source: 'presence' });
+    const breakStart = previousBreakStart || nowMs;
+    events.push({ id: `break_${breakStart}`, start: breakStart, startTime: serverClockTime(breakStart), minutes:0, lastAccruedAt:nowMs, source: 'presence' });
   }
   if ((action === 'resume' || action === 'logout') && events.some(ev => ev.start && !ev.end)) {
     for (const ev of events) {
       if (ev.start && !ev.end) {
         ev.end = nowMs;
         ev.endTime = timeStr;
-        ev.minutes = Math.floor(Math.max(0, nowMs - Number(ev.start)) / 60000);
+        const savedMinutes = Number(ev.minutes);
+        ev.minutes = Math.max(0, Math.floor(Number.isFinite(savedMinutes) ? savedMinutes : 0));
+        ev.lastAccruedAt = nowMs;
         ev.source = ev.source || 'presence';
       }
     }
@@ -3274,7 +3602,9 @@ function upsertAttendanceFromPresence(d, user = {}, action = 'heartbeat', nowMs 
     isOnline: !isLogout,
     status: isLogout ? 'Logged Out' : (isBreakAction ? 'On Break' : 'Online'),
     lastTick: nowMs,
-    presenceSource: 'backend-heartbeat-v3'
+    attendanceAccrualRemainderMs:Math.max(0, Math.min(59_999, Math.floor(Number(accrual.remainderMs) || 0))),
+    presenceGapMinutes:Math.max(0, Math.floor(Number(existing?.presenceGapMinutes) || 0) + Math.floor(Number(accrual.ignoredGapMinutes) || 0)),
+    presenceSource: 'backend-heartbeat-v4'
   };
   const normalizedLog = normalizeAttendanceLogsForSave([log], d.users || [user])[0] || log;
   if (idx >= 0) d.attendanceLogs[idx] = normalizedLog; else d.attendanceLogs.push(normalizedLog);
@@ -3302,7 +3632,7 @@ function findUserIndexByIdentity(users = [], identity = {}) {
   });
 }
 
-function applyPresenceUpdate(d, userPatch = {}, action = 'heartbeat') {
+function applyPresenceUpdate(d, userPatch = {}, action = 'heartbeat', command = { legacy:true }) {
   d.users ||= [];
   const nowMs = Date.now();
   const idx = findUserIndexByIdentity(d.users, userPatch);
@@ -3313,22 +3643,40 @@ function applyPresenceUpdate(d, userPatch = {}, action = 'heartbeat') {
   next.lastHeartbeatAt = nowMs;
   if (action === 'login') next.lastLoginAt = nowMs;
   if (action === 'logout') next.lastLogoutAt = nowMs;
+
   if (action === 'break') {
+    const alreadyOnBreak = String(existing?.availability || '').toLowerCase() === 'break' && toMs(existing?.breakStartedAt);
     next.availability = 'Break';
-    next.breakStartedAt = userPatch.breakStartedAt || nowMs;
+    next.breakStartedAt = alreadyOnBreak || toMs(userPatch.breakStartedAt) || nowMs;
+    next.availabilityUpdatedAt = alreadyOnBreak ? (existing.availabilityUpdatedAt || next.breakStartedAt) : nowMs;
+  } else if (action === 'resume') {
+    next.availability = 'Available';
+    next.breakStartedAt = null;
     next.availabilityUpdatedAt = nowMs;
-  } else if (action === 'resume' || action === 'login' || action === 'heartbeat') {
-    next.availability = userPatch.availability && userPatch.availability !== 'Unavailable' ? userPatch.availability : 'Available';
-    if (next.availability !== 'Break') next.breakStartedAt = null;
-    next.availabilityUpdatedAt = action === 'heartbeat' ? (next.availabilityUpdatedAt || nowMs) : nowMs;
+  } else if (action === 'login') {
+    // A new authenticated presence epoch starts available. Stale break/offline
+    // state from a previous browser session must not leak into the new session.
+    next.availability = 'Available';
+    next.breakStartedAt = null;
+    next.availabilityUpdatedAt = nowMs;
+  } else if (action === 'heartbeat') {
+    // Heartbeats are liveness-only. They never change availability or break
+    // state, so a slow pre-break heartbeat cannot undo a later Break/Resume.
+    const authoritativeAvailability = ['Available','Busy','Break'].includes(String(existing?.availability || ''))
+      ? String(existing.availability)
+      : 'Available';
+    next.availability = authoritativeAvailability;
+    next.breakStartedAt = authoritativeAvailability === 'Break' ? (existing?.breakStartedAt || next.breakStartedAt || nowMs) : null;
+    next.availabilityUpdatedAt = existing?.availabilityUpdatedAt || next.availabilityUpdatedAt || nowMs;
   } else if (action === 'logout') {
     next.availability = 'Unavailable';
     next.breakStartedAt = null;
     next.availabilityUpdatedAt = nowMs;
   }
+  applyPresenceClientCommandMetadata(next, command);
   const savedUser = sanitizePresenceUser(next, nowMs);
   if (idx >= 0) d.users[idx] = savedUser; else d.users.push(savedUser);
-  const attendanceLog = upsertAttendanceFromPresence(d, savedUser, action, nowMs);
+  const attendanceLog = upsertAttendanceFromPresence(d, savedUser, action, nowMs, existing);
   return { user:savedUser, attendanceLog };
 }
 
@@ -3505,7 +3853,7 @@ async function recordFileStorageEvent({fileId='',caseId='',action='FILE_EVENT',a
   }
 }
 function notify(d, to, text, category='normal', target=''){
-  const notification={id:nanoid(8),to,text,category,target,status:'UNREAD',createdAt:now()};
+  const notification={id:nanoid(8),to,text,category,target,status:'UNREAD',readBy:[],createdAt:now()};
   d.notifications.unshift(notification);
   return notification;
 }
@@ -3613,9 +3961,14 @@ function addFileRegistryEntry(d, doc={}){
     size: Number(doc.size || 0),
     sha256: doc.sha256 || '',
     uploadMutationId: doc.uploadMutationId || '',
+    uploadContentIdentity: doc.uploadContentIdentity || '',
     purpose: doc.purpose || doc.type || 'FILE',
+    type: doc.type || doc.folder || '',
+    folder: doc.folder || doc.type || '',
     uploadedBy: doc.uploadedBy || doc.by || 'Team',
     uploadedByRole: doc.uploadedByRole || '',
+    uploadedById: doc.uploadedById || '',
+    uploadedByUsername: doc.uploadedByUsername || '',
     uploadedAt: doc.uploadedAt || now(),
     storedAt: doc.storedAt || doc.uploadedAt || now(),
     securityStatus: doc.securityStatus || (doc.sha256 ? 'VALIDATED' : 'LEGACY_UNVERIFIED'),
@@ -3625,6 +3978,7 @@ function addFileRegistryEntry(d, doc={}){
     storageStatus: doc.storageStatus || 'UNKNOWN',
     chatScope: doc.chatScope || '',
     chatParticipants: Array.isArray(doc.chatParticipants) ? doc.chatParticipants : [],
+    isVoiceNote: Boolean(doc.isVoiceNote),
     url: `/api/files/${doc.id}/download`,
     previewUrl: `/api/files/${doc.id}/preview`,
     downloadUrl: `/api/files/${doc.id}/download`
@@ -3647,24 +4001,31 @@ function addFileRegistryEntry(d, doc={}){
     storageStatus: entry.storageStatus,
     securityStatus: doc.securityStatus || entry.securityStatus,
     storageProvider: doc.storageProvider || entry.storageProvider,
-    uploadMutationId: doc.uploadMutationId || entry.uploadMutationId || ''
+    uploadMutationId: doc.uploadMutationId || entry.uploadMutationId || '',
+    uploadContentIdentity: doc.uploadContentIdentity || entry.uploadContentIdentity || '',
+    uploadedById: doc.uploadedById || entry.uploadedById || '',
+    uploadedByUsername: doc.uploadedByUsername || entry.uploadedByUsername || '',
+    isVoiceNote: Boolean(doc.isVoiceNote || entry.isVoiceNote)
   });
   return doc;
 }
 function allKnownFileDocs(d={}){
-  const caseDocs = (d.cases || []).flatMap(c => [
-    ...(c.documents || []),
-    ...(c.completedFiles || []),
-    ...(c.sourceFiles || []),
-    ...(c.workFiles || []),
-    ...(c.files || [])
+  const caseDocs = (Array.isArray(d.cases) ? d.cases : []).flatMap(c => [
+    ...(Array.isArray(c.documents) ? c.documents : []),
+    ...(Array.isArray(c.completedFiles) ? c.completedFiles : []),
+    ...(Array.isArray(c.sourceFiles) ? c.sourceFiles : []),
+    ...(Array.isArray(c.workFiles) ? c.workFiles : []),
+    ...(Array.isArray(c.files) ? c.files : []),
+    ...(Array.isArray(c.uploads) ? c.uploads : []),
+    ...(Array.isArray(c.attachments) ? c.attachments : []),
+    ...(c.file ? [c.file] : [])
   ].filter(Boolean));
-  const chatDocs = (d.teamChat || []).flatMap(m => [
-    ...(m.files || []),
-    ...(m.attachments || []),
+  const chatDocs = (Array.isArray(d.teamChat) ? d.teamChat : []).flatMap(m => [
+    ...(Array.isArray(m.files) ? m.files : []),
+    ...(Array.isArray(m.attachments) ? m.attachments : []),
     ...(m.file ? [m.file] : [])
   ].filter(Boolean));
-  return [...(d.files || []), ...caseDocs, ...chatDocs].filter(Boolean);
+  return [...(Array.isArray(d.files) ? d.files : []), ...caseDocs, ...chatDocs].filter(Boolean);
 }
 
 function fileStorageKey(doc={}) {
@@ -3791,8 +4152,10 @@ function resolveFileById(d, id){
   if (!doc) {
     for (const c of d.cases || []) {
       doc = [
-        ...(c.documents || []), ...(c.completedFiles || []), ...(c.sourceFiles || []),
-        ...(c.workFiles || []), ...(c.files || [])
+        ...(Array.isArray(c.documents) ? c.documents : []), ...(Array.isArray(c.completedFiles) ? c.completedFiles : []),
+        ...(Array.isArray(c.sourceFiles) ? c.sourceFiles : []), ...(Array.isArray(c.workFiles) ? c.workFiles : []),
+        ...(Array.isArray(c.files) ? c.files : []), ...(Array.isArray(c.uploads) ? c.uploads : []),
+        ...(Array.isArray(c.attachments) ? c.attachments : []), ...(c.file ? [c.file] : [])
       ].find(matches) || null;
       if (doc) break;
     }
@@ -4229,7 +4592,7 @@ function scopedTeamChat(d = {}, req = {}) {
 
 function scopedNotifications(d = {}, req = {}) {
   const actor = req.auth?.user || {};
-  return (d.notifications || []).filter(notification => notificationBelongsToUser(notification, actor));
+  return (d.notifications || []).filter(notification => notificationBelongsToUser(notification, actor)).map(normalizeNotificationForClient);
 }
 
 function scopedAttendance(d = {}, req = {}) {
@@ -4248,14 +4611,27 @@ function scopedState(d = {}, req = {}, options = {}) {
   const includePerformance = options.includePerformance !== false;
   const visibleCases = filterCasesForUser(filterDeletedCases(d.cases || [], d.deletedProjectIds || []), actor);
   const safeCases = sanitizeCasesForRole(visibleCases, role);
-  const chatMessages = scopedTeamChat(d, req);
+  const fullChatMessages = scopedTeamChat(d, req);
+  const fullNotifications = scopedNotifications(d, req);
+  // Keep the normal operational workspace bounded even after months of use.
+  // PostgreSQL remains the permanent source of truth; older chat is available
+  // through the authenticated history endpoint instead of living forever in
+  // every browser tab's React heap.
+  const chatMessages = compact ? fullChatMessages.slice(0, WORKSPACE_COMPACT_CHAT_LIMIT) : fullChatMessages;
+  const notifications = compact ? fullNotifications.slice(0, WORKSPACE_COMPACT_NOTIFICATION_LIMIT) : fullNotifications;
   const payload = {
     users:scopedUsers(d, req),
     projects:safeCases,
     deletedProjectIds:[...(d.deletedProjectIds || [])],
     chatMessages,
-    notifications:scopedNotifications(d, req),
-    attendanceLogs:scopedAttendance(d, req)
+    notifications,
+    attendanceLogs:scopedAttendance(d, req),
+    liveWindow:{
+      chatReturned:chatMessages.length,
+      chatTotal:fullChatMessages.length,
+      notificationsReturned:notifications.length,
+      notificationsTotal:fullNotifications.length
+    }
   };
   if (!compact) {
     payload.cases = safeCases;
@@ -4350,12 +4726,14 @@ const corsOptions = {
   },
   methods: ['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','X-CSRF-Token','X-Request-Id','X-Webhook-Secret'],
-  exposedHeaders: ['X-Request-Id','Content-Disposition','Content-Length','Content-Type','RateLimit-Limit','RateLimit-Remaining','RateLimit-Reset','Retry-After']
+  exposedHeaders: ['X-Request-Id','X-Error-Fingerprint','X-Auth-Session-Context','Content-Disposition','Content-Length','Content-Type','RateLimit-Limit','RateLimit-Remaining','RateLimit-Reset','Retry-After']
 };
 const loginRateLimiter = createRateLimiter({ windowMs:15 * 60 * 1000, max:20, prefix:'login', key:req => `login:${req.ip || req.socket?.remoteAddress || 'unknown'}:${normalizeUsername(req.body?.username || '')}` });
 const recoveryRateLimiter = createRateLimiter({ windowMs:15 * 60 * 1000, max:8, prefix:'recovery' });
 const otpRateLimiter = createRateLimiter({ windowMs:10 * 60 * 1000, max:8, prefix:'otp' });
 const emailTestRateLimiter = createRateLimiter({ windowMs:60 * 60 * 1000, max:5, prefix:'email-test' });
+const clientDiagnosticRateLimiter = createRateLimiter({ windowMs:5 * 60 * 1000, max:60, prefix:'client-diagnostic', key:req => `client-diagnostic:${req.auth?.user?.id || req.ip || req.socket?.remoteAddress || 'unknown'}` });
+const recentClientDiagnosticReports = new Map();
 const apiWriteRateLimiter = createRateLimiter({ windowMs:60 * 1000, max:boundedEnvNumber('API_WRITE_RATE_LIMIT', 300, 10, 10000), prefix:'api-write', key:req => `api-write:${req.auth?.user?.id || req.ip || req.socket?.remoteAddress || 'unknown'}` });
 app.use(attachRequestId);
 app.use(requestLogMiddleware);
@@ -4369,7 +4747,7 @@ app.use('/api', (req,res,next) => {
   const publicDuringMaintenance=new Set(['/health','/health/live','/health/ready','/meta']);
   if (publicDuringMaintenance.has(req.path)) return next();
   const runtimeReadOnly = startupFailure.phase === 'runtime' && memoryState && isSafeMethod(req.method);
-  const runtimeAuthPaths = new Set(['/auth/login','/auth/session','/auth/logout','/auth/clear-browser-session','/auth/recovery/request','/auth/recovery/reset','/otp/send','/otp/verify']);
+  const runtimeAuthPaths = new Set(['/auth/login','/auth/session','/auth/logout','/auth/clear-browser-session','/auth/recovery/request','/auth/recovery/reset','/otp/send','/otp/verify','/client-diagnostics']);
   if (runtimeReadOnly || (startupFailure.phase === 'runtime' && runtimeAuthPaths.has(req.path))) return next();
   res.setHeader('Retry-After', startupFailure.retryable ? '30' : '300');
   return res.status(503).json({
@@ -4526,7 +4904,7 @@ app.post('/api/auth/change-password', async (req, res) => {
     void recordAuthEventBestEffort({ userId: user.id, username: user.username, eventType: 'PASSWORD_CHANGED', req });
   } catch (error) {
     structuredLog('error','password_change_failed',{requestId:req.requestId,userId:req.auth?.user?.id || '',code:error?.code || 'PASSWORD_CHANGE_ERROR'});
-    if (!res.headersSent) res.status(500).json({ ok: false, code: 'PASSWORD_CHANGE_ERROR', error: 'Password could not be changed. Please try again.', requestId:req.requestId });
+    if (!res.headersSent) sendApiFailure(res, req, Object.assign(error,{ code:error?.code || 'PASSWORD_CHANGE_ERROR' }), 'Password could not be changed. Please try again.');
   }
 });
 
@@ -4588,11 +4966,11 @@ app.post('/api/auth/recovery/reset', recoveryRateLimiter, async (req, res) => {
     res.json({ ok: true, username: updated.username });
   } catch (error) {
     structuredLog('error','password_recovery_reset_failed',{requestId:req.requestId,code:error?.code || 'RECOVERY_RESET_FAILED'});
-    res.status(500).json({ ok: false, code: 'RECOVERY_RESET_FAILED', error: 'Password could not be reset. Please try again.', requestId:req.requestId });
+    sendApiFailure(res, req, Object.assign(error,{ code:error?.code || 'RECOVERY_RESET_FAILED' }), 'Password could not be reset. Please try again.');
   }
 });
 
-app.get('/api/auth/health', requireAdminSession, async (_req, res) => {
+app.get('/api/auth/health', requireAdminSession, async (req, res) => {
   try {
     let activeSessions = 0;
     let lockedCredentials = 0;
@@ -4608,7 +4986,7 @@ app.get('/api/auth/health', requireAdminSession, async (_req, res) => {
     }
     res.json({ ok: true, credentialCount: await countCredentials(), activeSessions, lockedCredentials, passwordHash: 'scrypt-v1', httpOnlyCookie: true, csrfProtection: true, sessionHours: SESSION_TTL_HOURS });
   } catch (error) {
-    res.status(500).json({ ok: false, error: error.message || 'Authentication health could not be loaded.' });
+    sendApiFailure(res, req, error, 'Authentication health could not be loaded.');
   }
 });
 
@@ -4640,7 +5018,7 @@ app.post('/api/auth/users', requireAdminSession, async (req, res) => {
     void recordAuthEventBestEffort({ userId, username, eventType: 'USER_CREDENTIAL_CREATED', req, details: { role, createdBy: req.auth.user.name } });
     res.status(201).json({ ok: true, user: publicSessionUser(user, credential), persistence });
   } catch (error) {
-    res.status(error.statusCode || 500).json({ ok: false, code: error.code || '', error: error.message || 'User could not be created.' });
+    sendApiFailure(res, req, error, 'User could not be created.');
   }
 });
 
@@ -4681,7 +5059,7 @@ app.patch('/api/auth/users/:id', requireAdminSession, async (req, res) => {
     await recordAuthEvent({ userId: existingUser.id, username, eventType: 'USER_ACCESS_UPDATED', req, details: { role, status, updatedBy: req.auth.user.name } });
     res.json({ ok: true, user: publicSessionUser(nextUser, nextCredential), persistence });
   } catch (error) {
-    res.status(error.statusCode || 500).json({ ok: false, code: error.code || '', error: error.message || 'User access could not be updated.' });
+    sendApiFailure(res, req, error, 'User access could not be updated.');
   }
 });
 
@@ -4697,7 +5075,7 @@ app.post('/api/auth/users/:id/reset-password', requireAdminSession, async (req, 
     await recordAuthEvent({ userId: req.params.id, username: credential.username, eventType: 'PASSWORD_RESET_BY_ADMIN', req, details: { resetBy: req.auth.user.name } });
     res.json({ ok: true, userId: req.params.id, username: updated.username, mustChangePassword: true });
   } catch (error) {
-    res.status(500).json({ ok: false, error: error.message || 'Password could not be reset.' });
+    sendApiFailure(res, req, error, 'Password could not be reset.');
   }
 });
 
@@ -4768,6 +5146,7 @@ app.get('/api/health/live', (_req, res) => {
     processAlive,
     status:shuttingDown ? 'SHUTTING_DOWN' : startupFailure ? 'DEGRADED' : 'ALIVE',
     service:'Kalpvriksha Ops API',
+    backendVersion:BACKEND_PACKAGE_VERSION,
     time:now(),
     uptimeSeconds:Math.round(process.uptime()),
     startupFailure:startupFailurePayload()
@@ -4866,7 +5245,7 @@ app.post('/api/otp/verify', otpRateLimiter, async (req,res)=>{
     res.json({ ok:true, user:publicSessionUser(user,req.auth.credential || {}), emailRegistered:true, mobileRegistered:true, persistence });
   } catch (error) {
     structuredLog('error','otp_verify_failed',{requestId:req.requestId,code:error?.code || 'OTP_VERIFY_FAILED'});
-    if (!res.headersSent) res.status(500).json({ok:false,code:'OTP_VERIFY_FAILED',error:'OTP verification could not be completed.'});
+    if (!res.headersSent) sendApiFailure(res, req, Object.assign(error,{ code:error?.code || 'OTP_VERIFY_FAILED' }), 'OTP verification could not be completed.');
   }
 });
 
@@ -4876,9 +5255,9 @@ app.get('/api/bootstrap', requireCapability('state:read'), async (req,res)=>{
   const d = readDb();
   const scoped = scopedState(d, req, { compact:queryFlag(req.query.compact, false), includePerformance:queryFlag(req.query.performance, true) });
   const readIds = d.chatReads?.[chatReadKey(req)] || [];
-  const unreadChat = (d.teamChat || []).filter(message => !readIds.includes(message.id)).length;
+  const unreadChat = (Array.isArray(d.teamChat) ? d.teamChat : []).filter(message => !readIds.includes(message.id)).length;
   const actor = requestActor(req);
-  const mentionUnread = (d.teamChat || []).filter(message => !readIds.includes(message.id) && (message.mentions || []).some(value => {
+  const mentionUnread = (Array.isArray(d.teamChat) ? d.teamChat : []).filter(message => !readIds.includes(message.id) && (Array.isArray(message?.mentions) ? message.mentions : []).some(value => {
     const text = String(value || '').trim().toLowerCase();
     return text === actor.role.toLowerCase() || text === actor.name.toLowerCase() || text === actor.username.toLowerCase();
   })).length;
@@ -5014,7 +5393,7 @@ app.patch('/api/performance/baseline/:id', requireAdminSession, async (req, res)
     });
     res.json({ ok:true, enabled, baselineMonth:enabled ? baselineMonth : '', baselineAt, user:stripCredentialFields(nextUser), persistence });
   } catch (error) {
-    res.status(error.statusCode || 500).json({ ok:false, code:error.code || '', error:error.message || 'Performance baseline could not be updated.' });
+    sendApiFailure(res, req, error, 'Performance baseline could not be updated.');
   }
 });
 
@@ -5037,26 +5416,26 @@ app.get('/api/app-state', requireAdminSession, async (req, res) => {
     }
     res.json({ ok: true, state, ...state });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    sendApiFailure(res, req, e, 'Application state could not be loaded.');
   }
 });
 
-app.get('/api/system/status', requireCapability('system:read'), async (_req, res) => {
+app.get('/api/system/status', requireCapability('system:read'), async (req, res) => {
   try {
     const [db, reliability] = await Promise.all([getDbStatus(), buildReliabilityStatus({ detailed:false })]);
     const cloudConnected = String(db.database || '').startsWith('postgresql') && db.connected === true;
     res.status(reliability.ok ? 200 : 503).json({ ok:reliability.ok, cloudConnected, database:db.database, connected:db.connected, localMode:!cloudConnected, reliability });
   } catch (e) {
-    res.status(500).json({ ok:false, cloudConnected:false, localMode:true, error:e.message });
+    sendApiFailure(res, req, e, 'System status could not be loaded.', { cloudConnected:false, localMode:true });
   }
 });
 
-app.get('/api/system/reliability', requireAdminSession, async (_req,res)=>{
+app.get('/api/system/reliability', requireAdminSession, async (req,res)=>{
   try {
     const status = await buildReliabilityStatus({ detailed:true });
     res.status(status.ok ? 200 : 503).json(status);
   } catch(error) {
-    res.status(500).json({ok:false,code:error.code || 'RELIABILITY_STATUS_FAILED',error:error.message || 'Reliability status could not be loaded.'});
+    sendApiFailure(res, req, Object.assign(error,{ code:error.code || 'RELIABILITY_STATUS_FAILED' }), 'Reliability status could not be loaded.');
   }
 });
 
@@ -5081,7 +5460,7 @@ app.get('/api/system/jobs', requireAdminSession, async (req,res)=>{
     const jobs = await operationalJobs.list({status:String(req.query.status || ''),limit:Number(req.query.limit || 100)});
     res.json({ok:true,jobs,failedCount:jobs.filter(job=>job.status==='FAILED').length});
   } catch(error) {
-    res.status(500).json({ok:false,code:'OPERATIONAL_JOBS_FAILED',error:error.message || 'Operational jobs could not be loaded.'});
+    sendApiFailure(res, req, Object.assign(error,{ code:error.code || 'OPERATIONAL_JOBS_FAILED' }), 'Operational jobs could not be loaded.');
   }
 });
 
@@ -5095,7 +5474,7 @@ app.post('/api/system/jobs/:id/retry', requireAdminSession, async (req,res)=>{
     await recordOperationalEvent(pool,USE_POSTGRES,{eventType:'OPERATIONAL_JOB_RETRY_REQUESTED',severity:'INFO',actor:requestActor(req).name,requestId:req.requestId,details:{jobId:job.id,jobType:job.jobType}}).catch(()=>{});
     res.json({ok:true,job:retried});
   } catch(error) {
-    res.status(500).json({ok:false,code:'JOB_RETRY_FAILED',error:error.message || 'The job could not be queued for retry.'});
+    sendApiFailure(res, req, Object.assign(error,{ code:error.code || 'JOB_RETRY_FAILED' }), 'The job could not be queued for retry.');
   }
 });
 
@@ -5106,7 +5485,43 @@ app.get('/api/system/events', requireAdminSession, async (req,res)=>{
     const result=await pool.query('SELECT id,event_type,severity,actor,request_id,details,created_at FROM operational_events ORDER BY created_at DESC LIMIT $1',[limit]);
     res.json({ok:true,events:result.rows});
   } catch(error) {
-    res.status(500).json({ok:false,code:'OPERATIONAL_EVENTS_FAILED',error:error.message || 'Operational events could not be loaded.'});
+    sendApiFailure(res, req, Object.assign(error,{ code:error.code || 'OPERATIONAL_EVENTS_FAILED' }), 'Operational events could not be loaded.');
+  }
+});
+
+app.post('/api/client-diagnostics', clientDiagnosticRateLimiter, async (req,res)=>{
+  try {
+    const diagnostic = normalizeClientDiagnostic(req.body || {});
+    const actor = requestActor(req);
+    const nowMs = Date.now();
+    if (recentClientDiagnosticReports.size > 1000) {
+      for (const [key, seenAt] of recentClientDiagnosticReports.entries()) if (nowMs - seenAt > 5 * 60 * 1000) recentClientDiagnosticReports.delete(key);
+    }
+    const dedupeKey = `${actor.id || actor.username || actor.name}|${diagnostic.fingerprint}|${diagnostic.relatedRequestId || ''}`;
+    const lastSeenAt = Number(recentClientDiagnosticReports.get(dedupeKey) || 0);
+    if (nowMs - lastSeenAt < 30_000) return res.json({ok:true,recorded:false,duplicate:true,diagnosticId:diagnostic.diagnosticId});
+    recentClientDiagnosticReports.set(dedupeKey, nowMs);
+    const runtimeFailure = !diagnostic.status || diagnostic.status >= 500 || ['window-error','unhandled-rejection','app-error-boundary','root-ui-boundary','communication-hub-boundary'].includes(diagnostic.source);
+    const event = {
+      eventType:'CLIENT_RUNTIME_DIAGNOSTIC',
+      severity:runtimeFailure ? 'ERROR' : 'WARN',
+      actor:`client-${String(actor.role || 'user').toLowerCase()}`,
+      requestId:diagnostic.relatedRequestId || req.requestId || '',
+      details:{
+        ...diagnostic,
+        role:actor.role || '',
+        reportRequestId:req.requestId || ''
+      }
+    };
+    let persisted = true;
+    try { await recordOperationalEvent(pool,USE_POSTGRES,event); }
+    catch (persistError) {
+      persisted = false;
+      structuredLog('warn','client_runtime_diagnostic_unpersisted',{requestId:event.requestId,diagnosticId:diagnostic.diagnosticId,fingerprint:diagnostic.fingerprint,source:diagnostic.source,route:diagnostic.route,reason:persistError?.code || 'EVENT_STORE_UNAVAILABLE'});
+    }
+    res.json({ok:true,recorded:true,persisted,diagnosticId:diagnostic.diagnosticId});
+  } catch(error) {
+    sendApiFailure(res, req, error, 'Client diagnostic could not be recorded.');
   }
 });
 
@@ -5128,10 +5543,13 @@ app.post('/api/state/projects', async (req, res) => {
     const createIntent=String(req.body?.operation || '').trim().toLowerCase()==='create'
       || req.body?.createOnly === true
       || mutationId.startsWith('create-');
+    const mutationOperation=createIntent ? 'create' : 'update';
+    const mutationFingerprint=taskMutationFingerprint(mutationOperation,incoming);
     if (createIntent) {
       if (!hasCapability(req.auth?.user || {}, 'task:create')) return authorizationDenied(req, res, 'TASK_CREATE_FORBIDDEN', 'Only Admins and Managers can create tasks.');
       const committedReplay=mutationId ? (d.cases || []).find(record=>String(record?.lastTaskMutationId || '')===mutationId) : null;
       if (committedReplay) {
+        assertTaskMutationReplayMatches(committedReplay,mutationId,mutationFingerprint,mutationOperation);
         const visibleReplay=sanitizeCasesForRole([committedReplay],actor.role)[0] || committedReplay;
         return res.json({ok:true,idempotent:true,project:visibleReplay,case:visibleReplay,deletedProjectIds:d.deletedProjectIds || [],counts:{cases:(d.cases || []).length}});
       }
@@ -5155,7 +5573,7 @@ app.post('/api/state/projects', async (req, res) => {
       // concurrency checks. An unrelated user must not be able to confirm a
       // task or receive its redacted row merely by guessing a mutation ID.
       assertProjectUpdateAuthorized(existing, req);
-      if (mutationId && String(existing.lastTaskMutationId || '') === mutationId) {
+      if (mutationId && assertTaskMutationReplayMatches(existing,mutationId,mutationFingerprint,mutationOperation)) {
         const visibleExisting = sanitizeCasesForRole([existing], actor.role)[0];
         return res.json({ ok:true, idempotent:true, project:visibleExisting, case:visibleExisting, deletedProjectIds:d.deletedProjectIds || [], counts:{ cases:(d.cases || []).length } });
       }
@@ -5164,6 +5582,8 @@ app.post('/api/state/projects', async (req, res) => {
       assertTaskLifecycleTransition(existing, safeIncoming, actor);
       safeIncoming.taskVersion = nextTaskVersion(existing);
       safeIncoming.lastTaskMutationId = mutationId || nanoid(16);
+      safeIncoming.lastTaskMutationFingerprint = mutationFingerprint;
+      safeIncoming.lastTaskMutationOperation = mutationOperation;
       safeIncoming.lastTaskMutationAt = now();
     } else {
       safeIncoming = preserveFinanceFields({}, structuredClone(incoming));
@@ -5194,6 +5614,8 @@ app.post('/api/state/projects', async (req, res) => {
       safeIncoming.timeline = mergeTimelineEvents([], incoming.timeline || []);
       safeIncoming.taskVersion = 1;
       safeIncoming.lastTaskMutationId = mutationId || nanoid(16);
+      safeIncoming.lastTaskMutationFingerprint = mutationFingerprint;
+      safeIncoming.lastTaskMutationOperation = mutationOperation;
       safeIncoming.lastTaskMutationAt = now();
       assertTaskLifecycleTransition({}, safeIncoming, actor);
     }
@@ -5236,7 +5658,7 @@ app.post('/api/state/projects', async (req, res) => {
     const visible = sanitizeCasesForRole([saved], actor.role)[0] || saved;
     res.json({ ok:true, project:visible, case:visible, requestedProjectId:projectId, taskIdAllocated:createIdentityCollision, notifications:notificationEntries, deletedProjectIds:d.deletedProjectIds || [], counts:{ cases:(d.cases || []).length }, persistence });
   } catch (e) {
-    res.status(e.statusCode || 500).json({ ok:false, code:e.code || '', error:e.message || 'Project save failed.', currentTaskVersion:e.currentTaskVersion, requestId:req.requestId || '' });
+    sendApiFailure(res, req, e, 'Project save failed.', { currentTaskVersion:e.currentTaskVersion });
   }
 });
 
@@ -5245,6 +5667,10 @@ app.delete('/api/state/projects/:id', requireAnyRole('ADMIN','MANAGER'), require
   const actor = requestActor(req);
   const requestedId = textValue(req.params.id, 'Project id', 200, { required:true });
   const target=req.caseRecord;
+  // Deletion is naturally idempotent after commit because a retry receives
+  // CASE_NOT_FOUND/404, but the first attempt must still be based on the exact
+  // task version the user reviewed before deleting it.
+  assertExpectedTaskVersion(target,target,req.body || {});
   const targetIds=new Set([...getCaseIdentitySet(target),requestedId].map(value=>String(value || '').trim()).filter(Boolean));
   const before = (d.cases || []).length;
   for (const identity of targetIds) rememberDeletedProject(d,identity);
@@ -5277,6 +5703,29 @@ app.post('/api/presence', requireCapability('presence:self'), async (req, res) =
     const safeAction = ['login','heartbeat','break','resume','logout'].includes(action) ? action : 'heartbeat';
     const stateUser = findStateUserByIdOrUsername(actor.id, actor.username);
     if (!stateUser) return res.status(404).json({ ok:false, code:'USER_NOT_FOUND', error:'Signed-in user record was not found.' });
+    const presenceCommand = normalizePresenceClientCommand(body);
+    const commandDisposition = classifyPresenceClientCommand(stateUser, safeAction, presenceCommand);
+    if (commandDisposition.epochMismatch) {
+      return res.status(409).json({
+        ok:false,
+        code:'PRESENCE_CLIENT_EPOCH_STALE',
+        error:'This page belongs to an older presence session. Refresh or sign in again before changing live status.',
+        presenceGeneration:presenceMutationGeneration
+      });
+    }
+    if (commandDisposition.stale) {
+      const staleDateKey = serverTodayKey();
+      const staleAttendanceIndex = findAttendanceLogIndex(memoryState?.attendanceLogs || [], stateUser, staleDateKey);
+      const staleAttendanceLog = staleAttendanceIndex >= 0 ? (memoryState?.attendanceLogs || [])[staleAttendanceIndex] : null;
+      return res.json({
+        ok:true,
+        idempotent:true,
+        staleClientSequence:true,
+        user:sanitizePresenceUser(stateUser),
+        attendanceLog:staleAttendanceLog,
+        presenceGeneration:presenceMutationGeneration
+      });
+    }
     const requestedAvailability = ['Available','Busy','Break','Unavailable'].includes(String(body.availability || body.user?.availability || ''))
       ? String(body.availability || body.user?.availability)
       : stateUser.availability;
@@ -5298,7 +5747,7 @@ app.post('/api/presence', requireCapability('presence:self'), async (req, res) =
       collections:['users','attendanceLogs'],
       collectionRowIds:{ users:[String(actor.id || actor.username)], attendanceLogs:[attendanceId] }
     });
-    const { user, attendanceLog } = applyPresenceUpdate(presenceState, userPatch, safeAction);
+    const { user, attendanceLog } = applyPresenceUpdate(presenceState, userPatch, safeAction, presenceCommand);
     replacePresenceSliceInMemory(presenceState);
     markPresenceRowsDirty(user, attendanceLog, presenceMutationGeneration);
 
@@ -5358,7 +5807,7 @@ app.post('/api/presence', requireCapability('presence:self'), async (req, res) =
     }
     res.json({ ok:true, user, attendanceLog, presenceGeneration:presenceMutationGeneration, persistence });
   } catch (e) {
-    res.status(e.statusCode || 500).json({ ok:false, code:e.code || '', error:e.message || 'Presence update failed.' });
+    sendApiFailure(res, req, e, 'Presence update failed.');
   }
 });
 
@@ -5428,12 +5877,12 @@ app.post('/api/state', async (req,res)=>{
     const performanceRecords = d.performanceRecords || [];
     res.json({ok:true, database:USE_POSTGRES ? 'postgresql' : 'json-file', savedAt:now(), ignoredFields, deletedProjectIds:d.deletedProjectIds || [], performanceRecords, counts:{users:d.users.length, cases:d.cases.length, performanceRecords:performanceRecords.length, chatMessages:d.teamChat.length, notifications:d.notifications.length, attendanceLogs:d.attendanceLogs.length}, persistence});
   } catch (e) {
-    res.status(e.statusCode || 500).json({ ok:false, code:e.code || '', error:e.message || 'State save failed.', requestId:req.requestId || '' });
+    sendApiFailure(res, req, e, 'State save failed.');
   }
 });
 
 
-app.post('/api/cases', requireAnyRole('ADMIN','MANAGER'), uploadAny, async (req,res)=>{
+app.post('/api/cases', requireAnyRole('ADMIN','MANAGER'), uploadAny, requireFreshAuthenticatedRequestAfterBody, requireAnyRole('ADMIN','MANAGER'), async (req,res)=>{
   let preparedUploads=[];
   let persistenceCommitted=false;
   let rollbackActor='system';
@@ -5532,7 +5981,7 @@ app.post('/api/cases', requireAnyRole('ADMIN','MANAGER'), uploadAny, async (req,
     cleanupRequestTempUploads(req);
     if (!persistenceCommitted) rollbackPreparedUploads(preparedUploads,{reason:'CASE_CREATE_PERSISTENCE_FAILED',actor:rollbackActor,caseId:rollbackCaseId});
     if (error instanceof FileValidationError) return fileUploadFailure(res, error, 'Case file upload failed.');
-    res.status(error.statusCode || 500).json({ ok:false, code:error.code || '', error:error.message || 'Case creation failed.' });
+    sendApiFailure(res, req, error, 'Case creation failed.');
   }
 });
 
@@ -5540,6 +5989,9 @@ app.post('/api/cases/:id/assign', requireAnyRole('ADMIN','MANAGER'), requireCase
   const d = requestDb(req);
   const c = req.caseRecord;
   const actor = requestActor(req);
+  const mutation=prepareDedicatedTaskMutation(req,c,'assign');
+  if (mutation.replay) return res.json({...c,idempotent:true});
+  const previousCase=structuredClone(c);
   const assigneeId = textValue(req.body.assigneeId, 'Assignee', 200, { required:true });
   const user = (d.users || []).find(item => String(item.id || '') === assigneeId && normalizeAuthStatus(item.status || 'APPROVED') === 'APPROVED');
   if (!user) return res.status(400).json({ok:false,code:'ASSIGNEE_NOT_FOUND',error:'Assignee not found or inactive.'});
@@ -5548,6 +6000,7 @@ app.post('/api/cases/:id/assign', requireAnyRole('ADMIN','MANAGER'), requireCase
   c.ownership={...(c.ownership || {}),assignedTo:user.name,assignedBy:actor.name};
   c.history ||= []; c.history.unshift({at:now(),by:actor.name,action:`Assigned to ${user.name}`});
   addCaseTimelineEvent(c,{type:'assigned',by:actor.name,title:`Assigned to ${user.name}`,remarks:textValue(req.body.remarks || '', 'Remarks', MAX_TIMELINE_TEXT_LENGTH)});
+  commitDedicatedTaskMutation(c,previousCase,mutation);
   const notification=notifyUser(d,user.name,`Task assigned to you: ${c.caseId}`,'task',c.id);
   const auditEntry=addAudit(d,actor.name,'Task assigned',c.caseId);
   await save(d,{actor:actor.name,reason:'case_assign',takeSnapshotOwnership:true,collections:['cases','notifications','audit'],collectionRowIds:{cases:[String(c.id)],notifications:[String(notification.id)],audit:[String(auditEntry.id)]}}); res.json(c);
@@ -5555,15 +6008,18 @@ app.post('/api/cases/:id/assign', requireAnyRole('ADMIN','MANAGER'), requireCase
 
 app.post('/api/cases/:id/start', requireCaseAction('start'), async (req,res)=>{
   const d=requestDb(req); const c=req.caseRecord; const actor=requestActor(req);
+  const mutation=prepareDedicatedTaskMutation(req,c,'start');
+  if (mutation.replay) return res.json({...c,idempotent:true});
   const previousCase=structuredClone(c);
   c.status='IN_PROGRESS'; c.startedAt ||= now(); c.updatedAt=Date.now(); c.syncVersion=Date.now();
   c.history ||= []; c.history.unshift({at:now(),by:actor.name,action:'Work started'});
   addCaseTimelineEvent(c,{type:'started',by:actor.name,title:'Designer Started',remarks:textValue(req.body.remarks || '', 'Remarks', MAX_TIMELINE_TEXT_LENGTH)});
   assertTaskLifecycleTransition(previousCase,c,actor);
+  commitDedicatedTaskMutation(c,previousCase,mutation);
   await save(d,{actor:actor.name,reason:'case_start',takeSnapshotOwnership:true,collections:['cases'],collectionRowIds:{cases:[String(c.id)]}}); res.json(c);
 });
 
-app.post('/api/cases/:id/upload-source', requireAnyRole('ADMIN','MANAGER'), preauthorizeCaseAction('update'), uploadAny, requireCaseAction('update',{files:true,notifications:true}), async (req,res)=>{
+app.post('/api/cases/:id/upload-source', requireAnyRole('ADMIN','MANAGER'), preauthorizeCaseAction('update'), uploadAny, requireFreshAuthenticatedRequestAfterBody, requireAnyRole('ADMIN','MANAGER'), requireCaseAction('update',{files:true,notifications:true}), async (req,res)=>{
   let preparedUploads=[];
   let persistenceCommitted=false;
   try {
@@ -5586,11 +6042,11 @@ app.post('/api/cases/:id/upload-source', requireAnyRole('ADMIN','MANAGER'), prea
     cleanupRequestTempUploads(req);
     if (!persistenceCommitted) rollbackPreparedUploads(preparedUploads,{reason:'CASE_SOURCE_UPLOAD_PERSISTENCE_FAILED',actor:requestActor(req).name,caseId:req.caseRecord?.id || ''});
     if (error instanceof FileValidationError) return fileUploadFailure(res,error,'Source file upload failed.');
-    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'Source file upload failed.'});
+    sendApiFailure(res, req, error, 'Source file upload failed.');
   }
 });
 
-app.post('/api/cases/:id/upload-final', preauthorizeCaseAction('upload-final'), uploadAny, requireCaseAction('upload-final',{files:true,notifications:true,audit:true}), async (req,res)=>{
+app.post('/api/cases/:id/upload-final', preauthorizeCaseAction('upload-final'), uploadAny, requireFreshAuthenticatedRequestAfterBody, requireCaseAction('upload-final',{files:true,notifications:true,audit:true}), async (req,res)=>{
   let preparedUploads=[];
   let persistenceCommitted=false;
   try {
@@ -5628,16 +6084,20 @@ app.post('/api/cases/:id/upload-final', preauthorizeCaseAction('upload-final'), 
     cleanupRequestTempUploads(req);
     if (!persistenceCommitted) rollbackPreparedUploads(preparedUploads,{reason:'CASE_FINAL_UPLOAD_PERSISTENCE_FAILED',actor:requestActor(req).name,caseId:req.caseRecord?.id || ''});
     if (error instanceof FileValidationError) return fileUploadFailure(res,error,'Completed file upload failed.');
-    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'Completed file upload failed.'});
+    sendApiFailure(res, req, error, 'Completed file upload failed.');
   }
 });
 
 app.post('/api/cases/:id/manager-complete', requireAnyRole('ADMIN','MANAGER'), requireCaseAction('review',{notifications:true,audit:true}), async (req,res)=>{
   const d=requestDb(req); const c=req.caseRecord; const actor=requestActor(req);
+  const mutation=prepareDedicatedTaskMutation(req,c,'manager-complete');
+  if (mutation.replay) return res.json({...c,idempotent:true});
+  const previousCase=structuredClone(c);
   assertTaskLifecycleTransition(c,{...c,status:'COMPLETED'},actor);
   c.status='COMPLETED'; c.completedAt=now(); c.updatedAt=Date.now(); c.syncVersion=Date.now();
   c.history ||= []; c.history.unshift({at:now(),by:actor.name,action:'Reviewed by manager and marked complete'});
   addCaseTimelineEvent(c,{type:'approved',by:actor.name,title:'Approved',remarks:'Reviewed by manager and marked complete'});
+  commitDedicatedTaskMutation(c,previousCase,mutation);
   const notifications=[
     notifyRole(d,'ADMIN',`Case completed after manager review: ${c.caseId}`,'completed',c.id),
     notifyUser(d,c.assigneeName,`Case marked complete: ${c.caseId}`,'completed',c.id)
@@ -5648,10 +6108,14 @@ app.post('/api/cases/:id/manager-complete', requireAnyRole('ADMIN','MANAGER'), r
 
 app.post('/api/cases/:id/revision', requireAnyRole('ADMIN','MANAGER'), requireCaseAction('revision',{notifications:true}), async (req,res)=>{
   const d=requestDb(req); const c=req.caseRecord; const actor=requestActor(req);
+  const mutation=prepareDedicatedTaskMutation(req,c,'revision');
+  if (mutation.replay) return res.json({...c,idempotent:true});
+  const previousCase=structuredClone(c);
   c.status='REOPENED_FOR_REVISION'; c.priority='Urgent'; c.updatedAt=Date.now(); c.syncVersion=Date.now();
   const rev={id:nanoid(8),note:textValue(req.body.note || 'Banker revision requested','Revision note',MAX_TIMELINE_TEXT_LENGTH,{required:true}),by:actor.name,createdAt:now()};
   c.revisions ||= []; c.revisions.unshift(rev); c.history ||= []; c.history.unshift({at:now(),by:actor.name,action:'Revision opened as urgent'});
   addCaseTimelineEvent(c,{type:'revision_created',by:actor.name,at:rev.createdAt,title:'Revision Created',remarks:rev.note});
+  commitDedicatedTaskMutation(c,previousCase,mutation);
   const notifications=[
     notifyUser(d,c.assigneeName,`URGENT revision task: ${c.caseId} - ${rev.note}`,'task',c.id),
     notifyRole(d,'MANAGER',`URGENT revision opened: ${c.caseId}`,'task',c.id)
@@ -5666,6 +6130,9 @@ app.get('/api/cases/:id/timeline', requireCaseAction('read'), async (req,res)=>{
 
 app.post('/api/cases/:id/timeline', requireCaseAction('timeline',{audit:true}), async (req,res)=>{
   const d=requestDb(req); const c=req.caseRecord; const actor=requestActor(req);
+  const mutation=prepareDedicatedTaskMutation(req,c,'timeline');
+  if (mutation.replay) return res.json({ok:true,idempotent:true,event:null,timeline:c.timeline || [],case:c});
+  const previousCase=structuredClone(c);
   const event=addCaseTimelineEvent(c,{
     type:textValue(req.body.type || 'manual','Event type',100),
     by:actor.name,
@@ -5673,6 +6140,7 @@ app.post('/api/cases/:id/timeline', requireCaseAction('timeline',{audit:true}), 
     remarks:textValue(req.body.remarks || req.body.note || '','Timeline remarks',MAX_TIMELINE_TEXT_LENGTH),
     meta:req.body.meta && typeof req.body.meta === 'object' ? req.body.meta : {}
   });
+  commitDedicatedTaskMutation(c,previousCase,mutation);
   const auditEntry=addAudit(d,actor.name,'Timeline event added',c.caseId);
   await save(d,{actor:actor.name,reason:'case_timeline_add',takeSnapshotOwnership:true,collections:['cases','audit'],collectionRowIds:{cases:[String(c.id)],audit:[String(auditEntry.id)]}});
   res.json({ok:true,event,timeline:c.timeline,case:c});
@@ -5682,20 +6150,21 @@ app.post('/api/state/projects/:id/payment-status', async (req, res) => {
   if (!isFinanceAdminRequest(req)) return denyFinanceAccess(res);
   const requestStartedAt = Date.now();
   try {
-    const mutationId = String(req.body?.mutationId || '').trim().slice(0, 200);
-    const committedState = USE_POSTGRES ? relationalShadowState : readDb();
-    const committedCase = mutationId ? findCaseByAnyId(committedState?.cases || [], req.params.id) : null;
-    if (mutationId && committedCase?.lastFinanceMutationId === mutationId) {
-      const paymentId = String(committedCase.ledger?.financeLedgerId || '').trim();
-      const committedPayment = paymentId ? (committedState?.payments || []).find(item => String(item.id || '') === paymentId) : null;
-      const confirmedProject = financeResponsePatch(committedCase);
+    const mutationId = financeMutationId(req.body || {});
+    const mutationOperation = 'payment-status';
+    const mutationFingerprint = mutationId ? financeMutationFingerprint(mutationOperation, req.body || {}) : '';
+    const replay = mutationId ? await resolveCommittedFinanceReplay({ caseId:req.params.id, mutationId, fingerprint:mutationFingerprint, operation:mutationOperation }) : null;
+    if (replay?.committedCase) {
+      const paymentId = String(replay.receipt?.paymentId || replay.committedCase.ledger?.financeLedgerId || '').trim();
+      const committedPayment = paymentId ? (replay.committedState?.payments || []).find(item => String(item.id || '') === paymentId) : null;
+      const confirmedProject = financeResponsePatch(replay.committedCase);
       return res.json({
         ok:true,
         idempotent:true,
         project:confirmedProject,
         case:confirmedProject,
         payment:committedPayment || null,
-        financeVersion:committedCase.financeVersion,
+        financeVersion:replay.committedCase.financeVersion,
         persistence:{ database:USE_POSTGRES ? 'postgresql-relational' : 'json-file', stateVersion, alreadyCommitted:true },
         durationMs:Date.now() - requestStartedAt
       });
@@ -5708,7 +6177,7 @@ app.post('/api/state/projects/:id/payment-status', async (req, res) => {
     const previousSnapshot = buildFinanceSnapshot(c);
     const status = normalizePaymentTrackingStatus(req.body.paymentTrackingStatus || req.body.status || req.body.paymentStatus);
     const actor = requestActor(req);
-    const updated = upsertInlinePaymentLedger(d, c, status, { ...(req.body || {}), by:actor.name, updatedBy:actor.name });
+    const updated = upsertInlinePaymentLedger(d, c, status, { ...(req.body || {}), by:actor.name, updatedBy:actor.name }, { mutationId, fingerprint:mutationFingerprint, operation:mutationOperation });
     updated.updatedAt = Date.now();
     updated.syncVersion = Date.now();
     const nextSnapshot = buildFinanceSnapshot(updated);
@@ -5741,13 +6210,23 @@ app.post('/api/state/projects/:id/payment-status', async (req, res) => {
     const confirmedProject = financeResponsePatch(updated);
     res.json({ ok:true, project:confirmedProject, case:confirmedProject, payment:changedPayment || null, financeVersion:updated.financeVersion, persistence, durationMs:Date.now() - requestStartedAt });
   } catch (e) {
-    res.status(e.statusCode || 500).json({ ok:false, code:e.code || '', currentFinanceVersion:e.currentFinanceVersion, error:e.message || 'Payment status update failed' });
+    sendApiFailure(res, req, e, 'Payment status update failed.', { currentFinanceVersion:e.currentFinanceVersion });
   }
 });
 
 app.post('/api/cases/:id/payment', async (req,res)=>{
   if (!isFinanceAdminRequest(req)) return denyFinanceAccess(res);
   try {
+    const mutationId=financeMutationId(req.body || {});
+    const mutationOperation='payment-ledger';
+    const mutationFingerprint=mutationId ? financeMutationFingerprint(mutationOperation,req.body || {}) : '';
+    const replay=mutationId ? await resolveCommittedFinanceReplay({caseId:req.params.id,mutationId,fingerprint:mutationFingerprint,operation:mutationOperation}) : null;
+    if (replay?.committedCase) {
+      const paymentId=String(replay.receipt?.paymentId || '').trim();
+      const committedPayment=paymentId ? (replay.committedState?.payments || []).find(item=>String(item?.id || '')===paymentId) : null;
+      const confirmedProject=financeResponsePatch(replay.committedCase);
+      return res.json({ok:true,idempotent:true,payment:committedPayment || null,project:confirmedProject,case:confirmedProject,financeVersion:replay.committedCase.financeVersion,persistence:{database:USE_POSTGRES ? 'postgresql-relational' : 'json-file',stateVersion,alreadyCommitted:true}});
+    }
     const financeSnapshot=financeDb(req.params.id);
     if(!financeSnapshot) return res.status(404).json({ok:false,error:'Case not found'});
     const d=financeSnapshot.snapshot;
@@ -5762,7 +6241,20 @@ app.post('/api/cases/:id/payment', async (req,res)=>{
     if(!['YES','NO','PARTIAL','REFUND'].includes(received)) return res.status(400).json({ok:false,error:'paymentReceived is mandatory: YES, NO, PARTIAL or REFUND'});
     const nowIso = now();
     const actor = requestActor(req);
-    const paymentDate=textValue(req.body.paymentDate||indiaDateKey(nowIso),'Payment date',20);
+    const requestedPaymentDate=textValue(req.body.paymentDate||indiaDateKey(nowIso),'Payment date',20);
+    const paymentDate=normalizeTaskDate(requestedPaymentDate,nowIso);
+    if (!TASK_DATE_PATTERN.test(requestedPaymentDate) || paymentDate !== requestedPaymentDate) {
+      const error=new Error('Payment date must be a valid date in YYYY-MM-DD format.');
+      error.statusCode=400;
+      error.code='INVALID_PAYMENT_DATE';
+      throw error;
+    }
+    if (paymentDate > indiaDateKey(nowIso)) {
+      const error=new Error('Payment date cannot be in the future.');
+      error.statusCode=400;
+      error.code='PAYMENT_DATE_IN_FUTURE';
+      throw error;
+    }
     const accountingPeriod=getCaseTaskAccountingPeriod(c, req.body.accountingPeriod || paymentDate || nowIso);
     const paymentAmount=numericValue(req.body.paymentAmountIn,'Payment amount',{min:0,max:100_000_000,fallback:0});
     const expenses=hasOwnFinanceValue(req.body,'expenses')
@@ -5771,6 +6263,18 @@ app.post('/api/cases/:id/payment', async (req,res)=>{
     const refund=hasOwnFinanceValue(req.body,'refundAmount','refund')
       ? numericValue(req.body.refundAmount ?? req.body.refund,'Refund amount',{min:0,max:100_000_000,fallback:previousRefund})
       : previousRefund;
+    if (refund > paymentAmount) {
+      const error=new Error('Refund cannot be greater than the total amount received.');
+      error.statusCode=400;
+      error.code='REFUND_EXCEEDS_RECEIVED';
+      throw error;
+    }
+    if (received === 'YES' && paymentAmount <= 0) {
+      const error=new Error('Payment amount is required when paymentReceived is YES.');
+      error.statusCode=400;
+      error.code='PAYMENT_AMOUNT_REQUIRED';
+      throw error;
+    }
     const p={
       id:nanoid(8),
       caseId:c.id,
@@ -5850,6 +6354,7 @@ app.post('/api/cases/:id/payment', async (req,res)=>{
     c.history.unshift({at:nowIso,by:p.createdBy,action:`Payment ledger updated for ${accountingPeriod}: ${received}`});
     if (c.history.length > 1000) c.history = c.history.slice(0, 1000);
     const auditEntry=addAudit(d,p.createdBy,`Payment ledger updated for ${accountingPeriod}`,c.caseId);
+    if (mutationId) rememberFinanceMutationReceipt(c,{mutationId,fingerprint:mutationFingerprint,operation:mutationOperation,financeVersion:c.financeVersion,paymentId:p.id,committedAt:nowIso});
     const nextSnapshot = buildFinanceSnapshot(c);
     const persistence = await save(d, {
       actor:p.createdBy,
@@ -5866,7 +6371,7 @@ app.post('/api/cases/:id/payment', async (req,res)=>{
     const confirmedProject=financeResponsePatch(c);
     res.json({ok:true,payment:p,project:confirmedProject,case:confirmedProject,financeVersion:c.financeVersion,persistence});
   } catch (e) {
-    res.status(e.statusCode || 500).json({ok:false,code:e.code || '',error:e.message || 'Payment ledger update failed'});
+    sendApiFailure(res, req, e, 'Payment ledger update failed.', { currentFinanceVersion:e.currentFinanceVersion });
   }
 });
 
@@ -5892,7 +6397,7 @@ app.get('/api/finance/history/:id', async (req, res) => {
     }
     return res.json({ ok:true, caseId, caseNo, history:(c?.paymentAuditTrail || []).map((event, index) => ({ id:event.id || index, action:event.action || 'Finance updated', actor:event.by || '', created_at:event.at || event.time || '', state_version:null, next_snapshot:buildFinanceSnapshot(c) })) });
   } catch (e) {
-    res.status(e.statusCode || 500).json({ ok:false, code:e.code || '', error:e.message || 'Finance history could not be loaded.' });
+    sendApiFailure(res, req, e, 'Finance history could not be loaded.');
   }
 });
 
@@ -5912,7 +6417,7 @@ app.get('/api/finance/health', async (req, res) => {
     }
     res.json({ ok:true, database:USE_POSTGRES ? 'postgresql' : 'json-file', stateVersion, financeCases:financeCases.length, paymentRecords:(d.payments || []).filter(Boolean).length, latestFinanceAt:latestFinanceAt || null, historyCount, latestHistoryAt, durableWrites:true, staleFinanceProtection:true });
   } catch (e) {
-    res.status(500).json({ ok:false, error:e.message || 'Finance health check failed.' });
+    sendApiFailure(res, req, e, 'Finance health check failed.');
   }
 });
 
@@ -5938,14 +6443,14 @@ app.patch('/api/profile', async (req,res)=>{
     const persistence=await save(d,{actor:actor.name,reason:'self_profile_update',collections:['users'],collectionRowIds:{users:[String(user.id)]}});
     res.json({ok:true,user:publicSessionUser(user,req.auth.credential || {}),persistence});
   } catch (error) {
-    res.status(error.statusCode || 500).json({ok:false,code:error.code || 'PROFILE_UPDATE_FAILED',error:error.message || 'Profile could not be updated.'});
+    sendApiFailure(res, req, Object.assign(error,{ code:error.code || 'PROFILE_UPDATE_FAILED' }), 'Profile could not be updated.');
   }
 });
 
 const PROFILE_PHOTO_MAX_MB = 5;
 const PROFILE_PHOTO_UPLOAD_CONTRACT = Object.freeze({maxMb:PROFILE_PHOTO_MAX_MB,allowedMimeTypes:['image/png','image/jpeg','image/gif','image/webp','image/bmp']});
 const profilePhotoUpload = uploadSingle('photo');
-app.post('/api/profile/photo', profilePhotoUpload, async (req, res) => {
+app.post('/api/profile/photo', profilePhotoUpload, requireFreshAuthenticatedRequestAfterBody, async (req, res) => {
   let preparedUploads=[];
   let persistenceCommitted=false;
   let rollbackActor='system';
@@ -5986,7 +6491,7 @@ app.post('/api/profile/photo', profilePhotoUpload, async (req, res) => {
     cleanupRequestTempUploads(req);
     if (!persistenceCommitted) rollbackPreparedUploads(preparedUploads,{reason:'PROFILE_PHOTO_PERSISTENCE_FAILED',actor:rollbackActor});
     if (error instanceof FileValidationError) return fileUploadFailure(res,error,'Profile photo upload failed.');
-    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'Profile photo upload failed'});
+    sendApiFailure(res, req, error, 'Profile photo upload failed.');
   }
 });
 
@@ -6046,7 +6551,7 @@ function attachStoredFileToCase(caseRecord = {}, file = {}, type = '', actor = {
   return caseRecord;
 }
 
-app.post('/api/files/upload', uploadAny, async (req, res) => {
+app.post('/api/files/upload', uploadAny, requireFreshAuthenticatedRequestAfterBody, async (req, res) => {
   let preparedUploads=[];
   let persistenceCommitted=false;
   let rollbackActor='system';
@@ -6095,30 +6600,54 @@ app.post('/api/files/upload', uploadAny, async (req, res) => {
       if (!projectId && type !== 'chat') { const error=new Error('A task reference is required for this upload.'); error.statusCode=400; error.code='UNSCOPED_UPLOAD_FORBIDDEN'; throw error; }
       return record;
     };
-    const findCommittedUpload=(state={})=>{
+    const storedUploadType=(item={})=>{
+      const explicit=String(item?.type || item?.folder || '').trim().toLowerCase();
+      if (explicit) return explicit;
+      return ({SOURCE:'source',WORKING:'working',FINAL:'completed',REVISION:'revision',REVISION_FINAL:'completed',DISCUSSION:'discussion',PAYMENT_RECEIPT:'payment-receipt',CHAT:'chat'})[String(item?.purpose || '').trim().toUpperCase()] || '';
+    };
+    const sameUploadActor=(item={})=>{
+      const storedKeys=[item?.uploadedById,item?.uploadedByUsername,item?.uploadedBy].map(value=>String(value || '').trim().toLowerCase()).filter(Boolean);
+      const actorKeys=[actor.id,actor.username,actor.name].map(value=>String(value || '').trim().toLowerCase()).filter(Boolean);
+      return storedKeys.some(value=>actorKeys.includes(value));
+    };
+    const findCommittedUpload=(state={},incomingFile=null)=>{
       if (!uploadMutationId) return null;
+      const candidates=(Array.isArray(state.files) ? state.files : []).filter(item=>String(item?.uploadMutationId || '')===uploadMutationId && sameUploadActor(item));
+      if (!candidates.length) return null;
       const targetRecord=projectId ? findUploadTarget(state) : null;
       const targetIds=new Set(targetRecord ? getCaseIdentitySet(targetRecord) : [String(resolvedProjectId || projectId || '')]);
-      return (state.files || []).find(item=>{
-        const sameActor=uploadedById ? String(item?.uploadedById || '') === uploadedById : normalizeUsername(item?.uploadedByUsername || item?.uploadedBy || '') === normalizeUsername(actor.username || actor.name || '');
-        const storedParticipants=[...(item?.chatParticipants || [])].map(value=>String(value || '').toLowerCase()).sort();
+      const incomingName=String(incomingFile?.originalname || incomingFiles[0]?.originalname || '').trim();
+      const incomingSize=Number(incomingFile?.size || incomingFiles[0]?.size || 0);
+      const incomingSha=String(incomingFile?.sha256 || '').trim();
+      const exact=candidates.find(item=>{
+        const storedParticipants=(Array.isArray(item?.chatParticipants) ? item.chatParticipants : []).map(value=>String(value || '').toLowerCase()).sort();
         const sameParticipants=requestedChatParticipants.length === storedParticipants.length && requestedChatParticipants.every((value,index)=>value === storedParticipants[index]);
-        return String(item?.uploadMutationId || '') === uploadMutationId
-          && (!projectId || targetIds.has(String(item?.caseId || '')))
-          && sameActor
-          && (type !== 'chat' || (String(item?.chatScope || 'PRIVATE') === requestedChatScope && sameParticipants && Boolean(item?.isVoiceNote) === requestedVoiceNote));
+        const sameTarget=!projectId || targetIds.has(String(item?.caseId || ''));
+        const sameType=storedUploadType(item)===type;
+        const sameName=!incomingName || String(item?.originalName || item?.name || '').trim()===incomingName;
+        const sameSize=!incomingSize || Number(item?.size || 0)===incomingSize;
+        const sameSha=!incomingSha || !item?.sha256 || String(item.sha256)===incomingSha;
+        const sameChat=type!=='chat' || (String(item?.chatScope || 'PRIVATE')===requestedChatScope && sameParticipants && Boolean(item?.isVoiceNote)===requestedVoiceNote);
+        return sameTarget && sameType && sameName && sameSize && sameSha && sameChat;
       }) || null;
+      if (exact) return exact;
+      const error=new Error('This upload retry identity was already used for a different file or destination. Select the file again to create a new upload identity.');
+      error.statusCode=409;
+      error.code='UPLOAD_MUTATION_ID_REUSE';
+      throw error;
     };
     const idempotentUploadResponse=(state,existingFile)=>{
       const linkedCase=projectId ? findUploadTarget(state) : null;
       const visibleCase=linkedCase ? (sanitizeCasesForRole([linkedCase],actor.role)[0] || linkedCase) : null;
-      return {ok:true,idempotent:true,file:existingFile,project:visibleCase,case:visibleCase,requestedProjectId:projectId,resolvedProjectId,persistence:{mode:'idempotent',persisted:true}};
+      return {ok:true,idempotent:true,file:existingFile,project:visibleCase,case:visibleCase,requestedProjectId:projectId,resolvedProjectId,persistence:{mode:'idempotent',persisted:true,reason:'DUPLICATE_UPLOAD_MUTATION'}};
     };
 
     const initialState=readDb();
     authorizeUpload(initialState);
-    const priorUpload=findCommittedUpload(initialState);
-    if (priorUpload) { cleanupRequestTempUploads(req); return res.status(200).json(idempotentUploadResponse(initialState,priorUpload)); }
+    // Validate and hash the incoming bytes before confirming an idempotent retry.
+    // Filename/size metadata alone is not strong enough: two different files can
+    // legitimately share them. This makes response-loss retry exact rather than
+    // risking a silent attachment substitution.
     preparedUploads=await prepareSecureUploads(req,purpose);
     if (type === 'payment-receipt') {
       const detected=String(req.file?.mimetype || '').toLowerCase();
@@ -6128,9 +6657,11 @@ app.post('/api/files/upload', uploadAny, async (req, res) => {
     const uploadSnapshot=taskDb(resolvedProjectId,{files:true});
     const d=uploadSnapshot.snapshot;
     const caseRecord=authorizeUpload(d);
-    const concurrentUpload=findCommittedUpload(d);
+    const concurrentUpload=findCommittedUpload(d,req.file);
     if (concurrentUpload) {
-      rollbackPreparedUploads(preparedUploads,{reason:'DUPLICATE_UPLOAD_MUTATION',actor:actor.name,caseId:projectId});
+      // The verified content-addressed object is the same object referenced by
+      // the existing committed row. Keep it active and return that row rather
+      // than creating another file record after a lost browser response.
       preparedUploads=[]; cleanupRequestTempUploads(req);
       return res.status(200).json(idempotentUploadResponse(d,concurrentUpload));
     }
@@ -6165,7 +6696,7 @@ app.post('/api/files/upload', uploadAny, async (req, res) => {
     cleanupRequestTempUploads(req);
     if (!persistenceCommitted) rollbackPreparedUploads(preparedUploads,{reason:'FILE_REGISTRY_PERSISTENCE_FAILED',actor:rollbackActor,caseId:rollbackCaseId});
     if (error instanceof FileValidationError) return fileUploadFailure(res,error,'File upload failed.');
-    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'File upload failed.'});
+    sendApiFailure(res, req, error, 'File upload failed.');
   }
 });
 
@@ -6187,23 +6718,22 @@ function getStoredFilePreviewDescriptor(doc = {}, resolved = {}) {
     : textExtensions.has(extension) ? 'text'
     : officeExtensions.has(extension) ? 'office'
     : cadExtensions.has(extension) ? 'cad' : 'file';
+  // Inline preview capability is extension-bound. Current uploads are
+  // signature-validated against their extensions, and legacy MIME metadata is
+  // not trusted to turn an otherwise unsupported active format (for example
+  // SVG/HTML) into an inline image/text response.
   const kind = extension === '.webm' && /(voice|audio)/.test(purpose) ? 'audio'
-    : mime.includes('pdf') || extension === '.pdf' ? 'pdf'
-    : mime.startsWith('image/') ? 'image'
-    : mime.startsWith('video/') ? 'video'
-    : mime.startsWith('audio/') ? 'audio'
-    : mime.startsWith('text/') ? 'text'
-    : genericMime ? extensionKind
-    : officeExtensions.has(extension) ? 'office'
-    : cadExtensions.has(extension) ? 'cad' : 'file';
+    : extension === '.pdf' ? 'pdf'
+    : extensionKind;
   const inferredMimeByExtension={
     '.jpg':'image/jpeg','.jpeg':'image/jpeg','.png':'image/png','.gif':'image/gif','.webp':'image/webp','.bmp':'image/bmp','.heic':'image/heic','.heif':'image/heif',
     '.mp4':'video/mp4','.mov':'video/quicktime','.avi':'video/x-msvideo','.mkv':'video/x-matroska','.webm':kind === 'audio' ? 'audio/webm' : 'video/webm',
     '.mp3':'audio/mpeg','.wav':'audio/wav','.m4a':'audio/mp4','.ogg':'audio/ogg',
     '.txt':'text/plain; charset=utf-8','.csv':'text/csv; charset=utf-8','.json':'application/json; charset=utf-8','.md':'text/markdown; charset=utf-8','.log':'text/plain; charset=utf-8','.rtf':'application/rtf'
   };
+  const canonicalStreamMime = kind === 'pdf' ? 'application/pdf' : (['image','video','audio','text'].includes(kind) ? inferredMimeByExtension[extension] : '');
   const mimeType = extension === '.webm' && kind === 'audio' ? 'audio/webm'
-    : (!genericMime ? mime : kind === 'pdf' ? 'application/pdf' : (inferredMimeByExtension[extension] || 'application/octet-stream'));
+    : (canonicalStreamMime || (!genericMime ? mime : 'application/octet-stream'));
   return {fileName,extension,mime,mimeType,kind,fp:resolved.fp,stored:resolved.stored};
 }
 function contentDispositionValue(mode = 'attachment', fileName = 'file') {
@@ -6280,13 +6810,14 @@ app.delete('/api/files/:id',async (req,res)=>{
     const changedMessageIds=[];
 
     for (const c of d.cases || []) {
-      const fields=['documents','completedFiles','sourceFiles','workFiles','files'];
+      const fields=['documents','completedFiles','sourceFiles','workFiles','files','uploads','attachments'];
       let changed=false;
       for (const field of fields) {
         const before=Array.isArray(c[field]) ? c[field] : [];
         const after=before.filter(doc=>!matches(doc));
         if (after.length!==before.length) { c[field]=after; changed=true; removed=true; }
       }
+      if (c.file && matches(c.file)) { delete c.file; changed=true; removed=true; }
       if (changed) {
         if (c.id || c.caseId) changedCaseIds.push(String(c.id || c.caseId));
         c.history ||= [];
@@ -6351,7 +6882,7 @@ app.delete('/api/files/:id',async (req,res)=>{
     const visibleCases=sanitizeCasesForRole(updatedCases,actor.role);
     res.json({ ok:true, removed, fileId:targetId, storageStatus:'DELETED', physicalAction, physicalError:physicalError || undefined, cases:visibleCases, projects:visibleCases, case:visibleCases[0] || null, project:visibleCases[0] || null });
   } catch(error) {
-    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'File deletion failed.'});
+    sendApiFailure(res, req, error, 'File deletion failed.');
   }
 });
 
@@ -6387,7 +6918,7 @@ app.post('/api/system/files/garbage-collect', requireAdminSession, async (req,re
     const status=result.errors.length ? 207 : 200;
     res.status(status).json(result);
   } catch(error) {
-    res.status(error.statusCode || 500).json({ok:false,code:error.code || 'FILE_GC_FAILED',error:error.message || 'File garbage collection failed.'});
+    sendApiFailure(res, req, Object.assign(error,{ code:error.code || 'FILE_GC_FAILED' }), 'File garbage collection failed.');
   }
 });
 
@@ -6452,7 +6983,7 @@ app.post('/api/system/files/reconciliation', requireAdminSession, async (req,res
     res.json({ok:true,imported,markedMissing,refreshed,before:before.counts,after:after.counts,report:after});
   } catch(error) {
     if (!persistenceCommitted) rollbackPreparedUploads(importedObjects,{reason:'FILE_RECONCILIATION_PERSISTENCE_FAILED',actor:rollbackActor});
-    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'File reconciliation failed.'});
+    sendApiFailure(res, req, error, 'File reconciliation failed.');
   }
 });
 
@@ -6515,6 +7046,18 @@ ${id} `) || haystack.includes(` ${id}
   return Array.from(found.values()).slice(0, 5);
 }
 
+app.get('/api/chat/history', requireCapability('state:read'), async (req,res)=>{
+  const limit=Math.max(1,Math.min(250,Number(req.query.limit || 250) || 250));
+  const beforeRaw=Number(req.query.before || 0);
+  const before=Number.isFinite(beforeRaw) && beforeRaw > 0 ? beforeRaw : Number.POSITIVE_INFINITY;
+  const rows=scopedTeamChat(readDb(),req)
+    .filter(message=>toMs(message?.sentAt || message?.createdAt || message?.updatedAt || message?.id) < before)
+    .sort((a,b)=>toMs(b?.sentAt || b?.createdAt || b?.updatedAt || b?.id)-toMs(a?.sentAt || a?.createdAt || a?.updatedAt || a?.id))
+    .slice(0,limit);
+  const nextBefore=rows.length ? toMs(rows[rows.length-1]?.sentAt || rows[rows.length-1]?.createdAt || rows[rows.length-1]?.updatedAt || rows[rows.length-1]?.id) : 0;
+  res.json({ok:true,messages:rows,nextBefore,hasMore:rows.length === limit});
+});
+
 app.post('/api/chat', async (req,res)=>{
   try {
     const d=selectiveDb({ collections:['teamChat','notifications','audit'] });
@@ -6525,13 +7068,13 @@ app.post('/api/chat', async (req,res)=>{
         String(item?.mutationId || '') === mutationId
         && String(item?.senderId || '').trim() === String(actor.id || '').trim()
       );
-      if (existingMessage) return res.json(existingMessage);
+      if (existingMessage) return res.json({ok:true,idempotent:true,message:existingMessage});
     }
     const text=textValue(req.body.text || '', 'Message', MAX_CHAT_TEXT_LENGTH);
     const recipient=textValue(req.body.recipient || 'global','Recipient',200) || 'global';
     if (recipient !== 'global') {
       const recipientKey=String(recipient).trim().toLowerCase();
-      const recipientExists=(d.users || []).some(user=>[user.id,user.username,user.name].map(value=>String(value || '').trim().toLowerCase()).includes(recipientKey));
+      const recipientExists=(Array.isArray(d.users) ? d.users : []).some(user=>[user?.id,user?.username,user?.name].map(value=>String(value || '').trim().toLowerCase()).includes(recipientKey));
       if (!recipientExists) return res.status(400).json({ok:false,code:'CHAT_RECIPIENT_INVALID',error:'The selected chat recipient does not exist.'});
     }
     let explicitTaskRefs=[];
@@ -6606,9 +7149,9 @@ app.post('/api/chat', async (req,res)=>{
     // private file registry is not changed by sending a message, so do not
     // enqueue an unrelated file-table write.
     if (notificationIds.length) { collections.push('notifications'); collectionRowIds.notifications=notificationIds; }
-    await save(d,{actor:actor.name,reason:'chat_message_create',collections,collectionRowIds}); res.status(201).json(msg);
+    await save(d,{actor:actor.name,reason:'chat_message_create',collections,collectionRowIds}); res.status(201).json({ok:true,message:msg});
   } catch (error) {
-    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'Chat message could not be sent.'});
+    sendApiFailure(res, req, error, 'Chat message could not be sent.');
   }
 });
 
@@ -6641,12 +7184,12 @@ app.patch('/api/chat/:id', async (req,res)=>{
       message.reactions=reactions;
     }
     if (req.body.markRead === true || Array.isArray(req.body.readBy)) {
-      message.readBy=mergeAppendOnly(message.readBy || [], [{name:actor.name,userId:actor.id,time:now()}]);
+      message.readBy=appendReadByActor(message.readBy, actor, now());
     }
     message.updatedAt=now();
     await save(d,{actor:actor.name,reason:'chat_message_update',collections:['teamChat'],collectionRowIds:{teamChat:[String(message.id)]}}); res.json({ok:true,message});
   } catch(error) {
-    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'Message update failed.'});
+    sendApiFailure(res, req, error, 'Message update failed.');
   }
 });
 
@@ -6681,7 +7224,7 @@ app.post('/api/chat/read', async (req,res)=>{
     if (relevant && message?.id) readable.push(String(message.id));
   }
   const changedNotificationIds=(source.notifications || [])
-    .filter(notification=>notification.target==='chat' && notificationBelongsToUser(notification, req.auth?.user || {}))
+    .filter(notification=>notification.target==='chat' && notificationBelongsToUser(notification, req.auth?.user || {}) && !readByIncludesActor(notification.readBy, actor))
     .map(notification=>String(notification.id || '')).filter(Boolean);
   const d=selectiveDb({
     collections:['teamChat','chatReads','notifications'],
@@ -6691,12 +7234,12 @@ app.post('/api/chat/read', async (req,res)=>{
   const readAt=now();
   for (const message of d.teamChat || []) {
     if (!readable.includes(String(message?.id || ''))) continue;
-    message.readBy=mergeAppendOnly(message.readBy || [],[{name:actor.name,userId:actor.id,time:readAt}]);
+    message.readBy=appendReadByActor(message.readBy, actor, readAt);
   }
   d.chatReads[key]=[...new Set([...(d.chatReads[key] || []),...readable])];
   for (const notification of d.notifications || []) {
     if (!changedNotificationIds.includes(String(notification?.id || ''))) continue;
-    notification.status='READ'; notification.readAt=readAt; notification.readBy=actor.name;
+    notification.status='READ'; notification.readAt=readAt; notification.readBy=appendReadByActor(notification.readBy, actor, readAt);
   }
   const collections=['chatReads'];
   const collectionRowIds={};
@@ -6731,13 +7274,13 @@ app.post('/api/notifications', async (req,res)=>{
     if (!privileged && !designerAllowed) return authorizationDenied(req,res,'NOTIFICATION_CREATE_FORBIDDEN','You cannot create a notification for this recipient.');
     if (!targetRole && !targetUser) return res.status(400).json({ok:false,code:'NOTIFICATION_TARGET_REQUIRED',error:'A notification role or user is required.'});
     const to=targetUser || targetRole;
-    const notification={id:nanoid(8),mutationId:mutationId || nanoid(16),to,targetRole:targetRole || '',targetUser:targetUser || '',title,text:title,type,category,priority,target:textValue(req.body.target || '', 'Notification target', 200),caseId:textValue(req.body.caseId || req.body.projectId || '', 'Notification task', 200),status:'UNREAD',createdAt:now(),createdBy:actor.name,createdById:actor.id};
+    const notification={id:nanoid(8),mutationId:mutationId || nanoid(16),to,targetRole:targetRole || '',targetUser:targetUser || '',title,text:title,type,category,priority,target:textValue(req.body.target || '', 'Notification target', 200),caseId:textValue(req.body.caseId || req.body.projectId || '', 'Notification task', 200),status:'UNREAD',readBy:[],createdAt:now(),createdBy:actor.name,createdById:actor.id};
     d.notifications.unshift(notification);
     const auditEntry=addAudit(d, actor.name, 'Notification created', notification.id);
     await save(d,{actor:actor.name,reason:'notification_create',collections:['notifications','audit'],collectionRowIds:{notifications:[String(notification.id)],audit:[String(auditEntry.id)]}});
     res.status(201).json({ok:true,notification});
   } catch(error) {
-    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'Notification could not be created.'});
+    sendApiFailure(res, req, error, 'Notification could not be created.');
   }
 });
 
@@ -6746,27 +7289,29 @@ app.post('/api/notifications/:id/read', async (req,res)=>{
   const notification=(d.notifications || []).find(item=>String(item.id)===String(req.params.id));
   if (!notification) return res.status(404).json({ok:false,code:'NOTIFICATION_NOT_FOUND',error:'Notification not found.'});
   if (!notificationBelongsToUser(notification, req.auth?.user || {})) return authorizationDenied(req,res,'NOTIFICATION_ACCESS_DENIED','You cannot update this notification.');
-  notification.status='READ'; notification.readAt=now(); notification.readBy=requestActor(req).name;
-  await save(d,{actor:requestActor(req).name,reason:'notification_mark_read',collections:['notifications'],collectionRowIds:{notifications:[String(notification.id)]}}); res.json({ok:true});
+  const actor=requestActor(req);
+  const readAt=now();
+  notification.status='READ'; notification.readAt=readAt; notification.readBy=appendReadByActor(notification.readBy, actor, readAt);
+  await save(d,{actor:actor.name,reason:'notification_mark_read',collections:['notifications'],collectionRowIds:{notifications:[String(notification.id)]}}); res.json({ok:true});
 });
 
 app.post('/api/notifications/read-all', async (req,res)=>{
   const actor=requestActor(req);
   const changedIds=(readDb().notifications || [])
-    .filter(notification=>notificationBelongsToUser(notification, req.auth?.user || {}) && notification.status !== 'READ')
+    .filter(notification=>notificationBelongsToUser(notification, req.auth?.user || {}) && !readByIncludesActor(notification.readBy, actor))
     .map(notification=>String(notification.id || '')).filter(Boolean);
   if (!changedIds.length) return res.json({ok:true,count:0,persistence:{mode:'no-op',persisted:false}});
   const d=selectiveDb({ collections:['notifications'], collectionRowIds:{notifications:changedIds} });
   const readAt=now();
   for (const notification of d.notifications || []) {
     if (!changedIds.includes(String(notification?.id || ''))) continue;
-    notification.status='READ'; notification.readAt=readAt; notification.readBy=actor.name;
+    notification.status='READ'; notification.readAt=readAt; notification.readBy=appendReadByActor(notification.readBy, actor, readAt);
   }
   const persistence=await save(d,{actor:actor.name,reason:'notifications_mark_all_read',collections:['notifications'],collectionRowIds:{notifications:changedIds}});
   res.json({ok:true,count:changedIds.length,persistence});
 });
 
-app.post('/whatsapp/mock/incoming', authenticationGate, apiWriteRateLimiter, requireAdminSession, uploadAny, async (req,res)=>{
+app.post('/whatsapp/mock/incoming', authenticationGate, apiWriteRateLimiter, requireAdminSession, uploadAny, requireFreshAuthenticatedRequestAfterBody, requireAdminSession, async (req,res)=>{
   let preparedUploads=[];
   let persistenceCommitted=false;
   let rollbackCaseId='';
@@ -6811,7 +7356,7 @@ app.post('/whatsapp/mock/incoming', authenticationGate, apiWriteRateLimiter, req
     cleanupRequestTempUploads(req);
     if (!persistenceCommitted) rollbackPreparedUploads(preparedUploads,{reason:'WHATSAPP_CASE_PERSISTENCE_FAILED',actor:'WhatsApp',caseId:rollbackCaseId});
     if (error instanceof FileValidationError) return fileUploadFailure(res,error,'WhatsApp attachment upload failed.');
-    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message || 'WhatsApp lead could not be created.'});
+    sendApiFailure(res, req, error, 'WhatsApp lead could not be created.');
   }
 });
 
@@ -6824,7 +7369,7 @@ app.get('/api/qr/:caseId', async (req,res)=>{
   res.json({qr:data});
 });
 
-app.get('/api/db/health', requireAdminSession, async (_req,res)=>{
+app.get('/api/db/health', requireAdminSession, async (req,res)=>{
   try {
     if (USE_POSTGRES) {
       await ensurePostgres();
@@ -6834,18 +7379,18 @@ app.get('/api/db/health', requireAdminSession, async (_req,res)=>{
     const d = readDb();
     return res.json({ok:true,database:'json-file',connected:true,file:DB_FILE,localSandbox:true,warning:'Local JSON sandbox is enabled. Production requires PostgreSQL.',stateVersion,counts:{users:(d.users||[]).length,cases:(d.cases||[]).length,chatMessages:(d.teamChat||[]).length,notifications:(d.notifications||[]).length,attendanceLogs:(d.attendanceLogs||[]).length,payments:(d.payments||[]).filter(Boolean).length}});
   } catch (err) {
-    return res.status(500).json({ok:false,database:USE_POSTGRES?'postgresql-relational':'json-file',code:err.code || '',error:err.message});
+    return sendApiFailure(res, req, err, 'Database health check failed.', { database:USE_POSTGRES?'postgresql-relational':'json-file' });
   }
 });
 
-app.get('/api/db/migrations', requireAdminSession, async (_req,res)=>{
+app.get('/api/db/migrations', requireAdminSession, async (req,res)=>{
   if (!USE_POSTGRES) return res.json({ok:true,database:'json-file',migrations:[],warning:'Schema migrations run only with PostgreSQL.'});
   try {
     await ensurePostgres();
     const result = await pool.query('SELECT version,name,checksum,execution_ms,applied_at FROM schema_migrations ORDER BY version');
     res.json({ok:true,database:'postgresql-relational',migrations:result.rows});
   } catch (error) {
-    res.status(500).json({ok:false,code:error.code || '',error:error.message});
+    sendApiFailure(res, req, error, 'Database integrity operation failed.');
   }
 });
 
@@ -6860,7 +7405,7 @@ app.get('/api/db/revisions', requireAdminSession, async (req,res)=>{
     );
     res.json({ok:true,revisions:result.rows});
   } catch (error) {
-    res.status(500).json({ok:false,code:error.code || '',error:error.message});
+    sendApiFailure(res, req, error, 'Database integrity operation failed.');
   }
 });
 
@@ -6883,21 +7428,34 @@ app.post('/api/db/revisions/:id/restore', requireAdminSession, async (req,res)=>
       return res.status(409).json({ok:false,code:'RESTORE_VERSION_MISMATCH',error:'The live database changed while waiting for queued writes. Refresh revision history and confirm again.',expectedCurrentVersion:stateVersion});
     }
     const actor = requestActor(req);
-    const result = await restoreRelationalRevision(pool, { revisionId, actor:actor.name, applyAuthOperationsWithClient, financeSnapshotHash });
+    let result;
+    try {
+      result = await restoreRelationalRevision(pool, { revisionId, actor:actor.name, applyAuthOperationsWithClient, financeSnapshotHash });
+    } catch (restoreError) {
+      if (restoreError?.commitOutcomeUnknown === true) {
+        const recovered = await reloadCommittedState();
+        if (persistenceCommitEvidenceMatches(restoreError, recovered)) {
+          result = {
+            stateVersion:recovered.stateVersion,
+            snapshotHash:recovered.snapshotHash,
+            counts:recovered.counts,
+            database:'postgresql-relational',
+            commitConfirmedAfterReconnect:true
+          };
+        } else throw restoreError;
+      } else throw restoreError;
+    }
     await reloadCommittedState();
     res.json({ok:true,restoredRevisionId:revisionId,...result});
   } catch (error) {
-    res.status(error.statusCode || 500).json({ok:false,code:error.code || '',error:error.message});
+    sendApiFailure(res, req, error, 'The operation could not be completed.');
   }
 });
 
 
 app.use((err, req, res, _next) => {
-  const status = Number(err?.statusCode || err?.status || 500);
-  structuredLog(status >= 500 ? 'error' : 'warn','api_error',{requestId:req?.requestId || '',method:req?.method || '',path:req?.originalUrl || '',status,code:err?.code || '',error:err?.message || 'Unexpected server error.'});
-  if (status >= 500) operationalJobs.recordFailure('API_REQUEST',err,{requestId:req?.requestId || '',method:req?.method || '',path:req?.originalUrl || ''},{maxAttempts:1}).catch(()=>{});
   if (res.headersSent) return;
-  res.status(status).json({ ok:false, requestId:req?.requestId || '', code:err?.code || '', error:err?.message || 'Unexpected server error.' });
+  sendApiFailure(res, req, err, 'Unexpected server error.');
 });
 
 const PORT=boundedEnvNumber('PORT',8080,1,65535);

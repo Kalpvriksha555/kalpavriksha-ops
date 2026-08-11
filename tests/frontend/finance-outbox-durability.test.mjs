@@ -127,3 +127,33 @@ test('last-synced status is scoped to the signed-in finance actor', () => {
   advanceFinanceOutboxAfterConfirmation({ key:second.key, mutationId:second.mutationId, confirmedFinanceVersion:1, actorId:'admin-2' });
   assert.ok(getFinanceSyncSnapshot('admin-2',0).lastSyncedAt > 0);
 });
+
+test('same draft keeps its mutation id for retryable response loss', () => {
+  const first = queueFinanceDraft({ project:{ id:'CASE-RETRY', financeVersion:3 }, draft:draft(500), user:admin });
+  markFinanceOutboxError(first.key, first.mutationId, Object.assign(new Error('timeout'), { code:'FINANCE_SAVE_TIMEOUT' }), { retryable:true });
+  const retried = queueFinanceDraft({ project:{ id:'CASE-RETRY', financeVersion:3 }, draft:draft(500), user:admin });
+  assert.equal(retried.mutationId, first.mutationId);
+  assert.equal(retried.expectedFinanceVersion, 3);
+});
+
+test('same draft can be intentionally resubmitted after a finance-version conflict', () => {
+  const first = queueFinanceDraft({ project:{ id:'CASE-CONFLICT', financeVersion:3 }, draft:draft(600), user:admin });
+  markFinanceOutboxError(first.key, first.mutationId, Object.assign(new Error('stale'), { code:'FINANCE_VERSION_CONFLICT' }), { retryable:false });
+  const rebased = queueFinanceDraft({ project:{ id:'CASE-CONFLICT', financeVersion:4 }, draft:draft(600), user:admin });
+  assert.notEqual(rebased.mutationId, first.mutationId);
+  assert.equal(rebased.expectedFinanceVersion, 4);
+  assert.equal(rebased.retryable, true);
+  assert.equal(rebased.state, 'pending');
+  assert.equal(rebased.lastErrorCode, '');
+});
+
+test('an older confirmation can never move a newer queued finance version backwards', () => {
+  const first = queueFinanceDraft({ project:{ id:'CASE-MONOTONIC', financeVersion:5 }, draft:draft(100), user:admin });
+  const newer = queueFinanceDraft({ project:{ id:'CASE-MONOTONIC', financeVersion:7 }, draft:draft(800), user:admin, expectedFinanceVersion:7 });
+  assert.notEqual(first.mutationId, newer.mutationId);
+  const result = advanceFinanceOutboxAfterConfirmation({ key:first.key, mutationId:first.mutationId, confirmedFinanceVersion:6 });
+  assert.equal(result.newerPending, true);
+  const pending = getFinanceOutboxRecord('CASE-MONOTONIC', 'admin-1');
+  assert.equal(pending.expectedFinanceVersion, 7);
+  assert.equal(pending.confirmedFinanceVersion, 6);
+});

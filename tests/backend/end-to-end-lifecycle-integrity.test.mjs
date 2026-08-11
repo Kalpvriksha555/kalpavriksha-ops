@@ -4,10 +4,12 @@ import fs from 'node:fs';
 
 const server=fs.readFileSync(new URL('../../backend/src/server.js',import.meta.url),'utf8');
 
-test('task route uses immutable IDs, version checks, and explicit idempotent mutation confirmation',()=>{
+test('task route uses immutable IDs, version checks, and payload-bound idempotent mutation confirmation',()=>{
   assert.match(server,/next\.id = existing\.id/);
   assert.match(server,/assertExpectedTaskVersion\(existing, incoming, req\.body \|\| \{\}\)/);
-  assert.match(server,/existing\.lastTaskMutationId/);
+  assert.match(server,/assertTaskMutationReplayMatches/);
+  assert.match(server,/lastTaskMutationFingerprint/);
+  assert.match(server,/TASK_MUTATION_ID_REUSE/);
   assert.match(server,/idempotent:true/);
   assert.match(server,/safeIncoming\.taskVersion = nextTaskVersion\(existing\)/);
   const mutationStart=server.indexOf('function taskMutationId');
@@ -15,7 +17,11 @@ test('task route uses immutable IDs, version checks, and explicit idempotent mut
   const mutationBlock=server.slice(mutationStart,mutationEnd);
   assert.match(mutationBlock,/body\.mutationId/);
   assert.match(mutationBlock,/incoming\.clientMutationId/);
-  assert.doesNotMatch(mutationBlock,/lastTaskMutationId/);
+  assert.match(mutationBlock,/function taskMutationFingerprint/);
+  assert.match(mutationBlock,/crypto\.createHash\('sha256'\)/);
+  assert.match(mutationBlock,/function assertTaskMutationReplayMatches/);
+  assert.match(mutationBlock,/record\.lastTaskMutationId/);
+  assert.match(mutationBlock,/assertExpectedTaskVersion\(record,\{\},req\.body \|\| \{\}\)/);
 });
 
 test('lifecycle cannot enter review or completion without a stored final deliverable',()=>{
@@ -162,11 +168,11 @@ test('task authorization precedes optimistic concurrency in every existing-task 
   const dedicatedEnd=server.indexOf("app.delete('/api/state/projects",dedicatedStart);
   const dedicated=server.slice(dedicatedStart,dedicatedEnd);
   const dedicatedAuth=dedicated.indexOf('assertProjectUpdateAuthorized(existing, req)');
-  const dedicatedReplay=dedicated.indexOf("existing.lastTaskMutationId || '') === mutationId");
+  const dedicatedReplay=dedicated.indexOf('assertTaskMutationReplayMatches(existing,mutationId,mutationFingerprint,mutationOperation)');
   const dedicatedVersion=dedicated.indexOf('assertExpectedTaskVersion(existing, incoming, req.body || {})');
   assert.ok(dedicatedAuth >= 0 && dedicatedReplay >= 0 && dedicatedVersion >= 0
       && dedicatedAuth < dedicatedReplay && dedicatedReplay < dedicatedVersion,
-    'Dedicated task writes must authorize before idempotent replay and version checks.');
+    'Dedicated task writes must authorize before payload-bound idempotent replay and version checks.');
 
   const broadStart=server.indexOf("app.post('/api/state',");
   const broadEnd=server.indexOf("app.get('/api/health",broadStart);
@@ -178,12 +184,41 @@ test('task authorization precedes optimistic concurrency in every existing-task 
 });
 
 
+test('dedicated lifecycle mutations are versioned and idempotent before side effects are persisted',()=>{
+  for (const [route,nextRoute,operation] of [
+    ["app.post('/api/cases/:id/assign'","app.post('/api/cases/:id/start'",'assign'],
+    ["app.post('/api/cases/:id/start'","app.post('/api/cases/:id/upload-source'",'start'],
+    ["app.post('/api/cases/:id/manager-complete'","app.post('/api/cases/:id/revision'",'manager-complete'],
+    ["app.post('/api/cases/:id/revision'","app.post('/api/cases/:id/timeline'",'revision'],
+    ["app.post('/api/cases/:id/timeline'","app.post('/api/notifications'",'timeline']
+  ]) {
+    const start=server.indexOf(route);
+    const end=server.indexOf(nextRoute,start);
+    const block=server.slice(start,end > start ? end : start+5000);
+    assert.ok(start >= 0, `missing lifecycle route ${route}`);
+    assert.match(block,new RegExp(`prepareDedicatedTaskMutation\\(req,c,'${operation}'\\)`));
+    assert.match(block,/if\s*\(mutation\.replay\)/);
+    assert.match(block,/commitDedicatedTaskMutation\(c,previousCase,mutation\)/);
+  }
+});
+
+test('task deletion requires the exact task version before creating tombstones',()=>{
+  const start=server.indexOf("app.delete('/api/state/projects/:id'");
+  const end=server.indexOf("app.post('/api/presence'",start);
+  const block=server.slice(start,end);
+  const version=block.indexOf('assertExpectedTaskVersion(target,target,req.body || {})');
+  const tombstone=block.indexOf('rememberDeletedProject');
+  assert.ok(version >= 0 && tombstone >= 0 && version < tombstone,
+    'Task deletion must reject stale clients before recording any delete tombstone.');
+});
+
+
 test('full release verifier matrix runs every gate and aggregates all failures',()=>{
   const matrix=fs.readFileSync(new URL('../../scripts/full-release-verifier-matrix.mjs',import.meta.url),'utf8');
   const pkg=JSON.parse(fs.readFileSync(new URL('../../package.json',import.meta.url),'utf8'));
   for (const marker of [
     'security-package-audit','doctor','regression-guard','production-audit',
-    'frontend-tests','frontend-runtime-bootstrap','backend-tests','finance','authentication','authorization',
+    'frontend-tests','frontend-runtime-shapes','api-contract-stale-responses','task-lifecycle-idempotency','frontend-runtime-bootstrap','backend-tests','finance','authentication','authorization',
     'database','files','reliability','release','frontend-ux','integration','build'
   ]) assert.match(matrix,new RegExp(`id:'${marker}'`));
   assert.match(matrix,/for \(const step of steps\) results\.push\(await runStep\(step\)\)/);

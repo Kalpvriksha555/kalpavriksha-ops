@@ -1,9 +1,22 @@
-import { authFetch, getCsrfToken } from './authService';
+import { asRecord, parseJsonRecord, toArray } from '../utils/runtimeShapeUtils.js';
+import { authFetch, assertBrowserAuthContextOwnership, getCsrfToken, notifyBrowserAuthenticationRejected } from './authService';
+import { markClientMutationStarted } from './requestControlService.js';
+import { apiHttpError, readApiRecord } from './apiContractService.js';
 import { API_BASE } from '../config/appConfig';
 
 export const MAX_PROJECT_UPLOAD_BYTES = 100 * 1024 * 1024;
 export const MAX_PROJECT_UPLOAD_FILES = 20;
-const PROJECT_UPLOAD_KINDS = new Set(['pdf', 'image', 'video', 'audio', 'text', 'office', 'cad', 'archive']);
+export const PROJECT_UPLOAD_EXTENSIONS = Object.freeze([
+  'pdf','png','jpg','jpeg','gif','webp','bmp','heic','heif',
+  'dwg','dxf','xlsx','xls','csv','docx','doc','rtf','pptx','ppt','txt',
+  'mp4','mov','avi','mkv','webm','mp3','wav','m4a','ogg'
+]);
+export const PROJECT_UPLOAD_ACCEPT = PROJECT_UPLOAD_EXTENSIONS.map(extension => `.${extension}`).join(',');
+export const PAYMENT_RECEIPT_EXTENSIONS = Object.freeze(['pdf','png','jpg','jpeg','gif','webp','bmp','heic','heif']);
+export const PAYMENT_RECEIPT_ACCEPT = PAYMENT_RECEIPT_EXTENSIONS.map(extension => `.${extension}`).join(',');
+const PROJECT_UPLOAD_EXTENSION_SET = new Set(PROJECT_UPLOAD_EXTENSIONS);
+const PAYMENT_RECEIPT_EXTENSION_SET = new Set(PAYMENT_RECEIPT_EXTENSIONS);
+const PROJECT_UPLOAD_KINDS = new Set(['pdf', 'image', 'video', 'audio', 'text', 'office', 'cad']);
 const PAYMENT_RECEIPT_KINDS = Object.freeze(['pdf', 'image']);
 const LEGACY_UPLOAD_MUTATION_STORAGE_KEY = 'kalpavriksha_upload_mutations_v2';
 const UPLOAD_MUTATION_STORAGE_KEYS = Object.freeze(['kalpavriksha_upload_mutations_v3_a', 'kalpavriksha_upload_mutations_v3_b']);
@@ -24,21 +37,19 @@ const makeFileError = (code, message) => Object.assign(new Error(message), { cod
 const fileExtension = (name = '') => String(name).split('.').pop()?.toLowerCase() || '';
 const kindFromFile = (file = {}) => {
   const extension = fileExtension(file?.name);
-  const mime = String(file?.type || '').toLowerCase();
-  if (extension === 'pdf' || mime === 'application/pdf') return 'pdf';
-  if (/^(png|jpe?g|gif|webp|bmp)$/.test(extension) || mime.startsWith('image/')) return 'image';
-  if (/^(mp4|webm|mov|m4v)$/.test(extension) || mime.startsWith('video/')) return 'video';
-  if (/^(mp3|wav|m4a|ogg|aac|flac)$/.test(extension) || (extension === 'webm' && /(voice|audio)/.test(String(file?.name || '').toLowerCase())) || mime.startsWith('audio/')) return 'audio';
-  if (/^(txt|csv|json|xml|md|log)$/.test(extension) || mime.startsWith('text/')) return 'text';
-  if (/^(docx?|xlsx?|pptx?|odt|ods|odp)$/.test(extension)) return 'office';
-  if (/^(dwg|dxf|dgn)$/.test(extension)) return 'cad';
-  if (/^(zip|rar|7z)$/.test(extension)) return 'archive';
+  if (extension === 'pdf') return 'pdf';
+  if (/^(png|jpe?g|gif|webp|bmp|heic|heif)$/.test(extension)) return 'image';
+  if (/^(mp4|mov|avi|mkv|webm)$/.test(extension)) return 'video';
+  if (/^(mp3|wav|m4a|ogg)$/.test(extension)) return 'audio';
+  if (/^(txt|csv|rtf)$/.test(extension)) return 'text';
+  if (/^(docx?|xlsx?|pptx?)$/.test(extension)) return 'office';
+  if (/^(dwg|dxf)$/.test(extension)) return 'cad';
   return 'file';
 };
 
 export const validateProjectUploadSelection = (files, options = {}) => {
   options = options && typeof options === 'object' ? options : {};
-  const list = Array.from(files || []);
+  const list = toArray(files);
   const maxFiles = Math.max(1, Number(options?.maxFiles || MAX_PROJECT_UPLOAD_FILES));
   if (list.length > maxFiles) throw makeFileError('TOO_MANY_FILES', `Choose no more than ${maxFiles} files at once.`);
   const allowedKinds = new Set(options?.allowedKinds || PROJECT_UPLOAD_KINDS);
@@ -46,6 +57,11 @@ export const validateProjectUploadSelection = (files, options = {}) => {
   for (const file of list) {
     if (!Number(file?.size || 0)) throw makeFileError('FILE_EMPTY', `The selected file ${file?.name || ''} is empty.`);
     if (Number(file.size) > MAX_PROJECT_UPLOAD_BYTES) throw makeFileError('FILE_TOO_LARGE', `${file.name} is larger than 100 MB.`);
+    const extension = fileExtension(file?.name);
+    if (!extension || !PROJECT_UPLOAD_EXTENSION_SET.has(extension)) throw makeFileError('FILE_TYPE_NOT_ALLOWED', `${file.name} is not an allowed file type.`);
+    if (allowedKinds.has('pdf') && allowedKinds.has('image') && allowedKinds.size === PAYMENT_RECEIPT_KINDS.length && !PAYMENT_RECEIPT_EXTENSION_SET.has(extension)) {
+      throw makeFileError('FILE_TYPE_NOT_ALLOWED', `${file.name} must be a PDF or supported image file.`);
+    }
     const kind = kindFromFile(file);
     if (!allowedKinds.has(kind)) throw makeFileError('FILE_TYPE_NOT_ALLOWED', `${file.name} is not an allowed file type.`);
     const duplicateKey = `${String(file.name || '').toLowerCase()}::${file.size}::${file.lastModified || 0}`;
@@ -65,11 +81,13 @@ const readUploadMutationLedger = () => {
   let selected = { generation: 0, records: {} };
   try {
     for (const key of UPLOAD_MUTATION_STORAGE_KEYS) {
-      const parsed = JSON.parse(localStorage.getItem(key) || 'null');
-      if (parsed?.schemaVersion === 3 && Number(parsed.generation || 0) >= selected.generation) selected = parsed;
+      const parsed = parseJsonRecord(localStorage.getItem(key));
+      if (parsed?.schemaVersion === 3 && Number(parsed.generation || 0) >= selected.generation) {
+        selected = { ...parsed, records: asRecord(parsed?.records) };
+      }
     }
-    const legacy = JSON.parse(localStorage.getItem(LEGACY_UPLOAD_MUTATION_STORAGE_KEY) || '{}');
-    if (!Object.keys(selected.records || {}).length && legacy && typeof legacy === 'object') selected.records = legacy;
+    const legacy = parseJsonRecord(localStorage.getItem(LEGACY_UPLOAD_MUTATION_STORAGE_KEY));
+    if (!Object.keys(asRecord(selected.records)).length && Object.keys(legacy).length) selected.records = legacy;
   } catch {}
   uploadMutationLedgerCache = selected;
   return selected;
@@ -78,7 +96,7 @@ const readUploadMutationLedger = () => {
 const writeUploadMutationLedger = (records) => {
   if (typeof localStorage === 'undefined') return false;
   const current = readUploadMutationLedger();
-  const envelope = { schemaVersion: 3, generation: Number(current.generation || 0) + 1, writtenAt: Date.now(), records };
+  const envelope = { schemaVersion: 3, generation: Number(current.generation || 0) + 1, writtenAt: Date.now(), records: asRecord(records) };
   const raw = JSON.stringify(envelope);
   let copies = 0;
   for (const key of UPLOAD_MUTATION_STORAGE_KEYS) {
@@ -91,7 +109,7 @@ const writeUploadMutationLedger = (records) => {
 
 const createUploadMutation = (fingerprint, alternateFingerprints = []) => {
   const current = readUploadMutationLedger();
-  const records = { ...(current.records || {}) };
+  const records = { ...asRecord(current.records) };
   const existingKey = [fingerprint, ...alternateFingerprints].find(key => records[key]?.id);
   if (existingKey) return { ...records[existingKey], fingerprint: existingKey, durable: true };
   const now = Date.now();
@@ -109,13 +127,13 @@ const withUploadMutationLock = async (action) => {
   const deadline = Date.now() + UPLOAD_IDENTITY_LOCK_TIMEOUT;
   while (Date.now() < deadline) {
     try {
-      const existing = JSON.parse(localStorage.getItem(UPLOAD_MUTATION_LOCK_KEY) || 'null');
+      const existing = parseJsonRecord(localStorage.getItem(UPLOAD_MUTATION_LOCK_KEY));
       if (!existing || Number(existing.expiresAt || 0) < Date.now()) {
         localStorage.setItem(UPLOAD_MUTATION_LOCK_KEY, JSON.stringify({ token, expiresAt: Date.now() + UPLOAD_IDENTITY_LOCK_TIMEOUT }));
-        const verified = JSON.parse(localStorage.getItem(UPLOAD_MUTATION_LOCK_KEY) || 'null');
+        const verified = parseJsonRecord(localStorage.getItem(UPLOAD_MUTATION_LOCK_KEY));
         if (verified?.token === token) {
           try { return await action(); } finally {
-            const latest = JSON.parse(localStorage.getItem(UPLOAD_MUTATION_LOCK_KEY) || 'null');
+            const latest = parseJsonRecord(localStorage.getItem(UPLOAD_MUTATION_LOCK_KEY));
             if (latest?.token === token) localStorage.removeItem(UPLOAD_MUTATION_LOCK_KEY);
           }
         }
@@ -128,7 +146,7 @@ const withUploadMutationLock = async (action) => {
 
 const clearUploadMutation = (fingerprint) => {
   const current = readUploadMutationLedger();
-  const next = { ...(current.records || {}) };
+  const next = { ...asRecord(current.records) };
   delete next[fingerprint];
   writeUploadMutationLedger(next);
 };
@@ -172,6 +190,7 @@ export const isAllowedPrivateFileUrl = (value = '') => {
 
 const getProjectFileName = (doc = {}) => String(doc?.name || doc?.fileName || doc?.filename || '').trim();
 const getProjectFileMime = (doc = {}) => String(doc?.mime || doc?.mimeType || doc?.contentType || doc?.type || '').toLowerCase();
+const unavailableStorageStatus = (doc = {}) => ['DELETED','EXPIRED','MISSING','QUARANTINED'].includes(String(doc?.storageStatus || '').trim().toUpperCase());
 
 export const isProjectFilePdf = (doc = {}) => {
   const name = getProjectFileName(doc).toLowerCase();
@@ -182,7 +201,8 @@ export const isProjectFilePdf = (doc = {}) => {
 export const isProjectFileImage = (doc = {}) => {
   const name = getProjectFileName(doc).toLowerCase();
   const mime = getProjectFileMime(doc);
-  return mime.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|bmp|svg)$/i.test(name);
+  const safeImageExtension = /\.(jpg|jpeg|png|gif|webp|bmp|heic|heif)$/i.test(name);
+  return safeImageExtension || (mime.startsWith('image/') && !mime.includes('svg'));
 };
 
 export const getProjectFileKind = (doc = {}) => {
@@ -191,11 +211,11 @@ export const getProjectFileKind = (doc = {}) => {
   const extension = getProjectFileName(doc).split('.').pop()?.toLowerCase();
   const mime = getProjectFileMime(doc);
   if (extension === 'webm' && /(voice|audio)/.test(getProjectFileName(doc).toLowerCase())) return 'audio';
-  if (/^(mp4|webm|mov|m4v|avi|mkv)$/.test(extension) || mime.startsWith('video/')) return 'video';
-  if (/^(mp3|wav|m4a|ogg|aac|flac)$/.test(extension) || mime.startsWith('audio/')) return 'audio';
-  if (/^(txt|csv|json|xml|md|log)$/.test(extension) || mime.startsWith('text/')) return 'text';
-  if (/^(docx?|xlsx?|pptx?|odt|ods|odp)$/.test(extension)) return 'office';
-  if (/^(dwg|dxf|dgn)$/.test(extension)) return 'cad';
+  if (/^(mp4|webm|mov|avi|mkv)$/.test(extension) || mime.startsWith('video/')) return 'video';
+  if (/^(mp3|wav|m4a|ogg)$/.test(extension) || mime.startsWith('audio/')) return 'audio';
+  if (/^(txt|csv|rtf)$/.test(extension) || mime.startsWith('text/')) return 'text';
+  if (/^(docx?|xlsx?|pptx?)$/.test(extension)) return 'office';
+  if (/^(dwg|dxf)$/.test(extension)) return 'cad';
   return 'file';
 };
 
@@ -231,6 +251,25 @@ const normalizePreviewUrl = (url = '') => {
 };
 
 
+
+const getProjectFileStatusUrl = (doc = {}) => {
+  if (!doc || unavailableStorageStatus(doc)) return '';
+  const id = String(doc?.fileId || doc?.id || '').trim();
+  if (/^[A-Za-z0-9_-]{6,80}$/.test(id) && !/^\d+(\.\d+)?$/.test(id)) return `${API_BASE}/api/files/${encodeURIComponent(id)}/status`;
+  const previewUrl = getProjectFilePreviewUrl(doc);
+  const match = String(previewUrl || '').match(/\/api\/files\/([^/?#]+)/i);
+  return match?.[1] ? `${API_BASE}/api/files/${encodeURIComponent(decodeURIComponent(match[1]))}/status` : '';
+};
+
+export const probeProjectFileAvailability = async (doc = {}, options = {}) => {
+  const statusUrl = getProjectFileStatusUrl(doc);
+  if (!statusUrl) throw makeFileError('FILE_UNAVAILABLE', 'This saved file is no longer available for preview or download.');
+  const response = await authFetch(statusUrl, { method:'GET', cache:'no-store', timeoutMs:FILE_PREVIEW_TIMEOUT_MS, signal:options?.signal });
+  const payload = await readApiRecord(response, { operation:'File availability check', requireOk:response.ok });
+  if (!response.ok) throw apiHttpError(response, payload, 'The saved file is unavailable.');
+  if (payload?.found !== true || payload?.available !== true) throw makeFileError('FILE_UNAVAILABLE', payload?.found === false ? 'The saved file record could not be found.' : 'The saved file content is unavailable on the server.');
+  return payload;
+};
 
 const getPreviewDataUrl = (doc = {}) => {
   const previewUrl = getProjectFilePreviewUrl(doc);
@@ -347,7 +386,7 @@ export const releaseProjectFilePreview = (preview = {}) => {
 };
 
 export const getProjectFileDownloadUrl = (doc = {}) => {
-  if (!doc) return '';
+  if (!doc || unavailableStorageStatus(doc)) return '';
   const sanitizePrivateFileUrl = (value = '') => {
     if (!isTrustedNetworkUrl(value)) return '';
     const absolute = absoluteApiUrl(value);
@@ -387,8 +426,14 @@ export const normalizeProjectFileRecord = (doc = {}) => {
   };
   const downloadUrl = getProjectFileDownloadUrl(normalized);
   const previewUrl = getProjectFilePreviewUrl(normalized);
-  if (downloadUrl) normalized.downloadUrl = downloadUrl;
-  if (previewUrl) normalized.previewUrl = previewUrl;
+  if (unavailableStorageStatus(normalized)) {
+    normalized.url = '';
+    normalized.downloadUrl = '';
+    normalized.previewUrl = '';
+  } else {
+    if (downloadUrl) normalized.downloadUrl = downloadUrl;
+    if (previewUrl) normalized.previewUrl = previewUrl;
+  }
   return normalized;
 };
 
@@ -398,6 +443,7 @@ export const getProjectFileActionState = (doc = {}) => {
   const normalized = normalizeProjectFileRecord(doc);
   const downloadUrl = getProjectFileDownloadUrl(normalized);
   const previewUrl = getProjectFilePreviewUrl(normalized);
+  const storageStatus = String(normalized?.storageStatus || '').trim().toUpperCase();
   return {
     doc: normalized,
     hasLink: Boolean(downloadUrl || previewUrl),
@@ -405,17 +451,19 @@ export const getProjectFileActionState = (doc = {}) => {
     canDownload: Boolean(downloadUrl),
     downloadUrl,
     previewUrl,
+    storageStatus,
+    unavailable: unavailableStorageStatus(normalized),
   };
 };
 
 
 export const getProjectFilePreviewUrl = (doc = {}) => {
-  if (!doc) return '';
+  if (!doc || unavailableStorageStatus(doc)) return '';
 
   if (doc?.previewUrl) return normalizePreviewUrl(doc?.previewUrl);
 
   const id = String(doc?.fileId || doc?.id || '').trim();
-  const looksLikeServerFileId = /^[A-Za-z0-9_-]{6,40}$/.test(id) && !/^\d+(\.\d+)?$/.test(id);
+  const looksLikeServerFileId = /^[A-Za-z0-9_-]{6,80}$/.test(id) && !/^\d+(\.\d+)?$/.test(id);
   if (looksLikeServerFileId) return `${API_BASE}/api/files/${encodeURIComponent(id)}?mode=preview`;
 
   const downloadUrl = getProjectFileDownloadUrl(doc);
@@ -431,7 +479,7 @@ export const getProjectFilePreviewUrl = (doc = {}) => {
 const readServerMessage = async (res) => {
   const raw = await res.text().catch(() => '');
   try {
-    const parsed = JSON.parse(raw);
+    const parsed = asRecord(JSON.parse(raw));
     return parsed.error || parsed.message || raw || `Request failed (${res.status})`;
   } catch {
     return raw || `Request failed (${res.status})`;
@@ -453,7 +501,9 @@ const uploadWithXhr = (url, form, onProgress, signal) => new Promise((resolve, r
     handler(value);
   };
 
+  assertBrowserAuthContextOwnership();
   xhr.open('POST', url, true);
+  markClientMutationStarted();
   xhr.withCredentials = true;
   const csrfToken = getCsrfToken();
   if (csrfToken) xhr.setRequestHeader('X-CSRF-Token', csrfToken);
@@ -483,8 +533,11 @@ const uploadWithXhr = (url, form, onProgress, signal) => new Promise((resolve, r
   xhr.onload = () => {
     const raw = xhr.responseText || '';
     let payload = null;
-    try { payload = raw ? JSON.parse(raw) : null; } catch { payload = null; }
-    if (xhr.status >= 200 && xhr.status < 300) return finish(resolve, payload || {});
+    try { payload = raw ? asRecord(JSON.parse(raw)) : {}; } catch { payload = {}; }
+    const sessionContextChanged = xhr.status === 409 && String(xhr.getResponseHeader?.('X-Auth-Session-Context') || '').toLowerCase() === 'changed';
+    if (sessionContextChanged) notifyBrowserAuthenticationRejected('AUTH_SESSION_CONTEXT_CHANGED');
+    else if (xhr.status === 401) notifyBrowserAuthenticationRejected(payload?.code || 'AUTH_REQUIRED');
+    if (xhr.status >= 200 && xhr.status < 300) return finish(resolve, payload);
     const error = makeFileError(payload?.code || `UPLOAD_HTTP_${xhr.status}`, payload?.error || payload?.message || raw || `Upload failed (${xhr.status})`);
     error.status = xhr.status;
     error.payload = payload;
@@ -611,11 +664,11 @@ export const getProjectFileCacheKey = (doc = {}) => {
 };
 
 const readCacheIndex = () => {
-  try { return JSON.parse(localStorage.getItem(FILE_CACHE_INDEX_KEY) || '{}') || {}; } catch { return {}; }
+  return parseJsonRecord(localStorage.getItem(FILE_CACHE_INDEX_KEY));
 };
 
 const writeCacheIndex = (index = {}) => {
-  try { localStorage.setItem(FILE_CACHE_INDEX_KEY, JSON.stringify(index || {})); } catch {}
+  try { localStorage.setItem(FILE_CACHE_INDEX_KEY, JSON.stringify(asRecord(index))); } catch {}
 };
 
 const isCacheEntryFresh = (entry = {}) => {
@@ -907,14 +960,8 @@ export const downloadProjectFile = async (doc = {}, onProgress, options = {}) =>
 export const deleteProjectFileFromServer = async (doc = {}) => {
   if (!doc?.id) throw new Error('This file has no server record and cannot be deleted safely.');
   const response = await authFetch(`${API_BASE}/api/files/${encodeURIComponent(doc?.id)}`, { method: 'DELETE' });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(payload.error || `File deletion failed: ${response.status}`);
-    error.status = response.status;
-    error.code = payload.code || '';
-    error.payload = payload;
-    throw error;
-  }
+  const payload = await readApiRecord(response, { operation:'File deletion', requireOk:response.ok });
+  if (!response.ok) throw apiHttpError(response, payload, 'File deletion failed.');
   return payload;
 };
 

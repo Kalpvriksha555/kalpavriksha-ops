@@ -1,17 +1,18 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { ToastViewport } from "../ui/designSystem.jsx";
 import { getVisibleNotifications } from "../../services/notificationService";
+import { asArray, parseJsonArray } from "../../utils/runtimeShapeUtils.js";
 
 const storageKeyFor = (user = {}) => `kalpa_dismissed_toasts_${String(user?.id || user?.name || "guest").replace(/[^a-z0-9_-]/gi, "_")}`;
 
 export const ActiveToasts = ({ toasts = [], notifications = [], currentUser }) => {
   const storageKey = storageKeyFor(currentUser || {});
   const [dismissed, setDismissed] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(storageKey) || '[]').map(String); } catch(e) { return []; }
+    try { return parseJsonArray(localStorage.getItem(storageKey)).map(String); } catch(e) { return []; }
   });
 
   useEffect(() => {
-    try { setDismissed(JSON.parse(localStorage.getItem(storageKey) || '[]').map(String)); } catch(e) { setDismissed([]); }
+    try { setDismissed(parseJsonArray(localStorage.getItem(storageKey)).map(String)); } catch(e) { setDismissed([]); }
   }, [storageKey]);
 
   const source = useMemo(() => {
@@ -27,7 +28,7 @@ export const ActiveToasts = ({ toasts = [], notifications = [], currentUser }) =
       const ids = source.map(n => String(n.id)).filter(Boolean);
       if (!ids.length) return;
       setDismissed(prev => {
-        const next = [...new Set([...prev, ...ids])].slice(-80);
+        const next = [...new Set([...asArray(prev), ...ids])].slice(-80);
         try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch(e) {}
         return next;
       });
@@ -38,7 +39,7 @@ export const ActiveToasts = ({ toasts = [], notifications = [], currentUser }) =
   const dismiss = (id) => {
     const sid = String(id);
     setDismissed(prev => {
-      const next = [...new Set([...prev, sid])].slice(-80);
+      const next = [...new Set([...asArray(prev), sid])].slice(-80);
       try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch(e) {}
       return next;
     });

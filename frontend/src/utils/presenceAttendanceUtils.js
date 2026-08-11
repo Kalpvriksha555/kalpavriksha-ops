@@ -1,7 +1,8 @@
+import { asArray } from './runtimeShapeUtils.js';
+import { ATTENDANCE_MAX_LIVE_GAP_MINUTES, ONLINE_STALE_MS } from '../config/presenceConfig.js';
 // Presence, busy/free, and attendance calculation helpers.
 // Extracted during modularization phase 4 to keep App.jsx focused on UI orchestration.
 
-const ONLINE_STALE_MS = 5 * 60 * 1000;
 const COMPANY_TIME_ZONE = 'Asia/Kolkata';
 const INDIA_OFFSET = '+05:30';
 
@@ -60,19 +61,30 @@ export const localDateKeyFromMs = (ms) => {
 };
 
 const parseDateTimeFromLogClock = (dateKey, clockValue = '') => {
-  if (!dateKey || !clockValue || clockValue === '-') return 0;
+  const date = String(dateKey || '').trim();
   const raw = String(clockValue || '').trim();
-  if (!raw) return 0;
-  // Supports both modern browser times (01:06 AM) and older 24-hour entries (15:21).
-  const direct = new Date(`${dateKey}T${raw} ${INDIA_OFFSET}`).getTime();
-  if (!Number.isNaN(direct)) return direct;
-  const match24 = raw.match(/^(\d{1,2}):(\d{2})$/);
-  if (match24) {
-    const dt = new Date(`${dateKey}T${String(match24[1]).padStart(2, '0')}:${match24[2]}:00`);
-    const ms = dt.getTime();
-    return Number.isNaN(ms) ? 0 : ms;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !raw || raw === '-') return 0;
+  let hours = 0;
+  let minutes = 0;
+  let seconds = 0;
+  const twelveHour = raw.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AP]M)$/i);
+  if (twelveHour) {
+    hours = Number(twelveHour[1]);
+    minutes = Number(twelveHour[2]);
+    seconds = Number(twelveHour[3] || 0);
+    if (hours < 1 || hours > 12 || minutes > 59 || seconds > 59) return 0;
+    if (hours === 12) hours = 0;
+    if (twelveHour[4].toUpperCase() === 'PM') hours += 12;
+  } else {
+    const twentyFourHour = raw.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (!twentyFourHour) return 0;
+    hours = Number(twentyFourHour[1]);
+    minutes = Number(twentyFourHour[2]);
+    seconds = Number(twentyFourHour[3] || 0);
+    if (hours > 23 || minutes > 59 || seconds > 59) return 0;
   }
-  return 0;
+  const timestamp = new Date(`${date}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}${INDIA_OFFSET}`).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
 };
 
 export const isSessionDateMatch = (ms, dateKey) => {
@@ -120,6 +132,15 @@ export const getAttendanceFirstLoginLabel = (log = {}, user = null) => {
   return start ? formatClockTimeFromMs(start) : (log?.loginTime || '-');
 };
 
+const liveAttendanceDeltaMinutes = (fromMs, nowMs = Date.now(), maxGapMinutes = 10, remainderMs = 0) => {
+  const from = toMs(fromMs);
+  const now = toMs(nowMs) || Date.now();
+  if (!from || now <= from) return 0;
+  const elapsed = now - from;
+  if (elapsed > maxGapMinutes * 60_000) return 0;
+  return Math.floor((Math.max(0, Math.min(59_999, Number(remainderMs) || 0)) + elapsed) / 60_000);
+};
+
 export const deriveAttendanceSession = (log = {}, user = null, now = Date.now()) => {
   const start = getAttendanceSessionStartMs(log, user);
   const end = getAttendanceSessionEndMs(log, user, now);
@@ -127,10 +148,13 @@ export const deriveAttendanceSession = (log = {}, user = null, now = Date.now())
   const breakMinutes = getBreakMinutesFromLog(log, now, user);
   const savedTotal = Math.max(0, Math.floor(Number(log?.totalLoggedInMinutes) || 0));
   const computedTotal = start && end && end >= start ? Math.floor((end - start) / 60000) : 0;
-
-  // Prefer the session window. It prevents offline users from continuing to accrue time
-  // after logout while still recovering missing totals for online users.
-  const totalLoggedInMinutes = computedTotal || savedTotal;
+  const backendPresence = /^backend-heartbeat-v\d+$/i.test(String(log?.presenceSource || ''));
+  const liveDelta = backendPresence && online
+    ? liveAttendanceDeltaMinutes(log?.lastTick || log?.logoutAt, now, ATTENDANCE_MAX_LIVE_GAP_MINUTES, log?.attendanceAccrualRemainderMs)
+    : 0;
+  // Backend heartbeat rows already exclude long suspended/offline gaps. Trust
+  // their accumulated counters and add only the short live tail since lastTick.
+  const totalLoggedInMinutes = backendPresence ? (savedTotal + liveDelta) : (computedTotal || savedTotal);
   const savedActive = Math.max(0, Math.floor(Number(log?.activeMinutes) || 0));
   const computedActive = Math.max(0, totalLoggedInMinutes - breakMinutes);
 
@@ -139,7 +163,7 @@ export const deriveAttendanceSession = (log = {}, user = null, now = Date.now())
     end,
     online,
     totalLoggedInMinutes,
-    activeMinutes: Math.max(savedActive, computedActive),
+    activeMinutes: backendPresence ? Math.min(totalLoggedInMinutes, savedActive + (online && String(user?.availability || '').toLowerCase() !== 'break' ? liveDelta : 0)) : Math.max(savedActive, computedActive),
     breakMinutes,
     firstLoginLabel: start ? formatClockTimeFromMs(start) : (log?.loginTime || '-'),
     lastSeenMs: online ? 0 : end
@@ -147,13 +171,37 @@ export const deriveAttendanceSession = (log = {}, user = null, now = Date.now())
 };
 
 export const getBreakMinutesFromLog = (log = {}, now = Date.now(), user = null) => {
-  const stored = Number(log?.totalBreakMinutes || log?.breakMinutes || log?.breakMinutesToday || 0) || 0;
+  const stored = Math.max(0, Number(log?.totalBreakMinutes || log?.breakMinutes || log?.breakMinutesToday || 0) || 0);
+  const events = Array.isArray(log?.breakEvents) ? log.breakEvents : [];
+  let eventMinutes = 0;
+  let hasOpenEvent = false;
+  const backendPresence = /^backend-heartbeat-v\d+$/i.test(String(log?.presenceSource || ''));
+  for (const ev of events) {
+    const start = toMs(ev?.start || ev?.startAt || ev?.breakStartedAt);
+    const end = toMs(ev?.end || ev?.endAt || ev?.breakEndedAt);
+    if (!start) continue;
+    if (!end) hasOpenEvent = true;
+    const explicitMinutes = Number(ev?.minutes ?? ev?.durationMinutes);
+    const hasExplicitMinutes = Number.isFinite(explicitMinutes);
+    const wallMinutes = end ? Math.max(0, Math.floor((end - start) / 60_000)) : 0;
+    const openLiveTail = !end && backendPresence
+      ? liveAttendanceDeltaMinutes(ev?.lastAccruedAt || log?.lastTick || start, now, ATTENDANCE_MAX_LIVE_GAP_MINUTES)
+      : 0;
+    const duration = backendPresence
+      ? Math.max(0, Math.floor((hasExplicitMinutes ? explicitMinutes : 0) + openLiveTail))
+      : Math.max(0, Math.floor(hasExplicitMinutes ? explicitMinutes : (end ? wallMinutes : (now - start) / 60_000)));
+    eventMinutes += duration;
+  }
   const logBreakStart = toMs(log?.currentBreakStartedAt || log?.breakStartedAt);
   const userBreakStart = toMs(user?.currentBreakStartedAt || user?.breakStartedAt || user?.availabilityProfile?.breakStartedAt);
   const userOnBreak = String(user?.availability || '').toLowerCase() === 'break';
   const activeStart = logBreakStart || (userOnBreak ? userBreakStart : 0);
-  const openBreak = activeStart ? Math.floor(Math.max(0, now - activeStart) / 60000) : 0;
-  return stored + openBreak;
+  const liveTail = activeStart && (userOnBreak || hasOpenEvent)
+    ? liveAttendanceDeltaMinutes(log?.lastTick || activeStart, now, ATTENDANCE_MAX_LIVE_GAP_MINUTES, log?.attendanceAccrualRemainderMs)
+    : 0;
+  // eventMinutes already represents the complete open-break duration. stored +
+  // liveTail is the fallback when historical rows lack complete break events.
+  return Math.max(stored + liveTail, eventMinutes, stored);
 };
 
 export const normalizeWorkStatus = (status = '') => String(status || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -200,7 +248,7 @@ export const isDraftingStatus = (status = '') => normalizeWorkStatus(status) ===
 export const isDraftingPausedStatus = (status = '') => normalizeWorkStatus(status) === 'DRAFTINGPAUSED';
 
 export const getUserActiveTasks = (projects = [], userName = '') => (
-  (projects || []).filter(project => samePerson(project?.assignedTo, userName) && isDraftingStatus(project?.status))
+  asArray(projects).filter(project => samePerson(project?.assignedTo, userName) && isDraftingStatus(project?.status))
 );
 
 export const getUserDraftingTask = (projects = [], userName = '') => (
@@ -210,7 +258,7 @@ export const getUserDraftingTask = (projects = [], userName = '') => (
 );
 
 export const getUserLastCompletedAt = (projects = [], userName = '') => {
-  const completed = (projects || [])
+  const completed = asArray(projects)
     .filter(project => samePerson(project?.assignedTo, userName) && !isActiveWorkStatus(project?.status) && getTaskFinishedAt(project))
     .map(project => getTaskFinishedAt(project))
     .sort((a, b) => b - a);
@@ -265,7 +313,7 @@ export const getUserTaskActiveMinutesForDate = (projects = [], userName = '', da
   const dayEnd = new Date(`${dateKey}T23:59:59.999`).getTime();
   if (!dayStart || !dayEnd) return 0;
 
-  const intervals = (projects || [])
+  const intervals = asArray(projects)
     .filter(project => project && identityKey(project?.assignedTo || project?.designer || project?.completedBy) === key)
     .map(project => {
       const start = getTaskBusySince(project);
@@ -317,7 +365,7 @@ export const getAttendanceActiveTaskMinutes = (log = {}, user = null, projects =
   const windowEnd = Math.min(sessionEnd, dayEnd, now);
   if (!windowStart || !windowEnd || windowEnd <= windowStart) return 0;
 
-  const intervals = (projects || [])
+  const intervals = asArray(projects)
     .filter(project => project && samePerson(project?.assignedTo || project?.designer || project?.completedBy, user?.name || log?.name))
     .map(project => {
       const start = getTaskBusySince(project);
@@ -442,12 +490,13 @@ export const buildAttendanceEngineV3 = ({ attendanceLogs = [], users = [], proje
     const onBreak = onlineNow && (String(user?.availability || rowBase.status || '').toLowerCase().includes('break') || !!rowBase.currentBreakStartedAt);
     const activeTasks = getUserActiveTasks(projects, user?.name || rowBase.name);
     const taskBusyMinutes = getAttendanceActiveTaskMinutes(rowBase, user, projects, now);
+    const backendPresenceRow = /^backend-heartbeat-v\d+$/i.test(String(rowBase.presenceSource || ''));
     const savedProductiveCandidates = [
       rowBase.productiveMinutes,
       rowBase.productiveMinutesV3,
       rowBase.taskBusyMinutes,
       rowBase.activeTaskMinutes,
-      rowBase.activeMinutes,
+      ...(backendPresenceRow ? [] : [rowBase.activeMinutes]),
     ].map(v => Math.max(0, Math.floor(Number(v) || 0))).filter(Number.isFinite);
 
     const totalLoggedInMinutes = Math.max(

@@ -1,6 +1,8 @@
+import { asArray, asRecord, firstArray, parseJsonArray, parseJsonRecord, toArray } from './utils/runtimeShapeUtils.js';
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { FeedbackHost } from './components/ui/FeedbackHost.jsx';
 import { notifyUser, requestConfirmation, requestInput } from './services/uiFeedback.js';
+import { CLIENT_API_CONTRACT_DIAGNOSTIC_EVENT, CLIENT_RUNTIME_DIAGNOSTIC_EVENT, recordApiDiagnosticEvent, recordRuntimeDiagnostic, setRuntimeDiagnosticContextProvider } from './services/runtimeDiagnosticsService.js';
 import { useAdaptiveWorkspaceSync } from './hooks/useAdaptiveWorkspaceSync.js';
 import { formatLastSeenDateTime, formatCallDuration, formatDateKey, formatDateTime, formatDuration, formatMinutes } from './utils/date';
 import { buildProjectMonthlyFinanceEntry, compareAccountingMonths, formatAccountingMonthLabel, getAvailableFinanceMonthKeys, getCurrentAccountingMonthKey, getFinanceEventMonthKey, getIndiaDateKey, getPreviousAccountingMonthKey, getProjectCreatedMonthKey, getProjectFinanceMonthKey, getTaskDateTimestamp, normalizeAccountingMonthKey, normalizeTaskDateKey } from './utils/accountingPeriodUtils.js';
@@ -15,15 +17,19 @@ import { PortalLayer } from './components/ui/LayerPortal';
 import { Button, IconButton, InlineAlert } from './components/ui/designSystem.jsx';
 import { ActiveToasts } from './features/notifications';
 import { getStatusColor, getPriorityColor, fetchBackendState, createTaskApi, saveFinanceStatusApi, deleteTaskApi, isProjectDeletedError, mergeTaskLists, persistTasksToLocalCache } from './services/taskService';
-import { API_BASE, USE_BACKEND_STATE, ONLINE_STALE_MS, MAX_INLINE_DATA_URL_CHARS } from './config/appConfig';
-import { MAX_PROJECT_UPLOAD_FILES, absoluteApiUrl, getProjectFileDownloadUrl, getProjectFilePreviewUrl, getProjectFileActionState, isProjectFilePdf, isProjectFileImage, getProjectFileKind, canPreviewProjectFile, fetchProjectFilePreview, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile, getProjectFileCacheKey, listCachedProjectFiles, openCachedProjectFile, clearCachedProjectFile, pruneExpiredProjectFileCache, setProjectFileCacheActor, validateProjectUploadSelection } from './services/fileService';
+import { API_BASE, USE_BACKEND_STATE, ONLINE_STALE_MS, PRESENCE_HEARTBEAT_MS, MAX_INLINE_DATA_URL_CHARS } from './config/appConfig';
+import { MAX_PROJECT_UPLOAD_FILES, absoluteApiUrl, getProjectFileDownloadUrl, getProjectFilePreviewUrl, getProjectFileActionState, isProjectFilePdf, isProjectFileImage, getProjectFileKind, canPreviewProjectFile, fetchProjectFilePreview, uploadProjectFile, downloadProjectFile, deleteProjectFileFromServer, canDeleteProjectFile, getProjectFileCacheKey, listCachedProjectFiles, openCachedProjectFile, clearCachedProjectFile, pruneExpiredProjectFileCache, setProjectFileCacheActor, validateProjectUploadSelection, PROJECT_UPLOAD_ACCEPT, PAYMENT_RECEIPT_ACCEPT } from './services/fileService';
 import { UnifiedFileViewer } from './components/files/UnifiedFileViewer.jsx';
 import { updateProfileApi } from './services/profileService';
 import { sendRealOtp, verifyRealOtp } from './services/otpService';
 import { authFetch, loginApi, clearBrowserSessionApi, logoutApi, changePasswordApi, requestPasswordRecoveryApi, resetPasswordRecoveryApi, createAuthUserApi, updateAuthUserApi, resetAuthUserPasswordApi } from './services/authService';
+import { readApiRecord } from './services/apiContractService.js';
+import { markClientMutationStarted } from './services/requestControlService.js';
+import { advanceWorkspaceSyncMarkers, classifyWorkspaceResponseFreshness } from './utils/workspaceSyncUtils.js';
+import { applyFreshestTaskFinance } from './utils/financeMergeUtils.js';
 import { sendChatMessageApi, updateChatMessageApi, deleteChatMessageApi, markChatReadApi, markNotificationReadApi, markAllNotificationsReadApi, createNotificationApi } from './services/chatService';
 import { FINANCE_FLUSH_EVENT, FINANCE_SYNC_EVENT, advanceFinanceOutboxAfterConfirmation, financeActorKey, getFinanceOutboxRecord, getFinanceOutboxRecords, markFinanceOutboxAttempt, markFinanceOutboxError, queueFinanceDraft, requestFinanceOutboxFlush } from './services/financeOutboxService.js';
-import { buildNotification, getVisibleNotifications, NOTIFICATION_CATEGORIES, getNotificationCategory, getNotificationPriority, buildActivityTimeline, isNotificationForUser } from './services/notificationService';
+import { buildNotification, getVisibleNotifications, NOTIFICATION_CATEGORIES, getNotificationCategory, getNotificationPriority, buildActivityTimeline, isNotificationForUser, isNotificationReadByUser, addNotificationReadUser, normalizeNotificationReadBy } from './services/notificationService';
 import {
   Briefcase, CheckCircle, Clock, FileText, LayoutDashboard, LogOut,
   MapPin, Plus, Search, User, Users, Wallet, ArrowRight, Upload,
@@ -63,28 +69,16 @@ const createOpsBroadcast = () => {
 };
 const opsBroadcast = createOpsBroadcast();
 const OPS_TAB_ID = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+const LIVE_CHAT_MEMORY_LIMIT = 1500;
+const LIVE_NOTIFICATION_MEMORY_LIMIT = 300;
+const GLOBAL_CASE_SEARCH_LIMIT = 40;
 
-const CLIENT_RUNTIME_ERROR_LOG_KEY = 'kalpa_client_runtime_errors_v2';
-const CLIENT_RUNTIME_ERROR_LOG_LIMIT = 20;
-const recordClientRuntimeError = ({ error, source = 'runtime', componentStack = '' } = {}) => {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(CLIENT_RUNTIME_ERROR_LOG_KEY) || '[]');
-    const previous = Array.isArray(parsed) ? parsed : [];
-    const next = [{
-      at: new Date().toISOString(),
-      source: String(source || 'runtime').slice(0, 80),
-      message: String(error?.message || error || 'Unknown client error').slice(0, 2000),
-      stack: String(error?.stack || '').slice(0, 12000),
-      componentStack: String(componentStack || '').slice(0, 12000)
-    }, ...previous].slice(0, CLIENT_RUNTIME_ERROR_LOG_LIMIT);
-    localStorage.setItem(CLIENT_RUNTIME_ERROR_LOG_KEY, JSON.stringify(next));
-  } catch (_) {}
-};
+const recordClientRuntimeError = (details = {}) => recordRuntimeDiagnostic(details);
 
 const PERMANENT_TASK_WRITE_CODES = new Set([
-  'TASK_DATE_INVALID','TASK_DATE_FUTURE','TASK_COMPLETION_FORBIDDEN','COMPLETED_FILE_REQUIRED',
+  'TASK_DATE_INVALID','TASK_DATE_FUTURE','TASK_DATE_IN_FUTURE','TASK_COMPLETION_FORBIDDEN','COMPLETED_FILE_REQUIRED',
   'TASK_UPDATE_FORBIDDEN','TASK_CREATE_FORBIDDEN','CASE_ACCESS_DENIED','CASE_NOT_FOUND',
-  'TASK_ID_REQUIRED','TASK_INVALID','TASK_DISPLAY_ID_CONFLICT','TASK_REOPEN_FORBIDDEN','VALIDATION_ERROR'
+  'TASK_ID_REQUIRED','TASK_INVALID','TASK_DISPLAY_ID_CONFLICT','TASK_REOPEN_FORBIDDEN','TASK_MUTATION_ID_REUSE','VALIDATION_ERROR'
 ]);
 const isPermanentTaskWriteError = (error = {}) => {
   const code=String(error?.code || error?.payload?.code || '').trim().toUpperCase();
@@ -113,12 +107,38 @@ const sanitizeFileLikeObjectForCache = (fileObj) => {
   return next;
 };
 
+const PROJECT_ARRAY_FIELDS = Object.freeze([
+  'documents', 'completedFiles', 'finalFiles', 'workFiles', 'sourceFiles',
+  'subTasks', 'revisions', 'notes', 'reassignmentHistory', 'deliveryLog',
+  'revisionHistory', 'reviewHistory', 'caseEditHistory', 'pausedDraftingSessions',
+  'previousTaskIds', 'paymentAuditTrail', 'timeline', 'history'
+]);
+
+const normalizeProjectArrayShapes = (project = {}) => {
+  const source = asRecord(project);
+  const next = { ...source };
+  PROJECT_ARRAY_FIELDS.forEach(field => { next[field] = asArray(source[field]); });
+  next.subTasks = next.subTasks.map(item => ({ ...asRecord(item), attachments: asArray(asRecord(item).attachments) }));
+  next.revisions = next.revisions.map(item => ({ ...asRecord(item), attachments: asArray(asRecord(item).attachments), files: asArray(asRecord(item).files) }));
+  next.notes = next.notes.map(item => ({ ...asRecord(item), attachments: asArray(asRecord(item).attachments) }));
+  next.revisionHistory = next.revisionHistory.map(item => ({ ...asRecord(item), attachments: asArray(asRecord(item).attachments), files: asArray(asRecord(item).files) }));
+  next.reviewHistory = next.reviewHistory.map(item => ({ ...asRecord(item), attachments: asArray(asRecord(item).attachments), files: asArray(asRecord(item).files) }));
+  next.ownership = asRecord(source.ownership);
+  next.ledger = asRecord(source.ledger);
+  next.estimateDetails = asRecord(source.estimateDetails);
+  return next;
+};
+
 const sanitizeProjectForCache = (project) => {
-  if (!project || typeof project !== 'object') return project;
+  if (!project || typeof project !== 'object' || Array.isArray(project)) return {};
+  const normalized = normalizeProjectArrayShapes(project);
   return {
-    ...project,
-    documents: (project.documents || []).map(sanitizeFileLikeObjectForCache),
-    completedFiles: (project.completedFiles || []).map(sanitizeFileLikeObjectForCache)
+    ...normalized,
+    documents: normalized.documents.map(sanitizeFileLikeObjectForCache),
+    completedFiles: normalized.completedFiles.map(sanitizeFileLikeObjectForCache),
+    finalFiles: normalized.finalFiles.map(sanitizeFileLikeObjectForCache),
+    workFiles: normalized.workFiles.map(sanitizeFileLikeObjectForCache),
+    sourceFiles: normalized.sourceFiles.map(sanitizeFileLikeObjectForCache)
   };
 };
 
@@ -127,7 +147,7 @@ const sanitizeProjectsForCache = (projects) => (Array.isArray(projects) ? projec
 const FINANCE_COMPARE_FIELDS = Object.freeze([
   'estimate','estimateAmount','ledger','financeVersion','paymentTrackingStatus','paymentTrackingUpdatedAt','paymentTrackingUpdatedBy',
   'paymentStatus','paymentReceived','paymentAmountIn','refundAmount','payerName','transactionId',
-  'paymentDate','paymentTime','paymentAuditTrail','financeAccountingPeriod','lastFinanceMutationId','lastFinanceMutationAt'
+  'paymentDate','paymentTime','paymentAuditTrail','financeAccountingPeriod','lastFinanceMutationId','lastFinanceMutationAt','lastFinanceMutationFingerprint','lastFinanceMutationOperation','financeMutationReceipts'
 ]);
 
 const financeSignature = (project = {}) => JSON.stringify(Object.fromEntries(
@@ -157,6 +177,11 @@ const createTaskMutationId = (prefix = 'task') => {
 };
 
 const operationalActorKey = (user = {}) => String(user?.id || user?.username || user?.name || '').trim().toLowerCase();
+let activeOperationalActorScope = '';
+const setOperationalActorScope = (user = null) => {
+  activeOperationalActorScope = user ? operationalActorKey(user) : '';
+  return activeOperationalActorScope;
+};
 
 const createFinanceLedgerDraft = (project = {}) => ({
   estimate: String(project?.estimate ?? project?.estimateAmount ?? ''),
@@ -195,31 +220,34 @@ const parseFinanceDraftAmount = (value, label) => {
   return numeric;
 };
 
-const getPendingCreatedRecords = (actorId = '') => {
+const getPendingCreatedRecords = (actorId = activeOperationalActorScope) => {
   try {
-    const raw=JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
+    const raw=parseJsonRecord(localStorage.getItem('kalpa_pending_created_projects'));
     const actorKey=String(actorId || '').trim().toLowerCase();
+    if (!actorKey) return [];
     return Object.values(raw).map(record=>record?.project ? record : {project:record}).filter(record=>{
       if (!record?.project?.id) return false;
-      if (!actorKey) return true;
-      return !record.actorId || String(record.actorId).trim().toLowerCase()===actorKey;
+      return Boolean(record.actorId) && String(record.actorId).trim().toLowerCase()===actorKey;
     });
   } catch(e) { return []; }
 };
-const getPendingCreatedProjects = (actorId = '') => getPendingCreatedRecords(actorId).map(record=>record.project).filter(Boolean);
+const getPendingCreatedProjects = (actorId = activeOperationalActorScope) => getPendingCreatedRecords(actorId).map(record=>record.project).filter(Boolean);
 const rememberPendingCreatedProject = (project, options = {}) => {
   if (!project?.id) return;
   try {
-    const raw=JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
+    const raw=parseJsonRecord(localStorage.getItem('kalpa_pending_created_projects'));
     const key=String(project.id);
     const previous=raw[key] || {};
+    const actorId=String(options?.actorId || activeOperationalActorScope || previous.actorId || '').trim().toLowerCase();
+    if (!actorId) return null;
     const mutationId=String(options?.mutationId || previous.mutationId || createTaskMutationId(options?.operation === 'create' ? 'create' : 'update')).trim();
     raw[key]={
       project:sanitizeProjectForCache(project),
-      actorId:String(options?.actorId || previous.actorId || '').trim().toLowerCase(),
+      actorId,
       operation:String(options?.operation || previous.operation || (Number(project.taskVersion || 0) > 0 ? 'update' : 'create')),
       mutationId,
       expectedTaskVersion:Number(options?.expectedTaskVersion ?? previous.expectedTaskVersion ?? project.taskVersion ?? 0),
+      rollbackProject:options?.rollbackProject ? sanitizeProjectForCache(options.rollbackProject) : (previous.rollbackProject || null),
       createdAt:Number(previous.createdAt || Date.now()),
       lastAttemptAt:Number(previous.lastAttemptAt || 0),
       attempts:Number(previous.attempts || 0)
@@ -228,51 +256,65 @@ const rememberPendingCreatedProject = (project, options = {}) => {
     return raw[key];
   } catch(e) { return null; }
 };
-const markPendingCreatedAttempt = (projectId) => {
+const markPendingCreatedAttempt = (projectId, actorId = activeOperationalActorScope) => {
   try {
-    const raw=JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
+    const raw=parseJsonRecord(localStorage.getItem('kalpa_pending_created_projects'));
     const key=String(projectId || '');
-    if (raw[key]) { raw[key].lastAttemptAt=Date.now(); raw[key].attempts=Number(raw[key].attempts || 0)+1; localStorage.setItem('kalpa_pending_created_projects',JSON.stringify(raw)); }
+    const actorKey=String(actorId || '').trim().toLowerCase();
+    const record=raw[key];
+    if (record && actorKey && Boolean(record.actorId) && String(record.actorId).trim().toLowerCase()===actorKey) {
+      record.lastAttemptAt=Date.now();
+      record.attempts=Number(record.attempts || 0)+1;
+      localStorage.setItem('kalpa_pending_created_projects',JSON.stringify(raw));
+    }
   } catch(e) {}
 };
 const forgetPendingCreatedProjects = (...ids) => {
   const remove=new Set(ids.flat().map(x=>String(x)).filter(Boolean));
-  if (!remove.size) return;
+  const actorKey=String(activeOperationalActorScope || '').trim().toLowerCase();
+  if (!remove.size || !actorKey) return;
   try {
-    const raw=JSON.parse(localStorage.getItem('kalpa_pending_created_projects') || '{}') || {};
+    const raw=parseJsonRecord(localStorage.getItem('kalpa_pending_created_projects'));
     Object.entries(raw).forEach(([key,record])=>{
+      const recordActor=String(record?.actorId || '').trim().toLowerCase();
+      if (!recordActor || recordActor !== actorKey) return;
       const project=record?.project || record || {};
-      const identities=[key,project.id,project.caseId,project.displayId,...(project.previousTaskIds || [])].map(x=>String(x || '')).filter(Boolean);
+      const identities=[key,project.id,project.caseId,project.displayId,...asArray(project.previousTaskIds)].map(x=>String(x || '')).filter(Boolean);
       if (identities.some(id=>remove.has(id))) delete raw[key];
     });
     localStorage.setItem('kalpa_pending_created_projects',JSON.stringify(raw));
   } catch(e) {}
 };
-const getProtectedCreatedProjectIds = () => new Set(getPendingCreatedProjects().flatMap(p=>[p.id,p.caseId,p.displayId]).map(x=>String(x || '')).filter(Boolean));
+const getProtectedCreatedProjectIds = (actorId = activeOperationalActorScope) => new Set(getPendingCreatedProjects(actorId).flatMap(p=>[p.id,p.caseId,p.displayId]).map(x=>String(x || '')).filter(Boolean));
 
-const getPendingDeletedRecords = (actorId = '') => {
+const getPendingDeletedRecords = (actorId = activeOperationalActorScope) => {
   try {
-    const raw = JSON.parse(localStorage.getItem('kalpa_pending_deleted_project_ids') || '{}') || {};
+    const raw = parseJsonRecord(localStorage.getItem('kalpa_pending_deleted_project_ids'));
     const actorKey = String(actorId || '').trim().toLowerCase();
+    if (!actorKey) return [];
     return Object.values(raw).map(record => (typeof record === 'string' ? { id: record } : record)).filter(record => {
       if (!record?.id) return false;
-      if (!actorKey) return true;
-      return !record.actorId || String(record.actorId).trim().toLowerCase() === actorKey;
+      return Boolean(record.actorId) && String(record.actorId).trim().toLowerCase() === actorKey;
     });
   } catch(e) { return []; }
 };
-const getPendingDeletedProjectIds = (actorId = '') => getPendingDeletedRecords(actorId).map(record => String(record.id || '')).filter(Boolean);
+const getPendingDeletedProjectIds = (actorId = activeOperationalActorScope) => getPendingDeletedRecords(actorId).map(record => String(record.id || '')).filter(Boolean);
 const rememberPendingDeletedProjects = (ids, options = {}) => {
   const incoming = (Array.isArray(ids) ? ids : [ids]).flat().map(x => String(x || '')).filter(Boolean);
-  const actorId = String(options?.actorId || '').trim().toLowerCase();
-  if (!incoming.length) return getPendingDeletedProjectIds(actorId);
+  const actorId = String(options?.actorId || activeOperationalActorScope || '').trim().toLowerCase();
+  const expectedTaskVersion = Number(options?.expectedTaskVersion ?? 0);
+  const mutationId = String(options?.mutationId || '').trim();
+  if (!incoming.length || !actorId) return getPendingDeletedProjectIds(actorId);
   try {
-    const raw = JSON.parse(localStorage.getItem('kalpa_pending_deleted_project_ids') || '{}') || {};
+    const raw = parseJsonRecord(localStorage.getItem('kalpa_pending_deleted_project_ids'));
     incoming.forEach(id => {
       const previous = typeof raw[id] === 'object' && raw[id] ? raw[id] : {};
       raw[id] = {
         id,
         actorId: actorId || previous.actorId || '',
+        expectedTaskVersion:Number.isFinite(expectedTaskVersion) ? expectedTaskVersion : Number(previous.expectedTaskVersion || 0),
+        mutationId:mutationId || previous.mutationId || createTaskMutationId('delete'),
+        groupIds:[...new Set([...incoming,...asArray(previous.groupIds)].map(value=>String(value || '')).filter(Boolean))],
         deletedAt: previous.deletedAt || Date.now(),
         lastAttemptAt: previous.lastAttemptAt || 0,
         attempts: Number(previous.attempts || 0)
@@ -284,11 +326,11 @@ const rememberPendingDeletedProjects = (ids, options = {}) => {
 };
 const markPendingDeletedAttempt = (id, actorId = '') => {
   try {
-    const raw = JSON.parse(localStorage.getItem('kalpa_pending_deleted_project_ids') || '{}') || {};
+    const raw = parseJsonRecord(localStorage.getItem('kalpa_pending_deleted_project_ids'));
     const key = String(id || '');
     const actorKey = String(actorId || '').trim().toLowerCase();
     const record = raw[key];
-    if (record && (!actorKey || !record.actorId || String(record.actorId).trim().toLowerCase() === actorKey)) {
+    if (record && actorKey && Boolean(record.actorId) && String(record.actorId).trim().toLowerCase() === actorKey) {
       record.lastAttemptAt = Date.now();
       record.attempts = Number(record.attempts || 0) + 1;
       localStorage.setItem('kalpa_pending_deleted_project_ids', JSON.stringify(raw));
@@ -300,25 +342,26 @@ const forgetPendingDeletedProjects = (ids, options = {}) => {
   const actorKey = String(options?.actorId || '').trim().toLowerCase();
   if (!remove.size) return getPendingDeletedProjectIds(actorKey);
   try {
-    const raw = JSON.parse(localStorage.getItem('kalpa_pending_deleted_project_ids') || '{}') || {};
+    const raw = parseJsonRecord(localStorage.getItem('kalpa_pending_deleted_project_ids'));
     remove.forEach(id => {
       const record = raw[id];
-      if (!record || !actorKey || !record.actorId || String(record.actorId).trim().toLowerCase() === actorKey) delete raw[id];
+      if (!record) return;
+      if (actorKey && Boolean(record.actorId) && String(record.actorId).trim().toLowerCase() === actorKey) delete raw[id];
     });
     localStorage.setItem('kalpa_pending_deleted_project_ids', JSON.stringify(raw));
   } catch(e) {}
   return getPendingDeletedProjectIds(actorKey);
 };
-const getDeletedProjectIds = () => {
+const getDeletedProjectIds = (actorId = activeOperationalActorScope) => {
   try {
-    const confirmed = JSON.parse(localStorage.getItem('kalpa_deleted_project_ids') || '[]').map(x => String(x)).filter(Boolean);
-    return [...new Set([...confirmed, ...getPendingDeletedProjectIds()])];
-  } catch(e) { return getPendingDeletedProjectIds(); }
+    const confirmed = parseJsonArray(localStorage.getItem('kalpa_deleted_project_ids')).map(x => String(x)).filter(Boolean);
+    return [...new Set([...confirmed, ...getPendingDeletedProjectIds(actorId)])];
+  } catch(e) { return getPendingDeletedProjectIds(actorId); }
 };
 const saveDeletedProjectIds = (ids = [], options = {}) => {
-  const protectedIds = getProtectedCreatedProjectIds();
+  const protectedIds = getProtectedCreatedProjectIds(activeOperationalActorScope);
   const force = !!options?.force;
-  const unique = [...new Set((ids || []).map(x => String(x)).filter(Boolean).filter(id => force || !protectedIds.has(id)))];
+  const unique = [...new Set(asArray(ids).map(x => String(x)).filter(Boolean).filter(id => force || !protectedIds.has(id)))];
   try { localStorage.setItem('kalpa_deleted_project_ids', JSON.stringify(unique)); } catch(e) {}
   return unique;
 };
@@ -336,46 +379,56 @@ const forgetDeletedProjects = (...ids) => {
   return saveDeletedProjectIds(getDeletedProjectIds().filter(id => !remove.has(String(id))), { force: true });
 };
 const RECENT_CREATED_PROJECT_TTL_MS = 2 * 60 * 60 * 1000;
-const getRecentCreatedProjects = () => {
+const getRecentCreatedProjects = (actorId = activeOperationalActorScope) => {
   try {
-    const raw = JSON.parse(localStorage.getItem('kalpa_recent_created_projects') || '{}') || {};
+    const raw = parseJsonRecord(localStorage.getItem('kalpa_recent_created_projects'));
+    const actorKey = String(actorId || '').trim().toLowerCase();
+    if (!actorKey) return [];
     const now = Date.now();
     const next = {};
+    const owned = [];
     Object.entries(raw).forEach(([id, record]) => {
       const project = record?.project || record;
       const createdAt = Number(record?.createdAt || project?.createdAt || project?.updatedAt || 0);
+      const recordActor = String(record?.actorId || '').trim().toLowerCase();
       if (project?.id && createdAt && now - createdAt < RECENT_CREATED_PROJECT_TTL_MS) {
-        next[String(id)] = { project, createdAt };
+        next[String(id)] = { project, createdAt, actorId:recordActor };
+        if (recordActor && recordActor === actorKey) owned.push(project);
       }
     });
     if (JSON.stringify(next) !== JSON.stringify(raw)) localStorage.setItem('kalpa_recent_created_projects', JSON.stringify(next));
-    return Object.values(next).map(x => x.project).filter(Boolean);
+    return owned;
   } catch(e) { return []; }
 };
-const rememberRecentCreatedProject = (project) => {
+const rememberRecentCreatedProject = (project, options = {}) => {
   if (!project?.id) return;
   try {
-    const raw = JSON.parse(localStorage.getItem('kalpa_recent_created_projects') || '{}') || {};
-    raw[String(project.id)] = { project: sanitizeProjectForCache(project), createdAt: Date.now() };
+    const actorId = String(options?.actorId || activeOperationalActorScope || '').trim().toLowerCase();
+    if (!actorId) return;
+    const raw = parseJsonRecord(localStorage.getItem('kalpa_recent_created_projects'));
+    raw[String(project.id)] = { project: sanitizeProjectForCache(project), createdAt: Date.now(), actorId };
     localStorage.setItem('kalpa_recent_created_projects', JSON.stringify(raw));
   } catch(e) {}
 };
 const forgetRecentCreatedProjects = (...ids) => {
   const remove = new Set(ids.flat().map(x => String(x || '')).filter(Boolean));
-  if (!remove.size) return;
+  const actorKey = String(activeOperationalActorScope || '').trim().toLowerCase();
+  if (!remove.size || !actorKey) return;
   try {
-    const raw = JSON.parse(localStorage.getItem('kalpa_recent_created_projects') || '{}') || {};
+    const raw = parseJsonRecord(localStorage.getItem('kalpa_recent_created_projects'));
     Object.entries(raw).forEach(([key, record]) => {
+      const recordActor = String(record?.actorId || '').trim().toLowerCase();
+      if (!recordActor || recordActor !== actorKey) return;
       const project = record?.project || record || {};
-      const identities = [key, project.id, project.caseId, ...(project.previousTaskIds || [])].map(x => String(x || '')).filter(Boolean);
+      const identities = [key, project.id, project.caseId, ...asArray(project.previousTaskIds)].map(x => String(x || '')).filter(Boolean);
       if (identities.some(id => remove.has(id))) delete raw[key];
     });
     localStorage.setItem('kalpa_recent_created_projects', JSON.stringify(raw));
   } catch(e) {}
 };
 const projectIdentityMatches = (a = {}, b = {}) => {
-  const aIds = [a?.id, a?.caseId, ...(a?.previousTaskIds || [])].map(x => String(x || '')).filter(Boolean);
-  const bIds = [b?.id, b?.caseId, ...(b?.previousTaskIds || [])].map(x => String(x || '')).filter(Boolean);
+  const aIds = [a?.id, a?.caseId, ...asArray(a?.previousTaskIds)].map(x => String(x || '')).filter(Boolean);
+  const bIds = [b?.id, b?.caseId, ...asArray(b?.previousTaskIds)].map(x => String(x || '')).filter(Boolean);
   return aIds.some(id => bIds.includes(id));
 };
 const confirmPendingCreatedProjectsAgainstServer = (serverProjects = [], actorId = '') => {
@@ -383,7 +436,7 @@ const confirmPendingCreatedProjectsAgainstServer = (serverProjects = [], actorId
     const confirmed=[];
     for (const record of getPendingCreatedRecords(actorId)) {
       const pendingProject=record.project || {};
-      const serverProject=(serverProjects || []).find(candidate=>projectIdentityMatches(pendingProject,candidate));
+      const serverProject=asArray(serverProjects).find(candidate=>projectIdentityMatches(pendingProject,candidate));
       if (!serverProject) continue;
       const mutationMatched=record.mutationId && String(serverProject.lastTaskMutationId || '')===String(record.mutationId);
       const safeLegacyCreateConfirmation=record.operation==='create' && !record.mutationId && Number(serverProject.taskVersion || 0)>=1;
@@ -393,21 +446,21 @@ const confirmPendingCreatedProjectsAgainstServer = (serverProjects = [], actorId
   } catch(e) {}
 };
 const protectRecentlyCreatedProjects = (incoming = [], current = [], actorId = '') => {
-  const recent = getRecentCreatedProjects();
+  const recent = getRecentCreatedProjects(actorId);
   const pending = getPendingCreatedProjects(actorId);
   return mergeProjectsByFreshness(mergeProjectsByFreshness(mergeProjectsByFreshness(incoming, current), recent), pending);
 };
 const filterDeletedProjects = (projects = []) => {
   const deleted = new Set(getDeletedProjectIds());
   const protectedIds = new Set([
-    ...getProtectedCreatedProjectIds(),
+    ...getProtectedCreatedProjectIds(activeOperationalActorScope),
     ...getRecentCreatedProjects().flatMap(p => [p?.id, p?.caseId]).map(x => String(x || '')).filter(Boolean)
   ]);
   const list = Array.isArray(projects) ? projects : [];
   const supersededIds = new Set();
   list.forEach(p => {
     const ownIds=new Set([p?.id,p?.caseId,p?.displayId].map(value=>String(value || '')).filter(Boolean));
-    (p?.previousTaskIds || []).forEach(id => { if (id && !ownIds.has(String(id))) supersededIds.add(String(id)); });
+    asArray(p?.previousTaskIds).forEach(id => { if (id && !ownIds.has(String(id))) supersededIds.add(String(id)); });
     if (p?.supersedesTaskId && !ownIds.has(String(p.supersedesTaskId))) supersededIds.add(String(p.supersedesTaskId));
   });
   return list.filter(p => {
@@ -428,12 +481,12 @@ const filterDeletedProjects = (projects = []) => {
 let assignmentLedgerCache = null;
 const getAssignmentLedger = () => {
   if (assignmentLedgerCache) return assignmentLedgerCache;
-  try { assignmentLedgerCache = JSON.parse(localStorage.getItem('kalpa_assignment_ledger') || '{}') || {}; } catch(e) { assignmentLedgerCache = {}; }
+  try { assignmentLedgerCache = parseJsonRecord(localStorage.getItem('kalpa_assignment_ledger')); } catch(e) { assignmentLedgerCache = {}; }
   return assignmentLedgerCache;
 };
 const saveAssignmentLedger = (ledger) => {
-  assignmentLedgerCache = ledger || {};
-  try { localStorage.setItem('kalpa_assignment_ledger', JSON.stringify(ledger || {})); } catch(e) {}
+  assignmentLedgerCache = asRecord(ledger);
+  try { localStorage.setItem('kalpa_assignment_ledger', JSON.stringify(asRecord(ledger))); } catch(e) {}
 };
 const recordAssignmentLedgerBatch = (projects = []) => {
   const ledger = { ...getAssignmentLedger() };
@@ -480,7 +533,23 @@ const applyAssignmentLedgerToProjects = (projects = []) => {
   return merged.map(project => applyAssignmentLedgerToProject(project, ledger));
 };
 
-const sanitizeChatMessageForCache = (message) => sanitizeFileLikeObjectForCache(message);
+const normalizeRuntimeReadBy = (value) => {
+  if (Array.isArray(value)) return value.filter(entry => entry !== null && entry !== undefined && entry !== '');
+  if (value === null || value === undefined || value === '') return [];
+  return [value];
+};
+
+const sanitizeChatMessageForCache = (message) => {
+  const sanitized = sanitizeFileLikeObjectForCache(asRecord(message));
+  return {
+    ...asRecord(sanitized),
+    readBy: normalizeRuntimeReadBy(sanitized?.readBy),
+    mentions: asArray(sanitized?.mentions),
+    taskRefs: asArray(sanitized?.taskRefs),
+    files: asArray(sanitized?.files).map(sanitizeFileLikeObjectForCache),
+    reactions: asRecord(sanitized?.reactions)
+  };
+};
 const sanitizeChatsForCache = (messages) => (Array.isArray(messages) ? messages.filter(message => message && typeof message === 'object').map(sanitizeChatMessageForCache) : []);
 
 const chatTimeValue = (message = {}) => {
@@ -508,7 +577,7 @@ const reuseStableRecords = (current = [], next = [], keyFactory = (item) => item
 };
 
 const mergeChatMessagesByFreshness = (current = [], incoming = [], replaceIds = []) => {
-  const replaced = new Set((replaceIds || []).map(value => String(value || '')).filter(Boolean));
+  const replaced = new Set(asArray(replaceIds).map(value => String(value || '')).filter(Boolean));
   const base = (Array.isArray(current) ? current : []).filter(message => !replaced.has(String(message?.id || '')));
   const byId = new Map(base.filter(Boolean).map(message => [String(message.id || `${message.sender || message.by || ''}-${message.recipient || ''}-${message.sentAt || message.createdAt || ''}-${message.text || message.fileName || ''}`), message]));
   sanitizeChatsForCache(incoming).forEach((message) => {
@@ -516,8 +585,8 @@ const mergeChatMessagesByFreshness = (current = [], incoming = [], replaceIds = 
     const key = String(message.id || `${message.sender || message.by || ''}-${message.recipient || ''}-${message.sentAt || message.createdAt || ''}-${message.text || message.fileName || ''}`);
     const existing = byId.get(key);
     if (!existing) { byId.set(key, message); return; }
-    const readBy = [...(existing.readBy || []), ...(message.readBy || [])].filter(Boolean);
-    const reactions = { ...(existing.reactions || {}), ...(message.reactions || {}) };
+    const readBy = [...normalizeRuntimeReadBy(existing.readBy), ...normalizeRuntimeReadBy(message.readBy)].filter(Boolean);
+    const reactions = { ...asRecord(existing?.reactions), ...asRecord(message?.reactions) };
     const merged = {
       ...existing,
       ...message,
@@ -531,21 +600,25 @@ const mergeChatMessagesByFreshness = (current = [], incoming = [], replaceIds = 
     byId.set(key, stableRecordEqual(existing, merged) ? existing : merged);
   });
   const sorted = Array.from(byId.values()).sort((a, b) => chatTimeValue(a) - chatTimeValue(b));
-  return reuseStableRecords(current, sorted, message => message?.id || `${message?.sender || message?.by || ''}-${message?.sentAt || message?.createdAt || ''}`);
+  const bounded = sorted.length > LIVE_CHAT_MEMORY_LIMIT ? sorted.slice(-LIVE_CHAT_MEMORY_LIMIT) : sorted;
+  return reuseStableRecords(current, bounded, message => message?.id || `${message?.sender || message?.by || ''}-${message?.sentAt || message?.createdAt || ''}`);
 };
 
 const mergeNotificationsStable = (current = [], incoming = [], replaceIds = []) => {
-  const replaced = new Set((replaceIds || []).map(value => String(value || '')).filter(Boolean));
+  const replaced = new Set(asArray(replaceIds).map(value => String(value || '')).filter(Boolean));
   const byId = new Map((Array.isArray(current) ? current : []).filter(item => item?.id && !replaced.has(String(item.id))).map(item => [String(item.id), item]));
-  (Array.isArray(incoming) ? incoming : []).forEach(item => {
-    if (!item?.id) return;
+  (Array.isArray(incoming) ? incoming : []).forEach(rawItem => {
+    if (!rawItem?.id) return;
+    const item = { ...asRecord(rawItem), readBy: normalizeNotificationReadBy(rawItem?.readBy) };
     const key = String(item.id);
-    const existing = byId.get(key);
+    const existingRaw = byId.get(key);
+    const existing = existingRaw ? { ...asRecord(existingRaw), readBy: normalizeNotificationReadBy(existingRaw?.readBy) } : null;
     const merged = existing ? { ...existing, ...item } : item;
     byId.set(key, existing && stableRecordEqual(existing, merged) ? existing : merged);
   });
   const next = Array.from(byId.values()).sort((a,b) => Number(b.createdAt || b.id || 0) - Number(a.createdAt || a.id || 0));
-  return reuseStableRecords(current, next, item => item?.id);
+  const bounded = next.length > LIVE_NOTIFICATION_MEMORY_LIMIT ? next.slice(0, LIVE_NOTIFICATION_MEMORY_LIMIT) : next;
+  return reuseStableRecords(current, bounded, item => item?.id);
 };
 
 const AUTHORIZATION_CACHE_SCOPE_KEY = 'kalpa_authorization_cache_scope_v1';
@@ -659,7 +732,7 @@ const getOperationalUsers = (users = [], { includeAdmins = true } = {}) => (Arra
   });
 
 const isArchivedLifecycleUser = (u = {}) => ['DELETED', 'REJECTED', 'ARCHIVED'].includes(normalizeStatus(u?.status));
-const getManagedTeamUsers = (users = [], { includeAdmins = true } = {}) => (users || [])
+const getManagedTeamUsers = (users = [], { includeAdmins = true } = {}) => asArray(users)
   .map(normalizeTeamUser)
   .filter(u => hasValidTeamRole(u) && !isSystemPlaceholderUser(u) && !isArchivedLifecycleUser(u) && (includeAdmins || u.role !== ROLES.ADMIN))
   .sort((a, b) => {
@@ -855,13 +928,10 @@ const mergeTeamUserPresenceSafely = (prev = {}, incoming = {}) => {
   const prevTs = getPresenceMs(prev);
   const incomingTs = getPresenceMs(incoming);
   const merged = { ...prev, ...incoming, id: prev?.id || incoming?.id };
-  const prevOnlineFresh = !!prev?.isOnline && prevTs && (Date.now() - prevTs) <= ONLINE_STALE_MS;
-  const incomingStaleOffline = !incoming?.isOnline && String(incoming?.availability || '').toLowerCase() === 'unavailable';
-
   // A delayed /api/state response or another idle tab must not erase a fresher
   // live heartbeat already seen by this browser. This was the main cause of the
   // Attendance screen jumping between two contradictory states.
-  if (prevTs > incomingTs || (prevOnlineFresh && incomingStaleOffline)) {
+  if (prevTs > incomingTs) {
     merged.isOnline = prev?.isOnline;
     merged.availability = prev?.availability;
     merged.lastSeenAt = prev?.lastSeenAt;
@@ -886,7 +956,7 @@ const normalizeTeamUsers = (list = []) => {
 };
 
 const mergeTeamUsersStable = (existing = [], incoming = [], replaceIds = []) => {
-  const replaced = new Set((replaceIds || []).map(value => String(value || '')).filter(Boolean));
+  const replaced = new Set(asArray(replaceIds).map(value => String(value || '')).filter(Boolean));
   const base = (Array.isArray(existing) ? existing : []).filter(user => !replaced.has(String(user?.id || '')));
   const next = normalizeTeamUsers([...base, ...(Array.isArray(incoming) ? incoming : [])]);
   return reuseStableRecords(existing, next, user => user?.id || user?.username || identityKey(user?.name));
@@ -895,6 +965,15 @@ const mergeTeamUsersStable = (existing = [], incoming = [], replaceIds = []) => 
 const normalizePersonName = (name = '') => normalizeTeamUser({ name, username: name }).name || name;
 const identityKey = (value = '') => normalizePersonName(String(value || '')).toLowerCase().replace(/[^a-z0-9]/g, '');
 const samePerson = (a = '', b = '') => identityKey(a) === identityKey(b);
+
+const normalizeAttendanceLogRecord = (log = {}) => {
+  const source = asRecord(log);
+  return {
+    ...source,
+    breakEvents: asArray(source.breakEvents).filter(item => item && typeof item === 'object' && !Array.isArray(item)),
+    activeTasks: asArray(source.activeTasks).filter(item => item && typeof item === 'object' && !Array.isArray(item))
+  };
+};
 
 const attendanceLogKey = (log = {}) => `${String(log?.userId || log?.name || log?.id || '').toLowerCase().trim()}_${log?.date || ''}`;
 const attendanceLogFreshness = (log = {}) => Math.max(
@@ -905,14 +984,14 @@ const attendanceLogFreshness = (log = {}) => Math.max(
   Number(log?.firstLoginAt) || 0
 );
 const mergeAttendanceLogsStable = (existing = [], incoming = [], replaceIds = []) => {
-  const replaced = new Set((replaceIds || []).map(value => String(value || '')).filter(Boolean));
+  const replaced = new Set(asArray(replaceIds).map(value => String(value || '')).filter(Boolean));
   const byKey = new Map();
-  (Array.isArray(existing) ? existing : []).filter(Boolean).forEach(log => {
+  asArray(existing).filter(Boolean).map(normalizeAttendanceLogRecord).forEach(log => {
     const key = attendanceLogKey(log);
     if (!key || key === '_' || replaced.has(String(log.id || '')) || replaced.has(key)) return;
     byKey.set(key, log);
   });
-  (Array.isArray(incoming) ? incoming : []).filter(Boolean).forEach(log => {
+  asArray(incoming).filter(Boolean).map(normalizeAttendanceLogRecord).forEach(log => {
     const key = attendanceLogKey(log);
     if (!key || key === '_') return;
     const prev = byKey.get(key);
@@ -938,7 +1017,7 @@ const mergeAttendanceLogsStable = (existing = [], incoming = [], replaceIds = []
 };
 
 const readEntryName = (entry) => typeof entry === 'string' ? entry : (entry?.name || '');
-const hasReadBy = (message, userName) => (message?.readBy || []).some(r => samePerson(readEntryName(r), userName));
+const hasReadBy = (message, userName) => normalizeRuntimeReadBy(message?.readBy).some(r => samePerson(readEntryName(r), userName));
 
 const normalizeTimelineEvent = (event = {}) => {
   event = event && typeof event === 'object' ? event : {};
@@ -975,7 +1054,7 @@ const normalizeTimeline = (timeline = [], history = []) => {
 };
 
 const normalizeProjectRecord = (project = {}) => {
-  project = project && typeof project === 'object' ? project : {};
+  project = normalizeProjectArrayShapes(project);
   const assignedTo = normalizePersonName(project?.assignedTo || project?.ownership?.assignedTo || project?.assigneeName || project?.assignedToName || project?.assignedUserName || '');
   const createdBy = normalizePersonName(project?.createdBy || project?.creatorName || '');
   const manager = normalizePersonName(project?.manager || '');
@@ -1006,7 +1085,7 @@ const mergeProjectRecordSafely = (existing = {}, incoming = {}) => {
   const b = normalizeProjectRecord(incoming || {});
   const incomingNewer = projectFreshness(b) >= projectFreshness(a);
   const base = incomingNewer ? { ...a, ...b } : { ...b, ...a };
-  base.timeline = normalizeTimeline([...(a.timeline || []), ...(b.timeline || [])], [...(a.history || []), ...(b.history || [])]);
+  base.timeline = normalizeTimeline([...asArray(a.timeline), ...asArray(b.timeline)], [...asArray(a.history), ...asArray(b.history)]);
 
   // Assignment is business-critical and must not be downgraded by an older
   // Unassigned copy arriving from another tab, cache, or delayed snapshot.
@@ -1021,12 +1100,12 @@ const mergeProjectRecordSafely = (existing = {}, incoming = {}) => {
     base.assignedBy = chosen.assignedBy || base.assignedBy;
     base.assignedAt = chosen.assignedAt || base.assignedAt;
     base.assignmentVersion = chosen.assignmentVersion || chosen.assignedAt || base.assignmentVersion;
-    base.ownership = { ...(base.ownership || {}), assignedTo: base.assignedTo, assignedBy: base.assignedBy };
+    base.ownership = { ...asRecord(base.ownership), assignedTo: base.assignedTo, assignedBy: base.assignedBy };
   } else {
     base.assignedTo = 'Unassigned';
   }
 
-  return normalizeProjectRecord(base);
+  return normalizeProjectRecord(applyFreshestTaskFinance(base, a, b));
 };
 const mergeProjectsByFreshness = (current = [], incoming = []) => {
   const map = new Map();
@@ -1107,7 +1186,7 @@ const persistAndBroadcastProjects = (projects, options = {}) => {
   if (USE_BACKEND_STATE) {
     const changedProjects = Array.isArray(options?.changedProjects) ? options?.changedProjects : [];
     const removedProjectIds = Array.isArray(options?.removedProjectIds) ? options?.removedProjectIds : [];
-    const replaceIds = options?.replaceIds || [];
+    const replaceIds = asArray(options?.replaceIds);
     if (!changedProjects.length && !removedProjectIds.length && !replaceIds.length) return persistBackendProjectsCompatibility(normalized);
     if (!opsBroadcast) return normalized;
     try {
@@ -1367,7 +1446,7 @@ const getRevisionTimelineItems = (project = {}, projects = []) => {
       by: raw?.reviewer || raw?.completedBy || raw?.addedBy || raw?.by || raw?.requestedBy || fallback?.by || '',
       at: ts,
       workItemId: raw?.workItemId || fallback?.workItemId || '',
-      files: raw?.files || raw?.attachments || fallback?.files || [],
+      files: firstArray(raw?.files, raw?.attachments, fallback?.files),
     });
   };
 
@@ -1392,7 +1471,7 @@ const getRevisionTimelineItems = (project = {}, projects = []) => {
         createdAt: item.createdAt,
         completedAt: item.completedAt,
         workItemId: item.id,
-        files: [...(item.completedFiles || []), ...(item.documents || []).filter(doc => String(doc.type || '').toLowerCase() === 'completed')]
+        files: [...asArray(item.completedFiles), ...asArray(item.documents).filter(doc => String(doc.type || '').toLowerCase() === 'completed')]
       });
     });
 
@@ -1432,9 +1511,12 @@ const hasActiveRevision = (project = {}) => {
   const statusKey = normalizeWorkStatusForRevision(project?.status);
   const reviewKey = normalizeWorkStatusForRevision(project?.reviewStatus || project?.finalConclusion || '');
   if (CLOSED_REVISION_STATUSES.has(statusKey) || reviewKey === 'APPROVED') return false;
+  const revisionItems = Array.isArray(project?.subTasks)
+    ? project.subTasks
+    : (Array.isArray(project?.revisions) ? project.revisions : []);
   return ACTIVE_REVISION_STATUSES.has(statusKey)
     || ACTIVE_REVISION_STATUSES.has(reviewKey)
-    || (project?.subTasks || project?.revisions || []).some(isSubTaskOpen);
+    || revisionItems.some(isSubTaskOpen);
 };
 
 const getSlaInfo = (project = {}, now = Date.now()) => {
@@ -2014,8 +2096,8 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, onCreateUser, onUp
 };
 
 const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
-  const [filterDate, setFilterDate] = useState(new Date().toLocaleDateString('en-CA'));
-  const [monthKey, setMonthKey] = useState(new Date().toLocaleDateString('en-CA').slice(0, 7));
+  const [filterDate, setFilterDate] = useState(getIndiaDateKey());
+  const [monthKey, setMonthKey] = useState(getIndiaDateKey().slice(0, 7));
   const nowMs = Date.now();
   const teamMembers = getOperationalUsers(users && users.length ? users : INITIAL_USERS, { includeAdmins: false });
   const attendanceEngine = buildAttendanceEngineV3({ attendanceLogs, users: teamMembers, projects, dateKey: filterDate, now: nowMs });
@@ -2036,7 +2118,7 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
     const present = Boolean(logHasSession || engineRow?.session?.start || engineRow?.totalLoggedInMinutes > 0 || engineRow?.productiveMinutes > 0);
     const productive = Math.max(0, Math.floor(Number(engineRow?.productiveMinutes) || 0));
     const logged = Math.max(0, Math.floor(Number(engineRow?.totalLoggedInMinutes) || 0));
-    const todayKey = new Date(nowMs).toLocaleDateString('en-CA');
+    const todayKey = getIndiaDateKey(nowMs);
     const isFuture = String(date) > String(todayKey);
     const isToday = String(date) === String(todayKey);
     return { present, productive, logged, isFuture, isToday, label: isFuture ? 'Upcoming' : present ? (productive ? formatMinutes(productive) : 'Present') : 'Absent' };
@@ -2100,22 +2182,22 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
               <tbody className="divide-y divide-slate-100">
                 {attendanceRows.map(log => (
                   <tr key={log.id} className="hover:bg-slate-50/80 transition-colors">
-                    <td className="px-3 py-4"><p className="font-black text-slate-800 text-base">{log.name}</p><p className="text-xs font-semibold text-slate-400 mt-0.5">{log.role}{(log.activeTasks || [])[0]?.caseId ? ` • ${(log.activeTasks || [])[0].caseId}` : ''}</p></td>
+                    <td className="px-3 py-4"><p className="font-black text-slate-800 text-base">{log.name}</p><p className="text-xs font-semibold text-slate-400 mt-0.5">{log.role}{asArray(log.activeTasks)[0]?.caseId ? ` • ${asArray(log.activeTasks)[0].caseId}` : ''}</p></td>
                     <td className="px-3 py-4"><span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-black ${statusStyle(log.status)}`}><span className={`w-2 h-2 rounded-full ${statusDot(log.status)}`}></span>{log.status}</span><p className={`text-[11px] font-bold mt-2 ${log.alert === 'Stable' ? 'text-slate-400' : 'text-amber-600'}`}>{log.alert}</p></td>
                     <td className="px-3 py-4"><p className="font-black text-slate-700">{log.loginTime || '-'} <span className="text-slate-300">→</span> {log.onlineNow ? 'Live' : log.lastSeen}</p><div className="mt-2 h-2 rounded-full bg-slate-100 overflow-hidden"><div className="h-full bg-indigo-500 rounded-full" style={{width: `${log.productivePct}%`}}></div></div><p className="text-[10px] font-bold text-slate-400 mt-1">Productivity {log.productivePct}%</p></td>
                     <td className="px-3 py-4 text-right"><span className="bg-slate-50 text-slate-700 px-3 py-1.5 rounded-lg font-black">{formatMinutes(log.totalLoggedInMinutes)}</span></td>
                     <td className="px-3 py-4 text-right"><span className="bg-indigo-50 text-indigo-700 px-3 py-1.5 rounded-lg font-black">{formatMinutes(log.productiveMinutes)}</span></td>
-                    <td className="px-3 py-4 text-right"><span className="bg-amber-50 text-amber-700 px-3 py-1.5 rounded-lg font-black">{formatMinutes(log.breakMinutes)}</span>{log.breakEvents.length > 0 && <p className="text-[10px] text-slate-400 font-bold mt-1">{log.breakEvents.length} break{log.breakEvents.length > 1 ? 's' : ''}</p>}</td>
+                    <td className="px-3 py-4 text-right"><span className="bg-amber-50 text-amber-700 px-3 py-1.5 rounded-lg font-black">{formatMinutes(log.breakMinutes)}</span>{asArray(log.breakEvents).length > 0 && <p className="text-[10px] text-slate-400 font-bold mt-1">{asArray(log.breakEvents).length} break{asArray(log.breakEvents).length > 1 ? 's' : ''}</p>}</td>
                     <td className="px-3 py-4 min-w-[180px]">
-                      {log.breakEvents.length > 0 ? (
+                      {asArray(log.breakEvents).length > 0 ? (
                         <div className="space-y-1">
-                          {log.breakEvents.slice(0, 2).map(ev => (
+                          {asArray(log.breakEvents).slice(0, 2).map(ev => (
                             <div key={ev.id || ev.start} className={`flex items-center justify-between gap-2 rounded-lg px-2 py-1 text-[11px] font-bold ${ev.open ? 'bg-amber-50 text-amber-700 border border-amber-100' : 'bg-slate-50 text-slate-500'}`}>
                               <span>{ev.open ? 'Live break' : 'Break'}</span>
                               <span>{ev.label} • {formatMinutes(ev.minutes)}</span>
                             </div>
                           ))}
-                          {log.breakEvents.length > 2 && <p className="text-[10px] font-bold text-slate-400">+{log.breakEvents.length - 2} more break record{log.breakEvents.length - 2 > 1 ? 's' : ''}</p>}
+                          {asArray(log.breakEvents).length > 2 && <p className="text-[10px] font-bold text-slate-400">+{asArray(log.breakEvents).length - 2} more break record{asArray(log.breakEvents).length - 2 > 1 ? 's' : ''}</p>}
                         </div>
                       ) : <span className="text-xs font-bold text-slate-300">No break taken</span>}
                     </td>
@@ -2126,7 +2208,7 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
             </table>
           </div>
           <div className="sm:hidden space-y-3">
-            {attendanceRows.map(log => (<div key={log.id} className="rounded-2xl border border-slate-100 p-4 shadow-sm bg-white"><div className="flex items-start justify-between gap-3"><div><p className="font-black text-slate-800">{log.name}</p><p className="text-xs font-bold text-slate-400">{log.role}</p></div><span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-black ${statusStyle(log.status)}`}><span className={`w-2 h-2 rounded-full ${statusDot(log.status)}`}></span>{log.status}</span></div><p className="mt-3 text-sm font-black text-slate-700">{log.loginTime || '-'} <span className="text-slate-300">→</span> {log.onlineNow ? 'Live' : log.lastSeen}</p><div className="grid grid-cols-3 gap-2 mt-3 text-center"><div className="bg-slate-50 rounded-xl p-2"><p className="text-[10px] font-black text-slate-400 uppercase">Logged</p><p className="font-black text-slate-700">{formatMinutes(log.totalLoggedInMinutes)}</p></div><div className="bg-indigo-50 rounded-xl p-2"><p className="text-[10px] font-black text-indigo-400 uppercase">Productive</p><p className="font-black text-indigo-700">{formatMinutes(log.productiveMinutes)}</p></div><div className="bg-amber-50 rounded-xl p-2"><p className="text-[10px] font-black text-amber-400 uppercase">Break</p><p className="font-black text-amber-700">{formatMinutes(log.breakMinutes)}</p></div></div>{log.breakEvents.length > 0 && <div className="mt-3 rounded-xl bg-amber-50 border border-amber-100 p-2 text-[11px] font-bold text-amber-700">{log.breakEvents[0].open ? 'Live break' : 'Last break'}: {log.breakEvents[0].label} • {formatMinutes(log.breakEvents[0].minutes)}</div>}<p className="text-[11px] font-bold text-slate-400 mt-3">{log.alert}</p></div>))}
+            {attendanceRows.map(log => (<div key={log.id} className="rounded-2xl border border-slate-100 p-4 shadow-sm bg-white"><div className="flex items-start justify-between gap-3"><div><p className="font-black text-slate-800">{log.name}</p><p className="text-xs font-bold text-slate-400">{log.role}</p></div><span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-black ${statusStyle(log.status)}`}><span className={`w-2 h-2 rounded-full ${statusDot(log.status)}`}></span>{log.status}</span></div><p className="mt-3 text-sm font-black text-slate-700">{log.loginTime || '-'} <span className="text-slate-300">→</span> {log.onlineNow ? 'Live' : log.lastSeen}</p><div className="grid grid-cols-3 gap-2 mt-3 text-center"><div className="bg-slate-50 rounded-xl p-2"><p className="text-[10px] font-black text-slate-400 uppercase">Logged</p><p className="font-black text-slate-700">{formatMinutes(log.totalLoggedInMinutes)}</p></div><div className="bg-indigo-50 rounded-xl p-2"><p className="text-[10px] font-black text-indigo-400 uppercase">Productive</p><p className="font-black text-indigo-700">{formatMinutes(log.productiveMinutes)}</p></div><div className="bg-amber-50 rounded-xl p-2"><p className="text-[10px] font-black text-amber-400 uppercase">Break</p><p className="font-black text-amber-700">{formatMinutes(log.breakMinutes)}</p></div></div>{asArray(log.breakEvents).length > 0 && <div className="mt-3 rounded-xl bg-amber-50 border border-amber-100 p-2 text-[11px] font-bold text-amber-700">{asArray(log.breakEvents)[0]?.open ? 'Live break' : 'Last break'}: {asArray(log.breakEvents)[0]?.label} • {formatMinutes(asArray(log.breakEvents)[0]?.minutes)}</div>}<p className="text-[11px] font-bold text-slate-400 mt-3">{log.alert}</p></div>))}
           </div>
         </div>
 
@@ -2846,6 +2928,14 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     if (ledgerAutoSaveTimerRef.current) clearTimeout(ledgerAutoSaveTimerRef.current);
   }, []);
 
+  useEffect(() => () => {
+    // An authenticated file transfer must never outlive this task-detail
+    // instance. Logout/account replacement/navigation unmounts the view and
+    // aborts any request that was authorized under the previous session.
+    try { fileTransferAbortRef.current?.abort(); } catch {}
+    fileTransferAbortRef.current = null;
+  }, []);
+
   useEffect(() => {
     if (!showFinancials || !financeActorId) return undefined;
     const reflectFinanceSyncState = () => {
@@ -2917,7 +3007,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   const isAssignedToMe = samePerson(project.assignedTo, user.name);
   const canDesignerRevertOwnTask = user.role === ROLES.DESIGNER && isAssignedToMe;
   const canRevertTask = (canManage || canDesignerRevertOwnTask) && project.status !== 'Lead Received';
-  const activeDraftingForUser = (usersProjects = []) => (usersProjects || []).find(p => samePerson(p.assignedTo, project.assignedTo || user.name) && p.status === 'Drafting' && String(p.id) !== String(project.id));
+  const activeDraftingForUser = (usersProjects = []) => asArray(usersProjects).find(p => samePerson(p.assignedTo, project.assignedTo || user.name) && p.status === 'Drafting' && String(p.id) !== String(project.id));
 
   useEffect(() => {
     if (!ledgerDraftUnsafe) return undefined;
@@ -2982,7 +3072,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     const nextTaskId = idSourceChanged
       ? generateTraceableTaskId({ location: nextSnapshot.location, client: nextSnapshot.client, customerName: nextSnapshot.customerName, projects, excludeId: project.id })
       : (project.displayId || project.caseId || project.id);
-    const reassignmentHistory = [...(project.reassignmentHistory || [])];
+    const reassignmentHistory = [...asArray(project.reassignmentHistory)];
     if (String(previousSnapshot.assignedTo || 'Unassigned') !== String(nextSnapshot.assignedTo || 'Unassigned')) {
       reassignmentHistory.push({ from: previousSnapshot.assignedTo || 'Unassigned', to: nextSnapshot.assignedTo || 'Unassigned', by: user.name, time: new Date(now).toLocaleString(), reason: changeReason || 'Case edited' });
     }
@@ -2995,8 +3085,8 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       id: project.id,
       displayId: nextTaskId,
       previousTaskIds: nextTaskId !== (project.displayId || project.caseId || project.id)
-        ? [...new Set([...(project.previousTaskIds || []), ...((project.displayId || project.caseId) && String(project.displayId || project.caseId) !== String(project.id) ? [project.displayId || project.caseId] : [])])].filter(Boolean)
-        : (project.previousTaskIds || []),
+        ? [...new Set([...asArray(project.previousTaskIds), ...((project.displayId || project.caseId) && String(project.displayId || project.caseId) !== String(project.id) ? [project.displayId || project.caseId] : [])])].filter(Boolean)
+        : asArray(project.previousTaskIds),
       caseId: nextTaskId,
       taskName: [nextSnapshot.type, nextSnapshot.customerName, nextSnapshot.location].filter(Boolean).join(' • '),
       updatedAt: now,
@@ -3007,11 +3097,11 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       ownership: { ...(project.ownership || {}), assignedTo: nextSnapshot.assignedTo, editedBy: user.name },
       reassignmentHistory,
       caseEditHistory: [
-        ...(project.caseEditHistory || []),
+        ...asArray(project.caseEditHistory),
         { id: now, by: user.name, editedBy: user.name, at: now, editedAt: now, time: new Date(now).toLocaleString(), reason: changeReason, changedFields: nextTaskId !== (project.displayId || project.caseId || project.id) ? [...changedFields, 'taskId'] : changedFields, before: previousSnapshot, after: { ...nextSnapshot, id: nextTaskId } }
       ],
       timeline: [
-        ...(project.timeline || []),
+        ...asArray(project.timeline),
         { id: now, text: `Case edited by ${user.name}${nextTaskId !== (project.displayId || project.caseId || project.id) ? ` • Task ID changed ${project.displayId || project.caseId || project.id} → ${nextTaskId}` : ''}${changeReason ? `: ${changeReason}` : ''}`, time: new Date(now).toLocaleString() }
       ]
     };
@@ -3035,8 +3125,8 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       draftingElapsedMsBeforePause: totalElapsed,
       draftingElapsedMs: totalElapsed,
       pausedBy: user.name,
-      pausedDraftingSessions: [...(project.pausedDraftingSessions || []), { start: sessionStart, pausedAt: now, elapsedMs: sessionElapsed, totalElapsedMs: totalElapsed, by: user.name }],
-      timeline: [...(project.timeline || []), { id: now, text: `Drafting paused by ${user.name}`, time: new Date(now).toLocaleString() }]
+      pausedDraftingSessions: [...asArray(project.pausedDraftingSessions), { start: sessionStart, pausedAt: now, elapsedMs: sessionElapsed, totalElapsedMs: totalElapsed, by: user.name }],
+      timeline: [...asArray(project.timeline), { id: now, text: `Drafting paused by ${user.name}`, time: new Date(now).toLocaleString() }]
     }, project);
   };
 
@@ -3058,7 +3148,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       updatedProject.draftingPausedAt = null;
       updatedProject.pausedBy = null;
       updatedProject.reviewStatus = wasRevision ? 'Revision In Progress' : updatedProject.reviewStatus;
-      updatedProject.timeline = [...(project.timeline || []), { id: now, text: `${wasPaused ? 'Drafting resumed' : wasRevision ? 'Revision drafting started' : 'Drafting started'} by ${user.name}`, time: new Date(now).toLocaleString() }];
+      updatedProject.timeline = [...asArray(project.timeline), { id: now, text: `${wasPaused ? 'Drafting resumed' : wasRevision ? 'Revision drafting started' : 'Drafting started'} by ${user.name}`, time: new Date(now).toLocaleString() }];
     }
     else if (project.status === 'Drafting') {
       if (getCompletedDocuments(project).length === 0) {
@@ -3090,7 +3180,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     }
 
     updatedProject.timeline = [
-      ...(updatedProject.timeline || []),
+      ...asArray(updatedProject.timeline),
       { id: Date.now(), text: `Status advanced to ${updatedProject.status}`, time: new Date().toLocaleString() }
     ];
     onUpdateProject(updatedProject, project);
@@ -3117,7 +3207,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       reviewStatus: 'Approved',
       ownership: { ...(project.ownership || {}), reviewedBy: user.name, completedBy: user.name, approvedBy: user.name },
       timeline: [
-        ...(project.timeline || []),
+        ...asArray(project.timeline),
         { id: Date.now(), text: `Final file approved after internal review by ${user.name}`, time: new Date().toLocaleString() }
       ]
     };
@@ -3142,7 +3232,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     if (revertedTo) {
       updatedProject.status = revertedTo;
       updatedProject.timeline = [
-        ...(updatedProject.timeline || []),
+        ...asArray(updatedProject.timeline),
         { id: Date.now(), text: `Status reverted back to ${revertedTo} by ${user.name}`, time: new Date().toLocaleString() }
       ];
       onUpdateProject(updatedProject, project);
@@ -3311,7 +3401,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     if (isDocDownloaded(doc)) {
       return handleOpenDownloadedFile(doc);
     }
-    if (fileTransfer.active && fileTransfer.phase !== 'complete' && fileTransfer.phase !== 'error') {
+    if (fileTransferAbortRef.current || (fileTransfer.active && fileTransfer.phase !== 'complete' && fileTransfer.phase !== 'error')) {
       notifyUser(`${fileTransfer.label || 'File transfer'} is already in progress. Please wait until it completes before starting another upload/download.`);
       return { ok:false, error:new Error('Another transfer is in progress.'), cancelled:false };
     }
@@ -3433,9 +3523,9 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   };
 
   const handleFileUpload = async (type, e) => {
-    const files=Array.from(e?.target?.files || []);
+    const files=toArray(e?.target?.files);
     if (!files.length) return;
-    if (fileTransfer.active && !['complete','error'].includes(fileTransfer.phase)) {
+    if (fileTransferAbortRef.current || (fileTransfer.active && !['complete','error'].includes(fileTransfer.phase))) {
       notifyUser(`${fileTransfer.label || 'File transfer'} is already in progress. Please wait until it completes before starting another upload/download.`);
       if (e?.target) e.target.value='';
       return;
@@ -3447,19 +3537,32 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     const currentLabel=type === 'completed' ? 'Uploading final file' : type === 'working' ? 'Uploading work file' : 'Uploading source file';
     const generation=fileTransferGenerationRef.current + 1;
     fileTransferGenerationRef.current=generation;
+    const controller=new AbortController();
+    fileTransferAbortRef.current=controller;
     updateFileTransfer({active:true,phase:'uploading',label:currentLabel,fileName:files[0]?.name || 'file',transferType:type,progress:1,loaded:0,total:totalUploadBytes,speedBps:0,etaSeconds:0,startedAt:transferStartedAt,message:totalFiles > 1 ? `Uploading 1 of ${totalFiles}` : 'Upload started. Please do not upload again.'});
 
     try {
       let latestConfirmed=latestProjectRef.current || project;
       const preparedTarget=await prepareProjectUploadTarget(latestConfirmed);
+      if (controller.signal.aborted) {
+        const cancelled=new Error('Upload was cancelled before the server confirmed it.');
+        cancelled.code='UPLOAD_CANCELLED';
+        throw cancelled;
+      }
       latestConfirmed=preparedTarget.project;
       const taskMutationId=preparedTarget.taskMutationId;
       latestProjectRef.current=latestConfirmed;
       let fallbackProject=null;
       for (let index=0; index<files.length; index+=1) {
+        if (controller.signal.aborted) {
+          const cancelled=new Error('Upload was cancelled before the server confirmed it.');
+          cancelled.code='UPLOAD_CANCELLED';
+          throw cancelled;
+        }
         const file=files[index];
         updateFileTransfer({active:true,phase:'uploading',label:currentLabel,fileName:file.name,transferType:type,message:totalFiles > 1 ? `Uploading ${index + 1} of ${totalFiles}` : 'Uploading...'});
         const uploadedDoc=await uploadProjectFile(file,latestConfirmed.id || latestConfirmed.caseId,type,user.name,(info)=>{
+          if (fileTransferGenerationRef.current !== generation || controller.signal.aborted) return;
           const meta=normalizeTransferProgress(info);
           const safePct=Math.max(1,Math.min(99,Number(meta.percent) || 1));
           const aggregatePct=Math.round(((index / totalFiles) * 100)+(safePct / totalFiles));
@@ -3469,7 +3572,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
           const speedBps=loadedBytes > 0 ? loadedBytes/elapsedSeconds : 0;
           const remainingBytes=Math.max(0,totalUploadBytes-loadedBytes);
           updateFileTransfer({transferType:type,progress:Math.max(1,Math.min(99,aggregatePct)),loaded:loadedBytes,total:totalUploadBytes,speedBps,etaSeconds:speedBps > 0 && remainingBytes > 0 ? Math.ceil(remainingBytes/speedBps) : 0,message:totalFiles > 1 ? `Uploading ${index + 1} of ${totalFiles} • ${safePct}%` : `${safePct}% uploaded`});
-        }, { actorId:user.id, actorUsername:user.username, taskMutationId });
+        }, { actorId:user.id, actorUsername:user.username, taskMutationId, signal:controller.signal });
         if (uploadedDoc?._serverCase) {
           latestConfirmed=uploadedDoc._serverCase;
           acceptServerProject(latestConfirmed);
@@ -3481,10 +3584,10 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
           const base=fallbackProject || latestConfirmed;
           fallbackProject={
             ...base,
-            documents:[...(base.documents || []),cleanDoc],
-            completedFiles:type === 'completed' ? [...(base.completedFiles || []),cleanDoc] : (base.completedFiles || []),
-            workFiles:type === 'working' ? [...(base.workFiles || []),cleanDoc] : (base.workFiles || []),
-            timeline:[...(base.timeline || []),{id:Date.now()+Math.random(),text:`File uploaded: ${file.name}`,time:new Date().toLocaleString()}]
+            documents:[...asArray(base.documents),cleanDoc],
+            completedFiles:type === 'completed' ? [...asArray(base.completedFiles),cleanDoc] : asArray(base.completedFiles),
+            workFiles:type === 'working' ? [...asArray(base.workFiles),cleanDoc] : asArray(base.workFiles),
+            timeline:[...asArray(base.timeline),{id:Date.now()+Math.random(),text:`File uploaded: ${file.name}`,time:new Date().toLocaleString()}]
           };
           if (type === 'completed') {
             fallbackProject={...fallbackProject,status:'Internal Review',submittedAt:fallbackProject.submittedAt || Date.now(),draftingCompletedAt:fallbackProject.draftingCompletedAt || Date.now(),internalReviewStartedAt:fallbackProject.internalReviewStartedAt || Date.now(),completedAt:null,finalConclusion:'Pending Internal Review',reviewStatus:'Pending'};
@@ -3497,35 +3600,54 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       updateFileTransfer({active:true,phase:'complete',label:'Upload complete',progress:100,message:`${totalFiles} file${totalFiles > 1 ? 's' : ''} uploaded and linked successfully.`});
       resetFileTransferLater(2600, generation);
     } catch(error) {
-      console.error('File upload failed:',error);
-      updateFileTransfer({active:true,phase:'error',label:'Upload failed',progress:100,message:error?.message || 'Please check your internet connection and try again.'});
-      notifyUser(`File upload failed: ${error?.message || 'Please check your internet connection and try again.'}`);
+      const cancelled=controller.signal.aborted || error?.code === 'UPLOAD_CANCELLED';
+      console.error(cancelled ? 'File upload cancelled:' : 'File upload failed:',error);
+      updateFileTransfer({active:true,phase:'error',label:cancelled ? 'Upload cancelled' : 'Upload failed',progress:cancelled ? 0 : 100,message:cancelled ? 'Upload cancelled before server confirmation.' : (error?.message || 'Please check your internet connection and try again.')});
+      if (!cancelled) notifyUser(`File upload failed: ${error?.message || 'Please check your internet connection and try again.'}`);
     } finally {
+      if (fileTransferGenerationRef.current === generation && fileTransferAbortRef.current === controller) fileTransferAbortRef.current=null;
       if (type === 'completed') setIsUploadingFinal(false);
       if (e?.target) e.target.value='';
     }
   };
 
 
-
   const uploadSupportingAttachments = async (event, attachmentType, setAttachments, setUploading) => {
-    const files = Array.from(event?.target?.files || []);
+    const files = toArray(event?.target?.files);
     if (files.length === 0) return;
+    if (fileTransferAbortRef.current || (fileTransfer.active && !['complete','error'].includes(fileTransfer.phase))) {
+      notifyUser(`${fileTransfer.label || 'File transfer'} is already in progress. Please wait until it completes before starting another upload/download.`);
+      if (event?.target) event.target.value='';
+      return;
+    }
     setUploading(true);
     const generation=fileTransferGenerationRef.current + 1;
     fileTransferGenerationRef.current=generation;
+    const controller=new AbortController();
+    fileTransferAbortRef.current=controller;
     updateFileTransfer({ active: true, phase: 'uploading', label: attachmentType === 'revision' ? 'Uploading revision attachment' : 'Uploading attachment', fileName: files[0]?.name || 'attachment', transferType: attachmentType, progress: 1, loaded: 0, total: files.reduce((sum, f) => sum + Number(f.size || 0), 0), speedBps: 0, etaSeconds: 0, startedAt: Date.now(), message: 'Upload started. Please wait.' });
     try {
       const preparedTarget = await prepareProjectUploadTarget(latestProjectRef.current || project);
+      if (controller.signal.aborted) {
+        const cancelled=new Error('Upload was cancelled before the server confirmed it.');
+        cancelled.code='UPLOAD_CANCELLED';
+        throw cancelled;
+      }
       const confirmedUploadProject = preparedTarget.project;
       latestProjectRef.current = confirmedUploadProject;
       const uploadedDocs = [];
       for (const file of files) {
+        if (controller.signal.aborted) {
+          const cancelled=new Error('Upload was cancelled before the server confirmed it.');
+          cancelled.code='UPLOAD_CANCELLED';
+          throw cancelled;
+        }
         const uploadedDoc = await uploadProjectFile(file, confirmedUploadProject.id || confirmedUploadProject.caseId, attachmentType, user.name, (info) => {
+          if (fileTransferGenerationRef.current !== generation || controller.signal.aborted) return;
           const meta = normalizeTransferProgress(info);
           const safePct = Math.max(1, Math.min(99, Number(meta.percent) || 1));
           updateFileTransfer({ active: true, phase: 'uploading', label: attachmentType === 'revision' ? 'Uploading revision attachment' : 'Uploading attachment', fileName: file.name, transferType: attachmentType, progress: safePct, loaded: meta.loaded || 0, total: meta.total || Number(file.size || 0), speedBps: meta.speedBps || 0, etaSeconds: meta.etaSeconds || 0, message: `${safePct}% uploaded` });
-        }, { actorId:user.id, actorUsername:user.username, taskMutationId:preparedTarget.taskMutationId });
+        }, { actorId:user.id, actorUsername:user.username, taskMutationId:preparedTarget.taskMutationId, signal:controller.signal });
         if (uploadedDoc?._serverCase) acceptServerProject(uploadedDoc._serverCase);
         const cleanUploadedDoc={...uploadedDoc};
         delete cleanUploadedDoc._serverCase;
@@ -3542,11 +3664,13 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       updateFileTransfer({ active: true, phase: 'complete', label: 'Upload complete', progress: 100, message: `${uploadedDocs.length} attachment${uploadedDocs.length > 1 ? 's' : ''} uploaded successfully.` });
       resetFileTransferLater(2200, generation);
     } catch (error) {
-      console.error(`${attachmentType} attachment upload failed:`, error);
-      updateFileTransfer({ active: true, phase: 'error', label: 'Upload failed', progress: 100, message: error?.message || 'Please check your internet connection and try again.' });
-      notifyUser(`Attachment upload failed: ${error?.message || 'Please check your internet connection and try again.'}`);
+      const cancelled=controller.signal.aborted || error?.code === 'UPLOAD_CANCELLED';
+      console.error(`${attachmentType} attachment upload ${cancelled ? 'cancelled' : 'failed'}:`, error);
+      updateFileTransfer({ active: true, phase: 'error', label: cancelled ? 'Upload cancelled' : 'Upload failed', progress: cancelled ? 0 : 100, message: cancelled ? 'Upload cancelled before server confirmation.' : (error?.message || 'Please check your internet connection and try again.') });
+      if (!cancelled) notifyUser(`Attachment upload failed: ${error?.message || 'Please check your internet connection and try again.'}`);
     } finally {
       setUploading(false);
+      if (fileTransferGenerationRef.current === generation && fileTransferAbortRef.current === controller) fileTransferAbortRef.current=null;
       if (event?.target) event.target.value = '';
     }
   };
@@ -3605,7 +3729,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
         // write during normal production operation.
         const base=latestProjectRef.current || project;
         const sameFile=(doc)=>String(doc?.id || '')===String(docToDelete.id || '');
-        const localOnly={...base,documents:(base.documents || []).filter(doc=>!sameFile(doc)),completedFiles:(base.completedFiles || []).filter(doc=>!sameFile(doc)),workFiles:(base.workFiles || []).filter(doc=>!sameFile(doc)),sourceFiles:(base.sourceFiles || []).filter(doc=>!sameFile(doc))};
+        const localOnly={...base,documents:asArray(base.documents).filter(doc=>!sameFile(doc)),completedFiles:asArray(base.completedFiles).filter(doc=>!sameFile(doc)),workFiles:asArray(base.workFiles).filter(doc=>!sameFile(doc)),sourceFiles:asArray(base.sourceFiles).filter(doc=>!sameFile(doc))};
         latestProjectRef.current=localOnly;
         if (typeof onServerProjectConfirmed === 'function') onServerProjectConfirmed(localOnly);
       }
@@ -3620,14 +3744,41 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   const handleLedgerScreenshot = async (event) => {
     const file = event?.target?.files?.[0];
     if (!file || !showFinancials || isUploadingLedgerReceipt) return;
+    if (fileTransferAbortRef.current || (fileTransfer.active && !['complete','error'].includes(fileTransfer.phase))) {
+      notifyUser(`${fileTransfer.label || 'File transfer'} is already in progress. Please wait until it completes before uploading a payment receipt.`);
+      if (event?.target) event.target.value='';
+      return;
+    }
     validateProjectUploadSelection(event?.target?.files, { maxFiles: 1, allowedKinds: ['pdf', 'image'] });
     setIsUploadingLedgerReceipt(true);
     setLedgerSaveMessage('Uploading payment receipt…');
+    const generation=fileTransferGenerationRef.current + 1;
+    fileTransferGenerationRef.current=generation;
+    const controller=new AbortController();
+    fileTransferAbortRef.current=controller;
+    updateFileTransfer({active:true,phase:'uploading',label:'Uploading payment receipt',fileName:file.name || 'receipt',transferType:'payment-receipt',progress:1,loaded:0,total:Number(file.size || 0),speedBps:0,etaSeconds:0,startedAt:Date.now(),message:'Upload started. Please wait.'});
     try {
       const preparedTarget = await prepareProjectUploadTarget(latestProjectRef.current || project);
+      if (controller.signal.aborted) {
+        const cancelled=new Error('Upload was cancelled before the server confirmed it.');
+        cancelled.code='UPLOAD_CANCELLED';
+        throw cancelled;
+      }
       const confirmedUploadProject = preparedTarget.project;
       latestProjectRef.current = confirmedUploadProject;
-      const uploaded = await uploadProjectFile(file, confirmedUploadProject.id || confirmedUploadProject.caseId, 'payment-receipt', user.name, { actorId:user.id, actorUsername:user.username, taskMutationId:preparedTarget.taskMutationId });
+      const uploaded = await uploadProjectFile(
+        file,
+        confirmedUploadProject.id || confirmedUploadProject.caseId,
+        'payment-receipt',
+        user.name,
+        (info) => {
+          if (fileTransferGenerationRef.current !== generation || controller.signal.aborted) return;
+          const meta=normalizeTransferProgress(info);
+          const safePct=Math.max(1,Math.min(99,Number(meta.percent) || 1));
+          updateFileTransfer({active:true,phase:'uploading',label:'Uploading payment receipt',fileName:file.name || 'receipt',transferType:'payment-receipt',progress:safePct,loaded:meta.loaded || 0,total:meta.total || Number(file.size || 0),speedBps:meta.speedBps || 0,etaSeconds:meta.etaSeconds || 0,message:`${safePct}% uploaded`});
+        },
+        { actorId:user.id, actorUsername:user.username, taskMutationId:preparedTarget.taskMutationId, signal:controller.signal }
+      );
       const receipt={...uploaded};
       delete receipt._serverCase;
       delete receipt._persistence;
@@ -3635,11 +3786,16 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       ledgerDraftRef.current = nextDraft;
       setLedgerDraft(nextDraft);
       queueLedgerDraftForBackgroundSync(nextDraft, { flush:true, message:'Receipt uploaded • syncing automatically…' });
+      updateFileTransfer({active:true,phase:'complete',label:'Receipt upload complete',fileName:file.name || 'receipt',transferType:'payment-receipt',progress:100,etaSeconds:0,message:'Payment receipt uploaded and linked successfully.'});
+      resetFileTransferLater(2200,generation);
     } catch (error) {
-      console.error('Payment receipt upload failed:', error);
-      setLedgerSaveMessage(error?.message || 'Payment receipt upload failed.');
-      notifyUser(error?.message || 'Payment receipt upload failed.');
+      const cancelled=controller.signal.aborted || error?.code === 'UPLOAD_CANCELLED';
+      console.error(cancelled ? 'Payment receipt upload cancelled:' : 'Payment receipt upload failed:', error);
+      setLedgerSaveMessage(cancelled ? 'Payment receipt upload cancelled.' : (error?.message || 'Payment receipt upload failed.'));
+      updateFileTransfer({active:true,phase:'error',label:cancelled ? 'Upload cancelled' : 'Upload failed',fileName:file.name || 'receipt',transferType:'payment-receipt',progress:cancelled ? 0 : 100,etaSeconds:0,message:cancelled ? 'Upload cancelled before server confirmation.' : (error?.message || 'Payment receipt upload failed.')});
+      if (!cancelled) notifyUser(error?.message || 'Payment receipt upload failed.');
     } finally {
+      if (fileTransferGenerationRef.current === generation && fileTransferAbortRef.current === controller) fileTransferAbortRef.current=null;
       setIsUploadingLedgerReceipt(false);
       if (event?.target) event.target.value = '';
     }
@@ -3678,18 +3834,18 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       reviewStatus: isArchivedCompletedCase ? baseProject.reviewStatus : 'Reverted',
       revisionRequestedAt: now,
       reviewedBy: user.name,
-      documents: isArchivedCompletedCase ? (baseProject.documents || []) : [...(baseProject.documents || []), ...subTaskAttachments],
-      subTasks: isArchivedCompletedCase ? (baseProject.subTasks || []) : [...(baseProject.subTasks || []), revisionItem],
+      documents: isArchivedCompletedCase ? asArray(baseProject.documents) : [...asArray(baseProject.documents), ...subTaskAttachments],
+      subTasks: isArchivedCompletedCase ? asArray(baseProject.subTasks) : [...asArray(baseProject.subTasks), revisionItem],
       revisionHistory: [
-        ...(baseProject.revisionHistory || []),
+        ...asArray(baseProject.revisionHistory),
         { ...revisionItem, action: 'Revision Requested', reviewer: user.name, at: now, workItemId: revisionWorkItem?.id || null }
       ],
       reviewHistory: [
-        ...(baseProject.reviewHistory || []),
+        ...asArray(baseProject.reviewHistory),
         { id: now, action: 'Revision Requested', comment: title, reviewer: user.name, at: now, attachments: subTaskAttachments, revisionNumber, workItemId: revisionWorkItem?.id || null }
       ],
       timeline: [
-        ...(baseProject.timeline || []),
+        ...asArray(baseProject.timeline),
         { id: now, text: `Revision ${revisionNumber} requested by ${user.name}: ${title}`, time: new Date(now).toLocaleString() },
         ...(isArchivedCompletedCase ? [{ id: now + 0.5, text: `Temporary revision work item created for today while original task ID remains permanent.`, time: new Date(now).toLocaleString() }] : []),
         ...(subTaskAttachments.length ? [{ id: now + 1, text: `Revision attachment added by ${user.name}: ${subTaskAttachments.map(d => d.name).join(', ')}`, time: new Date(now).toLocaleString() }] : [])
@@ -3702,7 +3858,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
   };
 
   const toggleSubTask = (subTaskId) => {
-    const updatedSubTasks = (project.subTasks||[]).map(st =>
+    const updatedSubTasks = asArray(project.subTasks).map(st =>
       st.id === subTaskId ? { ...st, status: st.status === 'Pending' ? 'Done' : 'Pending' } : st
     );
     onUpdateProject({ ...project, subTasks: updatedSubTasks }, project);
@@ -3715,10 +3871,10 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
     const now = Date.now();
     const updatedProject = {
       ...baseProject,
-      notes: [...(baseProject.notes||[]), { id: now, text: noteText || `Attachment added by ${user.name}`, author: user.name, time: new Date(now).toLocaleString(), attachments: noteAttachments }],
-      documents: [...(baseProject.documents || []), ...noteAttachments],
+      notes: [...asArray(baseProject.notes), { id: now, text: noteText || `Attachment added by ${user.name}`, author: user.name, time: new Date(now).toLocaleString(), attachments: noteAttachments }],
+      documents: [...asArray(baseProject.documents), ...noteAttachments],
       timeline: [
-        ...(baseProject.timeline || []),
+        ...asArray(baseProject.timeline),
         ...(noteAttachments.length ? [{ id: now + 1, text: `Discussion attachment added by ${user.name}: ${noteAttachments.map(d => d.name).join(', ')}`, time: new Date(now).toLocaleString() }] : [])
       ]
     };
@@ -3898,11 +4054,11 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
       reportSentAt: sentAt,
       reportSentBy: user.name,
       deliveryLog: [
-        ...(project.deliveryLog || []),
+        ...asArray(project.deliveryLog),
         { id: sentAt, via, file: fileName, by: user.name, at: sentAt, time: new Date(sentAt).toLocaleString() }
       ],
       timeline: [
-        ...(project.timeline || []),
+        ...asArray(project.timeline),
         { id: sentAt, type: 'delivery', title: `Final file sent: ${fileName}`, text: `Final file sent: ${fileName}`, by: user.name, at: sentAt, time: sentAt, remarks: via }
       ]
     }, project);
@@ -3989,7 +4145,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
 
   const completedDocs = getCompletedDocuments(project);
   const completedDocsCount = completedDocs.length;
-  const hasRevisionCycle = (project.subTasks || []).length > 0 || (project.revisionHistory || []).length > 0 || project.priority === 'Urgent';
+  const hasRevisionCycle = asArray(project.subTasks).length > 0 || asArray(project.revisionHistory).length > 0 || project.priority === 'Urgent';
   const latestCompletedAt = completedDocs.reduce((max, doc) => Math.max(max, Number(doc.uploadedAt || doc.createdAt || doc.updatedAt || doc.id || 0) || new Date(doc.time || doc.date || 0).getTime() || 0), 0);
   const latestRevisedCompletedDocs = hasRevisionCycle && completedDocs.length > 0
     ? completedDocs.filter(doc => {
@@ -4278,8 +4434,8 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                       value={project.assignedTo}
                       onChange={(e) => {
                         const newVal = e.target.value;
-                        const newTimeline = [...(project.timeline||[]), { id: Date.now(), text: `Task re-assigned to ${newVal} by ${user.name}`, time: new Date().toLocaleString() }];
-                        const reassignmentHistory = [...(project.reassignmentHistory || []), { from: project.assignedTo || 'Unassigned', to: newVal, by: user.name, time: new Date().toLocaleString() }];
+                        const newTimeline = [...asArray(project.timeline), { id: Date.now(), text: `Task re-assigned to ${newVal} by ${user.name}`, time: new Date().toLocaleString() }];
+                        const reassignmentHistory = [...asArray(project.reassignmentHistory), { from: project.assignedTo || 'Unassigned', to: newVal, by: user.name, time: new Date().toLocaleString() }];
                         onUpdateProject({...project, assignedTo: newVal, assignedBy: user.name, assignedAt: Date.now(), assignmentVersion: Date.now(), reassignmentHistory, timeline: newTimeline}, project);
                       }}
                       className="w-full font-bold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-xl p-2.5 focus:ring-2 focus:ring-indigo-500 outline-none cursor-pointer"
@@ -4293,8 +4449,8 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                       <p className="text-[10px] font-black uppercase tracking-widest text-indigo-600 mb-2">Smart Recommendations</p>
                       {getAssignmentRecommendations(users, [project]).slice(0,3).map((u, idx) => (
                         <button type="button" key={u.id} onClick={() => {
-                          const newTimeline = [...(project.timeline||[]), { id: Date.now(), text: `Smart assigned to ${u.name} by ${user.name}`, time: new Date().toLocaleString() }];
-                          const reassignmentHistory = [...(project.reassignmentHistory || []), { from: project.assignedTo || 'Unassigned', to: u.name, by: user.name, time: new Date().toLocaleString() }];
+                          const newTimeline = [...asArray(project.timeline), { id: Date.now(), text: `Smart assigned to ${u.name} by ${user.name}`, time: new Date().toLocaleString() }];
+                          const reassignmentHistory = [...asArray(project.reassignmentHistory), { from: project.assignedTo || 'Unassigned', to: u.name, by: user.name, time: new Date().toLocaleString() }];
                           onUpdateProject({...project, assignedTo: u.name, assignedBy: user.name, assignedAt: Date.now(), assignmentVersion: Date.now(), reassignmentHistory, timeline: newTimeline}, project);
                         }} className="w-full text-left flex justify-between items-center bg-white hover:bg-indigo-100 rounded-lg px-3 py-2 mb-1 border border-indigo-100 transition-colors">
                           <span className="text-xs font-extrabold text-slate-700">{idx + 1}. {u.name}</span>
@@ -4345,7 +4501,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
               {[['Lead', project.createdAt], ['Assigned', project.assignedAt], ['Draft Started', project.draftingStartedAt], ['Submitted', project.submittedAt], ['Completed', project.completedAt]].map(([label, time]) => (
                 <div key={label} className={`rounded-xl p-3 border ${time ? 'bg-emerald-50 border-emerald-100 text-emerald-700' : 'bg-slate-50 border-slate-100 text-slate-400'}`}>
                   <p className="font-black uppercase tracking-widest text-[9px]">{label}</p>
-                  <p className="font-bold mt-1">{time ? new Date(time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : 'Pending'}</p>
+                  <p className="font-bold mt-1">{time ? new Date(time).toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', timeZone:'Asia/Kolkata'}) : 'Pending'}</p>
                 </div>
               ))}
             </div>
@@ -4379,7 +4535,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
 
              <div className="space-y-4">
                <h3 className="text-xs font-extrabold text-slate-400 uppercase tracking-widest bg-slate-50 py-2 px-3 rounded-lg inline-block">Source Files (From Bank)</h3>
-               {(project.documents||[]).filter(d => d.type === 'source').map((doc, idx) => (
+               {asArray(project.documents).filter(d => d.type === 'source').map((doc, idx) => (
                  <div key={idx} className="p-3.5 bg-slate-50 rounded-2xl border border-slate-100 group hover:border-indigo-200 transition-colors">
                    <div className="flex items-center justify-between">
                    <div className="flex items-center text-slate-700 overflow-hidden pr-2">
@@ -4397,13 +4553,13 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                   <div className="w-full sm:w-auto">
                     <label className={`text-xs font-bold flex items-center justify-center cursor-pointer px-3 py-1.5 rounded-lg transition-colors border ${isCurrentTransferForType('working', 'uploading') ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-wait' : 'bg-blue-50 text-blue-600 hover:text-blue-800 border-blue-100'}`}>
                       <Plus className="w-3 h-3 mr-1" /> {isCurrentTransferForType('working', 'uploading') ? 'Uploading Work File...' : 'Upload Work File'}
-                      <input type="file" multiple className="hidden" disabled={isCurrentTransferForType('working', 'uploading')} accept=".jpg,.jpeg,.png,.mp4,.mov,.avi,.mkv,.webm,.pdf,.dwg,.dxf,.xls,.xlsx,.doc,.docx" onChange={(e) => handleFileUpload('working', e)} />
+                      <input type="file" multiple className="hidden" disabled={isCurrentTransferForType('working', 'uploading')} accept={PROJECT_UPLOAD_ACCEPT} onChange={(e) => handleFileUpload('working', e)} />
                     </label>
                     {isCurrentTransferForType('working') && renderInlineFileTransferBar('sm:w-[380px]')}
                   </div>
                </div>
-               {(project.documents||[]).filter(d => d.type === 'working').length === 0 && <p className="text-sm text-slate-500 font-medium italic px-2">No working files uploaded yet.</p>}
-               {(project.documents||[]).filter(d => d.type === 'working').map((doc, idx) => (
+               {asArray(project.documents).filter(d => d.type === 'working').length === 0 && <p className="text-sm text-slate-500 font-medium italic px-2">No working files uploaded yet.</p>}
+               {asArray(project.documents).filter(d => d.type === 'working').map((doc, idx) => (
                  <div key={idx} className="p-3.5 bg-blue-50/50 rounded-2xl border border-blue-100 group hover:border-blue-200 transition-colors">
                    <div className="flex items-center justify-between">
                    <div className="flex items-center text-blue-900 overflow-hidden pr-2">
@@ -4512,10 +4668,10 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
               <List className="w-5 h-5 mr-2 text-red-500" /> Revisions & Sub-tasks
             </h2>
             <div className="space-y-3 mb-5 max-h-60 overflow-y-auto pr-2 custom-scrollbar">
-              {(project.subTasks||[]).length === 0 ? (
+              {asArray(project.subTasks).length === 0 ? (
                 <p className="text-sm text-slate-500 font-medium italic px-2">No active revisions.</p>
               ) : (
-                project.subTasks.map((st, idx) => (
+                asArray(project.subTasks).map((st, idx) => (
                   <div key={st.id || idx} className="flex items-start p-4 bg-slate-50 rounded-2xl border border-slate-100">
                     <button type="button" onClick={() => toggleSubTask(st.id)} className={`mt-0.5 mr-4 rounded-full flex-shrink-0 transition-transform hover:scale-110 ${st.status === 'Done' ? 'text-emerald-500' : 'text-slate-300 hover:text-slate-400'}`}>
                       <CheckCircle className="w-6 h-6" />
@@ -4523,7 +4679,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                     <div className="flex-1 min-w-0">
                       <p className={`font-bold text-base break-words ${st.status === 'Done' ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{st.title}</p>
                       <p className="text-xs font-semibold text-slate-400 mt-1">Added by {st.addedBy}</p>
-                      {renderInlineAttachments(st.attachments || [])}
+                      {renderInlineAttachments(asArray(st.attachments))}
                     </div>
                   </div>
                 ))
@@ -4537,7 +4693,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                     <Paperclip className="w-3.5 h-3.5 mr-1.5" /> {isUploadingRevisionAttachment ? 'Uploading...' : 'Attach Files'}
                     <input type="file" multiple className="hidden" onChange={handleRevisionAttachmentUpload} />
                   </label>
-                  <span className="text-[11px] font-bold text-slate-400">No upload limit. Add screenshots, PDFs, DWG, images, videos, Word or Excel files.</span>
+                  <span className="text-[11px] font-bold text-slate-400">Up to 20 files per selection, 100 MB each. Supports PDFs, CAD, images, video/audio, Word, Excel and PowerPoint files.</span>
                 </div>
                 {isCurrentTransferForType('revision') && renderInlineFileTransferBar('mb-3')}
                 {subTaskAttachments.length > 0 && (
@@ -4567,7 +4723,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                   <p className="font-bold text-slate-700 mb-1 text-lg">{isUploadingFinal ? 'Uploading...' : 'Upload Final File'}</p>
                   <p className="text-xs font-medium text-slate-500">PDF, AutoCAD, image, Word or Excel format</p>
                 </button>
-                <input ref={completedFileInputRef} type="file" multiple className="hidden" accept=".pdf,.dwg,.dxf,.jpg,.jpeg,.png,.mp4,.mov,.avi,.mkv,.webm,.xls,.xlsx,.csv,.doc,.docx" onChange={(e) => handleFileUpload('completed', e)} />
+                <input ref={completedFileInputRef} type="file" multiple className="hidden" accept={PROJECT_UPLOAD_ACCEPT} onChange={(e) => handleFileUpload('completed', e)} />
               </div>
             </div>
           )}
@@ -4605,7 +4761,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                   <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
                     <label className={`cursor-pointer bg-white px-5 py-3 border-2 border-amber-200 text-amber-700 font-bold rounded-xl hover:bg-amber-100 transition-colors shadow-sm w-full sm:w-auto text-center flex justify-center items-center ${isUploadingLedgerReceipt ? 'opacity-60 pointer-events-none' : ''}`}>
                       <Upload className="w-5 h-5 mr-2 inline"/> {isUploadingLedgerReceipt ? 'Uploading Receipt…' : 'Upload Receipt'}
-                      <input type="file" className="hidden" accept="image/*,.pdf" disabled={isUploadingLedgerReceipt} onChange={handleLedgerScreenshot} />
+                      <input type="file" className="hidden" accept={PAYMENT_RECEIPT_ACCEPT} disabled={isUploadingLedgerReceipt} onChange={handleLedgerScreenshot} />
                     </label>
                     {ledgerDraft.screenshot && typeof ledgerDraft.screenshot === 'object' && (
                       <button type="button" onClick={() => handleTrackedDownload(ledgerDraft.screenshot)} className="text-sm font-black text-indigo-700 hover:text-indigo-800 bg-indigo-50 px-4 py-3 rounded-xl border border-indigo-100 flex items-center transition-colors">
@@ -4646,12 +4802,12 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
               <button type="button" onClick={() => window.dispatchEvent(new CustomEvent('kalpa:discuss-task', { detail: { projectId: project.id || project.caseId || '', project } }))} className="bg-indigo-50 text-indigo-700 border border-indigo-100 px-4 py-2 rounded-xl text-xs font-black hover:bg-indigo-100 flex items-center justify-center gap-2"><MessageSquare className="w-4 h-4" /> Discuss in Group Chat</button>
             </div>
             <div className="space-y-3 mb-5 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
-              {(project.notes||[]).length === 0 && <p className="text-sm text-slate-400 font-medium italic">No discussion notes yet.</p>}
-              {(project.notes||[]).map((note, idx) => (
+              {asArray(project.notes).length === 0 && <p className="text-sm text-slate-400 font-medium italic">No discussion notes yet.</p>}
+              {asArray(project.notes).map((note, idx) => (
                 <div key={idx} className="bg-slate-50 p-3.5 rounded-2xl border border-slate-100">
                   <p className="text-sm font-semibold text-slate-700 whitespace-pre-wrap">{note.text}</p>
                   <p className="text-[10px] font-bold text-slate-400 mt-2 uppercase tracking-wider">{note.author} • {note.time}</p>
-                  {renderInlineAttachments(note.attachments || [])}
+                  {renderInlineAttachments(asArray(note.attachments))}
                 </div>
               ))}
             </div>
@@ -4663,7 +4819,7 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
                     <Paperclip className="w-3.5 h-3.5 mr-1.5" /> {isUploadingNoteAttachment ? 'Uploading...' : 'Attach Files'}
                     <input type="file" multiple className="hidden" onChange={handleNoteAttachmentUpload} />
                   </label>
-                  <span className="text-[11px] font-bold text-slate-400">Attach unlimited supporting screenshots/files.</span>
+                  <span className="text-[11px] font-bold text-slate-400">Attach supporting screenshots/files up to 100 MB each (20 files per selection).</span>
                 </div>
                 {isCurrentTransferForType('discussion') && renderInlineFileTransferBar('mb-3')}
                 {noteAttachments.length > 0 && (
@@ -4689,10 +4845,10 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
               <p className="bg-slate-50 p-3 rounded-xl"><span className="font-black text-slate-400 uppercase text-[10px] block">Reviewed By</span><span className="font-bold text-slate-800">{project.reviewedBy || project.ownership?.reviewedBy || '-'}</span></p>
               <p className="bg-slate-50 p-3 rounded-xl"><span className="font-black text-slate-400 uppercase text-[10px] block">Completed By</span><span className="font-bold text-slate-800">{project.completedBy || project.ownership?.completedBy || '-'}</span></p>
             </div>
-            {(project.reassignmentHistory || []).length > 0 && (
+            {asArray(project.reassignmentHistory).length > 0 && (
               <div className="mt-4 border-t border-slate-100 pt-4">
                 <p className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2">Reassignment History</p>
-                {(project.reassignmentHistory || []).map((r, idx) => <p key={idx} className="text-xs font-bold text-slate-600 bg-slate-50 rounded-lg px-3 py-2 mb-1">{r.from} → {r.to} by {r.by} • {r.time}</p>)}
+                {asArray(project.reassignmentHistory).map((r, idx) => <p key={idx} className="text-xs font-bold text-slate-600 bg-slate-50 rounded-lg px-3 py-2 mb-1">{r.from} → {r.to} by {r.by} • {r.time}</p>)}
               </div>
             )}
           </div>
@@ -4700,8 +4856,8 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
           <div className="bg-white p-6 rounded-3xl shadow-sm border-2 border-slate-100">
             <h2 className="text-lg font-extrabold mb-4 text-slate-800">Delivery Log</h2>
             <div className="space-y-2">
-              {(project.deliveryLog || []).length === 0 && <p className="text-sm text-slate-400 font-medium italic">No delivery record yet.</p>}
-              {(project.deliveryLog || []).map((d, idx) => (
+              {asArray(project.deliveryLog).length === 0 && <p className="text-sm text-slate-400 font-medium italic">No delivery record yet.</p>}
+              {asArray(project.deliveryLog).map((d, idx) => (
                 <div key={idx} className="bg-emerald-50 border border-emerald-100 rounded-xl p-3">
                   <p className="text-sm font-black text-emerald-800">{d.file}</p>
                   <p className="text-xs font-bold text-emerald-600 mt-1">{d.via} • {d.by} • {d.time}</p>
@@ -4740,24 +4896,18 @@ const TaskDetailView = ({ project, user, onBack, onUpdateProject, onServerProjec
 class AppErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
-    this.state = { hasError: false, error: null };
+    this.state = { hasError: false, error: null, diagnosticId: '' };
   }
 
   static getDerivedStateFromError(error) {
-    return { hasError: true, error };
+    return { hasError: true, error, diagnosticId: '' };
   }
 
   componentDidCatch(error, info) {
     try {
       console.error('Kalpvriksha Ops app error:', error, info);
-      const savedError = {
-        message: error?.message || String(error),
-        stack: error?.stack || '',
-        componentStack: info?.componentStack || '',
-        at: new Date().toISOString()
-      };
-      localStorage.setItem('kalpa_last_error', JSON.stringify(savedError));
-      recordClientRuntimeError({ error, source:'app-error-boundary', componentStack: info?.componentStack || '' });
+      const diagnostic = recordClientRuntimeError({ error, source:'app-error-boundary', componentStack: info?.componentStack || '' });
+      if (diagnostic?.diagnosticId) this.setState({ diagnosticId:diagnostic.diagnosticId });
     } catch (_) {}
   }
 
@@ -4774,6 +4924,7 @@ class AppErrorBoundary extends React.Component {
             <div className="mt-5 px-4 py-3 rounded-xl bg-red-50 border border-red-100 text-red-600 text-sm font-bold break-words">
               {this.state.error?.message || 'Unexpected application error'}
             </div>
+            {this.state.diagnosticId && <p className="mt-3 text-xs font-black font-mono text-slate-500">Diagnostic ID {this.state.diagnosticId}</p>}
             <button type="button" onClick={() => window.location.reload()} className="mt-6 px-6 py-3 rounded-xl bg-slate-900 text-white font-black hover:bg-slate-800 transition-colors">
               Refresh Page
             </button>
@@ -4816,11 +4967,16 @@ function AppShell() {
   useEffect(() => {
     const captureError = (event) => recordClientRuntimeError({ error: event?.error || event?.message || 'Window error', source:'window-error' });
     const captureRejection = (event) => recordClientRuntimeError({ error: event?.reason || 'Unhandled promise rejection', source:'unhandled-rejection' });
+    const captureApi = (event) => recordApiDiagnosticEvent(event);
     window.addEventListener('error', captureError);
     window.addEventListener('unhandledrejection', captureRejection);
+    window.addEventListener(CLIENT_RUNTIME_DIAGNOSTIC_EVENT, captureApi);
+    window.addEventListener(CLIENT_API_CONTRACT_DIAGNOSTIC_EVENT, captureApi);
     return () => {
       window.removeEventListener('error', captureError);
       window.removeEventListener('unhandledrejection', captureRejection);
+      window.removeEventListener(CLIENT_RUNTIME_DIAGNOSTIC_EVENT, captureApi);
+      window.removeEventListener(CLIENT_API_CONTRACT_DIAGNOSTIC_EVENT, captureApi);
     };
   }, []);
   useEffect(() => {
@@ -4836,6 +4992,8 @@ function AppShell() {
   const [passwordChangeSessionUser, setPasswordChangeSessionUser] = useState(null);
   const currentUserRef = useRef(null);
   const heartbeatRequestInFlightRef = useRef(false);
+  const presenceClientEpochRef = useRef(`${OPS_TAB_ID}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`);
+  const presenceClientSequenceRef = useRef(0);
   const workspaceRefreshInFlightRef = useRef(false);
   const pendingCreateFlushInFlightRef = useRef(false);
   const financeSaveInFlightRef = useRef(new Set());
@@ -4843,7 +5001,27 @@ function AppShell() {
   const workspaceDataRevisionRef = useRef(-1);
   const workspacePresenceGenerationRef = useRef(-1);
   const workspaceCollectionRevisionsRef = useRef(null);
+  const readWorkspaceSyncMarkers = useCallback(() => ({
+    stateVersion:workspaceStateVersionRef.current,
+    dataRevision:workspaceDataRevisionRef.current,
+    presenceGeneration:workspacePresenceGenerationRef.current,
+    collectionRevisions:workspaceCollectionRevisionsRef.current || {}
+  }), []);
+  const commitWorkspaceSyncMarkers = useCallback((payload = {}) => {
+    const next = advanceWorkspaceSyncMarkers(readWorkspaceSyncMarkers(), payload);
+    workspaceStateVersionRef.current = next.stateVersion;
+    workspaceDataRevisionRef.current = next.dataRevision;
+    workspacePresenceGenerationRef.current = next.presenceGeneration;
+    workspaceCollectionRevisionsRef.current = next.collectionRevisions;
+    return next;
+  }, [readWorkspaceSyncMarkers]);
   useEffect(() => { currentUserRef.current = currentUser; }, [currentUser]);
+  useEffect(() => setRuntimeDiagnosticContextProvider(() => ({
+    role:String(currentUserRef.current?.role || ''),
+    stateVersion:workspaceStateVersionRef.current,
+    dataRevision:workspaceDataRevisionRef.current,
+    presenceGeneration:workspacePresenceGenerationRef.current
+  })), []);
   const [firebaseUser, setFirebaseUser] = useState(null);
   const [isDbReady, setIsDbReady] = useState(false);
   const [isAuthReady, setIsAuthReady] = useState(false);
@@ -5011,10 +5189,50 @@ function AppShell() {
   const [showLocalBanner, setShowLocalBanner] = useState(false);
 
   const clearAuthenticatedWorkspace = useCallback(({ clearCache = true } = {}) => {
+    // An auth boundary also invalidates every Phase 12 workspace read that began
+    // under the previous identity, even if its network response arrives later.
+    markClientMutationStarted();
+    // Authentication is a hard tenant boundary even though this is a single-company
+    // workspace. Clear every actor-derived object and transient input before another
+    // employee can sign in on this page instance. Durable retry queues remain stored
+    // under their actor IDs and are intentionally not reassigned to the next user.
+    setOperationalActorScope(null);
+    if (createdTaskUploadAbortRef.current) {
+      try { createdTaskUploadAbortRef.current.abort(); } catch {}
+      createdTaskUploadAbortRef.current = null;
+    }
     setCurrentUser(null);
     setPasswordChangeSessionUser(null);
     currentUserRef.current = null;
     setSelectedProject(null);
+    setWorkspaceFilePreview(null);
+    setGlobalFilePreview((current) => {
+      if (current?.objectUrl) {
+        try { URL.revokeObjectURL(current.objectUrl); } catch {}
+      }
+      return null;
+    });
+    setGlobalFilePreviewUi({ zoom: 1, rotation: 0, fitMode: 'width' });
+    setLeadFiles([]);
+    setIsSubmittingLead(false);
+    setCreateTaskError('');
+    setCreatedTaskUpload({ active:false, project:null, total:0, confirmedFiles:[], failedFiles:[], currentFile:'', cancelled:false });
+    setShowNewLead(false);
+    setShowNotifs(false);
+    setShowProfilePanel(false);
+    setNotifSearch('');
+    setNotifFilter('All');
+    setGlobalSearch('');
+    setSavedGlobalFilters([]);
+    setSavedFilterName('');
+    setActiveTab('command');
+    previousTabRef.current = 'command';
+    setSelectedBoardDate(formatDateKey());
+    setArchiveViewState({ filterMonth: 'All', filterDate: '', selectedBanks: [], selectedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0 });
+    setFinanceViewState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
+    setTaskDetailReturnTab('board');
+    taskDetailReturnPositionRef.current = { windowY: 0, tab: 'board' };
+    setNewTaskCategory(TASK_CATEGORIES[0]);
     setBackendStateReady(false);
     setIsDbReady(false);
     setUsers([]);
@@ -5031,7 +5249,17 @@ function AppShell() {
     setShowLocalBanner(false);
     setDbError(null);
     if (clearCache) {
-      ['kalpa_users', 'kalpa_projects', 'kalpa_projects_backup', 'kalpa_chats', 'kalpa_notifs', 'kalpa_attendance', AUTHORIZATION_CACHE_SCOPE_KEY].forEach(key => {
+      [
+        'kalpa_users',
+        'kalpa_projects',
+        'kalpa_projects_backup',
+        'kalpa_chats',
+        'kalpa_notifs',
+        'kalpa_attendance',
+        'kalpa_team_meeting_started_at',
+        'kalpa_team_meeting_notes',
+        AUTHORIZATION_CACHE_SCOPE_KEY
+      ].forEach(key => {
         try { localStorage.removeItem(key); } catch(e) {}
       });
     }
@@ -5053,8 +5281,8 @@ function AppShell() {
   useEffect(() => {
     if (!currentUser) { setSavedGlobalFilters([]); return; }
     try {
-      const parsed = JSON.parse(localStorage.getItem(savedFiltersStorageKey) || '[]');
-      setSavedGlobalFilters(Array.isArray(parsed) ? parsed.filter(f => f && f.query).slice(0, 12) : []);
+      const parsed = parseJsonArray(localStorage.getItem(savedFiltersStorageKey));
+      setSavedGlobalFilters(parsed.filter(f => f && f.query).slice(0, 12));
     } catch (e) { setSavedGlobalFilters([]); }
   }, [savedFiltersStorageKey, currentUser?.id]);
   useEffect(() => {
@@ -5079,7 +5307,7 @@ function AppShell() {
       category:notification.category || getNotificationCategory(notification),
       priority:notification.priority || getNotificationPriority(notification)
     })), [notifications, currentUser?.id, currentUser?.name, currentUser?.role]);
-  const unreadNotifs = useMemo(() => myNotifs.filter(notification => !(notification.readBy || []).includes(currentUser?.name)).length, [myNotifs, currentUser?.name]);
+  const unreadNotifs = useMemo(() => myNotifs.filter(notification => !isNotificationReadByUser(notification, currentUser || {})).length, [myNotifs, currentUser?.id, currentUser?.username, currentUser?.name]);
   const notificationCounts = useMemo(() => {
     if (!showNotifs) return {};
     return NOTIFICATION_CATEGORIES.reduce((accumulator, label) => {
@@ -5101,23 +5329,24 @@ function AppShell() {
     () => showNotifs ? buildActivityTimeline(projects, chatMessages, notifications) : [],
     [showNotifs, projects, chatMessages, notifications]
   );
-  const globalCaseResults = useMemo(() => !normalizedGlobalSearch ? [] : (projects || [])
+  const globalCaseResults = useMemo(() => !normalizedGlobalSearch ? [] : asArray(projects)
     .filter(project => [project.id, formatTaskId(project.id), project.client, project.bankName, project.branchName, project.customerName, project.location, project.assignedTo, project.type, project.status, project.description, project.paymentStatus, project.paymentTrackingStatus, getLatestCompletedFileName(project), project.createdAt ? formatDateTime(project.createdAt) : '', project.completedAt ? formatDateTime(project.completedAt) : '']
       .filter(Boolean).join(' ').toLowerCase().includes(normalizedGlobalSearch))
-    .sort((left, right) => (right.updatedAt || right.createdAt || 0) - (left.updatedAt || left.createdAt || 0)), [projects, normalizedGlobalSearch]);
-  const globalPeopleResults = useMemo(() => !normalizedGlobalSearch ? [] : (activeUsers || [])
+    .sort((left, right) => (right.updatedAt || right.createdAt || 0) - (left.updatedAt || left.createdAt || 0))
+    .slice(0, GLOBAL_CASE_SEARCH_LIMIT), [projects, normalizedGlobalSearch]);
+  const globalPeopleResults = useMemo(() => !normalizedGlobalSearch ? [] : asArray(activeUsers)
     .filter(user => [user.name, user.username, user.role, user.availability, user.status].filter(Boolean).join(' ').toLowerCase().includes(normalizedGlobalSearch))
     .slice(0, 8), [activeUsers, normalizedGlobalSearch]);
-  const globalNotificationResults = useMemo(() => !normalizedGlobalSearch ? [] : (myNotifs || [])
+  const globalNotificationResults = useMemo(() => !normalizedGlobalSearch ? [] : asArray(myNotifs)
     .filter(notification => [notification.title, notification.message, notification.type, notification.category, notification.priority, notification.time].filter(Boolean).join(' ').toLowerCase().includes(normalizedGlobalSearch))
     .slice(0, 8), [myNotifs, normalizedGlobalSearch]);
-  const globalChatResults = useMemo(() => !normalizedGlobalSearch ? [] : (chatMessages || [])
+  const globalChatResults = useMemo(() => !normalizedGlobalSearch ? [] : asArray(chatMessages)
     .filter(message => [message.sender, message.text, message.channel, message.to, message.fileName].filter(Boolean).join(' ').toLowerCase().includes(normalizedGlobalSearch))
     .sort((left, right) => Number(right.createdAt || right.id || 0) - Number(left.createdAt || left.id || 0))
     .slice(0, 8), [chatMessages, normalizedGlobalSearch]);
   const displayedProjects = useMemo(() => {
     if (activeTab !== 'board' && activeTab !== 'my_tasks') return [];
-    return (projects || [])
+    return asArray(projects)
     .filter(project => {
       if (activeTab === 'my_tasks') {
         if (normalizePersonName(project.assignedTo) !== normalizePersonName(currentUser?.name || '')) return false;
@@ -5157,15 +5386,17 @@ function AppShell() {
       isOnline: action === 'logout' ? false : true,
       breakStartedAt: userPatch.breakStartedAt || null
     };
+    const clientPresenceSequence = ++presenceClientSequenceRef.current;
+    const clientPresenceEpoch = presenceClientEpochRef.current;
     if (action === 'heartbeat') heartbeatRequestInFlightRef.current = true;
     authFetch(`${API_BASE}/api/presence`, {
       method: 'POST',
       headers: jsonFinanceSafeHeaders,
       timeoutMs:30_000,
-      body: JSON.stringify({ action, user: identity })
+      body: JSON.stringify({ action, user: identity, clientPresenceEpoch, clientPresenceSequence })
     }).then(async res => {
       if (!res.ok) return;
-      const data = await res.json().catch(() => null);
+      const data = await readApiRecord(res, { operation:`Presence ${action}`, requireOk:true });
       // Heartbeat is a writer only. Attendance Engine V3 is painted from a
       // single reader (/api/state). Updating users/logs from both /api/presence
       // and /api/state was the slow flicker: two valid-but-different snapshots
@@ -5193,10 +5424,10 @@ function AppShell() {
     const incoming = filterDeletedProjects(sanitizeProjectsForCache(incomingProjects));
     confirmPendingCreatedProjectsAgainstServer(incoming, operationalActorKey(currentUser));
     setProjects(prev => {
-      const replacementIds = new Set((replaceIds || []).map(value => String(value || '')).filter(Boolean));
+      const replacementIds = new Set(asArray(replaceIds).map(value => String(value || '')).filter(Boolean));
       const base = replacementIds.size
-        ? (prev || []).filter(project => ![project?.id, project?.caseId, project?.displayId].some(value => replacementIds.has(String(value || ''))))
-        : (prev || []);
+        ? asArray(prev).filter(project => ![project?.id, project?.caseId, project?.displayId].some(value => replacementIds.has(String(value || ''))))
+        : asArray(prev);
       const merged = filterDeletedProjects(protectRecentlyCreatedProjects(incoming, base, operationalActorKey(currentUser)));
       const stable = reuseStableProjects(prev, merged);
       if (stable === prev) return prev;
@@ -5258,6 +5489,10 @@ function AppShell() {
       if (replaceIds.length) forgetRecentCreatedProjects(replaceIds);
       rememberRecentCreatedProject(confirmed);
       applyProjectSnapshot([confirmed], { source:'pre-upload-task-confirmed', replaceIds });
+      if (firebaseUser && !isLocalMock) {
+        setDoc(doc(db,'artifacts',safeAppId,'public','data','projects',String(confirmed.id || confirmed.caseId)),stripLargeLocalFilesForCloud(confirmed))
+          .catch(error=>console.warn('Pre-upload confirmed task cloud mirror update failed:',error));
+      }
       return { project:confirmed, taskMutationId:String(confirmed?.lastTaskMutationId || pendingCreate.mutationId || '') };
     } catch (error) {
       const wrapped = new Error(`This task is still waiting for server confirmation. The file was not sent. ${error?.message || 'Please retry shortly.'}`);
@@ -5265,10 +5500,10 @@ function AppShell() {
       wrapped.cause = error;
       throw wrapped;
     }
-  }, [USE_BACKEND_STATE, backendStateReady, isDbReady, currentUser?.id, currentUser?.username, currentUser?.name, jsonFinanceSafeHeaders, applyProjectSnapshot]);
+  }, [USE_BACKEND_STATE, backendStateReady, isDbReady, currentUser?.id, currentUser?.username, currentUser?.name, firebaseUser?.uid, jsonFinanceSafeHeaders, applyProjectSnapshot]);
 
   const runCreatedTaskSourceUploads = useCallback(async (confirmedTask, files = [], uploadOverride = null) => {
-    const pendingFiles = Array.from(files || []).filter(Boolean);
+    const pendingFiles = toArray(files).filter(Boolean);
     if (!confirmedTask || pendingFiles.length === 0) return { confirmedFiles:[], failedFiles:[] };
     if (createdTaskUploadAbortRef.current) {
       try { createdTaskUploadAbortRef.current.abort(); } catch {}
@@ -5322,6 +5557,7 @@ function AppShell() {
   useEffect(() => {
     if (!USE_BACKEND_STATE || !isAuthReady || !currentUser) return;
     let cancelled = false;
+    let staleHydrationRetries = 0;
     setBackendStateReady(false);
     setIsDbReady(false);
     setAuthBootStage('Loading your authorised workspace');
@@ -5329,7 +5565,16 @@ function AppShell() {
       try {
         const data = await fetchBackendState({ apiBase: API_BASE, headers: financeSafeHeaders, includePerformance:false, compact:true });
         if (cancelled) return;
-        if (Array.isArray(data.users)) setUsers(prev => mergeTeamUsersStable(prev, data.users, (prev || []).map(user => String(user.id || ''))));
+        // Never let a slow or out-of-order response repaint newer local state.
+        // A write beginning while this GET was in flight also invalidates it.
+        const hydrationFreshness = classifyWorkspaceResponseFreshness(data, readWorkspaceSyncMarkers(), { clientMutationAdvanced:data._staleAfterClientMutation === true });
+        if (hydrationFreshness.stale) {
+          const error = new Error(`Workspace hydration was stale (${hydrationFreshness.reasons.join(', ')}).`);
+          error.code = 'STALE_WORKSPACE_RESPONSE';
+          throw error;
+        }
+        commitWorkspaceSyncMarkers(data);
+        if (Array.isArray(data.users)) setUsers(prev => mergeTeamUsersStable(prev, data.users, asArray(prev).map(user => String(user.id || ''))));
         if (Array.isArray(data.deletedProjectIds)) replaceConfirmedDeletedProjects(data.deletedProjectIds);
         if (Array.isArray(data.projects)) applyProjectSnapshot(data.projects, { source: 'backend-hydrate' });
         if (Array.isArray(data.chatMessages)) {
@@ -5337,14 +5582,10 @@ function AppShell() {
           setChatMessages(prev => reuseStableRecords(prev, incomingChats, message => message?.id));
           if (!USE_BACKEND_STATE) { try { localStorage.setItem('kalpa_chats', JSON.stringify(incomingChats)); } catch(e) {} }
         }
-        if (Array.isArray(data.notifications)) setNotifications(prev => mergeNotificationsStable(prev, data.notifications, (prev || []).map(item => String(item.id || ''))));
+        if (Array.isArray(data.notifications)) setNotifications(prev => mergeNotificationsStable(prev, data.notifications, asArray(prev).map(item => String(item.id || ''))));
         if (Array.isArray(data.attendanceLogs)) setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, data.attendanceLogs));
         if (Array.isArray(data.performanceRecords)) setPerformanceRecords(data.performanceRecords);
         if (data.performanceSummary && typeof data.performanceSummary === 'object') setPerformanceSummary(data.performanceSummary);
-        if (Number.isFinite(Number(data.stateVersion))) workspaceStateVersionRef.current = Number(data.stateVersion);
-        if (Number.isFinite(Number(data.dataRevision))) workspaceDataRevisionRef.current = Number(data.dataRevision);
-        if (Number.isFinite(Number(data.presenceGeneration))) workspacePresenceGenerationRef.current = Number(data.presenceGeneration);
-        if (data.collectionRevisions && typeof data.collectionRevisions === 'object') workspaceCollectionRevisionsRef.current = data.collectionRevisions;
         setBackendStateReady(true);
         setIsDbReady(true);
         setAuthBootStage('');
@@ -5352,6 +5593,11 @@ function AppShell() {
         setShowLocalBanner(data.database === 'json-file');
       } catch (err) {
         if (cancelled) return;
+        if (err?.code === 'STALE_WORKSPACE_RESPONSE' && staleHydrationRetries < 3) {
+          staleHydrationRetries += 1;
+          window.setTimeout(() => { if (!cancelled) void hydrate(); }, 50 * staleHydrationRetries);
+          return;
+        }
         console.error('Authenticated backend state could not be loaded:', err);
         if (err?.code === 'PASSWORD_CHANGE_REQUIRED') {
           const pendingUser = err?.payload?.user || currentUserRef.current || currentUser;
@@ -5385,12 +5631,13 @@ function AppShell() {
     };
     hydrate();
     return () => { cancelled = true; };
-  }, [isAuthReady, currentUser?.id, currentUser?.role, financeSafeHeaders, applyProjectSnapshot]);
+  }, [isAuthReady, currentUser?.id, currentUser?.role, financeSafeHeaders, applyProjectSnapshot, readWorkspaceSyncMarkers, commitWorkspaceSyncMarkers]);
 
   // Visibility-aware workspace synchronisation replaces the old ten-second full-state poll.
   const refreshWorkspaceSnapshot = useCallback(async () => {
     if (!USE_BACKEND_STATE || !backendStateReady || !currentUserRef.current || workspaceRefreshInFlightRef.current) return;
     workspaceRefreshInFlightRef.current = true;
+    let needsFreshFollowUp = false;
     try {
       const data = await fetchBackendState({
         apiBase: API_BASE,
@@ -5402,28 +5649,31 @@ function AppShell() {
         sincePresence:workspacePresenceGenerationRef.current,
         sinceCollections:workspaceCollectionRevisionsRef.current
       });
-      if (Number.isFinite(Number(data.stateVersion))) workspaceStateVersionRef.current = Number(data.stateVersion);
-      if (Number.isFinite(Number(data.dataRevision))) workspaceDataRevisionRef.current = Number(data.dataRevision);
-      if (Number.isFinite(Number(data.presenceGeneration))) workspacePresenceGenerationRef.current = Number(data.presenceGeneration);
-      if (data.collectionRevisions && typeof data.collectionRevisions === 'object') workspaceCollectionRevisionsRef.current = data.collectionRevisions;
+      const freshness = classifyWorkspaceResponseFreshness(data, readWorkspaceSyncMarkers(), { clientMutationAdvanced:data._staleAfterClientMutation === true });
+      if (freshness.stale) {
+        needsFreshFollowUp = true;
+        console.info('Discarded stale workspace response', { reasons:freshness.reasons, incoming:freshness.incoming, current:freshness.current });
+        return;
+      }
+      commitWorkspaceSyncMarkers(data);
       if (data.unchanged) return;
-      const rowDeltaIds = data.rowDeltaIds && typeof data.rowDeltaIds === 'object' ? data.rowDeltaIds : {};
+      const rowDeltaIds = asRecord(data.rowDeltaIds);
       React.startTransition(() => {
-        if (Array.isArray(data.users)) setUsers(prev => mergeTeamUsersStable(prev, data.users, rowDeltaIds.users || []));
+        if (Array.isArray(data.users)) setUsers(prev => mergeTeamUsersStable(prev, data.users, asArray(rowDeltaIds.users)));
         if (Array.isArray(data.deletedProjectIds)) replaceConfirmedDeletedProjects(data.deletedProjectIds);
-        if (Array.isArray(data.projects) || Array.isArray(rowDeltaIds.cases)) applyProjectSnapshot(data.projects || [], { source: 'adaptive-sync', replaceIds:rowDeltaIds.cases || [] });
+        if (Array.isArray(data.projects) || Array.isArray(rowDeltaIds.cases)) applyProjectSnapshot(asArray(data.projects), { source: 'adaptive-sync', replaceIds:asArray(rowDeltaIds.cases) });
         if (Array.isArray(data.chatMessages) || Array.isArray(rowDeltaIds.teamChat)) {
           setChatMessages(prev => {
-            const merged = mergeChatMessagesByFreshness(prev, data.chatMessages || [], rowDeltaIds.teamChat || []);
+            const merged = mergeChatMessagesByFreshness(prev, asArray(data.chatMessages), asArray(rowDeltaIds.teamChat));
             if (!USE_BACKEND_STATE) { try { localStorage.setItem('kalpa_chats', JSON.stringify(sanitizeChatsForCache(merged))); } catch(e) {} }
             return merged;
           });
         }
         if (Array.isArray(data.notifications) || Array.isArray(rowDeltaIds.notifications)) {
-          setNotifications(prev => mergeNotificationsStable(prev, data.notifications || [], rowDeltaIds.notifications || []));
+          setNotifications(prev => mergeNotificationsStable(prev, asArray(data.notifications), asArray(rowDeltaIds.notifications)));
         }
         if (Array.isArray(data.attendanceLogs) || Array.isArray(rowDeltaIds.attendanceLogs)) {
-          setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, data.attendanceLogs || [], rowDeltaIds.attendanceLogs || []));
+          setAttendanceLogs(prev => mergeAttendanceLogsStable(prev, asArray(data.attendanceLogs), asArray(rowDeltaIds.attendanceLogs)));
         }
         if (Array.isArray(data.performanceRecords)) setPerformanceRecords(data.performanceRecords);
         if (data.performanceSummary && typeof data.performanceSummary === 'object') setPerformanceSummary(data.performanceSummary);
@@ -5435,8 +5685,9 @@ function AppShell() {
       console.warn('Adaptive workspace sync failed', error);
     } finally {
       workspaceRefreshInFlightRef.current = false;
+      if (needsFreshFollowUp && currentUserRef.current) window.setTimeout(() => void refreshWorkspaceSnapshot(), 0);
     }
-  }, [backendStateReady, financeSafeHeaders, applyProjectSnapshot]);
+  }, [backendStateReady, financeSafeHeaders, applyProjectSnapshot, readWorkspaceSyncMarkers, commitWorkspaceSyncMarkers]);
 
   useAdaptiveWorkspaceSync({
     enabled: Boolean(USE_BACKEND_STATE && backendStateReady && currentUser),
@@ -5541,21 +5792,41 @@ function AppShell() {
               if (replaceIds.length) forgetRecentCreatedProjects(replaceIds);
               rememberRecentCreatedProject(savedProject);
               applyProjectSnapshot([savedProject],{source:'pending-task-confirmed',replaceIds});
+              if (firebaseUser && !isLocalMock) {
+                setDoc(doc(db,'artifacts',safeAppId,'public','data','projects',String(savedProject.id || savedProject.caseId)),stripLargeLocalFilesForCloud(savedProject))
+                  .catch(error=>console.warn('Pending confirmed task cloud mirror update failed:',error));
+              }
             }
           } catch(e) {
             if (isProjectDeletedError(e)) {
               forgetPendingCreatedProjects(project.id,project.caseId,project.displayId);
               rememberDeletedProjectsForce(e?.payload?.deletedProjectIds || [project.id,project.caseId]);
-              setProjects(prev=>filterDeletedProjects(prev || []));
+              setProjects(prev=>filterDeletedProjects(asArray(prev)));
               continue;
             }
             if (['TASK_VERSION_CONFLICT','TASK_VERSION_REQUIRED'].includes(String(e?.code || ''))) {
               forgetPendingCreatedProjects(project.id,project.caseId,project.displayId);
+              const rollbackProject=record?.rollbackProject || null;
+              const rejectedIds=new Set([project.id,project.caseId,project.displayId].map(value=>String(value || '')).filter(Boolean));
+              if (rollbackProject) applyProjectSnapshot([rollbackProject],{source:'pending-task-version-rollback'});
+              else {
+                forgetRecentCreatedProjects(project.id,project.caseId,project.displayId);
+                setProjects(previous=>filterDeletedProjects(asArray(previous).filter(item=>!rejectedIds.has(String(item.id || '')) && !rejectedIds.has(String(item.caseId || '')) && !rejectedIds.has(String(item.displayId || '')))));
+              }
+              setSelectedProject(selected=>selected && projectIdentityMatches(selected,project) ? (rollbackProject || null) : selected);
               await refreshWorkspaceSnapshot().catch(()=>{});
               continue;
             }
             if (isPermanentTaskWriteError(e)) {
               forgetPendingCreatedProjects(project.id,project.caseId,project.displayId);
+              const rollbackProject=record?.rollbackProject || null;
+              const rejectedIds=new Set([project.id,project.caseId,project.displayId].map(value=>String(value || '')).filter(Boolean));
+              if (rollbackProject) applyProjectSnapshot([rollbackProject],{source:'pending-task-permanent-rollback'});
+              else {
+                forgetRecentCreatedProjects(project.id,project.caseId,project.displayId);
+                setProjects(previous=>filterDeletedProjects(asArray(previous).filter(item=>!rejectedIds.has(String(item.id || '')) && !rejectedIds.has(String(item.caseId || '')) && !rejectedIds.has(String(item.displayId || '')))));
+              }
+              setSelectedProject(selected=>selected && projectIdentityMatches(selected,project) ? (rollbackProject || null) : selected);
               await refreshWorkspaceSnapshot().catch(()=>{});
               console.warn('Pending task write was rejected permanently and removed from the retry outbox:',e.message);
               continue;
@@ -5572,7 +5843,7 @@ function AppShell() {
     window.addEventListener('online', flushPendingCreatedProjects);
     window.addEventListener('focus', flushPendingCreatedProjects);
     return () => { cancelled = true; clearInterval(timer); window.removeEventListener('online', flushPendingCreatedProjects); window.removeEventListener('focus', flushPendingCreatedProjects); };
-  }, [USE_BACKEND_STATE, backendStateReady, isDbReady, jsonFinanceSafeHeaders, currentUser?.id, currentUser?.username, currentUser?.name, applyProjectSnapshot, refreshWorkspaceSnapshot]);
+  }, [USE_BACKEND_STATE, backendStateReady, isDbReady, jsonFinanceSafeHeaders, currentUser?.id, currentUser?.username, currentUser?.name, firebaseUser?.uid, applyProjectSnapshot, refreshWorkspaceSnapshot]);
 
 
   // Durable delete-task outbox: a deleted task remains hidden everywhere and the
@@ -5583,18 +5854,42 @@ function AppShell() {
     let cancelled = false;
     const flushPendingDeletedProjects = async () => {
       const deleteActorKey = operationalActorKey(currentUser);
-      const pendingIds = getPendingDeletedProjectIds(deleteActorKey);
-      if (!pendingIds.length) return;
-      setProjects(prev => filterDeletedProjects(prev || []));
-      for (const id of pendingIds) {
+      const pendingRecords = getPendingDeletedRecords(deleteActorKey);
+      if (!pendingRecords.length) return;
+      setProjects(prev => filterDeletedProjects(asArray(prev)));
+      for (const record of pendingRecords) {
+        const id=String(record?.id || '');
         if (cancelled || !id) continue;
         try {
           markPendingDeletedAttempt(id, deleteActorKey);
-          const data = await deleteTaskApi({ apiBase: API_BASE, taskId: id, headers: jsonFinanceSafeHeaders });
+          const data = await deleteTaskApi({
+            apiBase: API_BASE,
+            taskId: id,
+            headers: jsonFinanceSafeHeaders,
+            expectedTaskVersion:Number(record?.expectedTaskVersion || 0),
+            mutationId:String(record?.mutationId || '')
+          });
           if (Array.isArray(data.deletedProjectIds)) rememberDeletedProjectsForce(data.deletedProjectIds);
-          // Keep the confirmed deleted-id memory, but remove it from retry outbox.
-          forgetPendingDeletedProjects(id, { actorId: deleteActorKey });
+          // Keep the confirmed deleted-id memory, but remove the whole alias group
+          // from the retry outbox after any one server identity confirms absence.
+          forgetPendingDeletedProjects(asArray(record?.groupIds).length ? record.groupIds : [id], { actorId: deleteActorKey });
+          if (firebaseUser && !isLocalMock) {
+            deleteDoc(doc(db,'artifacts',safeAppId,'public','data','projects',id))
+              .catch(error=>console.warn('Confirmed task cloud mirror delete failed:',error));
+          }
         } catch (e) {
+          const code=String(e?.code || e?.payload?.code || '').toUpperCase();
+          const permanentDeleteFailure=['TASK_VERSION_CONFLICT','TASK_VERSION_REQUIRED','TASK_UPDATE_FORBIDDEN','CASE_ACCESS_DENIED'].includes(code) || isPermanentTaskWriteError(e);
+          if (permanentDeleteFailure) {
+            const groupIds=asArray(record?.groupIds).length ? record.groupIds : [id];
+            forgetDeletedProjects(groupIds);
+            forgetPendingDeletedProjects(groupIds,{actorId:deleteActorKey});
+            await refreshWorkspaceSnapshot().catch(()=>{});
+            notifyUser(code.startsWith('TASK_VERSION_')
+              ? 'This task changed after you opened it, so the stale delete was cancelled and the latest task was restored.'
+              : (e?.message || 'The task could not be deleted and has been restored.'));
+            break;
+          }
           console.warn('Pending task delete retry failed:', e.message);
         }
       }
@@ -5613,7 +5908,7 @@ function AppShell() {
   useEffect(() => {
     const makeFingerprint = (items) => {
       try {
-        return (items || [])
+        return asArray(items)
           .map(p => `${p.id}:${p.updatedAt || 0}:${p.assignmentVersion || 0}:${p.assignedTo || ''}:${p.status || ''}`)
           .sort()
           .join('|');
@@ -5632,18 +5927,20 @@ function AppShell() {
 
     const handleBroadcast = (event) => {
       if (event?.data?.type === 'projects-delta' && event.data.source !== OPS_TAB_ID) {
+        markClientMutationStarted();
         const removedIds = Array.isArray(event.data.removedProjectIds) ? event.data.removedProjectIds : [];
         if (removedIds.length) {
           rememberDeletedProjectsForce(removedIds);
           const removedSet = new Set(removedIds.map(String));
-          setProjects(previous => filterDeletedProjects((previous || []).filter(project => !removedSet.has(String(project.id)) && !removedSet.has(String(project.caseId || '')))));
+          setProjects(previous => filterDeletedProjects(asArray(previous).filter(project => !removedSet.has(String(project.id)) && !removedSet.has(String(project.caseId || '')))));
         }
         if (Array.isArray(event.data.changedProjects) && event.data.changedProjects.length) {
-          applyProjectSnapshot(event.data.changedProjects, { persistCache:false, source:'cross-tab-delta', replaceIds:event.data.replaceIds || [] });
+          applyProjectSnapshot(event.data.changedProjects, { persistCache:false, source:'cross-tab-delta', replaceIds:asArray(event.data.replaceIds) });
         }
         return;
       }
       if (event?.data?.type === 'projects-updated' && event.data.source !== OPS_TAB_ID) {
+        markClientMutationStarted();
         if (Array.isArray(event.data.deletedProjectIds)) { rememberDeletedProjects(event.data.deletedProjectIds); setProjects(prev => filterDeletedProjects(prev)); }
         applyIncomingProjects(event.data.projects);
       }
@@ -5658,10 +5955,10 @@ function AppShell() {
       // kalpa_projects write, otherwise two tabs can keep waking each other up.
       if (event?.key !== 'kalpa_projects_sync_ping') return;
       try {
-        const ping = JSON.parse(localStorage.getItem('kalpa_projects_sync_ping') || '{}');
+        const ping = parseJsonRecord(localStorage.getItem('kalpa_projects_sync_ping'));
         if (ping.source === OPS_TAB_ID) return;
         const raw = localStorage.getItem('kalpa_projects_backup') || localStorage.getItem('kalpa_projects');
-        if (raw) applyIncomingProjects(filterDeletedProjects(JSON.parse(raw)));
+        if (raw) applyIncomingProjects(filterDeletedProjects(parseJsonArray(raw)));
       } catch (e) {
         console.warn('Project sync refresh failed', e);
       }
@@ -5763,7 +6060,7 @@ function AppShell() {
 
       const parseStoredArray = (raw, fallback = []) => {
         if (!raw) return fallback;
-        try { const parsed = JSON.parse(raw); return Array.isArray(parsed) ? parsed : fallback; } catch { return fallback; }
+        return parseJsonArray(raw, fallback);
       };
       setUsers(normalizeTeamUsers(parseStoredArray(savedUsers, INITIAL_USERS)));
       const localProjects = parseStoredArray(savedProjects);
@@ -5802,10 +6099,10 @@ function AppShell() {
           } else {
             try {
               const backup = localStorage.getItem('kalpa_projects_backup');
-              const cached = filterDeletedProjects(normalizeProjectRecords(backup ? JSON.parse(backup) : []));
+              const cached = filterDeletedProjects(normalizeProjectRecords(parseJsonArray(backup)));
               setProjects(prev => filterDeletedProjects(mergeProjectsByFreshness(prev, cached)));
             } catch(e) {
-              setProjects(prev => prev || []);
+              setProjects(prev => asArray(prev));
             }
           }
         }, handleDbError));
@@ -5867,7 +6164,7 @@ function AppShell() {
   useEffect(() => {
     if (!currentUser?.id || !isDbReady) return;
 
-    const today = new Date().toLocaleDateString('en-CA');
+    const today = getIndiaDateKey();
     const logId = `${currentUser.id}_${today}`;
 
     if (USE_BACKEND_STATE) {
@@ -5888,7 +6185,7 @@ function AppShell() {
         // local/server snapshots from flickering the table.
         postPresenceUpdate('heartbeat', refreshed);
       };
-      const heartbeatTimer = setInterval(sendHeartbeat, 60_000);
+      const heartbeatTimer = setInterval(sendHeartbeat, PRESENCE_HEARTBEAT_MS);
       const handleVisibility = () => {
         if (document.visibilityState === 'visible') sendHeartbeat();
       };
@@ -5902,9 +6199,9 @@ function AppShell() {
     const ensureLocalAttendanceRow = () => {
       const liveUser = currentUserRef.current || currentUser;
       const now = Date.now();
-      const timeStr = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+      const timeStr = new Date().toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', timeZone:'Asia/Kolkata'});
       setAttendanceLogs(prev => {
-        if ((prev || []).some(l => l.id === logId)) return prev;
+        if (asArray(prev).some(l => l.id === logId)) return prev;
         const currentLog = {
           id: logId,
           userId: liveUser.id,
@@ -5924,7 +6221,7 @@ function AppShell() {
           status: liveUser.availability === 'Break' ? 'On Break' : 'Online',
           lastTick: now
         };
-        const next = [...(prev || []), currentLog];
+        const next = [...asArray(prev), currentLog];
         if (isLocalMock) localStorage.setItem('kalpa_attendance', JSON.stringify(next));
         return next;
       });
@@ -5936,7 +6233,7 @@ function AppShell() {
     const attendanceTimer = USE_BACKEND_STATE ? null : setInterval(() => {
       const liveUser = currentUserRef.current || currentUser;
       setAttendanceLogs(prev => {
-        const currentLog = (prev || []).find(l => l.id === logId);
+        const currentLog = asArray(prev).find(l => l.id === logId);
         if (!currentLog) return prev;
         const now = Date.now();
         const isOnBreak = liveUser.availability === 'Break';
@@ -5945,11 +6242,11 @@ function AppShell() {
         const existingEvents = Array.isArray(currentLog.breakEvents) ? currentLog.breakEvents : [];
         const hasOpenBreak = existingEvents.some(ev => ev.start && !ev.end);
         const breakEvents = isOnBreak && !hasOpenBreak
-          ? [...existingEvents, { start: breakStart, startTime: new Date(breakStart).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) }]
+          ? [...existingEvents, { start: breakStart, startTime: new Date(breakStart).toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', timeZone:'Asia/Kolkata'}) }]
           : existingEvents;
         const updated = {
           ...currentLog,
-          logoutTime: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
+          logoutTime: new Date().toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', timeZone:'Asia/Kolkata'}),
           logoutAt: now,
           totalLoggedInMinutes: accrued.totalLoggedInMinutes,
           activeMinutes: accrued.activeMinutes,
@@ -6000,7 +6297,7 @@ function AppShell() {
       time: new Date().toLocaleTimeString()
     });
     setNotifications(prev => {
-      const next = [newNotif, ...(prev || [])].slice(0, 200);
+      const next = [newNotif, ...asArray(prev)].slice(0, 200);
       if (isLocalMock) localStorage.setItem('kalpa_notifs', JSON.stringify(next));
       return next;
     });
@@ -6011,7 +6308,7 @@ function AppShell() {
     if (USE_BACKEND_STATE) {
       try {
         const payload = await createNotificationApi(newNotif);
-        if (payload?.notification) setNotifications(prev => [payload.notification, ...(prev || []).filter(item => String(item.id) !== String(newNotif.id))].slice(0, 200));
+        if (payload?.notification) setNotifications(prev => [payload.notification, ...asArray(prev).filter(item => String(item.id) !== String(newNotif.id))].slice(0, 200));
       } catch(error) { console.warn('Notification save failed:', error.message); }
     } else {
       try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'notifications', newNotif.id.toString()), newNotif); } catch(e){}
@@ -6087,8 +6384,8 @@ function AppShell() {
         if (financeOnly) {
           setSelectedProject(updatedProject);
           setProjects(prev => {
-            const next = filterDeletedProjects(mergeProjectsByFreshness(prev || [], [updatedProject]));
-            persistAndBroadcastProjects(next, { changedProjects: [updatedProject], replaceIds: options?.replaceIds || [] });
+            const next = filterDeletedProjects(mergeProjectsByFreshness(asArray(prev), [updatedProject]));
+            persistAndBroadcastProjects(next, { changedProjects: [updatedProject], replaceIds: asArray(options?.replaceIds) });
             return next;
           });
           return updatedProject;
@@ -6123,15 +6420,15 @@ function AppShell() {
       if (original) {
         const stamp=Date.now();
         const revisionNumber=updatedProject.revisionNumber || getNextRevisionNumber(original);
-        const revisionFiles=[...(updatedProject.completedFiles || []),...(updatedProject.documents || []).filter(doc=>String(doc.type || '').toLowerCase()==='completed')];
+        const revisionFiles=[...asArray(updatedProject.completedFiles),...asArray(updatedProject.documents).filter(doc=>String(doc.type || '').toLowerCase()==='completed')];
         linkedOriginalUpdate=normalizeProjectRecord({
           ...original,
           updatedAt:stamp,
           syncVersion:stamp,
-          documents:[...(original.documents || []),...revisionFiles],
-          completedFiles:[...(original.completedFiles || []),...revisionFiles],
-          revisionHistory:[...(original.revisionHistory || []),{id:stamp,revisionNumber,revisionCode:`R${revisionNumber}`,action:'Revision Completed',status:'Completed',completedBy:updatedProject.completedBy || updatedProject.assignedTo,completedAt:updatedProject.completedAt || stamp,workItemId:updatedProject.id,files:revisionFiles}],
-          timeline:[...(original.timeline || []),{id:stamp,text:`Revision ${revisionNumber} completed and linked back to original task ${original.id}.`,time:new Date(stamp).toLocaleString()}]
+          documents:[...asArray(original.documents),...revisionFiles],
+          completedFiles:[...asArray(original.completedFiles),...revisionFiles],
+          revisionHistory:[...asArray(original.revisionHistory),{id:stamp,revisionNumber,revisionCode:`R${revisionNumber}`,action:'Revision Completed',status:'Completed',completedBy:updatedProject.completedBy || updatedProject.assignedTo,completedAt:updatedProject.completedAt || stamp,workItemId:updatedProject.id,files:revisionFiles}],
+          timeline:[...asArray(original.timeline),{id:stamp,text:`Revision ${revisionNumber} completed and linked back to original task ${original.id}.`,time:new Date(stamp).toLocaleString()}]
         });
       }
     }
@@ -6145,17 +6442,21 @@ function AppShell() {
     setSelectedProject(updatedProject);
     setProjects(previous=>{
       const ids=new Set(projectsToSave.flatMap(item=>[item.id,item.caseId,item.displayId]).map(value=>String(value || '')).filter(Boolean));
-      const next=filterDeletedProjects(mergeProjectsByFreshness((previous || []).filter(item=>!ids.has(String(item.id || '')) && !ids.has(String(item.caseId || '')) && !ids.has(String(item.displayId || ''))),projectsToSave));
-      persistAndBroadcastProjects(next, { changedProjects:projectsToSave, replaceIds:options?.replaceIds || [] });
+      const next=filterDeletedProjects(mergeProjectsByFreshness(asArray(previous).filter(item=>!ids.has(String(item.id || '')) && !ids.has(String(item.caseId || '')) && !ids.has(String(item.displayId || ''))),projectsToSave));
+      persistAndBroadcastProjects(next, { changedProjects:projectsToSave, replaceIds:asArray(options?.replaceIds) });
       return next;
     });
 
-    if (firebaseUser && !isLocalMock) {
+    // In backend-authoritative mode never write an optimistic/stale task to the
+    // legacy cloud mirror before PostgreSQL confirms it. A rejected version must
+    // not survive in a secondary store. Offline/Firebase-only mode retains its
+    // original direct-save behavior.
+    if (!USE_BACKEND_STATE && firebaseUser && !isLocalMock) {
       for (const projectToSave of projectsToSave) {
         try {
           await setDoc(doc(db,'artifacts',safeAppId,'public','data','projects',String(projectToSave.id)),stripLargeLocalFilesForCloud(projectToSave));
         } catch(error) {
-          console.warn('Project cloud save failed, but the authoritative backend write will continue.',error);
+          console.warn('Project cloud save failed in Firebase-only mode.',error);
         }
       }
     }
@@ -6185,17 +6486,30 @@ function AppShell() {
             const replaceIds=isCreate && !projectIdentityMatches(confirmed,projectToSave) ? [projectToSave.id,projectToSave.caseId,projectToSave.displayId] : [];
             if (replaceIds.length) forgetRecentCreatedProjects(replaceIds);
             applyProjectSnapshot([confirmed],{source:'task-update-confirmed',replaceIds});
+            if (firebaseUser && !isLocalMock) {
+              setDoc(doc(db,'artifacts',safeAppId,'public','data','projects',String(confirmed.id || confirmed.caseId)),stripLargeLocalFilesForCloud(confirmed))
+                .catch(error=>console.warn('Confirmed task cloud mirror update failed:',error));
+            }
             if (index===0) confirmedPrimary=confirmed;
           }
         } catch(error) {
           if (isProjectDeletedError(error)) {
             forgetPendingCreatedProjects(projectToSave.id,projectToSave.caseId,projectToSave.displayId);
             rememberDeletedProjectsForce(error?.payload?.deletedProjectIds || [projectToSave.id,projectToSave.caseId]);
-            setProjects(previous=>filterDeletedProjects(previous || []));
+            setProjects(previous=>filterDeletedProjects(asArray(previous)));
             continue;
           }
           if (['TASK_VERSION_CONFLICT','TASK_VERSION_REQUIRED'].includes(String(error?.code || ''))) {
             forgetPendingCreatedProjects(projectToSave.id,projectToSave.caseId,projectToSave.displayId);
+            const failedIds=new Set([projectToSave.id,projectToSave.caseId,projectToSave.displayId].map(value=>String(value || '')).filter(Boolean));
+            setProjects(previous=>{
+              const withoutRejected=asArray(previous).filter(item=>!failedIds.has(String(item.id || '')) && !failedIds.has(String(item.caseId || '')) && !failedIds.has(String(item.displayId || '')));
+              const restored=knownExisting ? mergeProjectsByFreshness(withoutRejected,[knownExisting]) : withoutRejected;
+              const next=filterDeletedProjects(restored);
+              persistAndBroadcastProjects(next);
+              return next;
+            });
+            if (index===0) setSelectedProject(knownExisting || null);
             notifyUser('This task changed on another screen. Your older copy was not allowed to overwrite it. The latest version is being reloaded.');
             await refreshWorkspaceSnapshot().catch(()=>{});
             continue;
@@ -6204,7 +6518,7 @@ function AppShell() {
             forgetPendingCreatedProjects(projectToSave.id,projectToSave.caseId,projectToSave.displayId);
             const failedIds=new Set([projectToSave.id,projectToSave.caseId,projectToSave.displayId].map(value=>String(value || '')).filter(Boolean));
             setProjects(previous=>{
-              const withoutRejected=(previous || []).filter(item=>!failedIds.has(String(item.id || '')) && !failedIds.has(String(item.caseId || '')) && !failedIds.has(String(item.displayId || '')));
+              const withoutRejected=asArray(previous).filter(item=>!failedIds.has(String(item.id || '')) && !failedIds.has(String(item.caseId || '')) && !failedIds.has(String(item.displayId || '')));
               const restored=knownExisting ? mergeProjectsByFreshness(withoutRejected,[knownExisting]) : withoutRejected;
               const next=filterDeletedProjects(restored);
               persistAndBroadcastProjects(next);
@@ -6218,7 +6532,8 @@ function AppShell() {
             actorId:operationalActorKey(currentUser),
             operation:isCreate ? 'create' : 'update',
             mutationId,
-            expectedTaskVersion
+            expectedTaskVersion,
+            rollbackProject:knownExisting || null
           });
           console.warn('Task write retained in the durable retry outbox:',error.message);
           notifyUser('The task is visible locally and its server confirmation will retry automatically. Do not recreate it.');
@@ -6292,8 +6607,10 @@ function AppShell() {
        return;
      }
      const id = String(taskId);
-     const target = (projects || []).find(p => String(p.id) === id || String(p.caseId || '') === id) || selectedProject || {};
-     const deleteIds = [...new Set([id, target?.id, target?.caseId, ...(target?.previousTaskIds || [])].map(x => String(x || '')).filter(Boolean))];
+     const target = asArray(projects).find(p => String(p.id) === id || String(p.caseId || '') === id) || selectedProject || {};
+     const deleteIds = [...new Set([id, target?.id, target?.caseId, ...asArray(target?.previousTaskIds)].map(x => String(x || '')).filter(Boolean))];
+     const expectedTaskVersion=Number(target?.taskVersion || 0);
+     const deleteMutationId=createTaskMutationId('delete');
      setSelectedProject(null);
      // A user-initiated delete must win over recent-create protection. Otherwise
      // a newly created case can disappear locally, then reappear from the protected
@@ -6301,10 +6618,14 @@ function AppShell() {
      forgetPendingCreatedProjects(deleteIds);
      forgetRecentCreatedProjects(deleteIds);
      rememberDeletedProjectsForce(deleteIds);
-     rememberPendingDeletedProjects(deleteIds, { actorId: operationalActorKey(currentUser) });
+     rememberPendingDeletedProjects(deleteIds, {
+       actorId: operationalActorKey(currentUser),
+       expectedTaskVersion,
+       mutationId:deleteMutationId
+     });
      setProjects(prev => {
        const deleteSet = new Set(deleteIds);
-       const next = filterDeletedProjects((prev || []).filter(p => !deleteSet.has(String(p.id)) && !deleteSet.has(String(p.caseId || ''))));
+       const next = filterDeletedProjects(asArray(prev).filter(p => !deleteSet.has(String(p.id)) && !deleteSet.has(String(p.caseId || ''))));
        persistAndBroadcastProjects(next, { removedProjectIds:deleteIds, replaceIds:[] });
        return next;
      });
@@ -6315,13 +6636,39 @@ function AppShell() {
      } catch(e) {}
      try {
        if (USE_BACKEND_STATE) {
-         const data = await deleteTaskApi({ apiBase: API_BASE, taskId: id, headers: jsonFinanceSafeHeaders });
+         const data = await deleteTaskApi({
+           apiBase: API_BASE,
+           taskId: id,
+           headers: jsonFinanceSafeHeaders,
+           expectedTaskVersion,
+           mutationId:deleteMutationId
+         });
          if (Array.isArray(data.deletedProjectIds)) rememberDeletedProjectsForce(data.deletedProjectIds);
          forgetPendingDeletedProjects(deleteIds, { actorId: operationalActorKey(currentUser) });
+         if (firebaseUser && !isLocalMock) {
+           deleteDoc(doc(db,'artifacts',safeAppId,'public','data','projects',id))
+             .catch(error=>console.warn('Confirmed task cloud mirror delete failed:',error));
+         }
        }
-     } catch (e) { console.warn('Backend delete failed after local deletion:', e); }
+     } catch (e) {
+       const code=String(e?.code || e?.payload?.code || '').toUpperCase();
+       const permanentDeleteFailure=['TASK_VERSION_CONFLICT','TASK_VERSION_REQUIRED','TASK_UPDATE_FORBIDDEN','CASE_ACCESS_DENIED'].includes(code) || isPermanentTaskWriteError(e);
+       if (permanentDeleteFailure) {
+         forgetDeletedProjects(deleteIds);
+         forgetPendingDeletedProjects(deleteIds,{actorId:operationalActorKey(currentUser)});
+         await refreshWorkspaceSnapshot().catch(()=>{});
+         notifyUser(code.startsWith('TASK_VERSION_')
+           ? 'This task changed after you opened it, so the stale delete was cancelled and the latest task was restored.'
+           : (e?.message || 'The task could not be deleted and has been restored.'));
+       } else {
+         console.warn('Backend delete failed after local deletion; durable retry remains queued:', e);
+       }
+     }
      try {
-       if (firebaseUser && !isLocalMock) await deleteDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', id));
+       // In backend mode the cloud mirror is touched only after the authoritative
+       // delete is confirmed; transient/permanent backend failures must not erase
+       // a secondary copy first.
+       if (!USE_BACKEND_STATE && firebaseUser && !isLocalMock) await deleteDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', id));
      } catch (e) { console.warn("Cloud delete skipped/failed after local deletion:", e); }
   };
 
@@ -6329,10 +6676,10 @@ function AppShell() {
     if (!firebaseUser) return;
     if (USE_BACKEND_STATE) {
       const saved = await sendChatMessageApi(msg);
-      setChatMessages(prev => mergeChatMessagesByFreshness(prev || [], [saved]));
+      setChatMessages(prev => mergeChatMessagesByFreshness(asArray(prev), [saved]));
       return saved;
     }
-    const normalizedMsg = { ...msg, readBy: msg.readBy || [{ name: msg.sender, time: msg.time }] };
+    const normalizedMsg = { ...msg, readBy: normalizeRuntimeReadBy(msg.readBy).length ? normalizeRuntimeReadBy(msg.readBy) : [{ name: msg.sender, time: msg.time }] };
     setChatMessages(prev => {
       const next = [...prev, normalizedMsg].sort((a,b) => a.id - b.id);
       if (isLocalMock) localStorage.setItem('kalpa_chats', JSON.stringify(sanitizeChatsForCache(next)));
@@ -6349,14 +6696,14 @@ function AppShell() {
         addNotification(ROLES.MANAGER, null, `@all mention from ${normalizedMsg.sender}`, 'mention', { category: 'Chat', priority: 'High' });
         addNotification(ROLES.DESIGNER, null, `@all mention from ${normalizedMsg.sender}`, 'mention', { category: 'Chat', priority: 'High' });
     }
-    (activeUsers || []).forEach(u => {
+    asArray(activeUsers).forEach(u => {
       if (u.name !== normalizedMsg.sender && text.toLowerCase().includes(`@${u.name}`.toLowerCase())) {
         notifiedUsers.add(String(u.name).toLowerCase());
         addNotification(u.role, u.name, `You were mentioned by ${normalizedMsg.sender}`, 'mention', { category: 'Chat', priority: 'High' });
       }
     });
     if (!isGlobalChat && !samePerson(recipient, normalizedMsg.sender)) {
-      const target = (activeUsers || []).find(u => samePerson(u.name, recipient) || samePerson(u.username, recipient) || String(u.id || '').toLowerCase() === String(recipient || '').toLowerCase());
+      const target = asArray(activeUsers).find(u => samePerson(u.name, recipient) || samePerson(u.username, recipient) || String(u.id || '').toLowerCase() === String(recipient || '').toLowerCase());
       if (target && !notifiedUsers.has(String(target.name).toLowerCase())) {
         const preview = text || normalizedMsg.fileName || 'Attachment';
         addNotification(target.role, target.name, `New message from ${normalizedMsg.sender}: ${preview.length > 60 ? `${preview.slice(0, 57)}...` : preview}`, 'chat', { category: 'Chat', priority: 'Normal' });
@@ -6371,14 +6718,14 @@ function AppShell() {
 
   const openTaskReferenceFromChat = (projectOrId) => {
     const projectId = typeof projectOrId === 'string' ? projectOrId : (projectOrId?.id || projectOrId?.caseId || '');
-    const target = (projects || []).find(p => String(p.id) === String(projectId) || String(p.caseId || '') === String(projectId)) || (typeof projectOrId === 'object' ? projectOrId : null);
+    const target = asArray(projects).find(p => String(p.id) === String(projectId) || String(p.caseId || '') === String(projectId)) || (typeof projectOrId === 'object' ? projectOrId : null);
     if (!target) return;
     openTaskDetail(target, activeTab || 'board');
   };
 
   const handleMarkMessagesRead = async (activeChannel) => {
     if (!currentUser) return;
-    const nowText = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+    const nowText = new Date().toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', timeZone:'Asia/Kolkata'});
     const updates = [];
     setChatMessages(prev => {
       const next = prev.map(m => {
@@ -6388,12 +6735,12 @@ function AppShell() {
         const isDM = activeChannel !== 'global' && activeChannel !== '__all__' && samePerson(m.sender, activeChannel) && sameCurrentUser(m.recipient);
         const isIncomingToMe = !sameCurrentUser(m.sender) && (markAll ? (sameCurrentUser(m.recipient) || m.recipient === 'global' || !m.recipient) : (isGlobal || isDM));
         if (!isIncomingToMe) return m;
-        const alreadyRead = (m.readBy || []).some(entry => {
+        const alreadyRead = normalizeRuntimeReadBy(m.readBy).some(entry => {
           const name = typeof entry === 'string' ? entry : entry?.name;
           return sameCurrentUser(name);
         });
         if (alreadyRead) return m;
-        const updated = { ...m, readBy: [...(m.readBy || []), { name: currentUser.name, time: nowText }] };
+        const updated = { ...m, readBy: [...normalizeRuntimeReadBy(m.readBy), { name: currentUser.name, time: nowText }] };
         updates.push(updated);
         return updated;
       });
@@ -6409,8 +6756,8 @@ function AppShell() {
       const next = prev.map(n => {
         const belongsToMe = (!n.targetUser && n.targetRole === currentUser.role) || samePerson(n.targetUser, currentUser.name) || samePerson(n.targetUser, currentUser.username) || (!!currentUser.id && String(n.targetUser || '').toLowerCase() === String(currentUser.id || '').toLowerCase());
         const isChatNotice = ['mention', 'chat', 'message'].includes(String(n.type || '').toLowerCase()) || /mention|message|chat/i.test(String(n.title || ''));
-        if (!belongsToMe || !isChatNotice || (n.readBy || []).includes(currentUser.name)) return n;
-        const updated = { ...n, readBy: [...(n.readBy || []), currentUser.name] };
+        if (!belongsToMe || !isChatNotice || isNotificationReadByUser(n, currentUser)) return n;
+        const updated = addNotificationReadUser(n, currentUser);
         readRelevantNotifications.push(updated);
         return updated;
       });
@@ -6429,12 +6776,12 @@ function AppShell() {
     if (USE_BACKEND_STATE) {
       const payload = await updateChatMessageApi(updatedMsg.id, updatedMsg);
       const saved = payload.message || updatedMsg;
-      setChatMessages(prev => mergeChatMessagesByFreshness((prev || []).filter(message => String(message.id) !== String(saved.id)), [saved]));
+      setChatMessages(prev => mergeChatMessagesByFreshness(asArray(prev).filter(message => String(message.id) !== String(saved.id)), [saved]));
       return saved;
     }
     const normalizedMsg = sanitizeChatMessageForCache({ ...updatedMsg });
     setChatMessages(prev => {
-      const next = (prev || []).map(m => String(m.id) === String(normalizedMsg.id) ? normalizedMsg : m).sort((a,b) => Number(a.id || 0) - Number(b.id || 0));
+      const next = asArray(prev).map(m => String(m.id) === String(normalizedMsg.id) ? normalizedMsg : m).sort((a,b) => Number(a.id || 0) - Number(b.id || 0));
       if (isLocalMock) localStorage.setItem('kalpa_chats', JSON.stringify(sanitizeChatsForCache(next)));
       return next;
     });
@@ -6445,7 +6792,7 @@ function AppShell() {
     if (!firebaseUser) return;
     if (USE_BACKEND_STATE) {
       const payload = await deleteChatMessageApi(msgId);
-      if (payload.message) setChatMessages(prev => mergeChatMessagesByFreshness((prev || []).filter(message => String(message.id) !== String(msgId)), [payload.message]));
+      if (payload.message) setChatMessages(prev => mergeChatMessagesByFreshness(asArray(prev).filter(message => String(message.id) !== String(msgId)), [payload.message]));
       return;
     }
     try { await deleteDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'chats', msgId.toString())); } catch(e){}
@@ -6455,9 +6802,9 @@ function AppShell() {
     if (!currentUser) return;
     const changed = [];
     setNotifications(prev => {
-      const next = (prev || []).map(n => {
-        if (String(n.id) !== String(notifId) || (n.readBy || []).includes(currentUser.name)) return n;
-        const updated = { ...n, readBy: [...(n.readBy || []), currentUser.name] };
+      const next = asArray(prev).map(n => {
+        if (String(n.id) !== String(notifId) || isNotificationReadByUser(n, currentUser)) return n;
+        const updated = addNotificationReadUser(n, currentUser);
         changed.push(updated);
         return updated;
       });
@@ -6472,9 +6819,9 @@ function AppShell() {
     if (!currentUser) return;
     const changed = [];
     setNotifications(prev => {
-      const next = (prev || []).map(n => {
-        if (!isNotificationForUser(n, currentUser) || (n.readBy || []).includes(currentUser.name)) return n;
-        const updated = { ...n, readBy: [...(n.readBy || []), currentUser.name] };
+      const next = asArray(prev).map(n => {
+        if (!isNotificationForUser(n, currentUser) || isNotificationReadByUser(n, currentUser)) return n;
+        const updated = addNotificationReadUser(n, currentUser);
         changed.push(updated);
         return updated;
       });
@@ -6538,16 +6885,16 @@ function AppShell() {
     const confirmed = normalizeTeamUser(response.user);
     setCurrentUser(previous => previous ? { ...previous, ...confirmed } : confirmed);
     currentUserRef.current = { ...(currentUserRef.current || {}), ...confirmed };
-    setUsers(previous => normalizeTeamUsers((previous || []).map(user => String(user.id) === String(confirmed.id) ? { ...user, ...confirmed } : user)));
+    setUsers(previous => normalizeTeamUsers(asArray(previous).map(user => String(user.id) === String(confirmed.id) ? { ...user, ...confirmed } : user)));
     return response;
   };
 
 
   const recordLoginAttendance = async (user, loginNow = Date.now()) => {
     if (!user) return;
-    const today = new Date(loginNow).toLocaleDateString('en-CA');
+    const today = getIndiaDateKey(loginNow);
     const logId = `${user.id}_${today}`;
-    const timeStr = new Date(loginNow).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+    const timeStr = new Date(loginNow).toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', timeZone:'Asia/Kolkata'});
     let updatedLog = null;
     setAttendanceLogs(prev => {
       const existing = prev.find(l => l.id === logId);
@@ -6584,10 +6931,10 @@ function AppShell() {
 
   const updateTodayAttendance = async (patcher) => {
     if (!currentUser) return;
-    const today = new Date().toLocaleDateString('en-CA');
+    const today = getIndiaDateKey();
     const logId = `${currentUser.id}_${today}`;
     const now = Date.now();
-    const timeStr = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+    const timeStr = new Date().toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', timeZone:'Asia/Kolkata'});
     let updatedLog = null;
 
     setAttendanceLogs(prev => {
@@ -6623,7 +6970,11 @@ function AppShell() {
 
   const establishAuthenticatedWorkspace = (user) => {
     if (!user) return;
+    presenceClientEpochRef.current = `${OPS_TAB_ID}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+    presenceClientSequenceRef.current = 0;
+    setOperationalActorScope(user);
     clearRoleScopedOperationalCaches(user);
+    setAuthBootWarning('');
     const authenticatedUser = { ...user, isOnline: true };
     setPasswordChangeSessionUser(null);
     setCurrentUser(authenticatedUser);
@@ -6650,14 +7001,14 @@ function AppShell() {
 
   const handleCreateAuthUser = async (input) => {
     const response = await createAuthUserApi(input);
-    if (response?.user) setUsers(prev => normalizeTeamUsers([...(prev || []), response.user]));
+    if (response?.user) setUsers(prev => normalizeTeamUsers([...asArray(prev), response.user]));
     return response;
   };
 
   const handleUpdateAuthUser = async (userId, patch) => {
     const response = await updateAuthUserApi(userId, patch);
     if (response?.user) {
-      setUsers(prev => normalizeTeamUsers((prev || []).map(user => String(user.id) === String(userId) ? { ...user, ...response.user } : user)));
+      setUsers(prev => normalizeTeamUsers(asArray(prev).map(user => String(user.id) === String(userId) ? { ...user, ...response.user } : user)));
       if (String(currentUserRef.current?.id || '') === String(userId)) setCurrentUser(prev => prev ? { ...prev, ...response.user } : prev);
     }
     return response;
@@ -6674,7 +7025,13 @@ function AppShell() {
 
   useEffect(() => {
     if (!USE_BACKEND_STATE) return undefined;
-    const expire = () => clearAuthenticatedWorkspace({ clearCache: true });
+    const expire = (event) => {
+      const code = String(event?.detail?.code || 'AUTH_REQUIRED');
+      clearAuthenticatedWorkspace({ clearCache: true });
+      if (code === 'AUTH_BROWSER_CONTEXT_CHANGED' || code === 'AUTH_SESSION_CONTEXT_CHANGED') {
+        setAuthBootWarning('Another browser tab or page instance became the active sign-in. This tab was signed out to prevent account data from mixing.');
+      }
+    };
     window.addEventListener('kalpa-auth-expired', expire);
     return () => window.removeEventListener('kalpa-auth-expired', expire);
   }, [clearAuthenticatedWorkspace]);
@@ -6684,7 +7041,7 @@ function AppShell() {
     const onBreak = currentUser.availability === 'Break';
     const now = Date.now();
     const updated = { ...currentUser, isOnline: true, availability: onBreak ? 'Available' : 'Break', breakStartedAt: onBreak ? null : now, availabilityUpdatedAt: now };
-    updateTodayAttendance((log, ts, timeStr) => {
+    if (!USE_BACKEND_STATE) updateTodayAttendance((log, ts, timeStr) => {
       const events = Array.isArray(log.breakEvents) ? log.breakEvents : [];
       if (!onBreak) {
         const accrued = buildAttendanceAccrual(log, ts, false);
@@ -6718,10 +7075,10 @@ function AppShell() {
   const handleLeadFileChange = (e) => {
       if (!e.target.files) return;
       try {
-        const remainingSlots = MAX_PROJECT_UPLOAD_FILES - (leadFiles || []).length;
+        const remainingSlots = MAX_PROJECT_UPLOAD_FILES - asArray(leadFiles).length;
         const selected = validateProjectUploadSelection(e.target.files, { maxFiles: remainingSlots });
-        validateProjectUploadSelection([...(leadFiles || []), ...selected], { maxFiles: MAX_PROJECT_UPLOAD_FILES });
-        setLeadFiles([...(leadFiles || []), ...selected]);
+        validateProjectUploadSelection([...asArray(leadFiles), ...selected], { maxFiles: MAX_PROJECT_UPLOAD_FILES });
+        setLeadFiles([...asArray(leadFiles), ...selected]);
       } catch (error) {
         notifyUser(error?.message || 'These files cannot be attached.');
       } finally {
@@ -6774,7 +7131,7 @@ function AppShell() {
 
 
   const persistSavedGlobalFilters = (nextFilters) => {
-    const clean = (nextFilters || []).filter(f => f && f.query).slice(0, 12);
+    const clean = asArray(nextFilters).filter(f => f && f.query).slice(0, 12);
     setSavedGlobalFilters(clean);
     try { localStorage.setItem(savedFiltersStorageKey, JSON.stringify(clean)); } catch (e) {}
   };
@@ -7207,7 +7564,7 @@ function AppShell() {
                rememberRecentCreatedProject(newP);
                const createMutationId=createTaskMutationId('create');
                rememberPendingCreatedProject(newP,{actorId:operationalActorKey(currentUser),operation:'create',mutationId:createMutationId,expectedTaskVersion:0});
-               const nextProjects = filterDeletedProjects(mergeProjectsByFreshness((projects || []).filter(p => String(p.id) !== String(newP.id)), [newP, ...getRecentCreatedProjects(), ...getPendingCreatedProjects(operationalActorKey(currentUser))]));
+               const nextProjects = filterDeletedProjects(mergeProjectsByFreshness(asArray(projects).filter(p => String(p.id) !== String(newP.id)), [newP, ...getRecentCreatedProjects(), ...getPendingCreatedProjects(operationalActorKey(currentUser))]));
                persistAndBroadcastProjects(nextProjects);
                setProjects(() => nextProjects);
                setSelectedBoardDate(taskDate);
@@ -7244,7 +7601,7 @@ function AppShell() {
                      forgetRecentCreatedProjects(newP.id,newP.caseId,newP.displayId);
                      setProjects(previous=>{
                        const rejectedIds=new Set([newP.id,newP.caseId,newP.displayId].map(value=>String(value || '')).filter(Boolean));
-                       const next=filterDeletedProjects((previous || []).filter(item=>!rejectedIds.has(String(item.id || '')) && !rejectedIds.has(String(item.caseId || '')) && !rejectedIds.has(String(item.displayId || ''))));
+                       const next=filterDeletedProjects(asArray(previous).filter(item=>!rejectedIds.has(String(item.id || '')) && !rejectedIds.has(String(item.caseId || '')) && !rejectedIds.has(String(item.displayId || ''))));
                        persistAndBroadcastProjects(next);
                        return next;
                      });
@@ -7266,8 +7623,8 @@ function AppShell() {
                  notifyUser(`Task ${taskId} is saved locally and waiting for server sync. Its source files were not uploaded; attach them after the task appears online.`);
                }
 
-               if (firebaseUser && !isLocalMock) {
-                   try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', confirmedProject.id), stripLargeLocalFilesForCloud(confirmedProject)); } catch(e){}
+               if (firebaseUser && !isLocalMock && (!USE_BACKEND_STATE || projectConfirmedByBackend)) {
+                   try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'projects', String(confirmedProject.id || confirmedProject.caseId)), stripLargeLocalFilesForCloud(confirmedProject)); } catch(e){}
                }
 
                if (!USE_BACKEND_STATE && newP.assignedTo !== 'Unassigned') {
@@ -7366,7 +7723,7 @@ function AppShell() {
                     <div className="bg-indigo-100 p-3 rounded-2xl mb-3 shadow-sm"><Upload className="w-6 h-6 text-indigo-600" /></div>
                     <p className="font-bold text-slate-700 text-base mb-1">Click to attach source files</p>
                     <p className="font-medium text-slate-400 text-xs">Images, PDFs, or AutoCAD files</p>
-                    <input type="file" multiple className="hidden" accept=".jpg,.jpeg,.png,.mp4,.mov,.avi,.mkv,.webm,.dwg,.dxf,.pdf,.xls,.xlsx,.doc,.docx" onChange={handleLeadFileChange} />
+                    <input type="file" multiple className="hidden" accept={PROJECT_UPLOAD_ACCEPT} onChange={handleLeadFileChange} />
                   </label>
                </div>
 

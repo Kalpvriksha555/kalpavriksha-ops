@@ -6,14 +6,22 @@ RELEASE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIVE="${KALPA_LIVE_ROOT:-/var/www/kalpavriksha-ops}"
 ENV_FILE="${KALPA_ENV_FILE:-/etc/kalpavriksha/backend.env}"
 PM2_NAME="${KALPA_PM2_NAME:-kalpvriksha-backend}"
+# PM2 defaults to a very short forced-kill window. Keep it longer than the
+# backend's maximum 120s graceful-shutdown window so queued PostgreSQL/presence
+# work can drain instead of being cut off by SIGKILL during future stops/restarts.
+PM2_KILL_TIMEOUT_MS="${PM2_KILL_TIMEOUT_MS:-125000}"
 PORT="${PORT:-8080}"
 DEPLOY_LOCK="${KALPA_DEPLOY_LOCK:-/run/lock/kalpavriksha-production-deploy.lock}"
 CERTIFIED_COMMIT_FILE="${KALPA_CERTIFIED_COMMIT_FILE:-/root/kalpavriksha-certified-candidate.commit}"
 CERTIFIED_RESULT_FILE="${KALPA_CERTIFIED_RESULT_FILE:-/root/kalpavriksha-certified-candidate.result.json}"
+KALPA_DEPLOY_STATE_ROOT="${KALPA_DEPLOY_STATE_ROOT:-/var/lib/kalpavriksha/deploy-state}"
+CURRENT_DEPLOYMENT_STATE="$KALPA_DEPLOY_STATE_ROOT/current.json"
+ATTEMPT_ROOT="$KALPA_DEPLOY_STATE_ROOT/attempts"
 BACKUP_TIMER_UNITS=(kalpavriksha-backup.timer kalpavriksha-database-backup.timer)
 ACTIVE_BACKUP_TIMERS=()
 BACKUP_TIMERS_PAUSED=0
 WORK="${KALPA_DEPLOY_WORK:-/root/kalpavriksha-1.9.30-deploy-$(date -u +%Y%m%dT%H%M%SZ)}"
+ATTEMPT_RECEIPT="$ATTEMPT_ROOT/$(basename "$WORK").json"
 ROLLBACK_ROOT="$WORK/previous-runtime"
 ROLLBACK_CWD="$ROLLBACK_ROOT/backend"
 ROLLBACK_SCRIPT=""
@@ -22,9 +30,9 @@ CERTIFICATE_BACKUP="$WORK/release-certificate.before.json"
 FRONTEND_BACKUP="$WORK/frontend-dist.before.tar.gz"
 LIVE_SOURCE_ROLLBACK="$WORK/previous-live-source"
 
-EXPECTED_ROOT_VERSION="1.9.30-runtime-persistence-recovery"
-EXPECTED_BACKEND_VERSION="2.9.30-runtime-persistence-recovery"
-EXPECTED_FRONTEND_VERSION="2.9.30-runtime-persistence-recovery"
+EXPECTED_ROOT_VERSION="1.9.30-ssh-independent-certify-deploy-closure"
+EXPECTED_BACKEND_VERSION="2.9.30-ssh-independent-certify-deploy-closure"
+EXPECTED_FRONTEND_VERSION="2.9.30-ssh-independent-certify-deploy-closure"
 
 BACKEND_STOPPED=0
 DEPLOYMENT_COMPLETE=0
@@ -32,6 +40,17 @@ HAD_CERTIFICATE=0
 HAD_FRONTEND_DIST=0
 ROLLBACK_CAPTURED=0
 LIVE_MUTATED=0
+DATABASE_SOURCE_UNCHANGED=0
+BACKEND_DEPS_UNCHANGED=0
+CURRENT_RUNTIME_READY_PROOF=0
+DEPENDENCY_TREE_REUSED=0
+LIVE_BACKEND_DEPS_REUSED=0
+POST_BACKUP_REUSED=0
+NEW_DATABASE_INPUT_HASH=""
+OLD_DATABASE_INPUT_HASH=""
+NEW_BACKEND_DEP_HASH=""
+OLD_BACKEND_DEP_HASH=""
+NEW_FRONTEND_DIST_HASH=""
 
 
 log() {
@@ -84,7 +103,7 @@ if ! flock -n 8; then
   fail "Another Kalpavriksha deployment is already running. Wait for it to finish; do not start a second deployment."
 fi
 printf 'pid=%s started=%s release=%s\n' "$$" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$RELEASE_ROOT" >&8
-mkdir -p "$WORK"
+mkdir -p "$WORK" "$ATTEMPT_ROOT"
 log "Exclusive deployment lock acquired: $DEPLOY_LOCK"
 
 wait_for_health() {
@@ -101,8 +120,45 @@ wait_for_health() {
   return 1
 }
 
+assert_backend_version() {
+  local payload="$1"
+  local expected="$2"
+  python3 - "$payload" "$expected" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1])); expected=sys.argv[2]
+actual=str(p.get('backendVersion') or '')
+if actual != expected:
+    raise SystemExit(f'backend version mismatch: expected {expected}, got {actual or "<missing>"}')
+PY
+}
+
+write_attempt_receipt() {
+  local status="$1"
+  python3 - "$ATTEMPT_RECEIPT" "$status" "${CURRENT_COMMIT:-}" "$DATABASE_SOURCE_UNCHANGED" "$BACKEND_DEPS_UNCHANGED" "$DEPENDENCY_TREE_REUSED" "$LIVE_BACKEND_DEPS_REUSED" "$POST_BACKUP_REUSED" "$WORK" <<'PY'
+import json,sys,datetime,os,tempfile
+out,status,commit,db_same,deps_same,candidate_reused,live_reused,post_reused,work=sys.argv[1:10]
+payload={
+ 'schemaVersion':1,'status':status,'commit':commit,
+ 'recordedAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+ 'resume':{
+   'databaseSourceUnchanged':db_same=='1',
+   'backendDependenciesUnchanged':deps_same=='1',
+   'candidateDependencyTreeReused':candidate_reused=='1',
+   'liveBackendDependencyTreeReused':live_reused=='1',
+   'postDeploymentBackupReused':post_reused=='1'
+ },
+ 'work':work
+}
+os.makedirs(os.path.dirname(out),exist_ok=True)
+tmp=out+'.tmp-'+str(os.getpid())
+with open(tmp,'w') as f: json.dump(payload,f,indent=2)
+os.replace(tmp,out)
+PY
+}
+
 restore_previous_runtime() {
   local rc=$?
+  local rollback_ok=1
   trap - ERR INT TERM EXIT
 
   if [[ "$DEPLOYMENT_COMPLETE" == "1" ]]; then
@@ -111,6 +167,7 @@ restore_previous_runtime() {
 
   if [[ "$ROLLBACK_CAPTURED" != "1" || "$LIVE_MUTATED" != "1" ]]; then
     resume_backup_timers
+    write_attempt_receipt "FAILED_BEFORE_LIVE_MUTATION" || true
     echo "Deployment stopped before the live runtime was modified; the current PM2 runtime was left untouched." >&2
     exit "$rc"
   fi
@@ -122,12 +179,12 @@ restore_previous_runtime() {
   echo "======================================================"
 
   if [[ -f "$ENV_BACKUP" ]]; then
-    cp -a "$ENV_BACKUP" "$ENV_FILE"
+    cp -a "$ENV_BACKUP" "$ENV_FILE" || rollback_ok=0
   fi
 
   if [[ -d "$LIVE_SOURCE_ROLLBACK" ]]; then
     echo "Restoring the previous permanent live source tree..."
-    rsync -a --delete "$LIVE_SOURCE_ROLLBACK/" "$LIVE/" \
+    if ! rsync -a --delete "$LIVE_SOURCE_ROLLBACK/" "$LIVE/" \
       --exclude='.git/' \
       --exclude='node_modules/' \
       --exclude='backend/node_modules/' \
@@ -147,26 +204,31 @@ restore_previous_runtime() {
       --exclude='uploads/' \
       --exclude='private-files/' \
       --exclude='backups/' \
-      --exclude='*.log' || true
-    node "$RELEASE_ROOT/scripts/source-parity-clean.mjs" "$LIVE_SOURCE_ROLLBACK" "$LIVE" \
-      >"$WORK/rollback-source-parity.json" 2>&1 || true
+      --exclude='*.log'; then
+      rollback_ok=0
+    fi
+    if ! node "$RELEASE_ROOT/scripts/source-parity-clean.mjs" "$LIVE_SOURCE_ROLLBACK" "$LIVE" >"$WORK/rollback-source-parity.json" 2>&1; then
+      rollback_ok=0
+    fi
+  else
+    rollback_ok=0
   fi
 
   if [[ "$HAD_CERTIFICATE" == "1" && -f "$CERTIFICATE_BACKUP" ]]; then
-    mkdir -p "$(dirname "$RELEASE_CERTIFICATE_PATH")"
-    cp -a "$CERTIFICATE_BACKUP" "$RELEASE_CERTIFICATE_PATH"
+    mkdir -p "$(dirname "${RELEASE_CERTIFICATE_PATH:-$LIVE/release-certification.json}")"
+    cp -a "$CERTIFICATE_BACKUP" "$RELEASE_CERTIFICATE_PATH" || rollback_ok=0
   elif [[ -n "${RELEASE_CERTIFICATE_PATH:-}" ]]; then
-    rm -f "$RELEASE_CERTIFICATE_PATH"
+    rm -f "$RELEASE_CERTIFICATE_PATH" || rollback_ok=0
   fi
 
   if [[ "$HAD_FRONTEND_DIST" == "1" && -f "$FRONTEND_BACKUP" ]]; then
     rm -rf "$LIVE/frontend/dist"
     mkdir -p "$LIVE/frontend"
-    tar -C "$LIVE/frontend" -xzf "$FRONTEND_BACKUP"
+    tar -C "$LIVE/frontend" -xzf "$FRONTEND_BACKUP" || rollback_ok=0
   elif [[ "$HAD_FRONTEND_DIST" != "1" ]]; then
-    rm -rf "$LIVE/frontend/dist"
+    rm -rf "$LIVE/frontend/dist" || rollback_ok=0
   fi
-  rm -rf "$LIVE/frontend/dist.next" "$LIVE/frontend/dist.previous"
+  rm -rf "$LIVE/frontend/dist.next" "$LIVE/frontend/dist.previous" || rollback_ok=0
 
   pm2 delete "$PM2_NAME" 2>/dev/null || true
   if [[ -n "$ROLLBACK_SCRIPT" && -f "$ROLLBACK_SCRIPT" ]]; then
@@ -174,16 +236,27 @@ restore_previous_runtime() {
     # shellcheck disable=SC1090
     source "$ENV_FILE"
     set +a
-    pm2 start "$ROLLBACK_SCRIPT" --name "$PM2_NAME" --cwd "$ROLLBACK_CWD" --time --update-env || true
-    wait_for_health "/api/health/live" "$WORK/rollback-live.json" 45 || true
-    wait_for_health "/api/health/ready" "$WORK/rollback-ready.json" 45 || true
-    pm2 save || true
+    if pm2 start "$ROLLBACK_SCRIPT" --name "$PM2_NAME" --cwd "$ROLLBACK_CWD" --time --update-env --kill-timeout "$PM2_KILL_TIMEOUT_MS"; then
+      wait_for_health "/api/health/live" "$WORK/rollback-live.json" 45 || rollback_ok=0
+      wait_for_health "/api/health/ready" "$WORK/rollback-ready.json" 45 || rollback_ok=0
+      pm2 save || rollback_ok=0
+    else
+      rollback_ok=0
+    fi
+  else
+    rollback_ok=0
   fi
 
   resume_backup_timers
   pm2 logs "$PM2_NAME" --lines 120 --nostream || true
   echo "Rollback records: $WORK"
-  exit "$rc"
+  if [[ "$rollback_ok" == "1" ]]; then
+    write_attempt_receipt "FAILED_BUT_ROLLBACK_VERIFIED" || true
+    exit "$rc"
+  fi
+  write_attempt_receipt "ROLLBACK_FAILED_REQUIRES_OPERATOR" || true
+  echo "CRITICAL: automatic runtime rollback could not be fully verified. Production database was not automatically rewritten. Operator intervention is required." >&2
+  exit 97
 }
 trap restore_previous_runtime ERR INT TERM EXIT
 
@@ -213,6 +286,25 @@ for key in ('downloadHashMatched','staleOptimisticIdResolvedToCanonicalTask','wr
     if e.get(key) is not True:
         raise SystemExit(f'candidate receipt is missing required E2E proof: {key}')
 PY
+node "$RELEASE_ROOT/scripts/phase-21-deployment-receipt.mjs" verify-candidate \
+  --root "$RELEASE_ROOT" \
+  --receipt "$CERTIFIED_RESULT_FILE" \
+  --commit "$CURRENT_COMMIT" \
+  --require-artifacts true >"$WORK/candidate-phase-verification.json"
+mapfile -t PHASE_VALUES < <(python3 - "$CERTIFIED_RESULT_FILE" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1])); phase=p.get('phaseReceipts') or {}; f=phase.get('fingerprints') or {}; a=phase.get('artifacts') or {}
+print(f.get('databaseInputHash',''))
+print((f.get('dependencyHashes') or {}).get('backend',''))
+print(a.get('frontendDistHash',''))
+PY
+)
+NEW_DATABASE_INPUT_HASH="${PHASE_VALUES[0]:-}"
+NEW_BACKEND_DEP_HASH="${PHASE_VALUES[1]:-}"
+NEW_FRONTEND_DIST_HASH="${PHASE_VALUES[2]:-}"
+[[ "$NEW_DATABASE_INPUT_HASH" =~ ^[0-9a-f]{64}$ ]] || fail "Candidate database input fingerprint is invalid."
+[[ "$NEW_BACKEND_DEP_HASH" =~ ^[0-9a-f]{64}$ ]] || fail "Candidate backend dependency fingerprint is invalid."
+[[ "$NEW_FRONTEND_DIST_HASH" =~ ^[0-9a-f]{64}$ ]] || fail "Candidate frontend artifact hash is invalid."
 REMOTE_COMMIT="$(git -C "$RELEASE_ROOT" ls-remote origin refs/heads/main | awk 'NR==1 {print $1}')"
 [[ "$REMOTE_COMMIT" == "$CURRENT_COMMIT" ]] || fail "GitHub main moved after certification. Re-certification is required."
 
@@ -246,6 +338,44 @@ export npm_config_registry="https://registry.npmjs.org/"
 : "${DATABASE_URL:?DATABASE_URL is missing from $ENV_FILE}"
 : "${KALPA_BACKUP_ROOT:?KALPA_BACKUP_ROOT is missing from $ENV_FILE}"
 : "${RELEASE_CERTIFICATE_PATH:?RELEASE_CERTIFICATE_PATH is missing from $ENV_FILE}"
+[[ "$PM2_KILL_TIMEOUT_MS" =~ ^[0-9]+$ ]] || fail "PM2_KILL_TIMEOUT_MS must be an integer number of milliseconds."
+(( PM2_KILL_TIMEOUT_MS >= 125000 && PM2_KILL_TIMEOUT_MS <= 300000 )) || fail "PM2_KILL_TIMEOUT_MS must be between 125000 and 300000 ms so it safely exceeds the backend graceful-shutdown ceiling."
+
+log "Proving the current production runtime is READY before planning any live mutation"
+wait_for_health "/api/health/live" "$WORK/current-live.json" 30 || fail "Current production backend is not live; deployment will not proceed from an unhealthy baseline."
+wait_for_health "/api/health/ready" "$WORK/current-ready.json" 30 || fail "Current production backend is not ready; deployment will not proceed from an unhealthy baseline."
+CURRENT_RUNTIME_READY_PROOF=1
+
+log "Computing source-aware resume fingerprints for the current live release"
+node "$RELEASE_ROOT/scripts/phase-21-deployment-receipt.mjs" fingerprint --root "$LIVE" >"$WORK/current-live-fingerprints.json"
+mapfile -t OLD_PHASE_VALUES < <(python3 - "$WORK/current-live-fingerprints.json" <<'PY'
+import json,sys
+f=(json.load(open(sys.argv[1])).get('fingerprints') or {})
+print(f.get('databaseInputHash',''))
+print((f.get('dependencyHashes') or {}).get('backend',''))
+PY
+)
+OLD_DATABASE_INPUT_HASH="${OLD_PHASE_VALUES[0]:-}"
+OLD_BACKEND_DEP_HASH="${OLD_PHASE_VALUES[1]:-}"
+if [[ -n "$OLD_DATABASE_INPUT_HASH" && "$OLD_DATABASE_INPUT_HASH" == "$NEW_DATABASE_INPUT_HASH" ]]; then DATABASE_SOURCE_UNCHANGED=1; fi
+if [[ -n "$OLD_BACKEND_DEP_HASH" && "$OLD_BACKEND_DEP_HASH" == "$NEW_BACKEND_DEP_HASH" ]]; then BACKEND_DEPS_UNCHANGED=1; fi
+printf 'Resume plan: databaseSourceUnchanged=%s backendDependenciesUnchanged=%s\n' "$DATABASE_SOURCE_UNCHANGED" "$BACKEND_DEPS_UNCHANGED"
+
+if [[ -s "$CURRENT_DEPLOYMENT_STATE" ]] \
+  && node "$RELEASE_ROOT/scripts/phase-21-deployment-receipt.mjs" verify-deployment-state \
+       --root "$LIVE" --state "$CURRENT_DEPLOYMENT_STATE" --commit "$CURRENT_COMMIT" --frontend-dist "$LIVE/frontend/dist" \
+       >"$WORK/current-deployment-state-verification.json" 2>&1; then
+  CURRENT_PM2_SCRIPT="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{const p=JSON.parse(s).find(x=>x.name===process.argv[1]);process.stdout.write(p?.pm2_env?.pm_exec_path||'');});" "$PM2_NAME")"
+  if [[ -n "$CURRENT_PM2_SCRIPT" && "$(realpath -m "$CURRENT_PM2_SCRIPT")" == "$(realpath -m "$LIVE/backend/src/server.js")" ]] \
+    && assert_backend_version "$WORK/current-live.json" "$EXPECTED_BACKEND_VERSION" \
+    && assert_backend_version "$WORK/current-ready.json" "$EXPECTED_BACKEND_VERSION"; then
+    log "This exact certified commit and frontend artifact are already deployed and healthy; no deployment work is required."
+    write_attempt_receipt "ALREADY_DEPLOYED_NOOP"
+    DEPLOYMENT_COMPLETE=1
+    trap - ERR INT TERM EXIT
+    exit 0
+  fi
+fi
 
 log "Capturing the currently running backend for immutable rollback"
 OLD_SCRIPT="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{const p=JSON.parse(s).find(x=>x.name===process.argv[1]);if(!p)process.exit(2);process.stdout.write(p.pm2_env.pm_exec_path||'');});" "$PM2_NAME")"
@@ -301,34 +431,37 @@ rsync -a "$LIVE/" "$LIVE_SOURCE_ROLLBACK/" \
   --exclude='*.log'
 ROLLBACK_CAPTURED=1
 
-log "Removing obsolete live-source artifacts from the release package"
-rm -f "$RELEASE_ROOT/backend/FETCH_HEAD"
-find "$RELEASE_ROOT" -type f -name 'server.js.before-presence-failsafe-*' -delete
-rm -rf "$RELEASE_ROOT/node_modules" "$RELEASE_ROOT/backend/node_modules" "$RELEASE_ROOT/frontend/node_modules" \
-  "$RELEASE_ROOT/frontend/dist" "$RELEASE_ROOT/.release" "$RELEASE_ROOT/release-certification.json"
-
-log "Preserving the exact certified GitHub commit as the immutable release identity"
+log "Preserving certified artifacts and reusing already-passed source/dependency phases"
 [[ "$(git -C "$RELEASE_ROOT" rev-parse HEAD)" == "$CURRENT_COMMIT" ]] || fail "Release Git identity changed unexpectedly."
-[[ -z "$(git -C "$RELEASE_ROOT" -c core.fileMode=false status --porcelain --untracked-files=no)" ]] || fail "Tracked release source changed before dependency installation."
-
-log "Installing isolated release dependencies"
+[[ -z "$(git -C "$RELEASE_ROOT" -c core.fileMode=false status --porcelain --untracked-files=no)" ]] || fail "Tracked release source changed after candidate certification."
 cd "$RELEASE_ROOT"
-npm ci --include=dev --ignore-scripts --no-audit --no-fund
-npm ci --prefix backend --no-audit --no-fund
-npm ci --prefix frontend --include=dev --no-audit --no-fund
-
-log "Running source security, syntax, regression, backend, frontend and build verification"
-npm run verify
+if [[ -d node_modules && -d backend/node_modules && -d frontend/node_modules ]] \
+  && npm ls --depth=0 --include=dev >/dev/null 2>&1 \
+  && npm ls --prefix backend --depth=0 >/dev/null 2>&1 \
+  && npm ls --prefix frontend --depth=0 --include=dev >/dev/null 2>&1; then
+  DEPENDENCY_TREE_REUSED=1
+  log "Certified dependency trees are still complete; deployment skips npm ci."
+else
+  log "Certified dependency tree is missing or stale; reinstalling exact lockfiles without repeating the full test chain."
+  npm ci --include=dev --ignore-scripts --no-audit --no-fund
+  npm ci --prefix backend --no-audit --no-fund
+  npm ci --prefix frontend --include=dev --no-audit --no-fund
+  npm run verify:frontend-runtime
+fi
+sha256sum -c RELEASE_FILE_MANIFEST.sha256 >/dev/null
 node --check backend/src/server.js
 node --check backend/src/repositories/postgresStateRepository.js
 node --check backend/src/services/operationalReliabilityService.js
+node --check scripts/deployment-receipt-utils.mjs
+node --check scripts/phase-21-deployment-receipt.mjs
 bash -n scripts/deploy-1.9.30-vps.sh
-node --check backend/scripts/backup-create.mjs
-
-log "Running clean-install verification against the exact source tree"
-npm run release:clean-install
-[[ -z "$(git -C "$RELEASE_ROOT" -c core.fileMode=false status --porcelain --untracked-files=no)" ]] || fail "Verification modified tracked source; deployment is blocked."
-[[ "$(git -C "$RELEASE_ROOT" rev-parse HEAD)" == "$CURRENT_COMMIT" ]] || fail "Certified Git commit changed during verification."
+bash -n scripts/launch-deploy-1.9.30-vps.sh
+bash -n scripts/candidate-certify-1.9.30-vps.sh
+bash -n scripts/certify-and-deploy-1.9.30-vps.sh
+node scripts/phase-21-deployment-receipt.mjs verify-candidate \
+  --root "$RELEASE_ROOT" --receipt "$CERTIFIED_RESULT_FILE" --commit "$CURRENT_COMMIT" --require-artifacts true \
+  >"$WORK/candidate-phase-verification.after-dependency-check.json"
+[[ -z "$(git -C "$RELEASE_ROOT" -c core.fileMode=false status --porcelain --untracked-files=no)" ]] || fail "Deployment preparation modified tracked release source."
 
 log "Pausing automatic backup timers and waiting for any in-flight backup"
 pause_backup_timers
@@ -343,26 +476,44 @@ npm run backup:create | tee "$WORK/pre-deployment-backup.json"
 npm run backup:verify | tee "$WORK/pre-deployment-backup-verification.json"
 npm run backup:status | tee "$WORK/pre-deployment-backup-status.json"
 
-log "Applying schema migrations and enforcing strict relational integrity"
-npm run db:migrate --prefix backend
-npm run db:integrity --prefix backend | tee "$WORK/pre-deployment-integrity.json"
+if [[ "$DATABASE_SOURCE_UNCHANGED" == "1" ]]; then
+  log "Backend/database functional input is unchanged; schema migration and duplicate full database scan are safely reused."
+else
+  log "Backend/database functional input changed; applying schema migrations before production certification."
+  npm run db:migrate --prefix backend
+fi
 
 log "Removing the obsolete emergency presence-disable setting"
 sed -i '/^[[:space:]]*KALPA_DISABLE_AUTO_PRESENCE_WRITES[[:space:]]*=/d' "$ENV_FILE"
 unset KALPA_DISABLE_AUTO_PRESENCE_WRITES
 
-log "Certifying the exact production release"
-rm -rf "$RELEASE_ROOT/frontend/dist"
+log "Certifying the exact production environment while reusing the exact candidate source/build proof"
 rm -f "$RELEASE_CERTIFICATE_PATH"
-npm run release:certify | tee "$WORK/release-certification.json"
+if [[ "$DATABASE_SOURCE_UNCHANGED" == "1" ]]; then
+  KALPA_RESUME_AWARE_CANDIDATE_RECEIPT="$CERTIFIED_RESULT_FILE" \
+  KALPA_REUSE_DATABASE_INTEGRITY=true \
+  KALPA_DATABASE_INPUT_HASH="$NEW_DATABASE_INPUT_HASH" \
+  KALPA_DEPLOYED_DATABASE_INPUT_HASH="$OLD_DATABASE_INPUT_HASH" \
+  KALPA_CURRENT_RUNTIME_READY_PROOF=true \
+  npm run release:certify | tee "$WORK/release-certification.json"
+else
+  KALPA_RESUME_AWARE_CANDIDATE_RECEIPT="$CERTIFIED_RESULT_FILE" \
+  KALPA_REUSE_DATABASE_INTEGRITY=false \
+  npm run release:certify | tee "$WORK/release-certification.json"
+fi
 npm run release:gate | tee "$WORK/release-gate.json"
+node scripts/phase-21-deployment-receipt.mjs verify-candidate \
+  --root "$RELEASE_ROOT" --receipt "$CERTIFIED_RESULT_FILE" --commit "$CURRENT_COMMIT" --require-artifacts true \
+  >"$WORK/candidate-phase-verification.after-production-certification.json"
 [[ -s "$RELEASE_ROOT/frontend/dist/index.html" ]] || fail "Certified frontend build is missing."
 
 log "Starting the certified release from its isolated staging path"
 pm2 delete "$PM2_NAME" 2>/dev/null || true
-pm2 start "$RELEASE_ROOT/backend/src/server.js" --name "$PM2_NAME" --cwd "$RELEASE_ROOT/backend" --time --update-env
+pm2 start "$RELEASE_ROOT/backend/src/server.js" --name "$PM2_NAME" --cwd "$RELEASE_ROOT/backend" --time --update-env --kill-timeout "$PM2_KILL_TIMEOUT_MS"
 wait_for_health "/api/health/live" "$WORK/staging-live.json" || fail "Staging backend liveness failed."
 wait_for_health "/api/health/ready" "$WORK/staging-ready.json" || fail "Staging backend readiness failed."
+assert_backend_version "$WORK/staging-live.json" "$EXPECTED_BACKEND_VERSION" || fail "Staging liveness came from the wrong backend version."
+assert_backend_version "$WORK/staging-ready.json" "$EXPECTED_BACKEND_VERSION" || fail "Staging readiness came from the wrong backend version."
 BACKEND_STOPPED=0
 
 log "Synchronizing the exact certified source to the permanent live path"
@@ -389,20 +540,30 @@ rsync -a --delete "$RELEASE_ROOT/" "$LIVE/" \
 log "Removing stale non-runtime live-source artifacts and proving source parity"
 node "$RELEASE_ROOT/scripts/source-parity-clean.mjs" "$RELEASE_ROOT" "$LIVE" | tee "$WORK/permanent-source-parity.json"
 
-log "Installing production backend dependencies at the permanent path"
-rm -rf "$LIVE/backend/node_modules"
-npm ci --prefix "$LIVE/backend" --omit=dev --no-audit --no-fund
+log "Reusing permanent backend dependencies when the dependency fingerprint is unchanged"
+if [[ "$BACKEND_DEPS_UNCHANGED" == "1" && -d "$LIVE/backend/node_modules" ]] \
+  && npm ls --prefix "$LIVE/backend" --omit=dev --depth=0 >/dev/null 2>&1; then
+  LIVE_BACKEND_DEPS_REUSED=1
+  log "Backend dependency fingerprint is unchanged and the permanent dependency tree is complete; production npm ci is skipped."
+else
+  rm -rf "$LIVE/backend/node_modules"
+  npm ci --prefix "$LIVE/backend" --omit=dev --no-audit --no-fund
+fi
 node --check "$LIVE/backend/src/server.js"
 
 log "Verifying the permanent live source against the release certificate before build-artifact switching"
 cd "$LIVE"
 npm run release:gate | tee "$WORK/permanent-live-release-gate.before-frontend-switch.json"
 
-log "Preparing an atomic frontend build switch"
+log "Preparing an atomic frontend build switch and proving exact certified artifact bytes"
 rm -rf "$LIVE/frontend/dist.next" "$LIVE/frontend/dist.previous"
 cp -a "$RELEASE_ROOT/frontend/dist" "$LIVE/frontend/dist.next"
+DIST_NEXT_HASH="$(node "$RELEASE_ROOT/scripts/phase-21-deployment-receipt.mjs" artifact-hash --root "$LIVE" --frontend-dist "$LIVE/frontend/dist.next" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("artifact") or {}).get("hash", ""))')"
+[[ "$DIST_NEXT_HASH" == "$NEW_FRONTEND_DIST_HASH" ]] || fail "Prepared frontend artifact does not match the certified candidate build."
 if [[ -d "$LIVE/frontend/dist" ]]; then mv "$LIVE/frontend/dist" "$LIVE/frontend/dist.previous"; fi
 mv "$LIVE/frontend/dist.next" "$LIVE/frontend/dist"
+LIVE_DIST_HASH="$(node "$RELEASE_ROOT/scripts/phase-21-deployment-receipt.mjs" artifact-hash --root "$LIVE" --frontend-dist "$LIVE/frontend/dist" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("artifact") or {}).get("hash", ""))')"
+[[ "$LIVE_DIST_HASH" == "$NEW_FRONTEND_DIST_HASH" ]] || fail "Live frontend artifact does not match the certified candidate after atomic switch."
 
 log "Re-verifying the permanent source after the atomic frontend switch"
 cd "$LIVE"
@@ -410,29 +571,42 @@ npm run release:gate | tee "$WORK/permanent-live-release-gate.after-frontend-swi
 
 log "Switching PM2 to the permanent live backend"
 pm2 delete "$PM2_NAME" 2>/dev/null || true
-pm2 start "$LIVE/backend/src/server.js" --name "$PM2_NAME" --cwd "$LIVE/backend" --time --update-env
+pm2 start "$LIVE/backend/src/server.js" --name "$PM2_NAME" --cwd "$LIVE/backend" --time --update-env --kill-timeout "$PM2_KILL_TIMEOUT_MS"
 wait_for_health "/api/health/live" "$WORK/live.json" || fail "Permanent backend liveness failed."
 wait_for_health "/api/health/ready" "$WORK/ready.json" || fail "Permanent backend readiness failed."
+assert_backend_version "$WORK/live.json" "$EXPECTED_BACKEND_VERSION" || fail "Permanent liveness came from the wrong backend version."
+assert_backend_version "$WORK/ready.json" "$EXPECTED_BACKEND_VERSION" || fail "Permanent readiness came from the wrong backend version."
 pm2 save
 
-log "Running final database integrity and public runtime health checks"
-# Database integrity is verified directly against PostgreSQL with the production environment.
-# /api/db/health is intentionally admin-protected and must never be used as an anonymous deployment probe.
-npm run db:integrity --prefix backend | tee "$WORK/post-deployment-integrity.json"
+log "Running final public runtime health checks; startup readiness already performed physical PostgreSQL integrity verification"
 curl -fsS "http://127.0.0.1:${PORT}/api/health/live" | tee "$WORK/final-live.json"
 echo
 curl -fsS "http://127.0.0.1:${PORT}/api/health/ready" | tee "$WORK/final-ready.json"
 echo
+assert_backend_version "$WORK/final-live.json" "$EXPECTED_BACKEND_VERSION" || fail "Final liveness came from the wrong backend version."
+assert_backend_version "$WORK/final-ready.json" "$EXPECTED_BACKEND_VERSION" || fail "Final readiness came from the wrong backend version."
 
-log "Creating and verifying the first post-deployment backup"
-npm run backup:create | tee "$WORK/post-deployment-backup.json"
-npm run backup:verify | tee "$WORK/post-deployment-backup-verification.json"
-npm run backup:status | tee "$WORK/post-deployment-backup-status.json"
+if [[ "$DATABASE_SOURCE_UNCHANGED" == "1" ]]; then
+  POST_BACKUP_REUSED=1
+  log "Database functional input is unchanged; the freshly verified pre-deployment backup remains the rollback point and the immediate duplicate post backup is skipped."
+  npm run backup:status | tee "$WORK/post-deployment-backup-status.reused.json"
+else
+  log "Database functional input changed; creating and verifying the first post-deployment backup."
+  npm run backup:create | tee "$WORK/post-deployment-backup.json"
+  npm run backup:verify | tee "$WORK/post-deployment-backup-verification.json"
+  npm run backup:status | tee "$WORK/post-deployment-backup-status.json"
+fi
 
 log "Restoring automatic backup timers"
 resume_backup_timers
 
 rm -rf "$LIVE/frontend/dist.previous"
+log "Recording the exact deployed source/artifact receipt only after all live gates pass"
+node "$RELEASE_ROOT/scripts/phase-21-deployment-receipt.mjs" write-deployment-state \
+  --root "$LIVE" --receipt "$CERTIFIED_RESULT_FILE" --commit "$CURRENT_COMMIT" \
+  --frontend-dist "$LIVE/frontend/dist" --output "$CURRENT_DEPLOYMENT_STATE" \
+  >"$WORK/deployment-state.json"
+write_attempt_receipt "DEPLOYED_AND_VERIFIED"
 DEPLOYMENT_COMPLETE=1
 trap - ERR INT TERM EXIT
 

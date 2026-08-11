@@ -1,3 +1,4 @@
+import { asArray } from '../utils/runtimeShapeUtils.js';
 import React from 'react';
 import { AlertCircle, Archive, BarChart3, Bell, Briefcase, Calculator, Calendar, CheckCircle, ClipboardList, Flag, LayoutDashboard, LogOut, MessageSquare, MoreHorizontal, Search, Settings, User, Users, Video, X } from 'lucide-react';
 import { getProfilePhotoVersion, profilePhotoUrl } from '../utils/profileUtils';
@@ -113,7 +114,7 @@ export const TopNavigation = ({
                   ))}
                 </div>
                 <div className="mt-3 grid grid-cols-4 gap-2 text-center">
-                  {[["Unread", unreadNotifs], ["Critical", (myNotifs || []).filter(n => n.priority === 'Critical').length], ["High", (myNotifs || []).filter(n => n.priority === 'High').length], ["Total", (myNotifs || []).length]].map(([label, count]) => (
+                  {[["Unread", unreadNotifs], ["Critical", asArray(myNotifs).filter(n => n.priority === 'Critical').length], ["High", asArray(myNotifs).filter(n => n.priority === 'High').length], ["Total", asArray(myNotifs).length]].map(([label, count]) => (
                     <div key={label} className="bg-white border border-slate-100 rounded-xl py-2">
                       <p className="text-sm font-black text-slate-800">{count}</p>
                       <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">{label}</p>
@@ -122,8 +123,8 @@ export const TopNavigation = ({
                 </div>
               </div>
               <div className="max-h-80 overflow-y-auto p-2 space-y-1 custom-scrollbar">
-                {(filteredNotifs || []).length === 0 && <p className="text-xs text-slate-400 font-bold text-center py-6">No notifications found.</p>}
-                {(filteredNotifs || []).map(n => {
+                {asArray(filteredNotifs).length === 0 && <p className="text-xs text-slate-400 font-bold text-center py-6">No notifications found.</p>}
+                {asArray(filteredNotifs).map(n => {
                   const unread = !isNotificationReadByUser(n, currentUser);
                   return (
                     <div key={n.id} className={`p-3.5 rounded-2xl flex items-start transition-colors group ${unread ? 'bg-indigo-50/50 border border-indigo-100' : 'bg-white hover:bg-slate-50 border border-transparent'}`}>
@@ -147,8 +148,8 @@ export const TopNavigation = ({
                   <button type="button" onClick={requestDesktopNotifications} className={`text-[10px] font-black px-2 py-1 rounded-lg border ${desktopNotificationsEnabled ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}>Desktop {desktopNotificationsEnabled ? 'On' : 'Off'}</button>
                 </div>
                 <div className="space-y-2 max-h-36 overflow-y-auto custom-scrollbar">
-                  {(activityTimeline || []).length === 0 && <p className="text-xs text-slate-400 font-bold text-center py-3">No recent activity.</p>}
-                  {(activityTimeline || []).map(item => (
+                  {asArray(activityTimeline).length === 0 && <p className="text-xs text-slate-400 font-bold text-center py-3">No recent activity.</p>}
+                  {asArray(activityTimeline).map(item => (
                     <div key={item.id} className="flex items-start gap-2 text-xs">
                       <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1.5 shrink-0"></span>
                       <div className="min-w-0"><p className="font-bold text-slate-700 truncate">{item.label}</p><p className="text-[10px] text-slate-400 font-black uppercase">{item.type}</p></div>

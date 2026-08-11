@@ -1,3 +1,4 @@
+import { asArray } from '../utils/runtimeShapeUtils.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, FileText, LayoutDashboard, Search, X } from 'lucide-react';
 import { EmptyStatePanel, LoadingState } from './ui/designSystem.jsx';
@@ -14,7 +15,7 @@ export const MultiSelectCheckbox = ({ label, options = [], selectedValues = [], 
   const rootRef = useRef(null);
   const selected = Array.isArray(selectedValues) ? selectedValues : [];
   const uniqueOptions = Array.from(new Map(
-    (options || []).filter(Boolean).map(option => [String(option).trim().toLocaleUpperCase(), String(option).trim()])
+    asArray(options).filter(Boolean).map(option => [String(option).trim().toLocaleUpperCase(), String(option).trim()])
   ).values());
   const filteredOptions = uniqueOptions.filter(option => option.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
 

@@ -29,3 +29,4 @@ No finance persistence, bank ledger, task lifecycle, attendance calculations, au
 The first combined release candidate was correctly rejected by the production Vite/PostCSS gate because the appended PDF viewport rules had been serialized with literal `\n` text instead of real newline characters. Production was not modified.
 
 This closure writes the viewport rules as normal CSS source and adds a focused regression that rejects literal escaped-newline serialization before deployment. The Windows push helper for this closure also runs the focused tests and a real Vite production build with the production API URL before it is allowed to commit or push.
+

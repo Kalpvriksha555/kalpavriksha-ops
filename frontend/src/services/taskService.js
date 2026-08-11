@@ -1,5 +1,8 @@
 import { authFetch } from './authService';
-import { isProjectDeletedError } from './requestControlService.js';
+import { asArray, asRecord } from '../utils/runtimeShapeUtils.js';
+import { getClientMutationGeneration, isProjectDeletedError } from './requestControlService.js';
+import { apiHttpError, readApiRecord, validateWorkspaceStatePayload } from './apiContractService.js';
+import { applyFreshestTaskFinance } from '../utils/financeMergeUtils.js';
 export { isProjectDeletedError } from './requestControlService.js';
 export const getStatusColor = (status) => {
   switch (status) {
@@ -25,54 +28,6 @@ export const getPriorityColor = (priority, dueDate) => {
 
 // Phase 24C: task API + sync helpers. Keep operational task mutations behind
 // this service so components do not create competing API/state code paths.
-
-const FINANCE_FIELDS = Object.freeze([
-  'estimate','ledger','financeVersion','paymentTrackingStatus','paymentTrackingUpdatedAt','paymentTrackingUpdatedBy',
-  'paymentStatus','paymentReceived','paymentAmountIn','refundAmount','payerName','transactionId',
-  'paymentDate','paymentTime','paymentAuditTrail','financeAccountingPeriod','lastFinanceMutationId','lastFinanceMutationAt'
-]);
-
-const toTime = (value) => {
-  if (!value) return 0;
-  const numeric = Number(value);
-  if (Number.isFinite(numeric) && numeric > 0) return numeric;
-  const parsed = new Date(value).getTime();
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-};
-
-export const getTaskFinanceTime = (task = {}) => Math.max(
-  0,
-  toTime(task?.financeVersion),
-  toTime(task?.paymentTrackingUpdatedAt),
-  toTime(task?.ledger?.updatedAt),
-  toTime(task?.paymentUpdatedAt),
-  toTime(task?.paymentDate),
-  ...(Array.isArray(task?.paymentAuditTrail) ? task?.paymentAuditTrail.map(item => toTime(item?.at || item?.updatedAt || item?.createdAt)) : [0])
-);
-
-const financeScore = (task = {}) => FINANCE_FIELDS.reduce((score, field) => {
-  const value = task?.[field];
-  if (value === undefined || value === null || value === '') return score;
-  if (Array.isArray(value)) return score + (value.length ? 2 : 0);
-  if (typeof value === 'object') return score + (Object.keys(value).length ? 2 : 0);
-  return score + 1;
-}, 0);
-
-const applyFreshestTaskFinance = (target = {}, current = {}, incoming = {}) => {
-  const currentTime = getTaskFinanceTime(current);
-  const incomingTime = getTaskFinanceTime(incoming);
-  const source = incomingTime > currentTime
-    ? incoming
-    : currentTime > incomingTime
-      ? current
-      : (financeScore(incoming) > financeScore(current) ? incoming : current);
-  const next = { ...target };
-  FINANCE_FIELDS.forEach(field => {
-    if (Object.prototype.hasOwnProperty.call(source || {}, field)) next[field] = structuredClone(source[field]);
-    else delete next[field];
-  });
-  return next;
-};
 
 export const TASK_SYNC_STORAGE_KEYS = Object.freeze({
   projects: 'kalpa_projects',
@@ -100,15 +55,34 @@ export const normalizeTaskAssignee = (value) => {
 };
 
 export const normalizeTaskRecord = (task = {}) => {
-  if (!task || typeof task !== 'object') return task;
-  const assignedTo = normalizeTaskAssignee(task?.assignedTo || task?.ownership?.assignedTo || task?.assigneeName || task?.assignedToName || task?.assignedUserName);
+  const source = asRecord(task);
+  const assignedTo = normalizeTaskAssignee(source?.assignedTo || source?.ownership?.assignedTo || source?.assigneeName || source?.assignedToName || source?.assignedUserName);
   return {
-    ...task,
-    id: String(task?.id || task?.caseId || '').trim() || task?.id,
-    caseId: task?.caseId || task?.id,
+    ...source,
+    id: String(source?.id || source?.caseId || '').trim() || source?.id,
+    caseId: source?.caseId || source?.id,
     assignedTo,
-    ownership: { ...(task?.ownership || {}), assignedTo },
-    updatedAt: task?.updatedAt || task?.syncVersion || task?.createdAt || Date.now()
+    ownership: { ...asRecord(source?.ownership), assignedTo },
+    documents: asArray(source?.documents),
+    completedFiles: asArray(source?.completedFiles),
+    finalFiles: asArray(source?.finalFiles),
+    workFiles: asArray(source?.workFiles),
+    sourceFiles: asArray(source?.sourceFiles),
+    subTasks: asArray(source?.subTasks),
+    revisions: asArray(source?.revisions),
+    notes: asArray(source?.notes),
+    reassignmentHistory: asArray(source?.reassignmentHistory),
+    deliveryLog: asArray(source?.deliveryLog),
+    revisionHistory: asArray(source?.revisionHistory),
+    reviewHistory: asArray(source?.reviewHistory),
+    caseEditHistory: asArray(source?.caseEditHistory),
+    pausedDraftingSessions: asArray(source?.pausedDraftingSessions),
+    previousTaskIds: asArray(source?.previousTaskIds),
+    paymentAuditTrail: asArray(source?.paymentAuditTrail),
+    timeline: asArray(source?.timeline),
+    history: asArray(source?.history),
+    ledger: asRecord(source?.ledger),
+    updatedAt: source?.updatedAt || source?.syncVersion || source?.createdAt || Date.now()
   };
 };
 
@@ -131,7 +105,7 @@ export const mergeTaskRecord = (current = {}, incoming = {}) => {
     merged.assignedBy = chosen.assignedBy || merged.assignedBy;
     merged.assignedAt = chosen.assignedAt || merged.assignedAt;
     merged.assignmentVersion = chosen.assignmentVersion || chosen.assignedAt || merged.assignmentVersion;
-    merged.ownership = { ...(merged.ownership || {}), assignedTo: merged.assignedTo, assignedBy: merged.assignedBy };
+    merged.ownership = { ...asRecord(merged.ownership), assignedTo: merged.assignedTo, assignedBy: merged.assignedBy };
   }
   const timeline = [...(Array.isArray(a.timeline) ? a.timeline : []), ...(Array.isArray(b.timeline) ? b.timeline : [])];
   const seen = new Set();
@@ -153,15 +127,27 @@ export const mergeTaskLists = (current = [], incoming = []) => {
   return Array.from(byId.values()).sort((a, b) => getTaskRecordTime(b) - getTaskRecordTime(a));
 };
 
-const parseJsonSafe = async (response) => response.json().catch(() => ({}));
+const parseJsonSafe = async (response, operation = 'API request', options = {}) => readApiRecord(response, {
+  operation,
+  requireOk:response.ok && options.requireOk !== false,
+  requiredFields:options.requiredFields || []
+});
 
 const throwApiError = async (response, fallback) => {
-  const payload = await parseJsonSafe(response);
-  const error = new Error(payload.error || `${fallback}: ${response.status}`);
-  error.status = response.status;
-  error.code = payload.code || '';
-  error.payload = payload;
-  throw error;
+  const payload = await readApiRecord(response, { operation:fallback || 'API request' });
+  throw apiHttpError(response, payload, fallback || 'Request failed.');
+};
+
+const requireConfirmedProject = (payload, operation = 'Task save') => {
+  const project = asRecord(payload?.project || payload?.case);
+  if (!project.id && !project.caseId) {
+    const error = new Error(`${operation} returned success without a confirmed task identity. Refresh before retrying.`);
+    error.name = 'ApiContractError';
+    error.code = 'TASK_CONFIRMATION_MISSING';
+    error.payload = asRecord(payload);
+    throw error;
+  }
+  return payload;
 };
 
 
@@ -174,9 +160,17 @@ export const fetchBackendState = async ({ apiBase, headers = {}, includePerforma
   if (Number.isFinite(Number(sinceVersion)) && Number(sinceVersion) >= 0) query.set('sinceVersion', String(Number(sinceVersion)));
   if (Number.isFinite(Number(sincePresence)) && Number(sincePresence) >= 0) query.set('sincePresence', String(Number(sincePresence)));
   if (sinceCollections && typeof sinceCollections === 'object') query.set('sinceCollections', JSON.stringify(sinceCollections));
+  const clientMutationGenerationAtStart = getClientMutationGeneration();
   const res = await authFetch(`${apiBase}/api/state?${query.toString()}`, { cache: 'no-store', headers, timeoutMs:60_000 });
   if (!res.ok) return throwApiError(res, 'Backend state failed');
-  return parseJsonSafe(res);
+  const payload = validateWorkspaceStatePayload(await parseJsonSafe(res, 'Workspace state'));
+  const clientMutationGenerationAtResponse = getClientMutationGeneration();
+  return {
+    ...payload,
+    _clientMutationGenerationAtStart:clientMutationGenerationAtStart,
+    _clientMutationGenerationAtResponse:clientMutationGenerationAtResponse,
+    _staleAfterClientMutation:clientMutationGenerationAtResponse !== clientMutationGenerationAtStart
+  };
 };
 
 const TASK_WRITE_TIMEOUT_MS = 2 * 60 * 1000;
@@ -202,7 +196,7 @@ export const createTaskApi = async ({ apiBase, headers = {}, task, expectedTaskV
     throw error;
   }
   if (!res.ok) return throwApiError(res, 'Backend project save failed');
-  return parseJsonSafe(res);
+  return requireConfirmedProject(await parseJsonSafe(res, 'Task save'), 'Task save');
 };
 
 export const saveTasksApi = async ({ apiBase, headers = {}, tasks = [] }) => {
@@ -212,14 +206,33 @@ export const saveTasksApi = async ({ apiBase, headers = {}, tasks = [] }) => {
     timeoutMs:TASK_WRITE_TIMEOUT_MS,
     body: JSON.stringify({ projects: normalizeTaskList(tasks) })
   });
-  if (!res.ok) throw new Error(`Backend state save failed: ${res.status}`);
-  return parseJsonSafe(res);
+  if (!res.ok) return throwApiError(res, 'Backend state save failed');
+  return parseJsonSafe(res, 'Backend state save');
 };
 
-export const deleteTaskApi = async ({ apiBase, taskId, headers = {} }) => {
-  const res = await authFetch(`${apiBase}/api/state/projects/${encodeURIComponent(String(taskId))}`, { method: 'DELETE', headers, timeoutMs:TASK_WRITE_TIMEOUT_MS });
+export const deleteTaskApi = async ({ apiBase, taskId, headers = {}, expectedTaskVersion, mutationId }) => {
+  let res;
+  try {
+    res = await authFetch(`${apiBase}/api/state/projects/${encodeURIComponent(String(taskId))}`, {
+      method: 'DELETE',
+      headers,
+      timeoutMs:TASK_WRITE_TIMEOUT_MS,
+      body:JSON.stringify({ expectedTaskVersion, mutationId:String(mutationId || '').trim() })
+    });
+  } catch (error) {
+    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+      const timeoutError = new Error('Task delete took too long. The task remains hidden while server confirmation retries with the same delete request.');
+      timeoutError.code = 'TASK_DELETE_TIMEOUT';
+      throw timeoutError;
+    }
+    throw error;
+  }
   if (!res.ok && res.status !== 404) return throwApiError(res, 'Backend task delete failed');
-  return parseJsonSafe(res);
+  if (res.status === 404) {
+    const payload = await readApiRecord(res, { operation:'Backend task delete' });
+    return { ...payload, ok:true, alreadyAbsent:true, deletedProjectIds:asArray(payload.deletedProjectIds) };
+  }
+  return parseJsonSafe(res, 'Backend task delete');
 };
 
 export const persistTasksToLocalCache = (tasks = [], { sanitize = (x) => x, filterDeleted = (x) => x, broadcast } = {}) => {
@@ -231,16 +244,17 @@ export const persistTasksToLocalCache = (tasks = [], { sanitize = (x) => x, filt
 };
 
 export const saveBackendStateApi = async ({ apiBase, headers = {}, payload = {} }) => {
+  payload = asRecord(payload);
   const normalizedPayload = { ...payload };
-  if (Object.prototype.hasOwnProperty.call(payload, 'projects')) normalizedPayload.projects = normalizeTaskList(payload.projects || []);
+  if (Object.prototype.hasOwnProperty.call(payload, 'projects')) normalizedPayload.projects = normalizeTaskList(payload.projects);
   const res = await authFetch(`${apiBase}/api/state`, {
     method: 'POST',
     headers,
     timeoutMs:TASK_WRITE_TIMEOUT_MS,
     body: JSON.stringify(normalizedPayload)
   });
-  if (!res.ok) throw new Error(`Backend state save failed: ${res.status}`);
-  return parseJsonSafe(res);
+  if (!res.ok) return throwApiError(res, 'Backend state save failed');
+  return parseJsonSafe(res, 'Backend state save');
 };
 
 
@@ -260,7 +274,7 @@ export const saveFinanceStatusApi = async ({ apiBase, headers = {}, taskId, stat
       })
     });
     if (!res.ok) return throwApiError(res, 'Finance save failed');
-    return parseJsonSafe(res);
+    return requireConfirmedProject(await parseJsonSafe(res, 'Finance save'), 'Finance save');
   } catch (error) {
     if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
       const timeoutError = new Error('Finance save took too long. Your values remain on screen. Select Save Payment Details again; the same mutation ID prevents duplicate posting if the first attempt completed.');
@@ -275,5 +289,5 @@ export const saveFinanceStatusApi = async ({ apiBase, headers = {}, taskId, stat
 export const fetchFinanceHistoryApi = async ({ apiBase, headers = {}, taskId }) => {
   const res = await authFetch(`${apiBase}/api/finance/history/${encodeURIComponent(String(taskId))}`, { cache: 'no-store', headers });
   if (!res.ok) return throwApiError(res, 'Finance history failed');
-  return parseJsonSafe(res);
+  return parseJsonSafe(res, 'Finance history');
 };

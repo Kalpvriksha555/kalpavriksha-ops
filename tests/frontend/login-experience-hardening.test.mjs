@@ -4,6 +4,7 @@ import fs from 'node:fs';
 
 const app = fs.readFileSync(new URL('../../frontend/src/App.jsx', import.meta.url), 'utf8');
 const auth = fs.readFileSync(new URL('../../frontend/src/services/authService.js', import.meta.url), 'utf8');
+const apiContract = fs.readFileSync(new URL('../../frontend/src/services/apiContractService.js', import.meta.url), 'utf8');
 
 const loginStart = app.indexOf('const LoginScreen =');
 const loginEnd = app.indexOf('const TeamPerformanceView', loginStart);
@@ -29,8 +30,8 @@ test('authentication requests use bounded action-specific deadlines and friendly
   assert.match(auth, /timeoutMessageForAuthAction/);
   assert.match(auth, /Password change confirmation took too long/);
   assert.match(auth, /Password reset confirmation took too long/);
-  assert.match(auth, /retryAfterSeconds/);
-  assert.match(auth, /requestId/);
+  assert.match(apiContract, /retryAfterSeconds/);
+  assert.match(apiContract, /requestId/);
   assert.match(auth, /if \(response\.status === 401\)/);
   assert.match(auth, /if \(!response\.ok\) return throwAuthError\(response, 'Secure session verification failed\.'/);
 });

@@ -1,3 +1,4 @@
+import { ONLINE_STALE_MS, PRESENCE_HEARTBEAT_MS } from './presenceConfig.js';
 const configuredApiBase = String(import.meta.env.VITE_API_BASE || import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
 const allowExternalDevelopmentApi = String(import.meta.env.VITE_ALLOW_EXTERNAL_DEV_API || '').toLowerCase() === 'true';
 
@@ -19,5 +20,5 @@ if (import.meta.env.PROD && !configuredApiBase) {
 // Firebase/localStorage are kept only as UI fallback/cache.
 export const USE_BACKEND_STATE = true;
 
-export const ONLINE_STALE_MS = 8 * 60 * 1000;
+export { ONLINE_STALE_MS, PRESENCE_HEARTBEAT_MS };
 export const MAX_INLINE_DATA_URL_CHARS = 180000;

@@ -1,7 +1,8 @@
+import { parseJsonRecord } from '../../utils/runtimeShapeUtils.js';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AlertCircle, ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Image as ImageIcon, Maximize2, Minus, Move, Plus, RefreshCcw, RotateCw, Search, X } from 'lucide-react';
-import { fetchProjectFilePreview, getProjectFileKind, getProjectFilePreviewUrl, releaseProjectFilePreview } from '../../services/fileService';
+import { fetchProjectFilePreview, getProjectFileKind, getProjectFilePreviewUrl, probeProjectFileAvailability, releaseProjectFilePreview } from '../../services/fileService';
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const SESSION_KEY_PREFIX = 'kalpa_unified_file_viewer_state_v2';
@@ -19,9 +20,7 @@ const getFileTitle = (file = {}) => file?.name || file?.fileName || file?.filena
 const getViewerKey = (file = {}) => String(file?._previewKey || file?.fileId || file?.id || file?.previewUrl || file?.url || file?.downloadUrl || getFileTitle(file));
 const readSessionState = (key) => {
   try {
-    const saved = JSON.parse(sessionStorage.getItem(`${SESSION_KEY_PREFIX}:${key}`) || '{}');
-    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return null;
-    return saved;
+    return parseJsonRecord(sessionStorage.getItem(`${SESSION_KEY_PREFIX}:${key}`));
   } catch { return null; }
 };
 const writeSessionState = (key, value) => {
@@ -185,6 +184,15 @@ export const UnifiedFileViewer = ({ file, onClose, onDownload }) => {
           const el = contentRef.current;
           if (el && saved?.scrollTop) el.scrollTop = Number(saved.scrollTop || 0);
         });
+        if (result.optimisticStream) {
+          // Keep PDF opening immediate, but verify the authoritative private-file
+          // row in parallel so an expired/missing object becomes a clear viewer
+          // error instead of a blank or browser-native iframe error page.
+          probeProjectFileAvailability(file, { signal:controller.signal }).catch((error) => {
+            if (controller.signal.aborted) return;
+            setPreview((current) => current?.file === file ? { ...current, loading:false, error:error?.message || 'The saved PDF is unavailable.', url:'', objectUrl:'' } : current);
+          });
+        }
       })
       .catch((error) => {
         if (controller.signal.aborted) return;

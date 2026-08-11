@@ -42,6 +42,24 @@ export function isDeferredPersistenceOperation({ metadata = {}, reason = '' } = 
   return metadata?.background === true || normalizedReason.startsWith('presence_');
 }
 
+export function persistenceCommitEvidenceMatches(error = {}, recovered = {}) {
+  if (error?.commitOutcomeUnknown !== true) return false;
+  const evidence = error?.commitEvidence || {};
+  const expectedVersion = Number(evidence.stateVersion);
+  const recoveredVersion = Number(recovered?.stateVersion);
+  const expectedHash = String(evidence.snapshotHash || '').trim();
+  const recoveredHash = String(recovered?.snapshotHash || '').trim();
+  if (!Number.isInteger(expectedVersion) || expectedVersion < 0 || recoveredVersion !== expectedVersion) return false;
+  if (!expectedHash || !recoveredHash || recoveredHash !== expectedHash) return false;
+  return true;
+}
+
+export function runtimeRecoveryCanRun({ queueDepth = 0, inFlight = 0, activeForegroundWrites = 0 } = {}) {
+  return Number(queueDepth || 0) <= 0
+    && Number(inFlight || 0) <= 0
+    && Number(activeForegroundWrites || 0) <= 0;
+}
+
 export function classifyPersistenceFailure({
   metadata = {},
   reason = '',
@@ -50,11 +68,14 @@ export function classifyPersistenceFailure({
   usePostgres = true
 } = {}) {
   const deferred = isDeferredPersistenceOperation({ metadata, reason });
-  const safelyRecovered = Boolean(recoverySucceeded || verifiedFallbackRestored);
+  // A verified shadow is a safe temporary fallback only for deferred telemetry.
+  // For foreground business writes, a failed database reload means commit outcome
+  // is still unresolved even if we can serve the last verified shadow read-only.
+  const safelyRecovered = Boolean(recoverySucceeded || (deferred && verifiedFallbackRestored));
   return {
     deferred,
     safelyRecovered,
-    critical: !deferred && (!usePostgres || !safelyRecovered),
+    critical: !deferred && (!usePostgres || !recoverySucceeded),
     jobType: deferred ? 'PRESENCE_PERSISTENCE' : 'STATE_PERSISTENCE'
   };
 }

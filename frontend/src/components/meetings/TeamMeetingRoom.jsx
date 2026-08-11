@@ -11,6 +11,9 @@ export const TeamMeetingRoom = ({ currentUser, safeAppId }) => {
   const [meetingNow, setMeetingNow] = useState(Date.now());
   const [meetingNotes, setMeetingNotes] = useState('');
   const roomName = createSafeMeetingRoomName('KalpaVriksha_Ops_TeamRoom', safeAppId);
+  const storageActorKey = String(currentUser?.id || currentUser?.username || currentUser?.name || 'signed-out').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+  const meetingStartedAtStorageKey = `kalpa_team_meeting_started_at::${storageActorKey}`;
+  const meetingNotesStorageKey = `kalpa_team_meeting_notes::${storageActorKey}`;
   const meetingUrl = buildJitsiUrl(roomName, currentUser?.name, {
     audioOnly: meetingMode === 'audio',
     muteVideo: meetingMode === 'audio'
@@ -28,9 +31,9 @@ export const TeamMeetingRoom = ({ currentUser, safeAppId }) => {
     window.setTimeout(() => setCopied(false), 1800);
   };
   useEffect(() => {
-    try { setMeetingStartedAt(Number(localStorage.getItem('kalpa_team_meeting_started_at') || 0) || null); } catch(e) {}
-    try { setMeetingNotes(localStorage.getItem('kalpa_team_meeting_notes') || ''); } catch(e) {}
-  }, []);
+    try { setMeetingStartedAt(Number(localStorage.getItem(meetingStartedAtStorageKey) || 0) || null); } catch(e) { setMeetingStartedAt(null); }
+    try { setMeetingNotes(localStorage.getItem(meetingNotesStorageKey) || ''); } catch(e) { setMeetingNotes(''); }
+  }, [meetingStartedAtStorageKey, meetingNotesStorageKey]);
   useEffect(() => {
     if (!meetingStartedAt || typeof document === 'undefined') return undefined;
     const update = () => { if (!document.hidden) setMeetingNow(Date.now()); };
@@ -41,16 +44,16 @@ export const TeamMeetingRoom = ({ currentUser, safeAppId }) => {
   const handleStartMeeting = () => {
     const now = Date.now();
     setMeetingStartedAt(now);
-    try { localStorage.setItem('kalpa_team_meeting_started_at', String(now)); } catch(e) {}
+    try { localStorage.setItem(meetingStartedAtStorageKey, String(now)); } catch(e) {}
   };
   const handleEndMeeting = () => {
     setMeetingStartedAt(null);
-    try { localStorage.removeItem('kalpa_team_meeting_started_at'); } catch(e) {}
+    try { localStorage.removeItem(meetingStartedAtStorageKey); } catch(e) {}
   };
   const handleNotesChange = (e) => {
     const value = e.target.value;
     setMeetingNotes(value);
-    try { localStorage.setItem('kalpa_team_meeting_notes', value); } catch(err) {}
+    try { localStorage.setItem(meetingNotesStorageKey, value); } catch(err) {}
   };
   return (
     <div className="space-y-5 sm:space-y-6 animate-in fade-in duration-200">

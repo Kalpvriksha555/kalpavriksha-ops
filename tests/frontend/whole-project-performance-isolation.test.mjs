@@ -15,14 +15,14 @@ test('adaptive sync collapses simultaneous focus, online and visibility refreshe
 
 test('production workspace refreshes are collection and row delta based', () => {
   assert.match(app, /sinceCollections:workspaceCollectionRevisionsRef\.current/);
-  assert.match(app, /const rowDeltaIds = data\.rowDeltaIds/);
+  assert.match(app, /const rowDeltaIds = asRecord\(data\.rowDeltaIds\)/);
   assert.match(app, /React\.startTransition/);
-  assert.match(app, /replaceIds:rowDeltaIds\.cases/);
+  assert.match(app, /replaceIds:asArray\(rowDeltaIds\.cases\)/);
 });
 
 test('production presence uses one server writer and compact row reconciliation', () => {
   assert.match(app, /Backend mode: the server is the only writer for attendance counters/);
-  assert.match(app, /const heartbeatTimer = setInterval\(sendHeartbeat, 60_000\)/);
+  assert.match(app, /const heartbeatTimer = setInterval\(sendHeartbeat, PRESENCE_HEARTBEAT_MS\)/);
   assert.match(app, /if \(data\?\.attendanceLog\)/);
   assert.doesNotMatch(app, /USE_BACKEND_STATE[\s\S]{0,120}setInterval\([^)]*25000/);
 });

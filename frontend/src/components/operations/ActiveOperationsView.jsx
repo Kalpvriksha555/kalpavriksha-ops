@@ -1,3 +1,4 @@
+import { asArray } from '../../utils/runtimeShapeUtils.js';
 import React, { useEffect, useState } from 'react';
 import { Calendar, List, KanbanSquare, Plus, Flag, Users, Clock, MessageSquare } from 'lucide-react';
 import { Badge } from '../shared';
@@ -73,7 +74,7 @@ const OperationKanbanCard = ({ project, onSelectProject, getCustomerDisplayName,
     <div className="flex justify-between items-center gap-2 pt-3 border-t border-slate-100">
       <Badge colorClass={project.assignedTo === 'Unassigned' ? 'bg-red-50 text-red-600 border-red-200' : 'bg-slate-50 text-slate-700 border-slate-200'}>{project.assignedTo}</Badge>
       <div className="flex items-center gap-2">
-        {project.subTasks?.length > 0 && <span className="text-[10px] text-red-600 bg-red-50 px-2 py-0.5 rounded font-black">{project.subTasks.length} Revs</span>}
+        {asArray(project.subTasks).length > 0 && <span className="text-[10px] text-red-600 bg-red-50 px-2 py-0.5 rounded font-black">{asArray(project.subTasks).length} Revs</span>}
         <button type="button" onClick={(e) => { e.stopPropagation(); if (typeof onDiscussTask === 'function') onDiscussTask(project); }} className="text-[10px] font-black text-indigo-700 bg-indigo-50 border border-indigo-100 px-2 py-1 rounded-lg hover:bg-indigo-100 flex items-center gap-1"><MessageSquare className="w-3 h-3" /> Chat</button>
       </div>
     </div>
@@ -217,8 +218,8 @@ const TeamActivityPanel = ({ users, projects, nowTick, ROLES, onSelectProject, g
             {designerOnline && designer.availability !== 'Break' && activeTasks.length > 0 ? (
               <div className="ml-5 space-y-2">
                 {activeTasks.map(activeTask => {
-                  const pendingRevs = (activeTask.subTasks || []).filter(st => st.status === 'Pending').length;
-                  const totalRevs = (activeTask.subTasks || []).length;
+                  const pendingRevs = asArray(activeTask.subTasks).filter(st => st.status === 'Pending').length;
+                  const totalRevs = asArray(activeTask.subTasks).length;
                   return (
                     <div key={activeTask.id} className="text-xs font-bold bg-slate-50 p-2.5 rounded-xl border border-slate-100 flex justify-between items-center group cursor-pointer hover:bg-slate-100 transition-colors" onClick={() => onSelectProject(activeTask)}>
                       <span className="text-slate-700 truncate mr-2">{getDisplayTaskId(activeTask)}{isRevisionWorkItem(activeTask) ? ` ${activeTask.revisionCode || 'REV'}` : ''}<span className="block text-[10px] text-slate-400 font-black mt-0.5">Drafting since {formatDuration(getTaskBusySince(activeTask), nowTick)}</span></span>
@@ -307,9 +308,19 @@ export const ActiveOperationsView = ({
   const safeActiveUsers = Array.isArray(activeUsers) ? activeUsers.filter(Boolean) : [];
   const [nowTick, setNowTick] = useState(Date.now());
   useEffect(() => {
-    const tick = () => setNowTick(Date.now());
-    const timer = setInterval(tick, 30000);
-    return () => clearInterval(timer);
+    if (typeof document === 'undefined') return undefined;
+    let timer = null;
+    const stop = () => { if (timer) clearInterval(timer); timer = null; };
+    const start = () => {
+      stop();
+      if (document.hidden) return;
+      setNowTick(Date.now());
+      timer = setInterval(() => setNowTick(Date.now()), 30000);
+    };
+    const onVisibility = () => start();
+    start();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => { stop(); document.removeEventListener('visibilitychange', onVisibility); };
   }, []);
   const selectTask = (project) => {
     if (typeof onSelectProject === 'function') onSelectProject(project);

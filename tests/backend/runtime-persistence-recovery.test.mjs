@@ -78,7 +78,7 @@ test('verified shadow rollback preserves newer presence rows without retaining a
 });
 
 test('server integrates deferred rollback, strict foreground maintenance and read-only runtime access', () => {
-  assert.match(server, /restoreVerifiedShadowAfterDeferredFailure\(expectedVersion\)/);
+  assert.match(server, /restoreVerifiedShadowAfterPersistenceFailure\(expectedVersion\)/);
   assert.match(server, /runtime_deferred_recovery_preserved/);
   assert.match(server, /phase:'runtime'/);
   assert.match(server, /lastCriticalPersistenceFailure/);

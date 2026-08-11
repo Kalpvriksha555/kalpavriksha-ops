@@ -1,3 +1,4 @@
+import { asArray } from './runtimeShapeUtils.js';
 import { getCurrentAccountingMonthKey, getIndiaDateKey, getProjectFinanceMonthKey, normalizeAccountingMonthKey } from './accountingPeriodUtils.js';
 
 export const PAYMENT_TRACKING_OPTIONS = ['Not Updated', 'Pending', 'Paid'];
@@ -162,9 +163,9 @@ export const buildPaymentTrackingUpdate = (project = {}, status = 'Not Updated',
     paymentReceived: computedStatus === 'Paid' ? 'YES' : (computedStatus === 'Pending' ? 'PARTIAL' : 'NO'),
     paymentAmountIn: nextAmountIn,
     paymentDate: nextLedger.date || project?.paymentDate,
-    paymentAuditTrail: [auditEvent, ...(project?.paymentAuditTrail || [])],
+    paymentAuditTrail: [auditEvent, ...asArray(project?.paymentAuditTrail)],
     timeline: [
-      ...(project?.timeline || []),
+      ...asArray(project?.timeline),
       {
         id: now,
         text: computedStatus === 'Paid'

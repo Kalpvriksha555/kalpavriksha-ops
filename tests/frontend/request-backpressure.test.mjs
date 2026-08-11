@@ -11,7 +11,7 @@ test('heartbeat requests cannot overlap and hidden tabs stop sending beats', () 
   assert.match(app, /action === 'heartbeat' && heartbeatRequestInFlightRef\.current/);
   assert.match(app, /heartbeatRequestInFlightRef\.current = false/);
   assert.match(app, /document\.visibilityState === 'hidden'/);
-  assert.match(app, /setInterval\(sendHeartbeat, 60_000\)/);
+  assert.match(app, /setInterval\(sendHeartbeat, PRESENCE_HEARTBEAT_MS\)/);
 });
 
 test('workspace refreshes and pending task retries have in-flight backpressure', () => {

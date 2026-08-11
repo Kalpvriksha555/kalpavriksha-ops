@@ -9,8 +9,13 @@ async function loadAuthServiceForNode() {
   source = source.replace("import { API_BASE } from '../config/appConfig';", "const API_BASE = '';");
   const requestControlUrl = pathToFileURL(path.resolve('frontend/src/services/requestControlService.js')).href;
   source = source.replace(
-    "import { createRequestDeadline } from './requestControlService.js';",
-    `import { createRequestDeadline } from ${JSON.stringify(requestControlUrl)};`
+    "import { createRequestDeadline, markClientMutationStarted } from './requestControlService.js';",
+    `import { createRequestDeadline, markClientMutationStarted } from ${JSON.stringify(requestControlUrl)};`
+  );
+  const apiContractUrl = pathToFileURL(path.resolve('frontend/src/services/apiContractService.js')).href;
+  source = source.replace(
+    "import { apiHttpError, readApiRecord } from './apiContractService.js';",
+    `import { apiHttpError, readApiRecord } from ${JSON.stringify(apiContractUrl)};`
   );
   return import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 }

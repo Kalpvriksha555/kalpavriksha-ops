@@ -1,3 +1,4 @@
+import { asArray, asRecord, parseJsonArray, parseJsonRecord } from '../../utils/runtimeShapeUtils.js';
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { MessageSquare, X, Phone, Video, Square, Mic, Smile, Paperclip, Send, Search, User, Star, Hash, AlertCircle, File as FileIcon, ExternalLink, ClipboardList } from 'lucide-react';
@@ -7,10 +8,14 @@ import { copyTextToClipboard } from '../../utils/clipboard';
 import { MiniEmptyState } from '../shared';
 import { getVisibleNotifications } from '../../services/notificationService';
 import { formatTaskId } from '../../utils/taskDisplayUtils';
-import { CHAT_API_BASE, absoluteChatUrl, makeMessageId, QUICK_EMOJIS, isUserActuallyOnline, getOperationalUsers, identityKey, samePerson, readEntryName, ROLES, normalizeChannelKey, chatEmojiGroups, reactionEmojis } from '../../utils/chatUtils';
+import { CHAT_API_BASE, absoluteChatUrl, makeMessageId, QUICK_EMOJIS, isUserActuallyOnline, getOperationalUsers, identityKey, samePerson, readEntryName, normalizeChatReadBy, ROLES, normalizeChannelKey, chatEmojiGroups, reactionEmojis, toMs } from '../../utils/chatUtils';
 import { authFetch } from '../../services/authService';
-import { uploadProjectFile } from '../../services/fileService';
+import { PROJECT_UPLOAD_ACCEPT, uploadProjectFile } from '../../services/fileService';
 import { notifyUser, requestConfirmation } from '../../services/uiFeedback.js';
+import { recordRuntimeDiagnostic } from '../../services/runtimeDiagnosticsService.js';
+
+const CHAT_RENDER_BATCH = 250;
+const HIDDEN_MESSAGE_ID_LIMIT = 500;
 
 export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessage, onDeleteMessage, onUpdateMessage, onMarkMessagesRead, appId, projects = [], onOpenTaskReference, onPreviewFile, onDownloadFile }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -28,6 +33,10 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const [callCopied, setCallCopied] = useState(false);
   const [chatSearch, setChatSearch] = useState('');
   const [showLatestButton, setShowLatestButton] = useState(false);
+  const [visibleMessageLimit, setVisibleMessageLimit] = useState(CHAT_RENDER_BATCH);
+  const [historyMessages, setHistoryMessages] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyExhausted, setHistoryExhausted] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const [voiceStartedAt, setVoiceStartedAt] = useState(null);
@@ -51,17 +60,36 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const hiddenKey = `kalpa_chat_hidden_${currentUser?.id || identityKey(currentUser?.name || '')}`;
   const pinnedKey = `kalpa_chat_pinned_${currentUser?.id || identityKey(currentUser?.name || '')}`;
   const [localReadState, setLocalReadState] = useState(() => {
-    try { const saved = JSON.parse(localStorage.getItem(localReadKey) || '{}'); return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {}; } catch(e) { return {}; }
+    return parseJsonRecord(localStorage.getItem(localReadKey));
   });
   const [hiddenMessageIds, setHiddenMessageIds] = useState(() => {
-    try { const saved = JSON.parse(localStorage.getItem(hiddenKey) || '[]'); return Array.isArray(saved) ? saved.map(String) : []; } catch(e) { return []; }
+    return parseJsonArray(localStorage.getItem(hiddenKey)).map(String);
   });
   const [pinnedMessageIds, setPinnedMessageIds] = useState(() => {
-    try { const saved = JSON.parse(localStorage.getItem(pinnedKey) || '[]'); return Array.isArray(saved) ? saved.map(String) : []; } catch(e) { return []; }
+    return parseJsonArray(localStorage.getItem(pinnedKey)).map(String);
   });
   const readThroughRef = useRef(localReadState);
-  const chatUsers = getOperationalUsers(users || [], { includeAdmins: true }).filter(u => !samePerson(u.name, currentUser?.name));
-  const liveCurrentUser = getOperationalUsers(users || [], { includeAdmins: true }).find(u => samePerson(u.name, currentUser?.name)) || currentUser;
+
+  // Logging out or replacing the active browser session unmounts the workspace.
+  // Stop any actor-owned transfer/recording immediately so it cannot continue
+  // after another employee becomes the active page identity.
+  useEffect(() => () => {
+    try { attachmentUploadAbortRef.current?.abort(); } catch {}
+    attachmentUploadAbortRef.current = null;
+    voiceCancelRef.current = true;
+    const recorder = mediaRecorderRef.current;
+    try {
+      if (recorder?.state && recorder.state !== 'inactive') recorder.stop();
+      else recorder?.stream?.getTracks?.().forEach(track => track.stop());
+    } catch {
+      try { recorder?.stream?.getTracks?.().forEach(track => track.stop()); } catch {}
+    }
+    mediaRecorderRef.current = null;
+    voiceChunksRef.current = [];
+    voiceTargetRef.current = null;
+  }, []);
+  const chatUsers = getOperationalUsers(asArray(users), { includeAdmins: true }).filter(u => !samePerson(u.name, currentUser?.name));
+  const liveCurrentUser = getOperationalUsers(asArray(users), { includeAdmins: true }).find(u => samePerson(u.name, currentUser?.name)) || currentUser;
   const currentUserOnline = isUserActuallyOnline(liveCurrentUser, presenceNow);
   const currentUserAliases = [currentUser?.name, currentUser?.username, currentUser?.id].filter(Boolean);
   const currentUserAliasKeys = currentUserAliases.flatMap(alias => [identityKey(alias), String(alias || '').trim().toLowerCase()]).filter(Boolean);
@@ -75,7 +103,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     const raw = String(value || '').trim().toLowerCase();
     return [user?.name, user?.username, user?.id].filter(Boolean).some(alias => identityKey(alias) === key || String(alias || '').trim().toLowerCase() === raw);
   };
-  const hasReadByCurrentUser = (message = {}) => (message?.readBy || []).some(entry => sameCurrentUser(readEntryName(entry)));
+  const hasReadByCurrentUser = (message = {}) => normalizeChatReadBy(message?.readBy).some(entry => sameCurrentUser(readEntryName(entry)));
   const sameChannelIdentity = (value = '', channel = activeChannel) => {
     if (channel === 'global') return String(value || 'global') === 'global' || !value;
     const user = chatUsers.find(u => sameChatIdentity(channel, u));
@@ -97,7 +125,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const getTaskDisplayId = (project = {}) => formatTaskId(project?.id || project?.caseId || '');
   const taskLookup = React.useMemo(() => {
     const map = new Map();
-    (projects || []).forEach(project => {
+    asArray(projects).forEach(project => {
       [project?.id, project?.caseId].filter(Boolean).forEach(key => map.set(normalizeTaskToken(key), project));
     });
     return map;
@@ -111,13 +139,13 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       if (key && !found.has(key)) found.set(key, project);
     };
 
-    (explicitRefs || []).forEach(ref => {
+    asArray(explicitRefs).forEach(ref => {
       const key = normalizeTaskToken(ref?.id || ref?.caseId || ref?.taskId);
       addProject(taskLookup.get(key) || (ref && (ref.id || ref.caseId || ref.taskId) ? ref : null));
     });
 
     const haystack = ` ${String(text || '').toUpperCase()} `;
-    (projects || []).forEach(project => {
+    asArray(projects).forEach(project => {
       const ids = [project?.id, project?.caseId].filter(Boolean).map(normalizeTaskToken);
       if (ids.some(id => id && (haystack.includes(`#${id}`) || haystack.includes(` ${id} `) || haystack.includes(`\n${id} `) || haystack.includes(` ${id}\n`)))) addProject(project);
     });
@@ -182,13 +210,13 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   }, [taskLookup]);
 
   useEffect(() => {
-    try { const saved = JSON.parse(localStorage.getItem(localReadKey) || '{}'); const safe = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {}; readThroughRef.current = safe; setLocalReadState(safe); } catch(e) { readThroughRef.current = {}; setLocalReadState({}); }
+    { const safe = parseJsonRecord(localStorage.getItem(localReadKey)); readThroughRef.current = safe; setLocalReadState(safe); }
   }, [localReadKey]);
   useEffect(() => {
-    try { const saved = JSON.parse(localStorage.getItem(hiddenKey) || '[]'); setHiddenMessageIds(Array.isArray(saved) ? saved.map(String) : []); } catch(e) { setHiddenMessageIds([]); }
+    setHiddenMessageIds(parseJsonArray(localStorage.getItem(hiddenKey)).map(String).slice(-HIDDEN_MESSAGE_ID_LIMIT));
   }, [hiddenKey]);
   useEffect(() => {
-    try { const saved = JSON.parse(localStorage.getItem(pinnedKey) || '[]'); setPinnedMessageIds(Array.isArray(saved) ? saved.map(String) : []); } catch(e) { setPinnedMessageIds([]); }
+    setPinnedMessageIds(parseJsonArray(localStorage.getItem(pinnedKey)).map(String));
   }, [pinnedKey]);
   useEffect(() => {
     if (!isOpen || typeof document === 'undefined') return undefined;
@@ -248,7 +276,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   }, [isOpen]);
 
   const savePinnedMessageIds = (nextIds = []) => {
-    const clean = [...new Set((nextIds || []).map(String).filter(Boolean))].slice(-20);
+    const clean = [...new Set(asArray(nextIds).map(String).filter(Boolean))].slice(-20);
     setPinnedMessageIds(clean);
     try { localStorage.setItem(pinnedKey, JSON.stringify(clean)); } catch(e) {}
   };
@@ -312,7 +340,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     return m?.sender || 'global';
   };
 
-  const unreadMessages = React.useMemo(() => (chatMessages || []).filter(m => {
+  const unreadMessages = React.useMemo(() => asArray(chatMessages).filter(m => {
     if (!isMessageForCurrentUser(m)) return false;
     if (m.callType || m.roomUrl) return false;
     if (sameCurrentUser(m.sender)) return false;
@@ -330,7 +358,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const getDirectUnreadCountForUser = (userName) => {
     const channelKey = identityKey(userName);
     const cutoff = Math.max(Number(localReadState[channelKey] || 0), Number(readThroughRef.current?.[channelKey] || 0));
-    return (chatMessages || []).filter(m => {
+    return asArray(chatMessages).filter(m => {
       if (!m || m.deleted || hiddenMessageIds.includes(String(m.id))) return false;
       if (m.callType || m.roomUrl) return false;
       if (!sameChatIdentity(m.sender, { name: userName, username: userName }) || !isIncomingDirectToCurrentUser(m)) return false;
@@ -807,7 +835,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   const findMessageByMenu = (menu) => {
     if (!menu) return null;
     if (menu.message) return menu.message;
-    return (chatMessages || []).find(m => String(m.id || m.messageId || m.sentAt || `${m.sender || 'msg'}-${m.time || ''}`) === String(menu.id));
+    return asArray(chatMessages).find(m => String(m.id || m.messageId || m.sentAt || `${m.sender || 'msg'}-${m.time || ''}`) === String(menu.id));
   };
 
   const activeActionMessage = findMessageByMenu(actionMenu);
@@ -876,7 +904,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       downloadUrl: source.downloadUrl || '',
       fileType: source.fileType || '',
       fileSize: source.fileSize || 0,
-      files: source.files || [],
+      files: asArray(source?.files),
       roomUrl: source.roomUrl || '',
       callType: source.callType || ''
     });
@@ -891,7 +919,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   };
 
   const deleteForMe = (m) => {
-    const next = Array.from(new Set([...(hiddenMessageIds || []).map(String), String(m.id)]));
+    const next = Array.from(new Set([...asArray(hiddenMessageIds).map(String), String(m.id)])).slice(-HIDDEN_MESSAGE_ID_LIMIT);
     setHiddenMessageIds(next);
     try { localStorage.setItem(hiddenKey, JSON.stringify(next)); } catch(e) {}
     setActionMenu(null);
@@ -909,7 +937,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   };
 
   const toggleReaction = (m, emoji) => {
-    const reactions = { ...(m.reactions || {}) };
+    const reactions = { ...asRecord(m?.reactions) };
     const names = Array.isArray(reactions[emoji]) ? [...reactions[emoji]] : [];
     const already = names.some(n => samePerson(n, currentUser?.name));
     reactions[emoji] = already ? names.filter(n => !samePerson(n, currentUser?.name)) : [...names, currentUser?.name];
@@ -922,7 +950,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     if (!text) return null;
     const knownTaskIds = Array.from(taskLookup.keys()).filter(Boolean).sort((a, b) => b.length - a.length);
     const escapedTaskPattern = knownTaskIds.map(id => id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-    const mentionNames = Array.from(new Set([currentUser?.name, ...(users || []).map(u => u.name), 'all'].filter(Boolean)));
+    const mentionNames = Array.from(new Set([currentUser?.name, ...asArray(users).map(u => u.name), 'all'].filter(Boolean)));
     const escapeForRegex = (value = '') => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const mentionPattern = mentionNames.map(name => `@${escapeForRegex(name)}`).join('|');
     const pattern = escapedTaskPattern ? new RegExp(`(#?(?:${escapedTaskPattern})|${mentionPattern})`, 'gi') : new RegExp(`(${mentionPattern})`, 'gi');
@@ -933,7 +961,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
       if (task) return <button key={i} type="button" onClick={(e) => { e.stopPropagation(); openTaskFromChat(task); }} className="inline-flex items-center gap-1 px-2 py-0.5 mx-0.5 rounded-md font-extrabold align-baseline bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-100"><ClipboardList className="w-3 h-3" />#{getTaskDisplayId(task)}</button>;
       if (lower === `@all`) return <strong key={i} className="inline-flex items-center text-red-700 bg-red-100 px-1.5 py-0.5 rounded-md font-extrabold">{part}</strong>;
       if (lower.startsWith('@')) {
-        const mentioned = (users || []).find(u => samePerson(part.slice(1), u.name) || samePerson(part.slice(1), u.username));
+        const mentioned = asArray(users).find(u => samePerson(part.slice(1), u.name) || samePerson(part.slice(1), u.username));
         const isMe = samePerson(part.slice(1), currentUser?.name) || samePerson(part.slice(1), currentUser?.username);
         return <strong key={i} className={`inline-flex items-center px-1.5 py-0.5 rounded-md font-extrabold ${isMe ? 'text-purple-700 bg-purple-100' : 'text-indigo-700 bg-indigo-50'}`}>{mentioned ? `@${mentioned.name}` : part}</strong>;
       }
@@ -942,7 +970,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
   };
 
   const renderTaskReferenceCards = (message = {}, isMine = false) => {
-    const refs = resolveTaskReferences(message?.text || '', message?.taskRefs || []);
+    const refs = resolveTaskReferences(message?.text || '', asArray(message?.taskRefs));
     if (!refs.length) return null;
     return (
       <div className="mt-3 space-y-2">
@@ -1150,18 +1178,62 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
     );
   };
 
+  const combinedChatMessages = React.useMemo(() => {
+    const byId = new Map();
+    [...asArray(historyMessages), ...asArray(chatMessages)].forEach(message => {
+      if (!message) return;
+      const key = String(message.id || `${message.sender || ''}-${message.recipient || ''}-${message.sentAt || message.createdAt || ''}-${message.text || message.fileName || ''}`);
+      byId.set(key, message);
+    });
+    return Array.from(byId.values());
+  }, [chatMessages, historyMessages]);
   const channelMessages = React.useMemo(() => {
     if (!isOpen) return [];
-    return (chatMessages || []).filter(m => {
+    return combinedChatMessages.filter(m => {
       if (!isMessageForCurrentUser(m)) return false;
       if (activeChannel === 'global') return isGlobalMessage(m);
       return (sameCurrentUser(m.sender) && sameChannelIdentity(m.recipient, activeChannel)) || (sameChannelIdentity(m.sender, activeChannel) && sameCurrentUser(m.recipient));
-    }).sort((a, b) => Number(a.sentAt || a.id || 0) - Number(b.sentAt || b.id || 0));
-  }, [isOpen, chatMessages, hiddenMessageIds, activeChannel, currentUser?.id, currentUser?.username, currentUser?.name]);
+    }).sort((a, b) => toMs(a.sentAt || a.createdAt || a.updatedAt || a.id) - toMs(b.sentAt || b.createdAt || b.updatedAt || b.id));
+  }, [isOpen, combinedChatMessages, hiddenMessageIds, activeChannel, currentUser?.id, currentUser?.username, currentUser?.name]);
   const searchKey = chatSearch.trim().toLowerCase();
-  const displayMessages = searchKey
+  const matchingMessages = searchKey
     ? channelMessages.filter(m => `${m.text || ''} ${m.fileName || ''} ${m.sender || ''}`.toLowerCase().includes(searchKey))
     : channelMessages;
+  const displayMessages = matchingMessages.slice(-visibleMessageLimit);
+  const hiddenOlderMessageCount = Math.max(0, matchingMessages.length - displayMessages.length);
+  useEffect(() => {
+    setVisibleMessageLimit(CHAT_RENDER_BATCH);
+    setHistoryMessages([]);
+    setHistoryExhausted(false);
+  }, [activeChannel, isOpen]);
+  useEffect(() => { setVisibleMessageLimit(CHAT_RENDER_BATCH); }, [searchKey]);
+  const loadOlderHistory = async () => {
+    if (historyLoading || historyExhausted) return;
+    // First reveal older messages already present in the bounded live working set.
+    if (hiddenOlderMessageCount > 0) {
+      setVisibleMessageLimit(value => value + CHAT_RENDER_BATCH);
+      return;
+    }
+    setHistoryLoading(true);
+    try {
+      const oldest = combinedChatMessages.reduce((minimum, message) => {
+        const value = toMs(message?.sentAt || message?.createdAt || message?.updatedAt || message?.id);
+        return value > 0 && value < minimum ? value : minimum;
+      }, Number.POSITIVE_INFINITY);
+      const before = Number.isFinite(oldest) ? oldest : Date.now() + 1;
+      const response = await authFetch(`${CHAT_API_BASE}/api/chat/history?before=${encodeURIComponent(before)}&limit=${CHAT_RENDER_BATCH}`, { method:'GET' });
+      const data = await response.json();
+      if (!response.ok || data?.ok !== true || !Array.isArray(data?.messages)) throw new Error(data?.error || 'Older messages could not be loaded.');
+      setHistoryMessages(previous => {
+        const byId = new Map([...asArray(previous), ...asArray(data.messages)].map(message => [String(message?.id || `${message?.sender || ''}-${message?.createdAt || ''}`), message]));
+        return Array.from(byId.values());
+      });
+      setVisibleMessageLimit(value => value + CHAT_RENDER_BATCH);
+      if (!data.hasMore || data.messages.length === 0) setHistoryExhausted(true);
+    } catch (error) {
+      notifyUser(error?.message || 'Older messages could not be loaded.');
+    } finally { setHistoryLoading(false); }
+  };
   const pinnedMessages = channelMessages.filter(m => isPinnedMessage(m) && !m.deleted).slice(-5);
 
   return (
@@ -1306,10 +1378,11 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
                 )}
                 <div ref={chatScrollRef} className="kalpa-chat-messages flex-1 overflow-y-auto p-5 space-y-4 bg-slate-50/50 custom-scrollbar relative" style={{ minHeight: 0, overflowX: 'hidden' }} onClick={(e) => { if (e.target === e.currentTarget) { setActionMenu(null); setReactionMenu(null); } }}>
                   {displayMessages.length === 0 && <p className="text-center text-sm text-slate-400 mt-10 font-medium">Say hello to {activeChannel === 'global' ? 'the team' : activeChannel}!</p>}
+                  {(hiddenOlderMessageCount > 0 || (!historyExhausted && displayMessages.length > 0)) && <div className="flex justify-center py-2"><button type="button" onClick={loadOlderHistory} disabled={historyLoading} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-[11px] font-black text-slate-600 hover:bg-slate-50 disabled:opacity-50">{historyLoading ? 'Loading older messages…' : hiddenOlderMessageCount > 0 ? `Load ${Math.min(CHAT_RENDER_BATCH, hiddenOlderMessageCount)} older messages` : 'Load older history'}</button></div>}
                   {displayMessages.map((m, idx) => {
                     const isMine = sameCurrentUser(m.sender);
                     const showName = idx === 0 || !samePerson(displayMessages[idx-1].sender, m.sender);
-                    const reactions = Object.entries(m.reactions || {}).filter(([, names]) => Array.isArray(names) && names.length);
+                    const reactions = Object.entries(asRecord(m?.reactions)).filter(([, names]) => Array.isArray(names) && names.length);
                     const pinned = isPinnedMessage(m);
                     return (
                       <div key={m.id} data-message-id={String(m.id)} className={`flex flex-col ${isMine ? 'items-end' : 'items-start'} ${pinned ? 'scroll-mt-24' : ''}`}>
@@ -1332,8 +1405,8 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
                           </div>
                           {!isMine && renderMessageOptions(m)}
                         </div>
-                        {reactions.length > 0 && <div className={`flex flex-wrap gap-1 mt-1 ${isMine ? 'justify-end' : 'justify-start'}`}>{reactions.map(([emoji, names]) => <button key={`${m.id}-${emoji}`} type="button" onClick={(e) => openReactionMenu(e, m)} title={(names || []).join(', ')} className="bg-white border border-slate-200 rounded-full px-2 py-0.5 text-xs shadow-sm hover:border-indigo-200"><span>{emoji}</span> <span className="font-black text-slate-500">{names.length}</span></button>)}</div>}
-                        <span className="text-[9px] font-bold text-slate-300 mt-1 mx-1 flex items-center gap-1">{m.time}{isMine && <span title={(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser?.name)).length ? `Read by ${(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser?.name)).map(r => `${readEntryName(r)} at ${r.time || ''}`).join(', ')}` : 'Sent'} className={(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser?.name)).length ? 'text-blue-500' : 'text-slate-300'}>{(m.readBy || []).filter(r => !samePerson(readEntryName(r), currentUser?.name)).length ? '✓✓' : '✓'}</span>}</span>
+                        {reactions.length > 0 && <div className={`flex flex-wrap gap-1 mt-1 ${isMine ? 'justify-end' : 'justify-start'}`}>{reactions.map(([emoji, names]) => <button key={`${m.id}-${emoji}`} type="button" onClick={(e) => openReactionMenu(e, m)} title={asArray(names).join(', ')} className="bg-white border border-slate-200 rounded-full px-2 py-0.5 text-xs shadow-sm hover:border-indigo-200"><span>{emoji}</span> <span className="font-black text-slate-500">{names.length}</span></button>)}</div>}
+                        <span className="text-[9px] font-bold text-slate-300 mt-1 mx-1 flex items-center gap-1">{m.time}{isMine && <span title={normalizeChatReadBy(m.readBy).filter(r => !samePerson(readEntryName(r), currentUser?.name)).length ? `Read by ${normalizeChatReadBy(m.readBy).filter(r => !samePerson(readEntryName(r), currentUser?.name)).map(r => `${readEntryName(r)} at ${r.time || ''}`).join(', ')}` : 'Sent'} className={normalizeChatReadBy(m.readBy).filter(r => !samePerson(readEntryName(r), currentUser?.name)).length ? 'text-blue-500' : 'text-slate-300'}>{normalizeChatReadBy(m.readBy).filter(r => !samePerson(readEntryName(r), currentUser?.name)).length ? '✓✓' : '✓'}</span>}</span>
                       </div>
                     );
                   })}
@@ -1399,7 +1472,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
                   <textarea ref={composerRef} rows={2} value={msg} onChange={handleInputChange} onKeyDown={handleMessageKeyDown} placeholder={editingMessage ? 'Edit your message...' : activeChannel === 'global' ? 'Message team or @mention...' : `Message ${activeChannel}...`} className="kalpa-chat-textarea w-full bg-slate-50 border border-slate-100 rounded-xl px-4 py-3 text-base font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all resize-none" style={{ minHeight: 58, maxHeight: 132, overflowY: 'auto' }} />
                   {renderComposerTaskPreview()}
                   <div className="kalpa-chat-actions-row flex items-center gap-2">
-                    <label title="Attach file" className="kalpa-chat-tool-btn p-2.5 text-slate-400 hover:text-indigo-600 bg-slate-50 hover:bg-indigo-50 rounded-xl transition-colors cursor-pointer"><Paperclip className="w-5 h-5" /><input type="file" className="hidden" accept="image/*,video/*,audio/*,.pdf,.dwg,.dxf,.xls,.xlsx,.csv,.doc,.docx,.ppt,.pptx,.zip,.rar" onChange={handleChatFileUpload} /></label>
+                    <label title="Attach file" className="kalpa-chat-tool-btn p-2.5 text-slate-400 hover:text-indigo-600 bg-slate-50 hover:bg-indigo-50 rounded-xl transition-colors cursor-pointer"><Paperclip className="w-5 h-5" /><input type="file" className="hidden" accept={PROJECT_UPLOAD_ACCEPT} onChange={handleChatFileUpload} /></label>
                     <button type="button" title="Add emoji" onClick={() => setShowEmojiPicker(v => !v)} className={`kalpa-chat-tool-btn p-2.5 rounded-xl transition-colors ${showEmojiPicker ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}><Smile className="w-5 h-5" /></button>
                     <button type="button" title={isRecordingVoice ? 'Stop and send voice note' : 'Record voice note'} onClick={isRecordingVoice ? stopVoiceRecording : startVoiceRecording} className={`kalpa-chat-tool-btn p-2.5 rounded-xl transition-colors ${isRecordingVoice ? 'bg-red-50 text-red-600 animate-pulse' : 'bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}>{isRecordingVoice ? <Square className="w-5 h-5" /> : <Mic className="w-5 h-5" />}</button>
                     <div className="flex-1" />
@@ -1506,7 +1579,7 @@ export const CommunicationHub = ({ currentUser, users, chatMessages, onSendMessa
             </div>
             <div className="p-2 flex items-center gap-1 overflow-x-auto" style={{ overscrollBehaviorX: 'contain', WebkitOverflowScrolling: 'touch' }}>
               {reactionEmojis.map(emoji => {
-                const selected = Array.isArray((activeReactionMessage.reactions || {})[emoji]) && (activeReactionMessage.reactions || {})[emoji].some(n => samePerson(n, currentUser?.name));
+                const selected = Array.isArray(asRecord(activeReactionMessage?.reactions)[emoji]) && asRecord(activeReactionMessage?.reactions)[emoji].some(n => samePerson(n, currentUser?.name));
                 return (
                   <button
                     type="button"
@@ -1568,18 +1641,17 @@ const ActiveToasts = ({ notifications = [], currentUser }) => {
 class AppErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
-    this.state = { hasError: false, message: '' };
+    this.state = { hasError: false, message: '', diagnosticId: '' };
   }
   static getDerivedStateFromError(error) {
-    return { hasError: true, message: error?.message || 'Something went wrong.' };
+    return { hasError: true, message: error?.message || 'Something went wrong.', diagnosticId: '' };
   }
   componentDidCatch(error, info) {
-    try {
-      const logs = JSON.parse(localStorage.getItem('kd-error-logs') || '[]');
-      logs.unshift({ at: new Date().toISOString(), message: error?.message || String(error), stack: error?.stack || '', componentStack: info?.componentStack || '' });
-      localStorage.setItem('kd-error-logs', JSON.stringify(logs.slice(0, 50)));
-    } catch (_) {}
     console.error('Kalpvriksha app error:', error, info);
+    try {
+      const diagnostic = recordRuntimeDiagnostic({ error, source:'communication-hub-boundary', componentStack:info?.componentStack || '' });
+      if (diagnostic?.diagnosticId) this.setState({ diagnosticId:diagnostic.diagnosticId });
+    } catch {}
   }
   render() {
     if (this.state.hasError) {
@@ -1590,6 +1662,7 @@ class AppErrorBoundary extends React.Component {
             <h1 className="text-2xl font-black text-slate-800">Something needs attention</h1>
             <p className="text-slate-500 font-medium mt-2">The page did not load correctly, but your data is safe. Refresh the page once. If it repeats, check the saved error log.</p>
             <p className="mt-4 text-xs font-bold text-red-500 bg-red-50 border border-red-100 rounded-xl p-3 break-words">{this.state.message}</p>
+            {this.state.diagnosticId && <p className="mt-3 text-xs font-black font-mono text-slate-500">Diagnostic ID {this.state.diagnosticId}</p>}
             <button type="button" onClick={() => window.location.reload()} className="mt-6 bg-slate-800 text-white px-6 py-3 rounded-xl font-black">Refresh Page</button>
           </div>
         </div>

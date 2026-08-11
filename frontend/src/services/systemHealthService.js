@@ -1,14 +1,10 @@
 import { API_BASE } from '../config/appConfig';
 import { authFetch } from './authService';
+import { apiHttpError, readApiRecord } from './apiContractService.js';
 
 const readPayload = async (response, fallback) => {
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok && response.status !== 503) {
-    const error = new Error(payload.error || fallback || `Request failed (${response.status})`);
-    error.status = response.status;
-    error.code = payload.code || '';
-    throw error;
-  }
+  const payload = await readApiRecord(response, { operation:fallback || 'System status request', requireOk:response.ok });
+  if (!response.ok && response.status !== 503) throw apiHttpError(response, payload, fallback || 'System status request failed.');
   return payload;
 };
 

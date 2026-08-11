@@ -867,7 +867,8 @@ const FINANCE_CASE_KEYS = new Set([
   'paymentStatus', 'paymentReceived', 'paymentAmountIn', 'expenses', 'refundAmount',
   'paymentDate', 'paymentTime', 'payerName', 'transactionId', 'ledger',
   'paymentAuditTrail', 'history', 'timeline', 'updatedAt', 'syncVersion',
-  'lastFinanceMutationId', 'lastFinanceMutationAt'
+  'lastFinanceMutationId', 'lastFinanceMutationAt', 'lastFinanceMutationFingerprint',
+  'lastFinanceMutationOperation', 'financeMutationReceipts'
 ]);
 
 function appendOnlyArray(previous = [], current = [], newEntryPattern = null) {
@@ -1680,8 +1681,8 @@ export async function loadRelationalState(pool, { normalizeState, seedState }) {
   await runRelationalMigrations(pool);
   const client = await pool.connect();
   try {
-    const metadata = await client.query('SELECT * FROM app_state_metadata WHERE key=$1', ['main']);
-    if (!metadata.rows.length) {
+    const metadataProbe = await client.query('SELECT * FROM app_state_metadata WHERE key=$1', ['main']);
+    if (!metadataProbe.rows.length) {
       const legacy = await client.query('SELECT value,state_version,updated_at FROM app_state WHERE key=$1', ['main']);
       const rawState = legacy.rows[0]?.value || structuredClone(seedState || {});
       const normalized = normalizeRuntimeStateFromPersistedState(rawState, normalizeState);
@@ -1691,14 +1692,25 @@ export async function loadRelationalState(pool, { normalizeState, seedState }) {
       const hash = stateSnapshotHash(normalized);
       await client.query('BEGIN');
       try {
+        await client.query("SET LOCAL lock_timeout = '15s'");
+        await client.query("SET LOCAL statement_timeout = '120s'");
         await client.query('SELECT pg_advisory_xact_lock($1)', [ADVISORY_LOCK_ID]);
-        const concurrentMetadata = await client.query('SELECT state_version FROM app_state_metadata WHERE key=$1 FOR UPDATE', ['main']);
+        const concurrentMetadata = await client.query('SELECT * FROM app_state_metadata WHERE key=$1 FOR UPDATE', ['main']);
         if (concurrentMetadata.rows.length) {
-          await client.query('COMMIT');
+          // Another process completed the one-time relational import while this
+          // process was waiting. Read and verify that exact committed version
+          // before releasing the lock; never return an unverified mixed snapshot.
           const currentParts = await readRelationalParts(client);
-          const currentPersistedState = recomposeState(currentParts);
+          const { persistedState:currentPersistedState } = verifyPersistedRelationalSnapshot(currentParts, concurrentMetadata.rows[0]);
           const currentState = normalizeRuntimeStateFromPersistedState(currentPersistedState, normalizeState);
-          return { state:currentState, persistedState:currentPersistedState, stateVersion:Number(concurrentMetadata.rows[0].state_version || 0), source:'relational', legacyState:rawState };
+          await client.query('COMMIT');
+          return {
+            state:currentState,
+            persistedState:currentPersistedState,
+            stateVersion:Number(concurrentMetadata.rows[0].state_version || 0),
+            source:'relational',
+            legacyState:rawState
+          };
         }
         await syncRelationalParts(client, parts);
         await client.query(
@@ -1719,21 +1731,38 @@ export async function loadRelationalState(pool, { normalizeState, seedState }) {
       return { state: normalized, persistedState:structuredClone(normalized), stateVersion: version, source: legacy.rows.length ? 'legacy_app_state_import' : 'empty_seed', legacyState: rawState };
     }
 
-    const parts = await readRelationalParts(client);
-    const { persistedState } = verifyPersistedRelationalSnapshot(parts, metadata.rows[0]);
-    const state = normalizeRuntimeStateFromPersistedState(persistedState, normalizeState);
-    // The legacy app_state remains read-only during cutover, but it is still
-    // the authoritative source for one-time password migration. Returning it
-    // lets the API hash those legacy passwords into auth_credentials while the
-    // relational operational state stays authoritative.
-    const legacy = await client.query('SELECT value FROM app_state WHERE key=$1', ['main']);
-    return {
-      state,
-      persistedState,
-      stateVersion: Number(metadata.rows[0].state_version || 0),
-      source: 'relational',
-      legacyState: legacy.rows[0]?.value || null
-    };
+    // Cold startup must observe metadata and all physical relational rows from
+    // one consistent PostgreSQL snapshot. A second process may still be serving
+    // during a staged cutover, so autocommit reads here are not safe enough.
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    try {
+      await client.query("SET LOCAL statement_timeout = '120s'");
+      const metadata = await client.query('SELECT * FROM app_state_metadata WHERE key=$1', ['main']);
+      if (!metadata.rows.length) {
+        const error = new Error('Relational state metadata disappeared during startup verification.');
+        error.code = 'RELATIONAL_METADATA_MISSING';
+        throw error;
+      }
+      const parts = await readRelationalParts(client);
+      const { persistedState } = verifyPersistedRelationalSnapshot(parts, metadata.rows[0]);
+      const state = normalizeRuntimeStateFromPersistedState(persistedState, normalizeState);
+      // The legacy app_state remains read-only during cutover, but it is still
+      // the authoritative source for one-time password migration. Returning it
+      // lets the API hash those legacy passwords into auth_credentials while the
+      // relational operational state stays authoritative.
+      const legacy = await client.query('SELECT value FROM app_state WHERE key=$1', ['main']);
+      await client.query('COMMIT');
+      return {
+        state,
+        persistedState,
+        stateVersion: Number(metadata.rows[0].state_version || 0),
+        source: 'relational',
+        legacyState: legacy.rows[0]?.value || null
+      };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    }
   } finally {
     client.release();
   }
@@ -1742,14 +1771,25 @@ export async function loadRelationalState(pool, { normalizeState, seedState }) {
 export async function reloadRelationalState(pool, { normalizeState }) {
   const client = await pool.connect();
   try {
+    // Metadata and physical rows must come from one MVCC snapshot. Reading the
+    // metadata first and tables afterwards in autocommit mode can observe two
+    // different committed versions during a deployment overlap or recovery,
+    // producing a false integrity failure even when PostgreSQL is healthy.
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    await client.query("SET LOCAL statement_timeout = '120s'");
     const metadata = await client.query('SELECT * FROM app_state_metadata WHERE key=$1', ['main']);
-    if (!metadata.rows.length) throw new Error('Relational state metadata is missing.');
+    if (!metadata.rows.length) {
+      const error = new Error('Relational state metadata is missing.');
+      error.code = 'RELATIONAL_METADATA_MISSING';
+      throw error;
+    }
     const parts = await readRelationalParts(client);
     // Runtime recovery must enforce the same count/hash boundary as cold startup.
     // Loading rows without verification after a failed write could replace the
     // in-memory state with a partially modified or manually altered database.
     const { persistedState, counts, hash } = verifyPersistedRelationalSnapshot(parts, metadata.rows[0]);
     const state = normalizeRuntimeStateFromPersistedState(persistedState, normalizeState);
+    await client.query('COMMIT');
     return {
       state,
       persistedState,
@@ -1757,6 +1797,45 @@ export async function reloadRelationalState(pool, { normalizeState }) {
       counts,
       snapshotHash:hash
     };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+
+async function confirmRelationalCommitEvidence(pool, evidence = {}) {
+  const expectedVersion = Number(evidence.stateVersion);
+  const expectedHash = String(evidence.snapshotHash || '').trim();
+  if (!Number.isInteger(expectedVersion) || expectedVersion < 0 || !expectedHash) return null;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    await client.query("SET LOCAL statement_timeout = '120s'");
+    const metadata = await client.query('SELECT * FROM app_state_metadata WHERE key=$1', ['main']);
+    const row = metadata.rows[0];
+    if (!row || Number(row.state_version || 0) !== expectedVersion || String(row.snapshot_hash || '') !== expectedHash) {
+      await client.query('COMMIT');
+      return null;
+    }
+    const parts = await readRelationalParts(client);
+    const verified = verifyPersistedRelationalSnapshot(parts, row);
+    if (verified.hash !== expectedHash) {
+      await client.query('COMMIT');
+      return null;
+    }
+    await client.query('COMMIT');
+    return {
+      stateVersion:expectedVersion,
+      snapshotHash:verified.hash,
+      counts:verified.counts,
+      persistedState:verified.persistedState
+    };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
   } finally {
     client.release();
   }
@@ -1775,6 +1854,11 @@ export async function persistRelationalState(pool, {
   const normalized = state;
   const selectedCollections = selectedCollectionSet(metadata.collections);
   const client = await pool.connect();
+  let commitAttempted = false;
+  let commitEvidence = null;
+  let committedStateForEvidence = null;
+  let committedStateOwnedForEvidence = false;
+  let revisionSnapshotWrittenForEvidence = false;
   try {
     await client.query('BEGIN');
     // A blocked row/advisory lock must not stall every foreground write forever.
@@ -1931,6 +2015,19 @@ export async function persistRelationalState(pool, {
       );
     }
 
+    // Once COMMIT is sent, a broken socket can make the acknowledgement
+    // ambiguous: PostgreSQL may have committed even though pg throws locally.
+    // Capture immutable commit evidence before sending COMMIT so the caller can
+    // reconnect and prove the outcome by exact stateVersion + snapshotHash.
+    committedStateForEvidence = committedState;
+    committedStateOwnedForEvidence = Boolean(fastSelectedWrite);
+    revisionSnapshotWrittenForEvidence = shouldWriteRevisionSnapshot;
+    commitEvidence = {
+      stateVersion:Number(targetVersion),
+      snapshotHash:hash,
+      counts
+    };
+    commitAttempted = true;
     await client.query('COMMIT');
     return {
       stateVersion: targetVersion,
@@ -1945,6 +2042,32 @@ export async function persistRelationalState(pool, {
     };
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
+    if (commitAttempted && commitEvidence) {
+      error.commitOutcomeUnknown = true;
+      error.commitEvidence = commitEvidence;
+      try {
+        const confirmed = await confirmRelationalCommitEvidence(pool, commitEvidence);
+        if (confirmed) {
+          return {
+            stateVersion:confirmed.stateVersion,
+            persistedAt:new Date().toISOString(),
+            database:'postgresql-relational',
+            snapshotHash:confirmed.snapshotHash,
+            counts:confirmed.counts,
+            committedState:confirmed.persistedState || committedStateForEvidence,
+            committedStateOwned:false,
+            fastSelectedWrite:committedStateOwnedForEvidence,
+            revisionSnapshotWritten:revisionSnapshotWrittenForEvidence,
+            commitConfirmedAfterReconnect:true
+          };
+        }
+      } catch (verificationError) {
+        error.commitVerificationError = {
+          code:verificationError?.code || '',
+          message:verificationError?.message || String(verificationError)
+        };
+      }
+    }
     throw error;
   } finally {
     client.release();
@@ -2427,27 +2550,29 @@ export async function rebaselineOperationalSameCountIntegrity(pool, { actor = 'd
 export async function getRelationalHealth(pool) {
   const client = await pool.connect();
   try {
+    // Health diagnostics must not compare metadata from one commit with rows
+    // from another. Use the same repeatable-read boundary as startup/recovery.
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    await client.query("SET LOCAL statement_timeout = '120s'");
     const clock = await client.query('SELECT now() AS now');
     const metadata = await client.query('SELECT * FROM app_state_metadata WHERE key=$1', ['main']);
     const migrations = await client.query('SELECT version,name,checksum,applied_at FROM schema_migrations ORDER BY version');
     const revisions = await client.query('SELECT count(*)::int AS count,max(state_version)::bigint AS latest_version,max(created_at) AS latest_at FROM state_revisions');
-    const tableCounts = await client.query(`SELECT
-        (SELECT count(*)::int FROM ops_users) AS users,
-        (SELECT count(*)::int FROM ops_cases) AS cases,
-        (SELECT count(*)::int FROM ops_payments) AS payments,
-        (SELECT count(*)::int FROM ops_notifications) AS notifications,
-        (SELECT count(*)::int FROM ops_chat_messages) AS team_chat,
-        (SELECT count(*)::int FROM ops_attendance_logs) AS attendance_logs,
-        (SELECT count(*)::int FROM ops_files) AS files`);
     const meta = metadata.rows[0] || null;
-    const actual = tableCounts.rows[0] || {};
-    const expected = meta?.entity_counts || {};
-    const mappedActual = {
-      users: Number(actual.users || 0), cases: Number(actual.cases || 0), payments: Number(actual.payments || 0),
-      notifications: Number(actual.notifications || 0), teamChat: Number(actual.team_chat || 0),
-      attendanceLogs: Number(actual.attendance_logs || 0), files: Number(actual.files || 0)
-    };
-    const countMismatches = compareCounts(Object.fromEntries(Object.keys(mappedActual).map(key => [key, expected[key] || 0])), mappedActual);
+    let counts = {};
+    let integrity = { ok:false, countMismatches:['metadata'], hashMatches:false, actualHash:'' };
+    if (meta) {
+      const parts = await readRelationalParts(client);
+      const persistedState = recomposeState(parts);
+      counts = entityCounts(parts);
+      const expectedCounts = meta.entity_counts || {};
+      const countMismatches = compareCounts(expectedCounts, counts);
+      const actualHash = stateSnapshotHash(persistedState);
+      const expectedHash = String(meta.snapshot_hash || '');
+      const hashMatches = Boolean(expectedHash) && expectedHash === actualHash;
+      integrity = { ok:countMismatches.length === 0 && hashMatches, countMismatches, hashMatches, actualHash };
+    }
+    await client.query('COMMIT');
     return {
       database: 'postgresql-relational',
       connected: true,
@@ -2456,11 +2581,14 @@ export async function getRelationalHealth(pool) {
       snapshotHash: meta?.snapshot_hash || '',
       source: meta?.source || '',
       updatedAt: meta?.updated_at || null,
-      counts: mappedActual,
-      integrity: { ok: countMismatches.length === 0, countMismatches },
+      counts,
+      integrity,
       migrations: { count: migrations.rows.length, currentVersion: migrations.rows.at(-1)?.version || null },
       revisions: revisions.rows[0]
     };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
   } finally {
     client.release();
   }

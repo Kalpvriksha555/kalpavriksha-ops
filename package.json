@@ -1,6 +1,6 @@
 {
   "name": "kalpavriksha-designs-ops",
-  "version": "1.9.30-runtime-persistence-recovery",
+  "version": "1.9.30-ssh-independent-certify-deploy-closure",
   "type": "module",
   "scripts": {
     "dev": "node scripts/start-all.mjs",
@@ -23,7 +23,7 @@
     "desktop:pack": "npm run build && electron-builder",
     "doctor": "node scripts/doctor.mjs",
     "clean:cache": "node -e \"console.log('Use scripts/clean-local-cache.ps1 on Windows or scripts/clean-local-cache.sh on Linux/macOS.')\"",
-    "verify": "npm run security:package-audit && npm run doctor && npm run guard && npm run audit:production && npm run test:frontend && npm run verify:frontend-runtime && npm run test:backend && npm run verify:finance && npm run verify:auth && npm run verify:authorization && npm run verify:database && npm run verify:files && npm run verify:reliability && npm run verify:release && npm run verify:frontend-ux && npm run verify:integration && npm run build",
+    "verify": "npm run security:package-audit && npm run doctor && npm run guard && npm run audit:production && npm run test:frontend && npm run verify:runtime-shapes && npm run verify:api-contract && npm run verify:task-lifecycle && npm run verify:file-lifecycle && npm run verify:session-isolation && npm run verify:presence-attendance && npm run verify:finance-ledger && npm run verify:persistence-restart && npm run verify:long-session && npm run verify:diagnostics && npm run verify:deployment-resume && npm run verify:fault-soak && npm run verify:certification-local-postgres && npm run verify:operator-deploy && npm run verify:frontend-runtime && npm run test:backend && npm run verify:finance && npm run verify:auth && npm run verify:authorization && npm run verify:database && npm run verify:files && npm run verify:reliability && npm run verify:release && npm run verify:frontend-ux && npm run verify:integration && npm run build",
     "guard": "node scripts/regression-guard.mjs",
     "audit:production": "node scripts/production-regression-audit.mjs",
     "security:package-audit": "node scripts/security-package-audit.mjs",
@@ -58,7 +58,22 @@
     "verify:matrix": "node scripts/full-release-verifier-matrix.mjs",
     "db:integrity:repair": "npm run db:integrity:repair --prefix backend",
     "deploy:vps": "bash scripts/launch-deploy-1.9.30-vps.sh",
-    "verify:frontend-runtime": "node scripts/frontend-runtime-bootstrap-check.mjs"
+    "verify:frontend-runtime": "node scripts/frontend-runtime-bootstrap-check.mjs",
+    "verify:runtime-shapes": "node scripts/phase-11-frontend-runtime-shape-check.mjs",
+    "verify:api-contract": "node scripts/phase-12-api-contract-stale-response-check.mjs",
+    "verify:task-lifecycle": "node scripts/phase-13-task-lifecycle-idempotency-check.mjs",
+    "verify:file-lifecycle": "node scripts/phase-14-file-upload-preview-retention-check.mjs",
+    "verify:session-isolation": "node scripts/phase-15-auth-session-browser-isolation-check.mjs",
+    "verify:presence-attendance": "node scripts/phase-16-attendance-presence-live-sync-check.mjs",
+    "verify:finance-ledger": "node scripts/phase-17-finance-ledger-invariants-check.mjs",
+    "verify:persistence-restart": "node scripts/phase-18-runtime-persistence-restart-check.mjs",
+    "verify:long-session": "node scripts/phase-19-performance-memory-long-session-check.mjs",
+    "verify:diagnostics": "node scripts/phase-20-runtime-error-diagnostics-check.mjs",
+    "verify:deployment-resume": "node scripts/phase-21-resume-aware-deployment-check.mjs",
+    "verify:fault-soak": "node scripts/phase-22-end-to-end-fault-soak-check.mjs",
+    "verify:certification-local-postgres": "node scripts/phase-23-production-local-postgres-certification-check.mjs",
+    "verify:operator-deploy": "node scripts/phase-24-operator-safe-certify-deploy-check.mjs",
+    "certify-deploy:vps": "bash scripts/launch-certify-and-deploy-1.9.30-vps.sh"
   },
   "dependencies": {
     "@vitejs/plugin-react": "6.0.3",

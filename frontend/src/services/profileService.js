@@ -1,5 +1,8 @@
 import { authFetch, getCsrfToken } from './authService';
 import { API_BASE } from '../config/appConfig';
+import { asRecord } from '../utils/runtimeShapeUtils.js';
+import { markClientMutationStarted } from './requestControlService.js';
+import { apiHttpError, readApiRecord } from './apiContractService.js';
 
 export const updateProfileApi = async (patch = {}) => {
   const res = await authFetch(`${API_BASE}/api/profile`, {
@@ -8,8 +11,9 @@ export const updateProfileApi = async (patch = {}) => {
     body:JSON.stringify(patch),
     timeoutMs:5 * 60 * 1000
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data.ok || !data.user) throw new Error(data.error || 'The backend did not confirm the profile update.');
+  const data = await readApiRecord(res, { operation:'Profile update', requireOk:res.ok });
+  if (!res.ok) throw apiHttpError(res, data, 'Profile update failed.');
+  if (!data.user) throw new Error('The backend did not confirm the profile update.');
   return data;
 };
 
@@ -21,6 +25,7 @@ export const uploadProfilePhoto = async ({ file, signal, onProgress } = {}) => {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${API_BASE}/api/profile/photo`);
+    markClientMutationStarted();
     xhr.withCredentials = true;
     xhr.timeout = 5 * 60 * 1000;
     const csrf = getCsrfToken();
@@ -37,7 +42,7 @@ export const uploadProfilePhoto = async ({ file, signal, onProgress } = {}) => {
     xhr.onload = () => {
       finish();
       let data = {};
-      try { data = JSON.parse(xhr.responseText || '{}'); } catch {}
+      try { data = asRecord(JSON.parse(xhr.responseText || '{}')); } catch { data = {}; }
       if (xhr.status < 200 || xhr.status >= 300 || !data.ok || !data.user) {
         reject(new Error(data.error || 'The backend did not confirm the profile photo upload.'));
         return;

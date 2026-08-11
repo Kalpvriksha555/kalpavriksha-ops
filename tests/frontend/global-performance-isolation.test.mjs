@@ -5,10 +5,10 @@ import fs from 'node:fs';
 const app = fs.readFileSync(new URL('../../frontend/src/App.jsx', import.meta.url), 'utf8');
 
 test('background row deltas replace only changed records and remove deleted or hidden rows', () => {
-  assert.match(app, /const rowDeltaIds = data\.rowDeltaIds/);
-  assert.match(app, /replaceIds:rowDeltaIds\.cases \|\| \[\]/);
-  assert.match(app, /mergeChatMessagesByFreshness\(prev, data\.chatMessages \|\| \[\], rowDeltaIds\.teamChat \|\| \[\]\)/);
-  assert.match(app, /mergeNotificationsStable\(prev, data\.notifications \|\| \[\], rowDeltaIds\.notifications \|\| \[\]\)/);
+  assert.match(app, /const rowDeltaIds = asRecord\(data\.rowDeltaIds\)/);
+  assert.match(app, /replaceIds:asArray\(rowDeltaIds\.cases\)/);
+  assert.match(app, /mergeChatMessagesByFreshness\(prev, asArray\(data\.chatMessages\), asArray\(rowDeltaIds\.teamChat\)\)/);
+  assert.match(app, /mergeNotificationsStable\(prev, asArray\(data\.notifications\), asArray\(rowDeltaIds\.notifications\)\)/);
 });
 
 test('workspace refreshes are low-priority transitions and preserve unchanged object references', () => {

@@ -1,0 +1,46 @@
+#!/usr/bin/env node
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+const root=path.resolve(new URL('..',import.meta.url).pathname);
+const read=(p)=>fs.readFileSync(path.join(root,p),'utf8');
+const json=(p)=>JSON.parse(read(p));
+const pkg=json('package.json');
+const backend=json('backend/package.json');
+const frontend=json('frontend/package.json');
+const push=read('PUSH_AND_DEPLOY.md');
+const deployDoc=read('DEPLOY_1.9.30.md');
+const launcher=read('scripts/launch-certify-and-deploy-1.9.30-vps.sh');
+const orchestrator=read('scripts/certify-and-deploy-1.9.30-vps.sh');
+assert.equal(pkg.version,'1.9.30-ssh-independent-certify-deploy-closure');
+assert.equal(backend.version,'2.9.30-ssh-independent-certify-deploy-closure');
+assert.equal(frontend.version,'2.9.30-ssh-independent-certify-deploy-closure');
+assert.equal(pkg.scripts['verify:operator-deploy'],'node scripts/phase-24-operator-safe-certify-deploy-check.mjs');
+assert.equal(pkg.scripts['certify-deploy:vps'],'bash scripts/launch-certify-and-deploy-1.9.30-vps.sh');
+assert.match(pkg.scripts.verify,/verify:certification-local-postgres && npm run verify:operator-deploy && npm run verify:frontend-runtime/);
+for (const doc of [push,deployDoc]) {
+  assert.match(doc,/launch-certify-and-deploy-1\.9\.30-vps\.sh/);
+  assert.doesNotMatch(doc,/deploy-1\.9\.24-vps\.sh/);
+  assert.doesNotMatch(doc,/KALPVRIKSHA VERSION 1\.9\.24/);
+}
+assert.match(push,/fresh non-live Git checkout/i);
+assert.match(push,/kalpavriksha-final-release-last-unit/);
+assert.match(push,/SSH disconnect does not interrupt/i);
+assert.match(deployDoc,/1\.9\.30-ssh-independent-certify-deploy-closure/);
+assert.doesNotMatch(deployDoc,/1\.9\.30-runtime-persistence-recovery/);
+assert.match(launcher,/Never launch final certification from the live source path/);
+assert.match(launcher,/status --porcelain --untracked-files=no/);
+assert.match(launcher,/ls-remote origin refs\/heads\/main/);
+assert.match(launcher,/systemd-run/);
+assert.match(launcher,/--property=Type=exec/);
+assert.match(launcher,/--property=TimeoutStartSec=0/);
+assert.match(launcher,/--property=TimeoutStopSec=300/);
+assert.match(launcher,/--property=KillMode=control-group/);
+assert.match(launcher,/--working-directory="\$RELEASE_ROOT"/);
+assert.match(launcher,/kalpavriksha-final-release-last-unit/);
+assert.match(launcher,/launch-certify-and-deploy|certify-and-deploy-1\.9\.30-vps\.sh/);
+assert.match(orchestrator,/KALPA_FINAL_RELEASE_LOCK/);
+assert.match(orchestrator,/kalpavriksha-final-certify-deploy\.lock/);
+assert.match(orchestrator,/exec 9>>"\$FINAL_RELEASE_LOCK"/);
+assert.match(orchestrator,/flock -n 9/);
+console.log('Phase 24 operator-safe certify/deploy closure PASS (current docs cannot point to obsolete deployers, exact GitHub candidate is launched outside live source, complete certification+deployment is SSH-independent, and a full-lifecycle lock prevents overlap).');

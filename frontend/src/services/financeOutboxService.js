@@ -243,8 +243,20 @@ export const queueFinanceDraft = ({ project = {}, draft = {}, user = {}, mutatio
   const safeDraft = sanitizeFinanceDraftForStorage(draft);
   const draftSignature = getStoredFinanceDraftSignature(safeDraft);
   const sameDraft = previous.draftSignature === draftSignature;
+  const suppliedExpectedVersion = Number(expectedFinanceVersion ?? project.financeVersion ?? previous.confirmedFinanceVersion ?? 0);
+  const previousExpectedVersion = Number(previous.expectedFinanceVersion ?? 0);
+  const terminalConflict = previous.retryable === false
+    || ['FINANCE_VERSION_CONFLICT','FINANCE_MUTATION_ID_REUSE'].includes(String(previous.lastErrorCode || ''));
+  const authoritativeVersionAdvanced = Number.isFinite(suppliedExpectedVersion)
+    && Number.isFinite(previousExpectedVersion)
+    && suppliedExpectedVersion !== previousExpectedVersion;
+  // Network/response-loss retries must reuse the same mutation ID. A terminal
+  // concurrency conflict is different: once the user is looking at a newer
+  // authoritative financeVersion, re-entering even the identical values is a
+  // new intentional mutation and must not be trapped behind the stale ID/version.
+  const reusePreviousMutation = sameDraft && !terminalConflict && !authoritativeVersionAdvanced;
   const now = Date.now();
-  const nextMutationId = sameDraft
+  const nextMutationId = reusePreviousMutation
     ? String(previous.mutationId || mutationId || createMutationId())
     : String(mutationId || createMutationId());
 
@@ -259,18 +271,18 @@ export const queueFinanceDraft = ({ project = {}, draft = {}, user = {}, mutatio
     draftSignature,
     mutationId: nextMutationId,
     expectedFinanceVersion: Number(
-      sameDraft
-        ? (previous.expectedFinanceVersion ?? expectedFinanceVersion ?? project.financeVersion ?? 0)
-        : (expectedFinanceVersion ?? previous.confirmedFinanceVersion ?? project.financeVersion ?? 0)
+      reusePreviousMutation
+        ? (previous.expectedFinanceVersion ?? suppliedExpectedVersion ?? 0)
+        : (suppliedExpectedVersion ?? previous.confirmedFinanceVersion ?? 0)
     ),
-    queuedAt: sameDraft ? Number(previous.queuedAt || now) : now,
+    queuedAt: reusePreviousMutation ? Number(previous.queuedAt || now) : now,
     updatedAt: now,
-    attempts: sameDraft ? Number(previous.attempts || 0) : 0,
-    lastAttemptAt: sameDraft ? Number(previous.lastAttemptAt || 0) : 0,
-    lastError: sameDraft ? String(previous.lastError || '') : '',
-    lastErrorCode: sameDraft ? String(previous.lastErrorCode || '') : '',
-    retryable: sameDraft ? previous.retryable !== false : true,
-    state: sameDraft && previous.state === 'error' ? 'error' : 'pending',
+    attempts: reusePreviousMutation ? Number(previous.attempts || 0) : 0,
+    lastAttemptAt: reusePreviousMutation ? Number(previous.lastAttemptAt || 0) : 0,
+    lastError: reusePreviousMutation ? String(previous.lastError || '') : '',
+    lastErrorCode: reusePreviousMutation ? String(previous.lastErrorCode || '') : '',
+    retryable: reusePreviousMutation ? previous.retryable !== false : true,
+    state: reusePreviousMutation && previous.state === 'error' ? 'error' : 'pending',
   };
 
   map[key] = record;
@@ -327,8 +339,18 @@ export const advanceFinanceOutboxAfterConfirmation = ({ key, mutationId, confirm
     return { removed: true, newerPending: false };
   }
 
-  record.expectedFinanceVersion = Number(confirmedFinanceVersion ?? record.expectedFinanceVersion ?? 0);
-  record.confirmedFinanceVersion = Number(confirmedFinanceVersion ?? record.confirmedFinanceVersion ?? 0);
+  const confirmedVersion = Math.max(0, Number(confirmedFinanceVersion || 0));
+  record.expectedFinanceVersion = Math.max(
+    0,
+    Number(record.expectedFinanceVersion || 0),
+    Number(record.confirmedFinanceVersion || 0),
+    confirmedVersion
+  );
+  record.confirmedFinanceVersion = Math.max(
+    0,
+    Number(record.confirmedFinanceVersion || 0),
+    confirmedVersion
+  );
   record.lastError = '';
   record.lastErrorCode = '';
   record.retryable = true;

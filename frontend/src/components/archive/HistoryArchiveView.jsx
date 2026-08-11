@@ -1,3 +1,4 @@
+import { asArray } from '../../utils/runtimeShapeUtils.js';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Archive, Calendar, Check, ChevronDown, ChevronRight, Filter, MapPin, Search } from 'lucide-react';
 import { formatDateTime, formatMonthLabel } from '../../utils/date';
@@ -94,7 +95,7 @@ export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, arc
     if (setArchiveViewState) setArchiveViewState(updater); else setLocalState(updater);
   };
 
-  const archived = useMemo(() => (projects || []).filter((project) => project.status === 'Completed' && !isRevisionWorkItem(project)).sort((a, b) => Number(b.completedAt || 0) - Number(a.completedAt || 0)), [projects]);
+  const archived = useMemo(() => asArray(projects).filter((project) => project.status === 'Completed' && !isRevisionWorkItem(project)).sort((a, b) => Number(b.completedAt || 0) - Number(a.completedAt || 0)), [projects]);
   const months = useMemo(() => [...new Set(archived.map((project) => project.completedAt ? formatMonthLabel(project.completedAt) : null).filter(Boolean))], [archived]);
   const banks = useMemo(() => [...new Set(archived.map(getArchiveBank))].sort(), [archived]);
   const locations = useMemo(() => [...new Set(archived.map(getArchiveLocation))].sort(), [archived]);

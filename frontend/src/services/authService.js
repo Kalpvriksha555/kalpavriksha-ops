@@ -1,19 +1,146 @@
 import { API_BASE } from '../config/appConfig';
-import { createRequestDeadline } from './requestControlService.js';
+import { createRequestDeadline, markClientMutationStarted } from './requestControlService.js';
+import { apiHttpError, readApiRecord } from './apiContractService.js';
 
 const CSRF_STORAGE_KEY = 'kalpa_csrf_token';
+const AUTH_CONTEXT_STORAGE_KEY = 'kalpa_auth_page_context_v1';
+const AUTH_CONTEXT_CHANNEL_NAME = 'kalpa_auth_page_context';
+const AUTH_CONTEXT_SCHEMA_VERSION = 1;
+const AUTH_PAGE_INSTANCE_ID = (() => {
+  try { return globalThis.crypto?.randomUUID?.() || `page-${Date.now()}-${Math.random().toString(36).slice(2)}`; }
+  catch { return `page-${Date.now()}-${Math.random().toString(36).slice(2)}`; }
+})();
 let csrfToken = '';
+let authRequestGeneration = 0;
+let observedAuthContext = null;
+let authContextChannel = null;
+
+const parseAuthContext = (raw = '') => {
+  try {
+    const value = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const ownerInstanceId = String(value.ownerInstanceId || '').trim();
+    if (!ownerInstanceId) return null;
+    return {
+      schemaVersion: Number(value.schemaVersion || AUTH_CONTEXT_SCHEMA_VERSION),
+      generation: Math.max(0, Number(value.generation || 0)),
+      ownerInstanceId,
+      state: String(value.state || 'signed-out'),
+      userId: String(value.userId || ''),
+      reason: String(value.reason || ''),
+      changedAt: Math.max(0, Number(value.changedAt || 0))
+    };
+  } catch { return null; }
+};
+
+const readStoredAuthContext = () => {
+  try {
+    const parsed = parseAuthContext(globalThis.localStorage?.getItem?.(AUTH_CONTEXT_STORAGE_KEY) || '');
+    if (parsed && (!observedAuthContext || parsed.generation >= Number(observedAuthContext.generation || 0))) observedAuthContext = parsed;
+  } catch {}
+  return observedAuthContext;
+};
+
+const invalidateAuthRequestGeneration = () => {
+  authRequestGeneration += 1;
+  return authRequestGeneration;
+};
+
+const staleAuthRequestError = () => {
+  const error = new Error('This request belongs to an older sign-in context and was discarded.');
+  error.code = 'AUTH_REQUEST_CONTEXT_STALE';
+  error.authenticationRejected = true;
+  return error;
+};
+
+const assertAuthRequestGeneration = (capturedGeneration) => {
+  if (Number(capturedGeneration) === authRequestGeneration) return true;
+  throw staleAuthRequestError();
+};
+
+const dispatchAuthContextChanged = (context = {}, code = 'AUTH_BROWSER_CONTEXT_CHANGED') => {
+  try {
+    globalThis.window?.dispatchEvent?.(new CustomEvent('kalpa-auth-expired', { detail: { code, context } }));
+  } catch {}
+};
+
+const acceptExternalAuthContext = (candidate) => {
+  const context = parseAuthContext(candidate);
+  if (!context || context.ownerInstanceId === AUTH_PAGE_INSTANCE_ID) return;
+  if (observedAuthContext && Number(context.generation || 0) < Number(observedAuthContext.generation || 0)) return;
+  observedAuthContext = context;
+  invalidateAuthRequestGeneration();
+  setCsrfToken('');
+  dispatchAuthContextChanged(context);
+};
+
+export const getAuthPageInstanceId = () => AUTH_PAGE_INSTANCE_ID;
+export const getBrowserAuthContext = () => readStoredAuthContext();
+export const browserAuthContextOwnedByThisPage = () => {
+  const context = readStoredAuthContext();
+  return !context?.ownerInstanceId || context.ownerInstanceId === AUTH_PAGE_INSTANCE_ID;
+};
+
+export const claimBrowserAuthContext = ({ state = 'signed-out', userId = '', reason = '' } = {}) => {
+  const previous = readStoredAuthContext();
+  const context = {
+    schemaVersion: AUTH_CONTEXT_SCHEMA_VERSION,
+    generation: Math.max(Number(previous?.generation || 0), Number(observedAuthContext?.generation || 0)) + 1,
+    ownerInstanceId: AUTH_PAGE_INSTANCE_ID,
+    state: String(state || 'signed-out'),
+    userId: String(userId || ''),
+    reason: String(reason || ''),
+    changedAt: Date.now()
+  };
+  observedAuthContext = context;
+  invalidateAuthRequestGeneration();
+  try { globalThis.localStorage?.setItem?.(AUTH_CONTEXT_STORAGE_KEY, JSON.stringify(context)); } catch {}
+  try { authContextChannel?.postMessage?.(context); } catch {}
+  return context;
+};
+
+export const assertBrowserAuthContextOwnership = () => {
+  const context = readStoredAuthContext();
+  if (!context?.ownerInstanceId || context.ownerInstanceId === AUTH_PAGE_INSTANCE_ID) return true;
+  setCsrfToken('');
+  dispatchAuthContextChanged(context);
+  const error = new Error('This browser tab no longer owns the active sign-in. Reload this tab before signing in again.');
+  error.code = 'AUTH_BROWSER_CONTEXT_CHANGED';
+  error.authenticationRejected = true;
+  throw error;
+};
 
 // CSRF credentials are page-instance secrets. Remove the legacy persisted copy
 // so a browser refresh never silently resurrects the previous workspace session.
 try { window.localStorage.removeItem(CSRF_STORAGE_KEY); } catch {}
 
 export const setCsrfToken = (value = '') => {
-  csrfToken = String(value || '');
+  const nextToken = String(value || '');
+  if (nextToken !== csrfToken) invalidateAuthRequestGeneration();
+  csrfToken = nextToken;
   try { window.localStorage.removeItem(CSRF_STORAGE_KEY); } catch {}
 };
 
 export const getCsrfToken = () => csrfToken;
+
+export const notifyBrowserAuthenticationRejected = (code = 'AUTH_REQUIRED') => {
+  setCsrfToken('');
+  dispatchAuthContextChanged(readStoredAuthContext(), String(code || 'AUTH_REQUIRED'));
+};
+
+if (typeof window !== 'undefined') {
+  try {
+    if (typeof BroadcastChannel !== 'undefined') {
+      authContextChannel = new BroadcastChannel(AUTH_CONTEXT_CHANNEL_NAME);
+      authContextChannel.addEventListener('message', event => acceptExternalAuthContext(event?.data));
+    }
+  } catch { authContextChannel = null; }
+  try {
+    window.addEventListener('storage', event => {
+      if (event?.key === AUTH_CONTEXT_STORAGE_KEY && event?.newValue) acceptExternalAuthContext(event.newValue);
+    });
+  } catch {}
+}
 
 const safeMethod = (method = 'GET') => ['GET', 'HEAD', 'OPTIONS'].includes(String(method || 'GET').toUpperCase());
 export const DEFAULT_AUTH_FETCH_TIMEOUT_MS = 90_000;
@@ -25,6 +152,34 @@ export const AUTH_REQUEST_TIMEOUTS = Object.freeze({
   recoveryReset: 40_000
 });
 const RESPONSE_BODY_METHODS = new Set(['arrayBuffer', 'blob', 'bytes', 'formData', 'json', 'text']);
+
+const API_DIAGNOSTIC_EVENT = 'kalpa-api-diagnostic';
+const createClientRequestId = () => {
+  try { return globalThis.crypto?.randomUUID?.() || `req-${Date.now()}-${Math.random().toString(36).slice(2)}`; }
+  catch { return `req-${Date.now()}-${Math.random().toString(36).slice(2)}`; }
+};
+const safeRequestRoute = (input = '') => {
+  try { return new URL(String(input || ''), globalThis.location?.origin || 'https://kalpa.invalid').pathname; }
+  catch { return String(input || '').split('?')[0].split('#')[0].slice(0, 240); }
+};
+const responseClassForStatus = (status = 0) => {
+  const value = Number(status || 0);
+  if (value >= 500) return 'SERVER_5XX';
+  if (value === 429) return 'RATE_LIMITED';
+  if (value === 401) return 'AUTH_REQUIRED';
+  if (value === 403) return 'FORBIDDEN';
+  if (value === 404) return 'NOT_FOUND';
+  if (value === 409) return 'CONFLICT';
+  if (value >= 400) return 'CLIENT_4XX';
+  return '';
+};
+const emitApiDiagnostic = (detail = {}) => {
+  try { globalThis.window?.dispatchEvent?.(new CustomEvent(API_DIAGNOSTIC_EVENT, { detail })); } catch {}
+};
+const attachResponseRequestMeta = (response, meta = {}) => {
+  try { Object.defineProperty(response, '__kalpaRequestMeta', { value:Object.freeze({ ...meta }), configurable:true }); } catch {}
+  return response;
+};
 
 const timeoutMessageForAuthAction = (action = '') => ({
   boot:'Secure session verification took too long. Check your connection and retry sign-in.',
@@ -55,10 +210,15 @@ const requestAbortReason = (signal) => {
   return error;
 };
 
-const consumeWithDeadline = async (response, methodName, args, deadline, finish) => {
+const consumeWithDeadline = async (response, methodName, args, deadline, finish, requestAuthGeneration) => {
+  assertAuthRequestGeneration(requestAuthGeneration);
   const operation = Promise.resolve().then(() => response[methodName](...args));
   if (!deadline.signal) {
-    try { return await operation; } finally { finish(); }
+    try {
+      const value = await operation;
+      assertAuthRequestGeneration(requestAuthGeneration);
+      return value;
+    } finally { finish(); }
   }
 
   let abortHandler = null;
@@ -73,14 +233,16 @@ const consumeWithDeadline = async (response, methodName, args, deadline, finish)
   });
 
   try {
-    return await Promise.race([operation, aborted]);
+    const value = await Promise.race([operation, aborted]);
+    assertAuthRequestGeneration(requestAuthGeneration);
+    return value;
   } finally {
     if (abortHandler) deadline.signal.removeEventListener('abort', abortHandler);
     finish();
   }
 };
 
-const streamWithDeadline = (body, deadline, finish) => {
+const streamWithDeadline = (body, deadline, finish, requestAuthGeneration) => {
   if (!body || typeof ReadableStream === 'undefined') return body;
   const reader = body.getReader();
   let settled = false;
@@ -108,7 +270,9 @@ const streamWithDeadline = (body, deadline, finish) => {
     async pull(controller) {
       if (settled) return;
       try {
+        assertAuthRequestGeneration(requestAuthGeneration);
         const { done, value } = await reader.read();
+        assertAuthRequestGeneration(requestAuthGeneration);
         if (done) {
           settle();
           controller.close();
@@ -127,7 +291,7 @@ const streamWithDeadline = (body, deadline, finish) => {
   });
 };
 
-const wrapResponseWithDeadline = (response, deadline, requestMethod = 'GET') => {
+const wrapResponseWithDeadline = (response, deadline, requestMethod = 'GET', requestAuthGeneration = authRequestGeneration) => {
   let finished = false;
   let wrappedBody;
   const finish = () => {
@@ -142,11 +306,11 @@ const wrapResponseWithDeadline = (response, deadline, requestMethod = 'GET') => 
     get(target, property) {
       if (property === 'body') {
         if (finished) return target.body;
-        wrappedBody ||= streamWithDeadline(target.body, deadline, finish);
+        wrappedBody ||= streamWithDeadline(target.body, deadline, finish, requestAuthGeneration);
         return wrappedBody;
       }
       if (RESPONSE_BODY_METHODS.has(property) && typeof target[property] === 'function') {
-        return (...args) => consumeWithDeadline(target, property, args, deadline, finish);
+        return (...args) => consumeWithDeadline(target, property, args, deadline, finish, requestAuthGeneration);
       }
       const value = Reflect.get(target, property, target);
       return typeof value === 'function' ? value.bind(target) : value;
@@ -154,7 +318,7 @@ const wrapResponseWithDeadline = (response, deadline, requestMethod = 'GET') => 
   });
 };
 
-const parsePayload = async (response) => response.json().catch(() => ({}));
+const parsePayload = async (response, operation = 'Authentication request') => readApiRecord(response, { operation, requireOk:response.ok });
 
 export const authFetch = async (input, init = {}) => {
   const {
@@ -162,40 +326,65 @@ export const authFetch = async (input, init = {}) => {
     signal: externalSignal,
     notifyAuthExpired = true,
     authAction = '',
+    skipSessionOwnershipCheck = false,
     ...fetchInit
   } = init || {};
+  if (!skipSessionOwnershipCheck) assertBrowserAuthContextOwnership();
+  const requestAuthGeneration = authRequestGeneration;
   const method = String(fetchInit.method || 'GET').toUpperCase();
   const headers = new Headers(fetchInit.headers || {});
-  if (!safeMethod(method) && csrfToken && !headers.has('X-CSRF-Token')) headers.set('X-CSRF-Token', csrfToken);
+  const requestId = String(headers.get('X-Request-Id') || createClientRequestId()).trim();
+  if (!headers.has('X-Request-Id')) headers.set('X-Request-Id', requestId);
+  const route = safeRequestRoute(input);
+  const operation = String(authAction || `${method} ${route}`).slice(0, 120);
+  const requestStartedAt = Date.now();
+  // Send the per-page session token on safe reads as well as writes. The server
+  // treats a mismatched token as a stale browser-tab context without clearing
+  // the shared cookie, preventing one tab from reading another tab's new user.
+  if (csrfToken && !headers.has('X-CSRF-Token')) headers.set('X-CSRF-Token', csrfToken);
 
   const deadline = createRequestDeadline({ timeoutMs, externalSignal });
+  if (!safeMethod(method)) markClientMutationStarted();
 
   try {
     const response = await fetch(input, { ...fetchInit, method, headers, signal:deadline.signal, credentials: 'include' });
-    if (response.status === 401 && notifyAuthExpired) {
-      setCsrfToken('');
-      try { window.dispatchEvent(new CustomEvent('kalpa-auth-expired')); } catch {}
+    const requestMeta = { requestId, route, method, operation, status:Number(response.status || 0), durationMs:Date.now() - requestStartedAt };
+    attachResponseRequestMeta(response, requestMeta);
+    if (!response.ok) emitApiDiagnostic({ source:'api-http', ...requestMeta, responseClass:responseClassForStatus(response.status), errorFingerprint:String(response.headers.get('X-Error-Fingerprint') || '') });
+    // A response that started under an older user/page context is never allowed
+    // to reach application state, even if HTTP completed successfully. This also
+    // protects slow response bodies that finish after logout or account replacement.
+    assertAuthRequestGeneration(requestAuthGeneration);
+    const sessionContextChanged = response.status === 409 && String(response.headers.get('X-Auth-Session-Context') || '').toLowerCase() === 'changed';
+    if (sessionContextChanged) {
+      notifyBrowserAuthenticationRejected('AUTH_SESSION_CONTEXT_CHANGED');
+    } else if (response.status === 401 && notifyAuthExpired) {
+      notifyBrowserAuthenticationRejected('AUTH_REQUIRED');
     }
-    return wrapResponseWithDeadline(response, deadline, method);
+    const responseAuthGeneration = authRequestGeneration;
+    return wrapResponseWithDeadline(response, deadline, method, responseAuthGeneration);
   } catch (error) {
     deadline.cleanup();
-    throw normalizeAuthNetworkError(error, authAction);
+    const normalized = normalizeAuthNetworkError(error, authAction);
+    normalized.requestId = normalized.requestId || requestId;
+    normalized.route = normalized.route || route;
+    normalized.method = normalized.method || method;
+    normalized.operation = normalized.operation || operation;
+    normalized.responseClass = normalized.responseClass || (normalized.code === 'AUTH_REQUEST_TIMEOUT' ? 'REQUEST_TIMEOUT' : 'NETWORK_UNAVAILABLE');
+    emitApiDiagnostic({ source:'api-network', error:normalized, code:normalized.code || '', requestId, route, method, operation, status:0, responseClass:normalized.responseClass, durationMs:Date.now() - requestStartedAt });
+    throw normalized;
   }
 };
 
 const throwAuthError = async (response, fallback) => {
-  const payload = await parsePayload(response);
-  const error = new Error(payload.error || fallback || `Authentication request failed: ${response.status}`);
-  error.status = response.status;
-  error.code = payload.code || '';
-  error.payload = payload;
-  error.retryAfterSeconds = Number(response.headers?.get?.('Retry-After') || payload.retryAfterSeconds || 0);
-  error.requestId = String(response.headers?.get?.('X-Request-Id') || payload.requestId || '');
+  const payload = await readApiRecord(response, { operation:fallback || 'Authentication request' });
+  const error = apiHttpError(response, payload, fallback || 'Authentication request failed.');
   if (response.status === 401) error.authenticationRejected = true;
   throw error;
 };
 
 export const loginApi = async ({ username, password }) => {
+  assertBrowserAuthContextOwnership();
   const response = await authFetch(`${API_BASE}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -205,28 +394,36 @@ export const loginApi = async ({ username, password }) => {
     notifyAuthExpired: false
   });
   if (!response.ok) return throwAuthError(response, 'Login failed.');
-  const payload = await parsePayload(response);
+  const payload = await parsePayload(response, 'Secure sign-in');
+  if (!payload.user || payload.authenticated !== true) throw apiHttpError(response, payload, 'Secure sign-in was not confirmed.');
   setCsrfToken(payload.csrfToken || '');
+  claimBrowserAuthContext({ state:'authenticated', userId:payload.user?.id || payload.user?.username || '', reason:'login' });
   return payload;
 };
 
 export const clearBrowserSessionApi = async () => {
   setCsrfToken('');
+  // Opening/reloading a page intentionally becomes the browser's new auth owner
+  // before network cleanup. Other tabs therefore stop using stale credentials
+  // immediately, even when the connection is slow or the cleanup response is lost.
+  claimBrowserAuthContext({ state:'signed-out', reason:'page-boot' });
   const response = await authFetch(`${API_BASE}/api/auth/clear-browser-session`, {
     method: 'POST',
     cache: 'no-store',
     timeoutMs: 8_000,
     authAction:'boot',
-    notifyAuthExpired: false
+    notifyAuthExpired: false,
+    skipSessionOwnershipCheck: true
   });
   if (!response.ok) return throwAuthError(response, 'Previous browser session could not be cleared.');
-  return parsePayload(response);
+  return parsePayload(response, 'Clear previous browser session');
 };
 
 export const getSessionApi = async () => {
   const response = await authFetch(`${API_BASE}/api/auth/session`, { cache:'no-store', timeoutMs:AUTH_REQUEST_TIMEOUTS.boot, authAction:'boot' });
   if (!response.ok) return throwAuthError(response, 'Secure session verification failed.');
-  const payload = await parsePayload(response);
+  const payload = await parsePayload(response, 'Secure session verification');
+  if (!payload.user || payload.authenticated !== true) throw apiHttpError(response, payload, 'Secure session verification was not confirmed.');
   setCsrfToken(payload.csrfToken || '');
   return payload;
 };
@@ -234,9 +431,10 @@ export const getSessionApi = async () => {
 export const logoutApi = async () => {
   try {
     const response = await authFetch(`${API_BASE}/api/auth/logout`, { method: 'POST' });
-    if (!response.ok && response.status !== 401) await throwAuthError(response, 'Logout failed.');
+    if (!response.ok && response.status !== 401 && response.status !== 409) await throwAuthError(response, 'Logout failed.');
   } finally {
     setCsrfToken('');
+    claimBrowserAuthContext({ state:'signed-out', reason:'logout' });
   }
   return { ok: true };
 };
@@ -245,6 +443,7 @@ export const logoutAllApi = async () => {
   const response = await authFetch(`${API_BASE}/api/auth/logout-all`, { method: 'POST' });
   if (!response.ok) return throwAuthError(response, 'Could not sign out other sessions.');
   setCsrfToken('');
+  claimBrowserAuthContext({ state:'signed-out', reason:'logout-all' });
   return parsePayload(response);
 };
 
@@ -260,6 +459,7 @@ export const changePasswordApi = async ({ currentPassword, newPassword }) => {
   if (!response.ok) return throwAuthError(response, 'Password could not be changed.');
   const payload = await parsePayload(response);
   setCsrfToken(payload.csrfToken || '');
+  claimBrowserAuthContext({ state:'authenticated', userId:payload.user?.id || payload.user?.username || '', reason:'password-change' });
   return payload;
 };
 

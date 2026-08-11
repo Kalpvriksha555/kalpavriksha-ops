@@ -1,3 +1,4 @@
+import { sanitizeOperationalPath } from './runtimeDiagnosticsService.js';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -37,7 +38,7 @@ export function requestLogMiddleware(req, res, next) {
     structuredLog(res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info', 'http_request', {
       requestId: req.requestId || res.getHeader('X-Request-ID') || '',
       method: req.method,
-      path: req.originalUrl || req.url,
+      path: sanitizeOperationalPath(req.originalUrl || req.url),
       status: res.statusCode,
       durationMs: Number(durationMs.toFixed(2)),
       userId: req.auth?.user?.id || '',

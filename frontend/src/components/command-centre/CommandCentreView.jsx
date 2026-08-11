@@ -1,3 +1,4 @@
+import { asArray, asRecord, firstArray, parseJsonArray, parseJsonRecord } from '../../utils/runtimeShapeUtils.js';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, BarChart3, Bell, CheckCircle, Clock, Coffee, Download, FileText, ShieldCheck, Star, User, Users, XCircle } from 'lucide-react';
 import { Badge, MiniEmptyState } from '../shared';
@@ -9,6 +10,7 @@ import { buildProjectMonthlyFinanceEntry, formatAccountingMonthLabel, getAccount
 import { formatTaskId, getEstimateDetails, getLatestCompletedFileName, getTaskDescription } from '../../utils/taskDisplayUtils';
 import { getTaskBusySince, getUserActiveTasks, getUserBusySince, getUserFreeSince, getUserLastCompletedAt, getUserDraftingTask, getDraftingElapsedMs } from '../../utils/presenceAttendanceUtils';
 import { authFetch } from '../../services/authService';
+import { apiHttpError, readApiRecord } from '../../services/apiContractService.js';
 import { notifyUser } from '../../services/uiFeedback.js';
 import { getBackupStatusApi, getOperationalEventsApi, getOperationalJobsApi, getReliabilityStatusApi, retryOperationalJobApi } from '../../services/systemHealthService';
 
@@ -655,7 +657,7 @@ const countBy = (items = [], keyFn) => (Array.isArray(items) ? items : []).reduc
 }, {});
 const topRowsFromCount = (countMap = {}, limit = 8) => Object.entries(countMap).sort((a, b) => b[1] - a[1]).slice(0, limit);
 const getCompletedCount = (projects = []) => (Array.isArray(projects) ? projects : []).filter(Boolean).filter(isProjectCompleted).length;
-const getRevisionCount = (projects = []) => (Array.isArray(projects) ? projects : []).filter(Boolean).filter(p => (p.subTasks || p.revisions || []).length > 0 || hasActiveRevision(p)).length;
+const getRevisionCount = (projects = []) => (Array.isArray(projects) ? projects : []).filter(Boolean).filter(p => firstArray(p?.subTasks, p?.revisions).length > 0 || hasActiveRevision(p)).length;
 const getSlaCompliancePct = (projects = []) => {
   const done = (Array.isArray(projects) ? projects : []).filter(Boolean).filter(isProjectCompleted);
   if (!done.length) return 100;
@@ -670,7 +672,7 @@ const getSlaCompliancePct = (projects = []) => {
 const CLOSED_REVISION_STATUSES = new Set(['COMPLETED', 'APPROVED', 'ARCHIVED', 'CLOSED', 'DELETED', 'CANCELLED', 'CANCELED']);
 const ACTIVE_REVISION_STATUSES = REVISION_STATUS_KEYS;
 const isSubTaskOpen = (subTask = {}) => !['DONE', 'COMPLETED', 'APPROVED', 'CLOSED', 'RESOLVED'].includes(normalizeWorkStatus(subTask?.status || 'Pending'));
-const getOpenRevisionItems = (project = {}) => (project?.subTasks || project?.revisions || []).filter(isSubTaskOpen);
+const getOpenRevisionItems = (project = {}) => firstArray(project?.subTasks, project?.revisions).filter(isSubTaskOpen);
 const hasActiveRevision = (project = {}) => {
   const statusKey = normalizeWorkStatus(project?.status);
   const reviewKey = normalizeWorkStatus(project?.reviewStatus || project?.finalConclusion || '');
@@ -894,9 +896,23 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
   const presenceTaskStateStorageKey = `kalpa_presence_task_state::${cacheActorKey}`;
   const [presenceTimes, setPresenceTimes] = useState({});
   useEffect(() => {
-    try { const saved = JSON.parse(localStorage.getItem(presenceTimesStorageKey) || '{}'); setPresenceTimes(saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {}); } catch (e) { setPresenceTimes({}); }
+    setPresenceTimes(parseJsonRecord(localStorage.getItem(presenceTimesStorageKey)));
   }, [presenceTimesStorageKey]);
-  useEffect(() => { const timer = setInterval(() => setAvailabilityNow(Date.now()), 30000); return () => clearInterval(timer); }, []);
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    let timer = null;
+    const stop = () => { if (timer) clearInterval(timer); timer = null; };
+    const start = () => {
+      stop();
+      if (document.hidden) return;
+      setAvailabilityNow(Date.now());
+      timer = setInterval(() => setAvailabilityNow(Date.now()), 30000);
+    };
+    const onVisibility = () => start();
+    start();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => { stop(); document.removeEventListener('visibilitychange', onVisibility); };
+  }, []);
   const metrics = useMemo(() => getTodayMetrics(safeProjects, dateKey), [projects, dateKey]);
   const isAdmin = currentUser?.role === ROLES.ADMIN;
   const activityDayKey = formatDateKey(availabilityNow);
@@ -950,9 +966,9 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
   useEffect(() => {
     const now = Date.now();
     let previous = {};
-    try { const saved = JSON.parse(localStorage.getItem(presenceTaskStateStorageKey) || '{}'); previous = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {}; } catch (e) { previous = {}; }
+    previous = parseJsonRecord(localStorage.getItem(presenceTaskStateStorageKey));
     let existingTimes = {};
-    try { const saved = JSON.parse(localStorage.getItem(presenceTimesStorageKey) || '{}'); existingTimes = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {}; } catch (e) { existingTimes = {}; }
+    existingTimes = parseJsonRecord(localStorage.getItem(presenceTimesStorageKey));
     const nextState = {};
     const nextTimes = { ...existingTimes };
 
@@ -1075,8 +1091,8 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
         ...metrics.waitingAssignment,
         ...metrics.internalReviewPending,
         ...metrics.revisions,
-        ...(metrics.slaBuckets.critical || []),
-        ...(metrics.slaBuckets['near-sla'] || [])
+        ...asArray(metrics.slaBuckets.critical),
+        ...asArray(metrics.slaBuckets['near-sla'])
       ];
       const seen = new Set();
       return merged.filter(item => {
@@ -1093,9 +1109,9 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
     if (filterKey === 'internalReview') return metrics.internalReviewPending.slice();
     if (filterKey === 'ready') return metrics.readyForDelivery.slice();
     if (filterKey === 'paymentPending') return metrics.paymentPending.slice();
-    if (filterKey === 'slaCritical') return (metrics.slaBuckets.critical || []).slice();
-    if (filterKey === 'healthy') return (metrics.slaBuckets.healthy || []).slice();
-    if (filterKey === 'attention') return (metrics.slaBuckets.attention || []).slice();
+    if (filterKey === 'slaCritical') return asArray(metrics.slaBuckets.critical).slice();
+    if (filterKey === 'healthy') return asArray(metrics.slaBuckets.healthy).slice();
+    if (filterKey === 'attention') return asArray(metrics.slaBuckets.attention).slice();
     return rawActiveBoard;
   };
   const attentionItems = filterOperations('attentionAll');
@@ -1119,13 +1135,13 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
     ['🟢 Ready for delivery', metrics.readyForDelivery.length, 'ready', 'bg-emerald-50 text-emerald-700 border-emerald-100'],
     ...(isAdmin ? [['🔵 Payment pending', metrics.paymentPending.length, 'paymentPending', 'bg-blue-50 text-blue-700 border-blue-100']] : []),
     ['🟣 Revision queue', metrics.revisions.length, 'revisions', 'bg-purple-50 text-purple-700 border-purple-100'],
-    ['⚫ SLA violations', (metrics.slaBuckets.critical || []).length, 'slaCritical', 'bg-slate-100 text-slate-800 border-slate-200']
+    ['⚫ SLA violations', asArray(metrics?.slaBuckets?.critical).length, 'slaCritical', 'bg-slate-100 text-slate-800 border-slate-200']
   ];
   const slaMonitorSections = [
-    ['0–2 hrs', 'Healthy', (metrics.slaBuckets.healthy || []).length, 'healthy', 'bg-emerald-50 text-emerald-700 border-emerald-100'],
-    ['2–4 hrs', 'Attention', (metrics.slaBuckets.attention || []).length, 'attention', 'bg-amber-50 text-amber-700 border-amber-100'],
-    ['4–8 hrs', 'Near SLA', (metrics.slaBuckets['near-sla'] || []).length, 'near', 'bg-orange-50 text-orange-700 border-orange-100'],
-    ['>8 hrs', 'Critical', (metrics.slaBuckets.critical || []).length, 'slaCritical', 'bg-red-50 text-red-700 border-red-100']
+    ['0–2 hrs', 'Healthy', asArray(metrics?.slaBuckets?.healthy).length, 'healthy', 'bg-emerald-50 text-emerald-700 border-emerald-100'],
+    ['2–4 hrs', 'Attention', asArray(metrics?.slaBuckets?.attention).length, 'attention', 'bg-amber-50 text-amber-700 border-amber-100'],
+    ['4–8 hrs', 'Near SLA', asArray(metrics?.slaBuckets?.['near-sla']).length, 'near', 'bg-orange-50 text-orange-700 border-orange-100'],
+    ['>8 hrs', 'Critical', asArray(metrics?.slaBuckets?.critical).length, 'slaCritical', 'bg-red-50 text-red-700 border-red-100']
   ];
   const actionCount = attentionItems.length;
   const commandFocusCards = [
@@ -1228,7 +1244,7 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
               <h3 className="font-black text-slate-800 mb-3">Alerts</h3>
               <button type="button" onClick={() => applyDashboardFilter('revisions')} className="w-full mb-2 bg-purple-50 text-purple-700 border border-purple-100 rounded-xl px-3 py-2 flex justify-between"><span className="font-black text-xs">Revisions</span><b>{metrics.revisions.length}</b></button>
               {isAdmin && <button type="button" onClick={() => applyDashboardFilter('paymentPending')} className="w-full mb-2 bg-blue-50 text-blue-700 border border-blue-100 rounded-xl px-3 py-2 flex justify-between"><span className="font-black text-xs">Payment Pending</span><b>{metrics.paymentPending.length}</b></button>}
-              <button type="button" onClick={() => applyDashboardFilter('slaCritical')} className="w-full bg-slate-100 text-slate-800 border border-slate-200 rounded-xl px-3 py-2 flex justify-between"><span className="font-black text-xs">Critical SLA</span><b>{(metrics.slaBuckets.critical || []).length}</b></button>
+              <button type="button" onClick={() => applyDashboardFilter('slaCritical')} className="w-full bg-slate-100 text-slate-800 border border-slate-200 rounded-xl px-3 py-2 flex justify-between"><span className="font-black text-xs">Critical SLA</span><b>{asArray(metrics?.slaBuckets?.critical).length}</b></button>
             </div>
           </div>
         </div>
@@ -1302,10 +1318,14 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
     let active = true;
     setLeaderboardError('');
     authFetch(absoluteApiUrl(`/api/performance/leaderboard?range=${encodeURIComponent(range)}`), { cache:'no-store', timeoutMs:30_000 })
-      .then(res => res.ok ? res.json() : Promise.reject(new Error(`Leaderboard failed: ${res.status}`)))
+      .then(async res => {
+        const data = await readApiRecord(res, { operation:'Performance leaderboard', requireOk:true, requiredFields:['leaderboard'] });
+        if (!res.ok) throw apiHttpError(res, data, 'Leaderboard failed');
+        return data;
+      })
       .then(data => {
-        if (!active || !data?.ok) return;
-        setLeaderboard(data.leaderboard || null);
+        if (!active) return;
+        setLeaderboard(Object.keys(asRecord(data.leaderboard)).length ? asRecord(data.leaderboard) : null);
       })
       .catch(error => { if (active) setLeaderboardError(error?.message || 'Team comparison could not be loaded.'); });
     return () => { active = false; };
@@ -1316,13 +1336,10 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
     setEngineBusy(true);
     try {
       const res = await authFetch(absoluteApiUrl('/api/performance/rebuild'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'performance-dashboard' }) });
-      const data = await res.json().catch(() => null);
-      if (data?.ok) {
-        setEngineSummary(data.summary || null);
-        setLeaderboardRefreshKey(value => value + 1);
-      } else {
-        notifyUser(data?.error || 'Performance rebuild failed.');
-      }
+      const data = await readApiRecord(res, { operation:'Performance rebuild', requireOk:true });
+      if (!res.ok) throw apiHttpError(res, data, 'Performance rebuild failed');
+      setEngineSummary(data.summary || null);
+      setLeaderboardRefreshKey(value => value + 1);
     } catch (err) {
       notifyUser(err?.message || 'Performance rebuild failed.');
     } finally {
@@ -1798,7 +1815,7 @@ export const ProductionQAView = ({ projects = [], users = [], currentUser = null
   const completedWithFiles = completedCases.filter(hasCompletedDeliverable).length;
   const assignedOpen = projectList.filter(p => isIncompleteProject(p) && p.assignedTo).length;
   const unassignedOpen = projectList.filter(p => isIncompleteProject(p) && !p.assignedTo).length;
-  const revisionCases = projectList.filter(p => hasActiveRevision(p) || (p.subTasks || p.revisions || []).length > 0).length;
+  const revisionCases = projectList.filter(p => hasActiveRevision(p) || firstArray(p?.subTasks, p?.revisions).length > 0).length;
   const paymentTracked = projectList.filter(p => getPaymentStatus(p) !== 'not-set' || getEstimateAmount(p) > 0).length;
   const slaPct = getSlaCompliancePct(projectList);
   const admins = team.filter(u => u.role === ROLES.ADMIN).length;
@@ -1827,11 +1844,11 @@ export const ProductionQAView = ({ projects = [], users = [], currentUser = null
   const exportQA = () => exportToCSV(['Group', 'Check', 'Status', 'Detail'], checks.map(c => [c.group, c.item, c.pass ? 'PASS' : 'ATTENTION', c.detail]), `Production_QA_${todayKey}.csv`);
   const grouped = checks.reduce((acc, c) => { (acc[c.group] ||= []).push(c); return acc; }, {});
   const workflowItems = ['Login', 'Attendance', 'Case creation', 'Assignment', 'Drafting', 'Completion upload/download', 'Internal review', 'Revision', 'Archive', 'Finance ledger', 'Notifications', 'Chat', 'Mobile responsiveness', 'Multi-user sync'];
-  const signoffStorageKey = `kalpa-production-qa-signoff-${todayKey}`;
+  const signoffStorageKey = `kalpa-production-qa-signoff-${todayKey}::${String(currentUser?.id || currentUser?.username || currentUser?.name || 'signed-out').trim().toLowerCase()}`;
   const [signedItems, setSignedItems] = useState(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem(signoffStorageKey) || '[]');
-      return Array.isArray(saved) ? saved : [];
+      const saved = parseJsonArray(localStorage.getItem(signoffStorageKey));
+      return saved;
     } catch {
       return [];
     }
@@ -2014,8 +2031,8 @@ export const SystemSettingsView = ({ projects = [], users = [], currentUser = nu
           <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm p-6"><h2 className="text-2xl font-black text-slate-800">Backup & Restore Readiness</h2><p className="text-slate-500 font-bold mt-2">Backups are created and verified from the VPS terminal. Browser restoration remains disabled to prevent accidental production data replacement.</p></div>
           <div className="bg-white rounded-2xl border border-slate-100 overflow-hidden">
             <div className="grid grid-cols-4 gap-3 px-4 py-3 bg-slate-50 text-[10px] font-black uppercase tracking-widest text-slate-500"><span>Created</span><span>Type</span><span>Status</span><span>Size</span></div>
-            {(backups?.manifests || []).map(item => <div key={item.id || item.manifestPath} className="grid grid-cols-4 gap-3 px-4 py-3 border-t border-slate-100 text-xs font-bold text-slate-600"><span>{item.createdAt ? new Date(item.createdAt).toLocaleString() : '-'}</span><span>{item.backupType || '-'}</span><span className={item.status === 'VERIFIED' ? 'text-emerald-600' : 'text-rose-600'}>{item.status || '-'}</span><span>{formatBytes(Object.values(item.components || {}).reduce((sum, part) => sum + Number(part?.sizeBytes || 0), 0))}</span></div>)}
-            {!(backups?.manifests || []).length && <div className="p-8 text-center text-slate-400 font-bold">No verified backup manifest has been found.</div>}
+            {asArray(backups?.manifests).map(item => <div key={item.id || item.manifestPath} className="grid grid-cols-4 gap-3 px-4 py-3 border-t border-slate-100 text-xs font-bold text-slate-600"><span>{item.createdAt ? new Date(item.createdAt).toLocaleString() : '-'}</span><span>{item.backupType || '-'}</span><span className={item.status === 'VERIFIED' ? 'text-emerald-600' : 'text-rose-600'}>{item.status || '-'}</span><span>{formatBytes(Object.values(item.components || {}).reduce((sum, part) => sum + Number(part?.sizeBytes || 0), 0))}</span></div>)}
+            {!asArray(backups?.manifests).length && <div className="p-8 text-center text-slate-400 font-bold">No verified backup manifest has been found.</div>}
           </div>
         </div>
       )}
@@ -2031,7 +2048,29 @@ export const SystemSettingsView = ({ projects = [], users = [], currentUser = nu
       {activeTool === 'audit' && (
         <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden">
           <div className="p-6 border-b border-slate-100"><h2 className="text-2xl font-black text-slate-800">Operational Events</h2><p className="text-slate-500 font-bold mt-2">Structured reliability events supplement case timelines and finance audit records.</p></div>
-          <div className="divide-y divide-slate-100 max-h-[620px] overflow-y-auto">{events.map(event => <div key={event.id} className="p-4"><div className="flex items-center justify-between gap-3"><p className="font-black text-slate-800">{event.event_type || event.eventType}</p><span className={`text-[10px] font-black ${String(event.severity).includes('ERROR') || String(event.severity).includes('FATAL') ? 'text-rose-600' : 'text-slate-500'}`}>{event.severity}</span></div><p className="text-xs font-bold text-slate-500 mt-1">{event.actor || 'system'} • {event.created_at ? new Date(event.created_at).toLocaleString() : '-'}</p><p className="text-[10px] font-mono text-slate-400 mt-1">Request {event.request_id || '-'}</p></div>)}{!events.length && <div className="p-10 text-center text-slate-400 font-bold">No persistent operational events available.</div>}</div>
+          <div className="divide-y divide-slate-100 max-h-[620px] overflow-y-auto">
+            {events.map(event => {
+              const details = asRecord(event.details);
+              const isClientDiagnostic = String(event.event_type || event.eventType || '').toUpperCase() === 'CLIENT_RUNTIME_DIAGNOSTIC';
+              return (
+                <div key={event.id} className="p-4">
+                  <div className="flex items-center justify-between gap-3"><p className="font-black text-slate-800">{event.event_type || event.eventType}</p><span className={`text-[10px] font-black ${String(event.severity).includes('ERROR') || String(event.severity).includes('FATAL') ? 'text-rose-600' : 'text-slate-500'}`}>{event.severity}</span></div>
+                  <p className="text-xs font-bold text-slate-500 mt-1">{event.actor || 'system'} • {event.created_at ? new Date(event.created_at).toLocaleString() : '-'}</p>
+                  <p className="text-[10px] font-mono text-slate-400 mt-1">Request {event.request_id || '-'}</p>
+                  {isClientDiagnostic && (
+                    <div className="mt-3 rounded-xl border border-amber-100 bg-amber-50/70 p-3 text-[11px] font-bold text-slate-600">
+                      <p className="font-mono text-amber-700">Diagnostic {details.diagnosticId || '-'}</p>
+                      <p className="mt-1">{details.messageClass || 'RUNTIME_EXCEPTION'}{details.source ? ` • ${details.source}` : ''}{details.operation ? ` • ${details.operation}` : ''}</p>
+                      <p className="mt-1 font-mono text-slate-500">{details.method || ''} {details.route || ''}{details.status ? ` • HTTP ${details.status}` : ''}</p>
+                      <p className="mt-1 text-slate-500">State {details.stateVersion ?? '-'} • data {details.dataRevision ?? '-'} • presence {details.presenceGeneration ?? '-'} • {details.visibility || 'unknown'} • {details.viewport || 'unknown'}</p>
+                      {asArray(details.componentPath).length > 0 && <p className="mt-1 font-mono text-slate-400">UI {asArray(details.componentPath).join(' › ')}</p>}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {!events.length && <div className="p-10 text-center text-slate-400 font-bold">No persistent operational events available.</div>}
+          </div>
         </div>
       )}
     </div>

@@ -125,10 +125,10 @@ test('media and HEIC signatures pass real private-storage validation', async () 
 test('upload mutation idempotency is actor and chat-target scoped', () => {
   const route = server.slice(server.indexOf("app.post('/api/files/upload'"), server.indexOf('function getStoredFilePreviewDescriptor'));
   assert.match(route, /uploadedById/);
-  assert.match(route, /sameActor/);
+  assert.match(route, /sameUploadActor/);
   assert.match(route, /requestedChatScope/);
   assert.match(route, /requestedChatParticipants\.every/);
-  assert.match(route, /Boolean\(item\?\.isVoiceNote\) === requestedVoiceNote/);
+  assert.match(route, /Boolean\(item\?\.isVoiceNote\)===requestedVoiceNote/);
   assert.match(route, /file\.uploadedByUsername=actor\.username/);
 });
 
@@ -137,8 +137,9 @@ test('voice note evidence is persisted and overrides a misleading video WebM MIM
   assert.match(server, /file\.mime='audio\/webm'/);
   const descriptor = server.slice(server.indexOf('function getStoredFilePreviewDescriptor'), server.indexOf('function applyPrivateFileResponseHeaders'));
   const voice = descriptor.indexOf("extension === '.webm' && /(voice|audio)/.test(purpose) ? 'audio'");
-  const video = descriptor.indexOf("mime.startsWith('video/') ? 'video'");
-  assert.ok(voice >= 0 && video > voice);
+  const extensionBound = descriptor.indexOf(': extensionKind;');
+  assert.ok(voice >= 0 && extensionBound > voice);
+  assert.doesNotMatch(descriptor, /mime\.startsWith\('video\/'\) \? 'video'/);
 });
 
 test('OOXML validation reads the central directory and old incoming files are pruned', async () => {

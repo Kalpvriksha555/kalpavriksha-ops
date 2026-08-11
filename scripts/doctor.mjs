@@ -20,9 +20,11 @@ function walk(dir, out = []) {
   return out;
 }
 
-for (const p of ['frontend/src/App.jsx', 'frontend/src/main.jsx', 'backend/src/server.js']) {
+for (const p of ['frontend/src/App.jsx', 'frontend/src/main.jsx', 'backend/src/server.js', 'PUSH_AND_DEPLOY.md', 'DEPLOY_1.9.30.md', 'scripts/launch-certify-and-deploy-1.9.30-vps.sh']) {
   if (!exists(p)) errors.push(`Missing required file: ${p}`);
 }
+
+if (!exists('backend/.env.example')) errors.push('Missing required safe backend environment template: backend/.env.example');
 
 const forbidden = walk('.').filter(p => /(^|\/)(node_modules|dist|\.git)(\/|$)/.test(p));
 if (forbidden.length) errors.push(`Build/cache folders must not be committed: ${forbidden.slice(0, 8).join(', ')}`);

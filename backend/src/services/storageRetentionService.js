@@ -5,9 +5,18 @@ export const DEFAULT_TRASH_RETENTION_DAYS = 1;
 
 function timestampMs(value) {
   if (value === null || value === undefined || value === '') return 0;
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const normalizeEpoch = (numeric) => {
+    if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+    // Legacy/browser payloads occasionally persisted Unix seconds while the
+    // current application stores milliseconds/ISO timestamps. Treat plausible
+    // epoch-second values as seconds instead of accidentally expiring them as
+    // dates in 1970 under the 90-day retention job.
+    if (numeric >= 1_000_000_000 && numeric < 100_000_000_000) return numeric * 1000;
+    return numeric;
+  };
+  if (typeof value === 'number') return normalizeEpoch(value);
   const numeric = Number(value);
-  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  if (Number.isFinite(numeric) && numeric > 0) return normalizeEpoch(numeric);
   const parsed = Date.parse(String(value));
   return Number.isFinite(parsed) ? parsed : 0;
 }
@@ -36,8 +45,8 @@ export function financialFileReferenceSets(state = {}) {
 
   // Payment rows and per-case ledger objects are financial records and are
   // permanently exempt from ordinary 90-day attachment retention.
-  visit(state.payments || []);
-  for (const record of state.cases || []) {
+  visit(Array.isArray(state.payments) ? state.payments : []);
+  for (const record of (Array.isArray(state.cases) ? state.cases : [])) {
     visit(record?.ledger || null);
     visit(record?.finance || null);
     visit(record?.paymentLedger || null);
@@ -107,7 +116,7 @@ export function applyFileRetentionToState(state = {}, { nowMs = Date.now(), rete
   const unknownAgeIds = [];
   const patch = expirationPatch({ nowMs, retentionDays, actor });
 
-  for (const doc of state.files || []) {
+  for (const doc of (Array.isArray(state.files) ? state.files : [])) {
     if (!doc || !doc.id) continue;
     if (isPermanentFileProtected(doc, references)) {
       protectedIds.push(String(doc.id));
@@ -128,7 +137,7 @@ export function applyFileRetentionToState(state = {}, { nowMs = Date.now(), rete
   const changedCaseIds = [];
   const changedMessageIds = [];
   if (expiredIds.size) {
-    for (const record of state.cases || []) {
+    for (const record of (Array.isArray(state.cases) ? state.cases : [])) {
       let changed = false;
       for (const field of ['documents','completedFiles','sourceFiles','workFiles','files','uploads','attachments']) {
         changed = patchMatchingDocs(record?.[field], expiredIds, patch) || changed;
@@ -139,7 +148,7 @@ export function applyFileRetentionToState(state = {}, { nowMs = Date.now(), rete
       }
       if (changed) changedCaseIds.push(String(record.id || record.caseId || ''));
     }
-    for (const message of state.teamChat || []) {
+    for (const message of (Array.isArray(state.teamChat) ? state.teamChat : [])) {
       let changed = false;
       changed = patchMatchingDocs(message?.files, expiredIds, patch) || changed;
       changed = patchMatchingDocs(message?.attachments, expiredIds, patch) || changed;

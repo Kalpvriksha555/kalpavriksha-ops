@@ -13,10 +13,10 @@ const upsertEnd = server.indexOf('const PRESENCE_STALE_MS', upsertStart);
 const upsert = server.slice(upsertStart, upsertEnd);
 
 test('finance retries are idempotent only against committed relational state', () => {
-  assert.match(route, /const committedState = USE_POSTGRES \? relationalShadowState : readDb\(\)/);
-  assert.match(route, /committedCase\?\.lastFinanceMutationId === mutationId/);
+  assert.match(server, /const committedState = USE_POSTGRES \? relationalShadowState : readDb\(\)/);
+  assert.match(route, /resolveCommittedFinanceReplay/);
   assert.match(route, /alreadyCommitted:true/);
-  assert.ok(route.indexOf('lastFinanceMutationId === mutationId') < route.indexOf('assertExpectedFinanceVersion'));
+  assert.ok(route.indexOf('resolveCommittedFinanceReplay') < route.indexOf('assertExpectedFinanceVersion'));
 });
 
 test('finance writes keep immutable history but avoid a full revision snapshot on every save', () => {
@@ -45,6 +45,8 @@ test('finance snapshots include estimate changes for recovery and audit', () => 
   assert.match(financeIntegrity, /'estimateAmount'/);
   assert.match(financeIntegrity, /for \(const field of FINANCE_FIELDS\)/);
   assert.match(financeIntegrity, /lastFinanceMutationId/);
+  assert.match(financeIntegrity, /financeMutationReceipts/);
+  assert.match(financeIntegrity, /financeMutationFingerprint/);
 });
 
 const repository = fs.readFileSync(new URL('../../backend/src/repositories/postgresStateRepository.js', import.meta.url), 'utf8');

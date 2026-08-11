@@ -1,3 +1,4 @@
+import { asArray } from './runtimeShapeUtils.js';
 // Task/project display helpers extracted during Modularization Phase 3.
 // These helpers are intentionally data-only so UI components can reuse the
 // same labels/metadata without duplicating fallback logic.
@@ -17,9 +18,9 @@ export const allProjectDocs = (project = {}) => {
     project?.finalDocument,
   ].filter(Boolean);
   const docs = [
-    ...(project?.documents || []),
-    ...(project?.completedFiles || []),
-    ...(project?.finalFiles || []),
+    ...asArray(project?.documents),
+    ...asArray(project?.completedFiles),
+    ...asArray(project?.finalFiles),
     ...singleCompletedFields,
   ];
   const seen = new Set();

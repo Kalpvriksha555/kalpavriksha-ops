@@ -36,8 +36,8 @@ test('case authorisation and mutation handlers use the shared request snapshot',
 });
 
 test('long case uploads parse the multipart body before pinning a state snapshot', () => {
-  assert.match(server, /app\.post\('\/api\/cases\/:id\/upload-source', requireAnyRole\('ADMIN','MANAGER'\), preauthorizeCaseAction\('update'\), uploadAny, requireCaseAction\('update',\{files:true,notifications:true\}\)/);
-  assert.match(server, /app\.post\('\/api\/cases\/:id\/upload-final', preauthorizeCaseAction\('upload-final'\), uploadAny, requireCaseAction\('upload-final',\{files:true,notifications:true,audit:true\}\)/);
+  assert.match(server, /app\.post\('\/api\/cases\/:id\/upload-source', requireAnyRole\('ADMIN','MANAGER'\), preauthorizeCaseAction\('update'\), uploadAny, requireFreshAuthenticatedRequestAfterBody, requireAnyRole\('ADMIN','MANAGER'\), requireCaseAction\('update',\{files:true,notifications:true\}\)/);
+  assert.match(server, /app\.post\('\/api\/cases\/:id\/upload-final', preauthorizeCaseAction\('upload-final'\), uploadAny, requireFreshAuthenticatedRequestAfterBody, requireCaseAction\('upload-final',\{files:true,notifications:true,audit:true\}\)/);
   assert.match(server, /prepareSecureUploads\(req, 'SOURCE'\)[\s\S]*taskDb\(req\.params\.id,\{files:true,notifications:true\}\)/);
   assert.match(server, /prepareSecureUploads\(req, isRevision \? 'REVISION_FINAL' : 'FINAL'\)[\s\S]*taskDb\(req\.params\.id,\{files:true,notifications:true,audit:true\}\)/);
 });
@@ -76,8 +76,8 @@ test('failed content-addressed uploads are retained as safe-GC candidates instea
 
 test('large case uploads are authorised before transfer and reauthorised against a fresh snapshot afterward', () => {
   assert.match(server, /function preauthorizeCaseAction\(action = 'read'\)/);
-  assert.match(server, /preauthorizeCaseAction\('update'\), uploadAny, requireCaseAction\('update',\{files:true,notifications:true\}\)/);
-  assert.match(server, /preauthorizeCaseAction\('upload-final'\), uploadAny, requireCaseAction\('upload-final',\{files:true,notifications:true,audit:true\}\)/);
+  assert.match(server, /preauthorizeCaseAction\('update'\), uploadAny, requireFreshAuthenticatedRequestAfterBody, requireAnyRole\('ADMIN','MANAGER'\), requireCaseAction\('update',\{files:true,notifications:true\}\)/);
+  assert.match(server, /preauthorizeCaseAction\('upload-final'\), uploadAny, requireFreshAuthenticatedRequestAfterBody, requireCaseAction\('upload-final',\{files:true,notifications:true,audit:true\}\)/);
   assert.match(server, /cleanupIncomingUploads\(req\.files \|\| \(req\.file \? \[req\.file\] : \[\]\)\)/);
 });
 

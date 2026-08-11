@@ -1,9 +1,9 @@
-> **Current production deployment baseline:** `1.9.29-final-health-probe-closure`. Use `bash scripts/launch-deploy-1.9.29-vps.sh`. Older deployment entrypoints are superseded.
+> **Current source candidate:** `1.9.30-ssh-independent-certify-deploy-closure`. The guarded end-to-end VPS entrypoint is `bash scripts/launch-certify-and-deploy-1.9.30-vps.sh`. It becomes the production baseline only after the live cutover succeeds.
 
 
 # Kalpvriksha Designs Ops — Team Transparency & Speed Release
 
-This source-only package contains all nine completed hardening phases:
+This source-only package contains the completed original hardening programme plus Stability Closure Phases 10–24. The original phases are:
 
 1. Emergency package and secret cleanup
 2. Finance durability and anti-rollback protection
@@ -16,6 +16,8 @@ This source-only package contains all nine completed hardening phases:
 9. Frontend architecture, performance, accessibility and grouped archive UX
 
 It excludes credentials, production records, client documents, dependencies, logs and generated frontend bundles.
+
+Phase 23 closes production-local PostgreSQL certification compatibility. Phase 24 closes the final operator path: stale root deployment instructions are removed, the entire candidate-certification + guarded-deployment pipeline can be launched as an SSH-independent systemd unit, and a full-lifecycle lock prevents two final pipelines from overlapping.
 
 ## Local development
 
@@ -80,8 +82,14 @@ Read before deployment:
 - `SESSION_PERFORMANCE_STABILITY_VERIFICATION.md`
 - `TEAM_TRANSPARENCY_SPEED_FIX.md`
 - `TEAM_TRANSPARENCY_SPEED_VERIFICATION.md`
+- `PHASE_22_END_TO_END_FAULT_MATRIX_FINAL_STABILITY_SOAK.md`
+- `PHASE_22_VERIFICATION_RESULTS.md`
+- `PHASE_23_PRODUCTION_LOCAL_POSTGRES_CERTIFICATION_CLOSURE.md`
+- `PHASE_23_VERIFICATION_RESULTS.md`
+- `PHASE_24_OPERATOR_SAFE_CERTIFY_DEPLOY_CLOSURE.md`
+- `PHASE_24_VERIFICATION_RESULTS.md`
 
-Before production deployment, use `scripts/launch-deploy-1.9.29-vps.sh`. It runs the complete source, clean-install, environment, production-integrity and verified-backup gates before downtime. A narrowly recognized legacy files/performance metadata drift is repaired only after the verified full backup and while writes are stopped; any other hash or collection drift still fails closed.
+Before production deployment, use `scripts/launch-certify-and-deploy-1.9.30-vps.sh` from a clean, non-live checkout of the exact GitHub `main` commit. Phase 21 reuses already-passed candidate/dependency/database phases only when their content-hash receipts still match exactly; Phase 22 additionally requires a complete source manifest including mandatory hidden files and a final combined fault-soak gate; a fresh production backup, current runtime checks, required production database gates, atomic frontend artifact verification, permanent PM2 checks and public health probes remain fail-closed.
 
 
 ## Reliability commands
@@ -117,9 +125,10 @@ npm run finance-recovery:apply -- --plan "/root/finance-recovery-plan.json" --co
 Do not run obsolete July 30 deployment scripts. Push this source tree to `main`, then fetch and execute the deployment script without resetting the live checkout first:
 
 ```bash
-cd /var/www/kalpavriksha-ops
+# Run from a clean candidate checkout outside /var/www/kalpavriksha-ops.
+cd /path/to/clean/kalpavriksha-candidate
 git fetch origin main
-git show origin/main:scripts/deploy-1.9.24-vps.sh > /root/deploy-1.9.24-vps.sh
-chmod +x /root/deploy-1.9.24-vps.sh
-bash /root/deploy-1.9.24-vps.sh
+git checkout main
+git pull --ff-only origin main
+bash scripts/launch-certify-and-deploy-1.9.30-vps.sh
 ```

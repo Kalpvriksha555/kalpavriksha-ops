@@ -57,6 +57,7 @@ const commandCentreSource = fs.readFileSync(path.resolve(here, '../../frontend/s
 const viewerSource = fs.readFileSync(path.resolve(here, '../../frontend/src/components/files/UnifiedFileViewer.jsx'), 'utf8');
 const fileServiceSource = fs.readFileSync(path.resolve(here, '../../frontend/src/services/fileService.js'), 'utf8');
 const taskServiceSource = fs.readFileSync(path.resolve(here, '../../frontend/src/services/taskService.js'), 'utf8');
+const financeMergeSource = fs.readFileSync(path.resolve(here, '../../frontend/src/utils/financeMergeUtils.js'), 'utf8');
 const chatUtilsSource = fs.readFileSync(path.resolve(here, '../../frontend/src/utils/chatUtils.js'), 'utf8');
 
 test('historical task, finance, archive, notification and attendance helpers tolerate explicit null records', () => {
@@ -105,8 +106,9 @@ test('archive view normalizes corrupt persisted array fields before render-time 
 });
 
 test('chat persisted state rejects corrupt object and array shapes instead of carrying them into render logic', () => {
-  assert.match(chatSource, /!Array\.isArray\(saved\) \? saved : \{\}/);
-  assert.match(chatSource, /Array\.isArray\(saved\) \? saved\.map\(String\) : \[\]/);
+  assert.match(chatSource, /parseJsonRecord\(localStorage\.getItem\(localReadKey\)\)/);
+  assert.match(chatSource, /parseJsonArray\(localStorage\.getItem\(hiddenKey\)\)\.map\(String\)/);
+  assert.match(chatSource, /parseJsonArray\(localStorage\.getItem\(pinnedKey\)\)\.map\(String\)/);
 });
 
 test('public file, task, chat-presence and meeting boundaries defend explicit null option records', () => {
@@ -114,17 +116,17 @@ test('public file, task, chat-presence and meeting boundaries defend explicit nu
   assert.match(fileServiceSource, /fetchProjectFilePreview = async \(doc = \{\}, options = \{\}\) => \{\s*doc = doc && typeof doc === 'object' \? doc : \{\}/);
   assert.match(fileServiceSource, /normalizeProjectFileRecord = \(doc = \{\}\) => \{\s*doc = doc && typeof doc === 'object' \? doc : \{\}/);
   assert.match(fileServiceSource, /downloadProjectFile = async \(doc = \{\}, onProgress, options = \{\}\) => \{\s*doc = doc && typeof doc === 'object' \? doc : \{\}/);
-  assert.match(taskServiceSource, /toTime\(task\?\.financeVersion\)/);
+  assert.match(financeMergeSource, /toTime\(task\?\.financeVersion\)/);
   assert.match(chatUtilsSource, /toMs\(user\?\.lastHeartbeatAt\)/);
   assert.equal(buildJitsiUrl('room', 'User', null).includes('meet.jit.si'), true);
 });
 
 test('browser cache boundaries normalize malformed legacy storage instead of trusting JSON shape', () => {
   assert.match(appSource, /const parseStoredArray = \(raw, fallback = \[\]\) =>/);
-  assert.match(appSource, /Array\.isArray\(parsed\) \? parsed : fallback/);
-  assert.match(commandCentreSource, /saved && typeof saved === 'object' && !Array\.isArray\(saved\) \? saved : \{\}/);
+  assert.match(appSource, /return parseJsonArray\(raw, fallback\)/);
+  assert.match(commandCentreSource, /parseJsonRecord\(localStorage\.getItem\(presenceTimesStorageKey\)\)/);
   assert.match(commandCentreSource, /nextTimes\[key\] && typeof nextTimes\[key\] === 'object' && !Array\.isArray\(nextTimes\[key\]\)/);
-  assert.match(viewerSource, /typeof saved !== 'object' \|\| Array\.isArray\(saved\)/);
+  assert.match(viewerSource, /parseJsonRecord\(sessionStorage\.getItem/);
 });
 
 test('chat read markers use component-local refs and never mutate the currentUser prop object', () => {
@@ -138,7 +140,7 @@ test('release verify executes an actual signed-out React runtime bootstrap after
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   const runtimeVerifier = fs.readFileSync(path.join(root, 'scripts/frontend-runtime-bootstrap-check.mjs'), 'utf8');
   assert.equal(pkg.scripts['verify:frontend-runtime'], 'node scripts/frontend-runtime-bootstrap-check.mjs');
-  assert.match(pkg.scripts.verify, /npm run test:frontend && npm run verify:frontend-runtime && npm run test:backend/);
+  assert.match(pkg.scripts.verify, /npm run test:frontend && npm run verify:runtime-shapes && npm run verify:api-contract && npm run verify:task-lifecycle && npm run verify:file-lifecycle && npm run verify:session-isolation && npm run verify:presence-attendance && npm run verify:finance-ledger && npm run verify:persistence-restart && npm run verify:long-session && npm run verify:diagnostics && npm run verify:deployment-resume && npm run verify:fault-soak && npm run verify:certification-local-postgres && npm run verify:operator-deploy && npm run verify:frontend-runtime && npm run test:backend/);
   const matrix = fs.readFileSync(path.join(root, 'scripts/full-release-verifier-matrix.mjs'), 'utf8');
   assert.match(matrix, /id:'frontend-runtime-bootstrap'/);
   assert.match(runtimeVerifier, /viteServer\.ssrLoadModule\('\/src\/App\.jsx'\)/);
@@ -159,11 +161,14 @@ test('release verify executes an actual signed-out React runtime bootstrap after
 });
 
 
-test('client runtime diagnostics capture render, window and async failures without storing workspace data', () => {
-  assert.match(appSource, /CLIENT_RUNTIME_ERROR_LOG_KEY = 'kalpa_client_runtime_errors_v2'/);
-  assert.match(appSource, /CLIENT_RUNTIME_ERROR_LOG_LIMIT = 20/);
+test('client runtime diagnostics capture render, window, async and API failures without storing raw workspace data', () => {
+  const diagnosticsSource = fs.readFileSync(path.join(path.resolve(here, '../..'), 'frontend/src/services/runtimeDiagnosticsService.js'), 'utf8');
+  assert.match(diagnosticsSource, /CLIENT_RUNTIME_ERROR_LOG_KEY = 'kalpa_client_runtime_errors_v3'/);
+  assert.match(diagnosticsSource, /CLIENT_RUNTIME_ERROR_LOG_LIMIT = 30/);
   assert.match(appSource, /window\.addEventListener\('error', captureError\)/);
   assert.match(appSource, /window\.addEventListener\('unhandledrejection', captureRejection\)/);
+  assert.match(appSource, /CLIENT_RUNTIME_DIAGNOSTIC_EVENT/);
   assert.match(appSource, /source:'app-error-boundary'/);
   assert.match(appSource, /componentStack: info\?\.componentStack \|\| ''/);
+  assert.doesNotMatch(appSource, /localStorage\.setItem\('kalpa_last_error'/);
 });

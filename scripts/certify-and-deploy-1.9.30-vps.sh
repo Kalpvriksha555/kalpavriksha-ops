@@ -21,6 +21,9 @@ TEMP_PG_STARTED=0
 DEPLOY_STARTED=0
 DEPLOY_UNIT=""
 EXPECTED_COMMIT=""
+CERTIFIED_COMMIT_FILE="${KALPA_CERTIFIED_COMMIT_FILE:-/root/kalpavriksha-certified-candidate.commit}"
+CERTIFIED_RESULT_FILE="${KALPA_CERTIFIED_RESULT_FILE:-/root/kalpavriksha-certified-candidate.result.json}"
+REUSE_CERTIFIED_CANDIDATE=0
 
 say(){ printf '\n[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 fail(){ printf '\nFINAL RELEASE STOPPED SAFELY: %s\n' "$*" >&2; exit 1; }
@@ -46,6 +49,13 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 [[ "$(id -u)" == "0" ]] || fail "Run as root on the VPS."
+
+FINAL_RELEASE_LOCK="${KALPA_FINAL_RELEASE_LOCK:-/run/lock/kalpavriksha-final-certify-deploy.lock}"
+exec 9>>"$FINAL_RELEASE_LOCK"
+if ! flock -n 9; then
+  fail "Another Kalpavriksha final certification/deployment pipeline is already running."
+fi
+
 [[ -d "$RELEASE_ROOT/.git" ]] || fail "Run from a fresh Git checkout."
 [[ "$(realpath -m "$RELEASE_ROOT")" != "$(realpath -m "$LIVE_ROOT")" ]] || fail "Never certify/deploy from the live source path."
 [[ -s "$ENV_FILE" ]] || fail "Production environment file is missing: $ENV_FILE"
@@ -64,6 +74,25 @@ say "Verifying current live backend before certification setup"
 curl -fsS --connect-timeout 3 --max-time 10 http://127.0.0.1:8080/api/health/live
 printf '\n'
 
+say "Checking whether this exact candidate already has reusable content-hash certification"
+if [[ -s "$CERTIFIED_COMMIT_FILE" && -s "$CERTIFIED_RESULT_FILE" ]] \
+  && [[ "$(tr -d '[:space:]' < "$CERTIFIED_COMMIT_FILE")" == "$EXPECTED_COMMIT" ]] \
+  && node "$RELEASE_ROOT/scripts/phase-21-deployment-receipt.mjs" verify-candidate \
+       --root "$RELEASE_ROOT" --receipt "$CERTIFIED_RESULT_FILE" --commit "$EXPECTED_COMMIT" --require-artifacts true \
+       >/tmp/kalpavriksha-existing-candidate-receipt.json 2>&1 \
+  && python3 - "$CERTIFIED_RESULT_FILE" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1])); e=p.get('e2e') or {}
+if not all(e.get(k) is True for k in ('downloadHashMatched','staleOptimisticIdResolvedToCanonicalTask','wrongTaskAttachmentPrevented')):
+    raise SystemExit(1)
+PY
+then
+  REUSE_CERTIFIED_CANDIDATE=1
+  say "Exact candidate receipt, clean-install artifact and frontend build are unchanged; temporary PostgreSQL provisioning and candidate recertification are skipped."
+fi
+rm -f /tmp/kalpavriksha-existing-candidate-receipt.json
+
+if [[ "$REUSE_CERTIFIED_CANDIDATE" != "1" ]]; then
 say "Reading production PostgreSQL metadata without exposing credentials"
 PROD_DATABASE_URL="$(bash -c 'set -a; source "$1"; : "${DATABASE_URL:?DATABASE_URL missing}"; printf "%s" "$DATABASE_URL"' _ "$ENV_FILE")" || fail "Could not read DATABASE_URL."
 [[ "$PROD_DATABASE_URL" =~ ^postgres(ql)?:// ]] || fail "DATABASE_URL is not PostgreSQL."
@@ -75,7 +104,12 @@ PY
 )
 PROD_HOST="${PROD_META[0]:-}"; PROD_PORT="${PROD_META[1]:-5432}"
 [[ -n "$PROD_HOST" ]] || fail "Production PostgreSQL host could not be parsed."
-case "${PROD_HOST,,}" in localhost|127.0.0.1|::1) fail "Production PostgreSQL is local; refusing isolated local clone provisioning.";; esac
+case "${PROD_HOST,,}" in
+  localhost|127.0.0.1|::1)
+    [[ "$PROD_PORT" != "$LOCAL_PG_PORT" ]] || fail "Temporary PostgreSQL port $LOCAL_PG_PORT matches the local production PostgreSQL port. Choose a different KALPA_TEMP_PG_PORT before certification."
+    say "Production PostgreSQL is local; certification remains isolated because the temporary cluster uses a separate data root, socket directory and port ${LOCAL_PG_PORT}."
+    ;;
+esac
 printf 'Production DB host: %s\nProduction DB port: %s\nCredentials: hidden\n' "$PROD_HOST" "$PROD_PORT"
 PSQL_CLIENT="$(command -v psql 2>/dev/null || true)"; [[ -x "$PSQL_CLIENT" ]] || PSQL_CLIENT="$(find /usr/lib/postgresql -type f -path '*/bin/psql' 2>/dev/null | sort -V | tail -n1)"; [[ -x "$PSQL_CLIENT" ]] || fail "PostgreSQL client psql is missing."
 PROD_INFO="$(PGCONNECT_TIMEOUT=10 "$PSQL_CLIENT" "$PROD_DATABASE_URL" -X -A -t -F '|' -v ON_ERROR_STOP=1 -c "SELECT current_setting('server_version_num'),pg_database_size(current_database()),d.datlocprovider,COALESCE(to_jsonb(d)->>'datlocale',to_jsonb(d)->>'daticulocale',''),d.datcollate,d.datctype FROM pg_database d WHERE d.datname=current_database();")" || fail "Cannot read production PostgreSQL locale metadata."
@@ -203,14 +237,13 @@ rm -rf "$PREFLIGHT_DIR"
 printf 'Database restore/auth preflight: PASS\n'
 
 say "Running isolated candidate certification; production cutover is still blocked"
-rm -f /root/kalpavriksha-certified-candidate.commit /root/kalpavriksha-certified-candidate.result.json /root/kalpavriksha-certified-candidate.logpath
 cd "$RELEASE_ROOT"
 env PATH="$PATH" VITE_API_URL="$API_URL" VITE_API_BASE="$API_URL" KALPA_CERT_PG_HOST="$PGSOCKET" KALPA_CERT_PG_PORT="$LOCAL_PG_PORT" KALPA_CERT_DB_TCP_HOST=127.0.0.1 KALPA_CERT_PORT="$CERT_PORT" bash scripts/candidate-certify-1.9.30-vps.sh
 
 say "Verifying certification receipt before removing temporary PostgreSQL"
-[[ -s /root/kalpavriksha-certified-candidate.commit && -s /root/kalpavriksha-certified-candidate.result.json ]] || fail "Candidate certification receipt is missing."
-[[ "$(tr -d '[:space:]' < /root/kalpavriksha-certified-candidate.commit)" == "$EXPECTED_COMMIT" ]] || fail "Candidate certification receipt commit mismatch."
-python3 - /root/kalpavriksha-certified-candidate.result.json "$EXPECTED_COMMIT" <<'PY'
+[[ -s "$CERTIFIED_COMMIT_FILE" && -s "$CERTIFIED_RESULT_FILE" ]] || fail "Candidate certification receipt is missing."
+[[ "$(tr -d '[:space:]' < "$CERTIFIED_COMMIT_FILE")" == "$EXPECTED_COMMIT" ]] || fail "Candidate certification receipt commit mismatch."
+python3 - "$CERTIFIED_RESULT_FILE" "$EXPECTED_COMMIT" <<'PY'
 import json,sys
 p=json.load(open(sys.argv[1])); expected=sys.argv[2]
 if p.get('ok') is not True or p.get('status')!='CERTIFIED_FOR_GUARDED_DEPLOYMENT' or p.get('commit')!=expected: raise SystemExit('candidate certification receipt invalid')
@@ -219,6 +252,11 @@ for key in ('downloadHashMatched','staleOptimisticIdResolvedToCanonicalTask','wr
     if e.get(key) is not True: raise SystemExit(f'missing E2E proof: {key}')
 print('Candidate certification receipt: PASS')
 PY
+node "$RELEASE_ROOT/scripts/phase-21-deployment-receipt.mjs" verify-candidate \
+  --root "$RELEASE_ROOT" --receipt "$CERTIFIED_RESULT_FILE" --commit "$EXPECTED_COMMIT" --require-artifacts true \
+  >/tmp/kalpavriksha-new-candidate-receipt.json || fail "Candidate content-hash phase receipt verification failed."
+rm -f /tmp/kalpavriksha-new-candidate-receipt.json
+fi
 
 say "Stopping and deleting temporary PostgreSQL before production deployment"
 stop_temp_postgres; restore_policy_guard

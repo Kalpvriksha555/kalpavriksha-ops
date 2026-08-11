@@ -1,7 +1,9 @@
 import { API_BASE } from '../config/appConfig';
 import { authFetch } from './authService';
+import { asArray, asRecord } from '../utils/runtimeShapeUtils.js';
+import { apiHttpError, readApiRecord } from './apiContractService.js';
 
-const parseJson = async (response) => response.json().catch(() => ({}));
+const parseJson = async (response, operation = 'Communication request') => readApiRecord(response, { operation, requireOk:response.ok });
 
 const transientMutationIds = new WeakMap();
 const createMutationId = (prefix = 'mutation') => {
@@ -21,14 +23,8 @@ const mutationIdFor = (record = {}, prefix = 'mutation', { useRecordId = false }
   return createMutationId(prefix);
 };
 const assertOk = async (response, fallback) => {
-  const payload = await parseJson(response);
-  if (!response.ok) {
-    const error = new Error(payload.error || fallback || `Request failed (${response.status})`);
-    error.status = response.status;
-    error.code = payload.code || '';
-    error.payload = payload;
-    throw error;
-  }
+  const payload = await parseJson(response, fallback || 'Communication request');
+  if (!response.ok) throw apiHttpError(response, payload, fallback || 'Communication request failed.');
   return payload;
 };
 
@@ -56,14 +52,23 @@ export const sendChatMessageApi = async (message = {}) => {
       text:message?.text || '',
       recipient:message?.recipient || 'global',
       caseId:message?.caseId || '',
-      mentions:message?.mentions || [],
-      taskRefs:message?.taskRefs || [],
+      mentions:asArray(message?.mentions),
+      taskRefs:asArray(message?.taskRefs),
       files,
       roomUrl:message?.roomUrl || '',
       fileUrl:message?.fileUrl || ''
     })
   });
-  return assertOk(response, 'Message could not be sent.');
+  const payload = await assertOk(response, 'Message could not be sent.');
+  const saved = asRecord(payload.message);
+  if (!saved.id) {
+    const error = new Error('Message save was not confirmed with a server message id. Refresh before retrying.');
+    error.name = 'ApiContractError';
+    error.code = 'CHAT_CONFIRMATION_MISSING';
+    error.payload = payload;
+    throw error;
+  }
+  return saved;
 };
 
 export const updateChatMessageApi = async (messageId, patch = {}) => {
@@ -74,7 +79,7 @@ export const updateChatMessageApi = async (messageId, patch = {}) => {
     body: JSON.stringify({
       ...(patch?.text !== undefined ? { text:patch?.text } : {}),
       ...(patch?.deleted !== undefined ? { deleted:Boolean(patch?.deleted) } : {}),
-      ...(patch?.reactions ? { reactions:patch?.reactions } : {}),
+      ...(patch?.reactions ? { reactions:asRecord(patch?.reactions) } : {}),
       ...(patch?.readBy ? { readBy:patch?.readBy, markRead:true } : {})
     })
   });

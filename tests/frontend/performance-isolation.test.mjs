@@ -69,7 +69,7 @@ test('backend project synchronization sends row deltas and never reads stale tas
   assert.match(app, /Array\.isArray\(options\?\.changedProjects\)/);
   assert.match(app, /changedProjects:projectsToSave/);
   assert.match(app, /removedProjectIds:deleteIds/);
-  assert.match(app, /replaceIds:options\?\.replaceIds \|\| \[\]/);
+  assert.match(app, /replaceIds:asArray\(options\?\.replaceIds\)/);
   assert.match(app, /if \(USE_BACKEND_STATE\) \{\s*void refreshWorkspaceSnapshot\(\)/s);
   assert.match(app, /if \(!opsBroadcast\)/);
 });

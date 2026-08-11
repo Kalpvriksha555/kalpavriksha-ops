@@ -5,7 +5,7 @@ umask 077
 RELEASE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPLOY_SCRIPT="$RELEASE_ROOT/scripts/deploy-1.9.30-vps.sh"
 UNIT_PREFIX="kalpavriksha-deploy-1930"
-UNIT="${UNIT_PREFIX}-$(date -u +%Y%m%dT%H%M%SZ)"
+UNIT="${UNIT_PREFIX}-$(date -u +%Y%m%dT%H%M%SZ)-${RANDOM}"
 LAST_UNIT_FILE="${KALPA_DEPLOY_LAST_UNIT_FILE:-/root/kalpavriksha-deploy-last-unit}"
 CERTIFIED_COMMIT_FILE="${KALPA_CERTIFIED_COMMIT_FILE:-/root/kalpavriksha-certified-candidate.commit}"
 CERTIFIED_RESULT_FILE="${KALPA_CERTIFIED_RESULT_FILE:-/root/kalpavriksha-certified-candidate.result.json}"
@@ -36,6 +36,9 @@ for key in ('downloadHashMatched','staleOptimisticIdResolvedToCanonicalTask','wr
     if checks.get(key) is not True:
         raise SystemExit(f'Candidate certification receipt is missing required E2E proof: {key}')
 PY
+node "$RELEASE_ROOT/scripts/phase-21-deployment-receipt.mjs" verify-candidate \
+  --root "$RELEASE_ROOT" --receipt "$CERTIFIED_RESULT_FILE" --commit "$CURRENT_COMMIT" --require-artifacts true \
+  >/dev/null || { echo "Candidate content-hash receipt/artifacts are stale. Re-certify this exact commit before deployment." >&2; exit 1; }
 REMOTE_COMMIT="$(git -C "$RELEASE_ROOT" ls-remote origin refs/heads/main | awk 'NR==1 {print $1}')"
 [[ -n "$REMOTE_COMMIT" && "$REMOTE_COMMIT" == "$CURRENT_COMMIT" ]] || { echo "GitHub main moved after candidate certification. Re-certify before deployment." >&2; exit 1; }
 
@@ -48,12 +51,17 @@ if command -v flock >/dev/null 2>&1; then
   flock -u 7
 fi
 
-printf '%s.service\n' "$UNIT" > "$LAST_UNIT_FILE"
+LAST_UNIT_TMP="${LAST_UNIT_FILE}.tmp.$$"
+printf '%s.service\n' "$UNIT" > "$LAST_UNIT_TMP"
+mv -f "$LAST_UNIT_TMP" "$LAST_UNIT_FILE"
 
 systemd-run \
   --unit="$UNIT" \
-  --property=Type=simple \
+  --property=Type=exec \
   --property=TimeoutStartSec=0 \
+  --property=TimeoutStopSec=180 \
+  --property=KillMode=control-group \
+  --property=Restart=no \
   /bin/bash "$DEPLOY_SCRIPT"
 
 echo
