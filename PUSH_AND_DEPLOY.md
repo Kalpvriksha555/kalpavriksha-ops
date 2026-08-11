@@ -33,6 +33,8 @@ git clone --branch main --single-branch "$REPO_URL" "$CANDIDATE"
 cd "$CANDIDATE"
 git rev-parse HEAD
 bash scripts/launch-certify-and-deploy-1.9.30-vps.sh
+
+The launcher enqueues the full pipeline with non-blocking systemd handoff, disables the start-timeout race with `TimeoutStartSec=infinity`, records the exact new unit, and verifies that unit becomes active before reporting success.
 ```
 
 This launches the **entire candidate certification + guarded deployment pipeline as a transient systemd unit**, so an SSH disconnect does not interrupt npm installation, the temporary PostgreSQL clone, database export/restore, candidate E2E certification, or the later production deployment.

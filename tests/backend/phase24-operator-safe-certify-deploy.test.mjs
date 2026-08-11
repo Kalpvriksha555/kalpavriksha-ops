@@ -20,7 +20,8 @@ test('final wrapper survives SSH disconnect and proves exact GitHub candidate ou
   assert.match(launcher,/CURRENT_COMMIT/);
   assert.match(launcher,/REMOTE_COMMIT/);
   assert.match(launcher,/systemd-run/);
-  assert.match(launcher,/TimeoutStartSec=0/);
+  assert.match(launcher,/--no-block/);
+  assert.match(launcher,/TimeoutStartSec=infinity/);
   assert.match(launcher,/KillMode=control-group/);
   assert.match(launcher,/kalpavriksha-final-release-last-unit/);
 });

@@ -16,7 +16,7 @@ fail(){ printf 'FINAL RELEASE LAUNCH STOPPED SAFELY: %s\n' "$*" >&2; exit 1; }
 [[ "$(realpath -m "$RELEASE_ROOT")" != "$(realpath -m "$LIVE_ROOT")" ]] || fail "Never launch final certification from the live source path."
 [[ -f "$ORCHESTRATOR" ]] || fail "Integrated certification/deployment script is missing: $ORCHESTRATOR"
 bash -n "$ORCHESTRATOR" || fail "Integrated certification/deployment script failed Bash syntax validation."
-for tool in git systemd-run realpath; do command -v "$tool" >/dev/null 2>&1 || fail "Required command is missing: $tool"; done
+for tool in git systemd-run systemctl realpath sleep; do command -v "$tool" >/dev/null 2>&1 || fail "Required command is missing: $tool"; done
 
 CURRENT_COMMIT="$(git -C "$RELEASE_ROOT" rev-parse HEAD 2>/dev/null || true)"
 [[ -n "$CURRENT_COMMIT" ]] || fail "Candidate checkout has no Git commit identity."
@@ -36,22 +36,42 @@ if [[ -s "$LAST_UNIT_FILE" ]]; then
 fi
 
 systemd-run \
+  --no-block \
   --unit="$UNIT" \
   --property=Type=exec \
-  --property=TimeoutStartSec=0 \
+  --property=TimeoutStartSec=infinity \
   --property=TimeoutStopSec=300 \
   --property=KillMode=control-group \
   --property=Restart=no \
   --working-directory="$RELEASE_ROOT" \
   /bin/bash "$ORCHESTRATOR"
 
+UNIT_SERVICE="${UNIT}.service"
 LAST_UNIT_TMP="${LAST_UNIT_FILE}.tmp.$$"
-printf '%s.service\n' "$UNIT" > "$LAST_UNIT_TMP"
+printf '%s\n' "$UNIT_SERVICE" > "$LAST_UNIT_TMP"
 mv -f "$LAST_UNIT_TMP" "$LAST_UNIT_FILE"
+
+# systemd-run --no-block only confirms enqueue. Prove the transient unit actually
+# reached the active state so an immediate exec/start failure is never reported
+# to the operator as a successful SSH-independent handoff.
+UNIT_STARTED=0
+for _ in {1..40}; do
+  ACTIVE_STATE="$(systemctl show "$UNIT_SERVICE" -p ActiveState --value 2>/dev/null || true)"
+  if [[ "$ACTIVE_STATE" == "active" ]]; then
+    UNIT_STARTED=1
+    break
+  fi
+  if [[ "$ACTIVE_STATE" == "failed" || "$ACTIVE_STATE" == "inactive" ]]; then
+    RESULT="$(systemctl show "$UNIT_SERVICE" -p Result --value 2>/dev/null || true)"
+    fail "Transient final-release unit failed during handoff (unit=$UNIT_SERVICE active=$ACTIVE_STATE result=${RESULT:-unknown})."
+  fi
+  sleep 0.25
+done
+[[ "$UNIT_STARTED" == "1" ]] || fail "Transient final-release unit did not become active within 10 seconds: $UNIT_SERVICE"
 
 printf '\nKalpavriksha final certification + deployment started independently of SSH.\n'
 printf 'Candidate commit: %s\n' "$CURRENT_COMMIT"
-printf 'Unit: %s.service\n' "$UNIT"
-printf 'Follow now: journalctl -fu %s.service\n' "$UNIT"
+printf 'Unit: %s\n' "$UNIT_SERVICE"
+printf 'Follow now: journalctl -fu %s\n' "$UNIT_SERVICE"
 printf 'After reconnect: journalctl -u "$(cat %s)" --no-pager -n 350 -l\n' "$LAST_UNIT_FILE"
 printf 'Status: systemctl status "$(cat %s)" --no-pager -l\n' "$LAST_UNIT_FILE"

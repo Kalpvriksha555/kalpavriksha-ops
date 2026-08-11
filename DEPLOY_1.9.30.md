@@ -9,6 +9,8 @@ Production deployment is intentionally blocked until the exact GitHub commit pas
 
 ```bash
 bash scripts/launch-certify-and-deploy-1.9.30-vps.sh
+
+The launcher enqueues the full pipeline with non-blocking systemd handoff, disables the start-timeout race with `TimeoutStartSec=infinity`, records the exact new unit, and verifies that unit becomes active before reporting success.
 ```
 
 The wrapper validates that the checkout is clean, is not the live path, and exactly equals GitHub `origin/main`. It then launches `scripts/certify-and-deploy-1.9.30-vps.sh` as an SSH-independent transient systemd unit and records that unit in:

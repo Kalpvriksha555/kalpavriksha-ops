@@ -64,12 +64,16 @@ test('current launcher is SSH-independent, overlap-protected and requires exact 
   assert.match(launcher, /GitHub main moved after candidate certification/);
   assert.match(launcher, /phase-21-deployment-receipt\.mjs" verify-candidate/);
   assert.match(launcher, /--property=Type=exec/);
-  assert.match(launcher, /--property=TimeoutStartSec=0/);
+  assert.match(launcher, /--no-block/);
+  assert.match(launcher, /--property=TimeoutStartSec=infinity/);
 });
 
 test('final operator wrapper launches the whole certification and deploy workflow independently of SSH', () => {
   assert.match(finalWrapper, /certify-and-deploy-1\.9\.30-vps\.sh/);
   assert.match(finalWrapper, /systemd-run/);
+  assert.match(finalWrapper, /--no-block/);
+  assert.match(finalWrapper, /TimeoutStartSec=infinity/);
+  assert.match(finalWrapper, /systemctl show .*ActiveState/s);
   assert.match(finalWrapper, /kalpavriksha-final-release-last-unit/);
   assert.match(finalWrapper, /ls-remote origin refs\/heads\/main/);
   assert.match(orchestrator, /kalpavriksha-final-certify-deploy\.lock/);

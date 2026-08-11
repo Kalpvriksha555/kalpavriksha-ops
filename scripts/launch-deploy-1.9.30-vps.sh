@@ -15,6 +15,7 @@ bash -n "$DEPLOY_SCRIPT" || { echo "Deployment script failed Bash syntax validat
 command -v systemd-run >/dev/null || { echo "systemd-run is required for SSH-independent deployment." >&2; exit 1; }
 command -v git >/dev/null || { echo "git is required to prove the certified candidate commit." >&2; exit 1; }
 command -v python3 >/dev/null || { echo "python3 is required to verify the candidate certification receipt." >&2; exit 1; }
+command -v systemctl >/dev/null || { echo "systemctl is required to verify the transient deployment handoff." >&2; exit 1; }
 
 [[ -s "$CERTIFIED_COMMIT_FILE" ]] || { echo "No isolated candidate certification exists. Run scripts/candidate-certify-1.9.30-vps.sh successfully before production deployment." >&2; exit 1; }
 [[ -s "$CERTIFIED_RESULT_FILE" ]] || { echo "Candidate certification receipt is missing: $CERTIFIED_RESULT_FILE" >&2; exit 1; }
@@ -52,20 +53,38 @@ if command -v flock >/dev/null 2>&1; then
 fi
 
 LAST_UNIT_TMP="${LAST_UNIT_FILE}.tmp.$$"
-printf '%s.service\n' "$UNIT" > "$LAST_UNIT_TMP"
+UNIT_SERVICE="${UNIT}.service"
+printf '%s\n' "$UNIT_SERVICE" > "$LAST_UNIT_TMP"
 mv -f "$LAST_UNIT_TMP" "$LAST_UNIT_FILE"
 
 systemd-run \
+  --no-block \
   --unit="$UNIT" \
   --property=Type=exec \
-  --property=TimeoutStartSec=0 \
+  --property=TimeoutStartSec=infinity \
   --property=TimeoutStopSec=180 \
   --property=KillMode=control-group \
   --property=Restart=no \
   /bin/bash "$DEPLOY_SCRIPT"
 
+UNIT_STARTED=0
+for _ in {1..40}; do
+  ACTIVE_STATE="$(systemctl show "$UNIT_SERVICE" -p ActiveState --value 2>/dev/null || true)"
+  if [[ "$ACTIVE_STATE" == "active" ]]; then
+    UNIT_STARTED=1
+    break
+  fi
+  if [[ "$ACTIVE_STATE" == "failed" || "$ACTIVE_STATE" == "inactive" ]]; then
+    RESULT="$(systemctl show "$UNIT_SERVICE" -p Result --value 2>/dev/null || true)"
+    echo "Deployment transient unit failed during handoff (unit=$UNIT_SERVICE active=$ACTIVE_STATE result=${RESULT:-unknown})." >&2
+    exit 1
+  fi
+  sleep 0.25
+done
+[[ "$UNIT_STARTED" == "1" ]] || { echo "Deployment transient unit did not become active within 10 seconds: $UNIT_SERVICE" >&2; exit 1; }
+
 echo
 echo "Kalpavriksha 1.9.30 deployment started independently of SSH."
-echo "Unit: $UNIT.service"
-echo "Follow: journalctl -fu $UNIT.service"
+echo "Unit: $UNIT_SERVICE"
+echo "Follow: journalctl -fu $UNIT_SERVICE"
 echo "Reconnect: journalctl -u \"\$(cat $LAST_UNIT_FILE)\" --no-pager -n 250 -l"

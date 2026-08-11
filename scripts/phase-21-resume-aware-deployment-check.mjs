@@ -77,7 +77,9 @@ assert.doesNotMatch(orchestrator, /rm -f \/root\/kalpavriksha-certified-candidat
 const launcher = read('scripts/launch-deploy-1.9.30-vps.sh');
 assert.match(launcher, /phase-21-deployment-receipt\.mjs" verify-candidate/);
 assert.match(launcher, /--property=Type=exec/);
-assert.match(launcher, /--property=TimeoutStartSec=0/);
+assert.match(launcher, /--no-block/);
+assert.match(launcher, /--property=TimeoutStartSec=infinity/);
+assert.match(launcher, /systemctl show .*ActiveState/s);
 assert.match(launcher, /--property=TimeoutStopSec=180/);
 assert.match(launcher, /--property=KillMode=control-group/);
 assert.match(launcher, /--property=Restart=no/);
