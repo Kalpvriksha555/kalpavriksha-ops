@@ -31,7 +31,10 @@ const ignoredDirNames = new Set(['.git','node_modules','dist','release','.releas
 const walk = (absolute = root, prefix = '') => {
   const files = [];
   for (const entry of fs.readdirSync(absolute, { withFileTypes:true })) {
-    if (entry.isDirectory() && ignoredDirNames.has(entry.name)) continue;
+    // Git linked worktrees expose .git as a regular metadata file rather than
+    // a directory. Exclude ignored metadata names before checking entry type so
+    // release manifests are portable between linked worktrees and normal clones.
+    if (ignoredDirNames.has(entry.name)) continue;
     const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
     if (entry.isDirectory()) files.push(...walk(path.join(absolute, entry.name), relative));
     else if (relative !== 'RELEASE_FILE_MANIFEST.sha256') files.push(relative.replaceAll('\\','/'));
@@ -48,6 +51,7 @@ const parseManifest = () => {
     const [, hash, file] = match;
     assert.equal(map.has(file), false, `Duplicate release manifest path: ${file}`);
     assert.equal(file.startsWith('/') || file.includes('../'), false, `Unsafe manifest path: ${file}`);
+    assert.equal(/(^|\/)\.git(?:\/|$)/.test(file), false, `Git metadata must never be release-manifest content: ${file}`);
     map.set(file, hash);
   }
   return map;
