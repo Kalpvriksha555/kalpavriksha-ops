@@ -77,35 +77,58 @@ export const getLatestCompletedFileName = (project = {}) => {
   return latest ? (latest.name || latest.fileName || latest.originalName || '') : '';
 };
 
-export const getTaskDescription = (project = {}) => {
-  const raw = project?.description
-    ?? project?.taskDescription
-    ?? project?.task_description
-    ?? project?.instructions
-    ?? project?.specialInstructions
-    ?? project?.special_instructions
-    ?? project?.otherDescription
-    ?? project?.other_description
-    ?? project?.taskNote
-    ?? project?.task_note
-    ?? project?.workDescription
-    ?? project?.work_description
-    ?? project?.details
-    ?? '';
-  return String(raw || '').trim();
+const displayTextValue = (value) => {
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'bigint') return String(value);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+
+  // Some historical/cache payloads may wrap a display value in a small record.
+  // Only read known scalar fields; never stringify arbitrary objects into
+  // "[object Object]" for user-facing task metadata.
+  for (const candidate of [
+    value.text, value.value, value.label, value.details, value.description, value.note, value.amount,
+  ]) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) return String(candidate);
+    if (typeof candidate === 'bigint') return String(candidate);
+  }
+  return '';
 };
 
-export const getEstimateDetails = (project = {}) => {
-  const raw = project?.estimateDetails
-    ?? project?.estimate_details
-    ?? project?.propertyEstimateValue
-    ?? project?.property_estimate_value
-    ?? project?.estimateInstruction
-    ?? project?.estimate_instruction
-    ?? project?.estimateNote
-    ?? project?.estimate_note
-    ?? '';
-  return String(raw || '').trim();
+const firstDisplayText = (...values) => {
+  for (const value of values) {
+    const text = displayTextValue(value);
+    if (text) return text;
+  }
+  return '';
 };
+
+export const getTaskDescription = (project = {}) => firstDisplayText(
+  project?.description,
+  project?.taskDescription,
+  project?.task_description,
+  project?.instructions,
+  project?.specialInstructions,
+  project?.special_instructions,
+  project?.otherDescription,
+  project?.other_description,
+  project?.taskNote,
+  project?.task_note,
+  project?.workDescription,
+  project?.work_description,
+  project?.details,
+);
+
+export const getEstimateDetails = (project = {}) => firstDisplayText(
+  project?.estimateDetails,
+  project?.estimate_details,
+  project?.propertyEstimateValue,
+  project?.property_estimate_value,
+  project?.estimateInstruction,
+  project?.estimate_instruction,
+  project?.estimateNote,
+  project?.estimate_note,
+);
 
 export const getCompletedFileBadge = (project = {}) => getLatestCompletedFileName(project) || '';

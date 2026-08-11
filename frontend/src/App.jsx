@@ -125,7 +125,7 @@ const normalizeProjectArrayShapes = (project = {}) => {
   next.reviewHistory = next.reviewHistory.map(item => ({ ...asRecord(item), attachments: asArray(asRecord(item).attachments), files: asArray(asRecord(item).files) }));
   next.ownership = asRecord(source.ownership);
   next.ledger = asRecord(source.ledger);
-  next.estimateDetails = asRecord(source.estimateDetails);
+  next.estimateDetails = getEstimateDetails(source);
   return next;
 };
 
