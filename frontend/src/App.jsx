@@ -13,7 +13,7 @@ import { createSafeMeetingRoomName, buildJitsiUrl } from './utils/meeting';
 import { copyTextToClipboard } from './utils/clipboard';
 import { Badge, PageLoadingScreen, EmptyState, MiniEmptyState, MultiSelectCheckbox } from './components/shared';
 import { LocalModeBanner, DatabasePermissionBanner, TopNavigation, MobileSearchBar, MainTabNavigation, MobileBottomNavigation } from './components/layout';
-import { PortalLayer } from './components/ui/LayerPortal';
+import { PortalLayer, LAYER_Z } from './components/ui/LayerPortal';
 import { Button, IconButton, InlineAlert } from './components/ui/designSystem.jsx';
 import { ActiveToasts } from './features/notifications';
 import { getStatusColor, getPriorityColor, fetchBackendState, createTaskApi, saveFinanceStatusApi, deleteTaskApi, isProjectDeletedError, mergeTaskLists, persistTasksToLocalCache } from './services/taskService';
@@ -1706,21 +1706,43 @@ export const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onRe
     }
   };
 
+  const selectRecoveryMethod = (method) => {
+    if (method === recoveryMethod) return;
+    setRecoveryMethod(method);
+    setOtpSent(false);
+    setRecoveryChallengeId('');
+    setRecoveryOtp('');
+    setRecoveryNewPass('');
+    setRecoveryConfirmPass('');
+    setRecoveryMessage('');
+  };
+
   const handleSendRecoveryOtp = async () => {
     if (recoverySendInFlightRef.current || recoveryCooldown > 0) return;
     setRecoveryMessage('');
-    if (!recoveryUser.trim()) {
+    const normalizedRecoveryUser = recoveryUser.trim().toLowerCase();
+    const normalizedRecoveryEmail = recoveryEmail.trim().toLowerCase();
+    const normalizedRecoveryMobile = recoveryMobile.replace(/\D/g, '');
+    if (!normalizedRecoveryUser) {
       setRecoveryMessage('Username is required.');
+      return;
+    }
+    if (recoveryMethod === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedRecoveryEmail)) {
+      setRecoveryMessage('Enter your registered email address.');
+      return;
+    }
+    if (recoveryMethod === 'mobile' && normalizedRecoveryMobile.length < 10) {
+      setRecoveryMessage('Enter your registered mobile number.');
       return;
     }
     recoverySendInFlightRef.current = true;
     setRecoverySending(true);
     try {
       const response = await onRequestRecovery({
-        username: recoveryUser.trim(),
+        username: normalizedRecoveryUser,
         channel: recoveryMethod,
-        email: recoveryMethod === 'email' ? recoveryEmail.trim() : '',
-        mobile: recoveryMethod === 'mobile' ? recoveryMobile.trim() : ''
+        email: recoveryMethod === 'email' ? normalizedRecoveryEmail : '',
+        mobile: recoveryMethod === 'mobile' ? normalizedRecoveryMobile : ''
       });
       setRecoveryChallengeId(response.challengeId || '');
       setOtpSent(Boolean(response.challengeId));
@@ -1836,13 +1858,13 @@ export const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onRe
             <button disabled={isSubmitting} type="submit" className="w-full bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white font-black py-3.5 rounded-xl shadow-lg transition-all">
               {isSubmitting ? 'Verifying securely…' : 'Secure Sign In'}
             </button>
-            <button type="button" onClick={() => { setShowRecovery(true); setRecoveryMessage(''); }} className="w-full text-sm font-black text-indigo-600 hover:text-indigo-700">Forgot password?</button>
+            <button type="button" aria-haspopup="dialog" onClick={() => { setShowRecovery(true); setRecoveryMessage(''); }} className="kalpa-forgot-password-action relative z-20 w-full text-sm font-black text-indigo-600 hover:text-indigo-700">Forgot password?</button>
           </form>
         )}
 
         {showRecovery && !mustChangePassword && (
-          <PortalLayer isOpen={showRecovery} className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm z-[1000] flex items-center justify-center p-4" lockScrollClass="kalpa-password-recovery-open" role="dialog" ariaModal={true} ariaLabel="Password recovery" onEscape={() => setShowRecovery(false)} initialFocusSelector="input">
-            <div className="bg-white rounded-3xl p-6 w-full max-w-lg shadow-2xl border border-slate-100">
+          <PortalLayer isOpen={showRecovery} className="kalpa-password-recovery-layer fixed inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4" style={{ zIndex: LAYER_Z.modal }} lockScrollClass="kalpa-password-recovery-open" role="dialog" ariaModal={true} ariaLabel="Password recovery" onEscape={() => setShowRecovery(false)} initialFocusSelector="input">
+            <div className="kalpa-password-recovery-card bg-white rounded-3xl p-6 w-full max-w-lg shadow-2xl border border-slate-100">
               <div className="flex items-center justify-between mb-4">
                 <div><h2 className="text-xl font-black text-slate-800">Password Recovery</h2><p className="text-xs font-semibold text-slate-400 mt-1">Recovery details must exactly match the registered profile.</p></div>
                 <button type="button" aria-label="Close password recovery" onClick={() => setShowRecovery(false)} className="text-slate-400 hover:text-slate-700"><X className="w-5 h-5" /></button>
@@ -1850,8 +1872,8 @@ export const LoginScreen = ({ onLogin, onChangePassword, onRequestRecovery, onRe
               <form className="space-y-3" onSubmit={handlePasswordRecovery}>
                 <input value={recoveryUser} onChange={event => setRecoveryUser(event.target.value)} placeholder="Username" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />
                 <div className="grid grid-cols-2 gap-2">
-                  <button type="button" onClick={() => setRecoveryMethod('email')} className={`${recoveryMethod === 'email' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'} py-2.5 rounded-xl font-black text-sm`}>Email OTP</button>
-                  <button type="button" onClick={() => setRecoveryMethod('mobile')} className={`${recoveryMethod === 'mobile' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'} py-2.5 rounded-xl font-black text-sm`}>Mobile OTP</button>
+                  <button type="button" onClick={() => selectRecoveryMethod('email')} className={`${recoveryMethod === 'email' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'} py-2.5 rounded-xl font-black text-sm`}>Email OTP</button>
+                  <button type="button" onClick={() => selectRecoveryMethod('mobile')} className={`${recoveryMethod === 'mobile' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'} py-2.5 rounded-xl font-black text-sm`}>Mobile OTP</button>
                 </div>
                 {recoveryMethod === 'email' ? <input type="email" value={recoveryEmail} onChange={event => setRecoveryEmail(event.target.value)} placeholder="Registered email" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" /> : <input value={recoveryMobile} onChange={event => setRecoveryMobile(event.target.value)} placeholder="Registered mobile" className="w-full border-2 border-slate-100 rounded-xl p-3 font-bold outline-none focus:border-indigo-500" />}
                 <button type="button" disabled={recoverySending || recoveryCooldown > 0} onClick={handleSendRecoveryOtp} className="w-full bg-indigo-50 text-indigo-700 border border-indigo-100 py-3 rounded-xl font-black disabled:opacity-60">{recoverySending ? 'Sending…' : recoveryCooldown > 0 ? `Resend available in ${recoveryCooldown}s` : 'Send Recovery OTP'}</button>

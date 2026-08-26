@@ -5483,3 +5483,35 @@ body.kalpa-preview-open {
   }
 }
 
+/* 2026-08-26: Password recovery visibility + viewport closure.
+   The recovery dialog is portaled outside #root, so it must carry a real modal
+   layer even when an arbitrary Tailwind z-index utility is absent from the
+   precompiled stylesheet. Keep the trigger in front and the dialog scrollable
+   on short/mobile viewports. */
+.kalpa-forgot-password-action {
+  position: relative !important;
+  z-index: 20 !important;
+  min-height: 40px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+.kalpa-password-recovery-layer {
+  z-index: var(--kalpa-z-modal, 2147483000) !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  touch-action: auto !important;
+  padding-top: max(16px, var(--kalpa-safe-top, 0px)) !important;
+  padding-right: max(16px, var(--kalpa-safe-right, 0px)) !important;
+  padding-bottom: max(16px, var(--kalpa-safe-bottom, 0px)) !important;
+  padding-left: max(16px, var(--kalpa-safe-left, 0px)) !important;
+}
+.kalpa-password-recovery-card {
+  position: relative !important;
+  z-index: 1 !important;
+  max-height: calc(100dvh - 32px - var(--kalpa-safe-top, 0px) - var(--kalpa-safe-bottom, 0px)) !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  overscroll-behavior: contain !important;
+  -webkit-overflow-scrolling: touch !important;
+}
