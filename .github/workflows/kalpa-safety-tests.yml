@@ -84,6 +84,8 @@ jobs:
           node scripts/verify-release-manifest.mjs
           sha256sum -c RELEASE_FILE_MANIFEST.sha256
       - name: Independently install backend/frontend and build in temporary directory
+        env:
+          VITE_API_URL: https://api.kalpvriksha.co.in
         run: node scripts/clean-install-verify.mjs
       - name: Verify clean-install receipt is source-matched
         run: |
