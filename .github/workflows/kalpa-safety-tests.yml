@@ -12,6 +12,7 @@ on:
       - 'scripts/storage-governor.mjs'
       - 'scripts/verify-release-manifest.mjs'
       - 'RELEASE_FILE_MANIFEST.sha256'
+      - 'scripts/phase-14-file-upload-preview-retention-check.mjs'
       - 'tests/backend/storage-governor.test.mjs'
       - 'docs/deployment/systemd/kalpavriksha-*governor*'
       - 'tests/backend/*retention*.test.mjs'
@@ -48,5 +49,7 @@ jobs:
           node --check backend/scripts/backup-create.mjs
           node --check backend/scripts/backup-lib.mjs
           node --check backend/scripts/backup-space-guard.mjs
+      - name: Existing Phase 14 file lifecycle and retention verifier
+        run: node scripts/phase-14-file-upload-preview-retention-check.mjs
       - name: Retention and backup protection regression tests
         run: node --test tests/backend/storage-retention-policy.test.mjs tests/backend/backup-retention-fail-closed.test.mjs tests/backend/release-certificate-runtime-policy.test.mjs tests/backend/storage-governor.test.mjs tests/backend/backup-space-guard.test.mjs tests/backend/backup-stale-readiness.test.mjs
