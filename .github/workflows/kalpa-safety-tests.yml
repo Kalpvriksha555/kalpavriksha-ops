@@ -6,6 +6,8 @@ on:
       - 'tests/backend/backup-space-guard.test.mjs'
       - 'backend/src/services/storageRetentionService.js'
       - 'backend/src/services/releaseCertificationService.js'
+      - 'backend/src/services/operationalReliabilityService.js'
+      - 'tests/backend/backup-stale-readiness.test.mjs'
       - 'backend/src/server.js'
       - 'scripts/storage-governor.mjs'
       - 'tests/backend/storage-governor.test.mjs'
@@ -34,6 +36,7 @@ jobs:
         run: |
           node --check backend/src/services/storageRetentionService.js
           node --check backend/src/services/releaseCertificationService.js
+          node --check backend/src/services/operationalReliabilityService.js
           node --check backend/src/server.js
           node --check scripts/storage-governor.mjs
           node --check backend/scripts/backup-create.mjs
