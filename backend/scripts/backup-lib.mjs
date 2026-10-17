@@ -86,16 +86,11 @@ export async function recordBackupRun(databaseUrl,record={}){
   }catch(error){if(!/backup_runs/i.test(error.message||''))throw error;}
   finally{await pool.end().catch(()=>{});}
 }
-export function pruneBackups(root,{retentionDays=30,retentionCount=30}={}){
-  const manifests=listManifests(root);const keep=new Set(manifests.slice(0,Math.max(1,retentionCount)));
-  const cutoff=Date.now()-Math.max(1,retentionDays)*86400000;const removed=[];
-  for(const manifestPath of manifests){
-    if(keep.has(manifestPath)||fs.statSync(manifestPath).mtimeMs>=cutoff)continue;
-    try{
-      const manifest=JSON.parse(fs.readFileSync(manifestPath,'utf8'));
-      for(const component of Object.values(manifest.components||{})){if(component?.file){const fp=path.join(root,component.file);if(fs.existsSync(fp))fs.rmSync(fp,{force:true});}}
-      fs.rmSync(manifestPath,{force:true});removed.push(path.basename(manifestPath));
-    }catch{}
-  }
-  return removed;
+// Legacy automatic pruning could remove recoverable history even after a failed
+// backup verification. It must remain disabled until verified offsite recovery,
+// restore testing, explicit retention tiers, and cross-manifest reference checks
+// are implemented. A destructive pruning path must never be controlled solely
+// by the age or count of manifests.
+export function pruneBackups(_root, _options = {}) {
+  return [];
 }
