@@ -292,3 +292,11 @@ out,commit,unit=sys.argv[1:4]
 json.dump({'ok':True,'status':'DEPLOYED_AND_PUBLICLY_VERIFIED','commit':commit,'deploymentUnit':unit,'verifiedAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),'checks':{'candidateCertified':True,'temporaryPostgresRemovedBeforeDeploy':True,'deploymentUnitSuccess':True,'pm2PermanentPath':True,'localLiveReady':True,'publicApiLive':True,'publicFrontendReachable':True}},open(out,'w'),indent=2)
 PY
 printf '\n======================================================\n KALPAVRIKSHA FINAL RELEASE DEPLOYED AND VERIFIED\n======================================================\nCommit: %s\nPM2: permanent live path and online\nLocal API: live + ready\nPublic API: reachable\nPublic frontend: reachable\nResult: /root/kalpavriksha-final-deployment.result.json\n======================================================\n' "$EXPECTED_COMMIT"
+
+# After final public verification only. Failures never invalidate successful deployment.
+if [[ "$(bash -c 'source "$1"; echo "${KALPA_AUTO_RELEASE_CLEANUP:-false}"' _ "$ENV_FILE")" == "true" ]]; then
+  say "Guarded cleanup of superseded generated rollback workspaces"
+  KALPA_AUTO_RELEASE_CLEANUP=true node --input-type=module -e \
+    'import {cleanOldReleaseWorkspaces} from "./backend/scripts/auto-storage-retention.mjs"; console.log(JSON.stringify(cleanOldReleaseWorkspaces({apply:true})));' \
+    || echo 'WARNING: Old workspaces preserved; housekeeping was unable to complete.' >&2
+fi

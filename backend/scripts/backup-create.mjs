@@ -4,6 +4,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { atomicJson, commandExists, ensureDir, fileMeta, isoStamp, pruneBackups, recordBackupRun, run, verifyManifest } from './backup-lib.mjs';
 import { checkBackupHeadroom } from './backup-space-guard.mjs';
+import {rotateVerifiedBackups} from './auto-storage-retention.mjs';
 
 const args=new Set(process.argv.slice(2));
 const dryRun=args.has('--dry-run');
@@ -110,7 +111,19 @@ try{
     manifest.verification={ok:verification.ok,checks:verification.checks};manifest.ok=verification.ok;manifest.status=verification.ok?'VERIFIED':'FAILED';manifest.verifiedAt=new Date().toISOString();atomicJson(manifestPath,manifest);
     await recordBackupRun(databaseUrl,{id,backupType:manifest.backupType,status:manifest.status,manifestPath,databaseFile:manifest.components.database?.file||'',filesArchive:manifest.components.files?.file||'',databaseSha256:manifest.components.database?.sha256||'',filesSha256:manifest.components.files?.sha256||'',sizeBytes:Object.values(manifest.components).reduce((n,item)=>n+Number(item.sizeBytes||0),0),details:{verification:manifest.verification,fileSnapshotStrategy:databaseOnly?'none':'rsync-converged-snapshot'},startedAt,completedAt:manifest.completedAt,verifiedAt:manifest.verifiedAt});
     const removed=manifest.ok?pruneBackups(backupRoot,{retentionDays,retentionCount}):[];
-    console.log(JSON.stringify({ok:manifest.ok,id,status:manifest.status,manifestPath,components:manifest.components,fileSnapshotStrategy:databaseOnly?'none':'rsync-converged-snapshot',removed},null,2));
+    // Only a newly VERIFIED full backup can rotate old archived sets. A failed
+    // rotation cannot invalidate the completed backup or hide its proof.
+    let automaticRotation={ok:true,skipped:'DISABLED'};
+    if(manifest.ok && manifest.backupType==='FULL' && process.env.KALPA_AUTO_BACKUP_ROTATION==='true'){
+      try{
+        automaticRotation=rotateVerifiedBackups(backupRoot,{freshId:id,apply:true,
+          pinnedId:process.env.KALPA_BACKUP_PINNED_ID||''});
+      }catch(error){
+        automaticRotation={ok:false,error:String(error?.message||error)};
+        console.error('[backup] automatic rotation deferred:',automaticRotation.error);
+      }
+    }
+    console.log(JSON.stringify({ok:manifest.ok,id,status:manifest.status,manifestPath,components:manifest.components,fileSnapshotStrategy:databaseOnly?'none':'rsync-converged-snapshot',removed,automaticRotation},null,2));
     if(!manifest.ok)process.exitCode=2;
   }
 }catch(error){
