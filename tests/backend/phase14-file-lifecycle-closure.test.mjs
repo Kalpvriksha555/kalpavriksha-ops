@@ -8,21 +8,26 @@ const storage = fs.readFileSync(new URL('../../backend/src/services/fileStorageS
 
 const DAY = 24 * 60 * 60 * 1000;
 
-test('90-day retention interprets legacy Unix-second upload timestamps safely', () => {
-  const now = Date.parse('2026-08-10T00:00:00Z');
-  const thirtyDaysAgoSeconds = Math.floor((now - 30 * DAY) / 1000);
-  const ninetyOneDaysAgoSeconds = Math.floor((now - 91 * DAY) / 1000);
+test('two-calendar-month post-completion retention parses legacy Unix-second upload timestamps safely', () => {
+  const now = Date.parse('2026-10-17T00:00:00Z');
+  const recentUpload = Math.floor(Date.parse('2026-09-10T00:00:00Z') / 1000);
+  const oldUpload = Math.floor(Date.parse('2026-06-01T00:00:00Z') / 1000);
   const state = {
     files:[
-      { id:'young-seconds', purpose:'SOURCE', uploadedAt:thirtyDaysAgoSeconds, storageStatus:'AVAILABLE' },
-      { id:'old-seconds', purpose:'SOURCE', uploadedAt:String(ninetyOneDaysAgoSeconds), storageStatus:'AVAILABLE' }
+      {id:'young-seconds',caseId:'closed-case',purpose:'SOURCE',uploadedAt:recentUpload,storageStatus:'AVAILABLE'},
+      {id:'old-seconds',caseId:'closed-case',purpose:'SOURCE',uploadedAt:String(oldUpload),storageStatus:'AVAILABLE'},
+      {id:'orphan-seconds',caseId:'missing-case',purpose:'SOURCE',uploadedAt:String(oldUpload),storageStatus:'AVAILABLE'}
     ],
-    cases:[], teamChat:[], payments:[]
+    cases:[{id:'closed-case',status:'COMPLETED',completedAt:'2026-08-01T00:00:00Z',
+      documents:[{id:'young-seconds'},{id:'old-seconds'}]}],
+    teamChat:[],payments:[]
   };
-  const result = applyFileRetentionToState(state, { nowMs:now, retentionDays:90 });
-  assert.deepEqual(result.expiredIds, ['old-seconds']);
-  assert.equal(state.files[0].storageStatus, 'AVAILABLE');
-  assert.equal(state.files[1].storageStatus, 'EXPIRED');
+  const result = applyFileRetentionToState(state,{nowMs:now,retentionMonths:2});
+  assert.deepEqual(result.expiredIds,['old-seconds']);
+  assert.equal(state.files[0].storageStatus,'AVAILABLE');
+  assert.equal(state.files[1].storageStatus,'EXPIRED');
+  assert.equal(state.files[2].storageStatus,'AVAILABLE');
+  assert.equal(state.cases[0].documents[1].storageStatus,'EXPIRED');
 });
 
 test('canonical upload registry persists replay actor, type and voice-note identity', () => {
