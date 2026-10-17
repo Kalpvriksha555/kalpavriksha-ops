@@ -19,3 +19,13 @@ test('refuse a backup preflight when estimated free space is unsafe',()=>{
 test('preflight never authorizes cleanup by reducing the reserve',()=>{
   assert.ok(projectedBackupBytes({reserveGiB:0,databaseOnly:true}) >= 4*GiB);
 });
+
+test('disk headroom guard runs under backup lock and its failure reaches finally cleanup',async()=>{
+  const fs=await import('node:fs');
+  const code=fs.readFileSync(new URL('../../backend/scripts/backup-create.mjs',import.meta.url),'utf8');
+  const exclusive=code.indexOf("fs.openSync(lockPath,'wx'");
+  const preflight=code.indexOf('if (!dryRun) checkBackupHeadroom(');
+  const cleanup=code.indexOf('}finally{',preflight);
+  assert.ok(exclusive>=0&&preflight>exclusive&&cleanup>preflight);
+  assert.match(code.slice(cleanup),/fs\.rmSync\(lockPath,\{force:true\}\)/);
+});
