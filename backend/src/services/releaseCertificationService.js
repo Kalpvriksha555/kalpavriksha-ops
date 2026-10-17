@@ -215,6 +215,30 @@ export function readAndVerifyReleaseCertificate(filePath, options = {}) {
   }
 }
 
+// Operational readiness must not depend on the age of certification evidence
+// for the exact unchanged, previously certified release. A fresh certificate
+// remains mandatory when the release source or backend version changes.
+// Keep ordinary verification fail-closed; this is a separate runtime decision.
+export function runtimeReleaseCertificateDecision(verification, {expectedSourceHash = ''} = {}) {
+  const failures = Array.isArray(verification?.failures) ? verification.failures : [];
+  const ageFailures = new Set([
+    'Certificate is expired.',
+    'Certificate is older than the allowed release window.'
+  ]);
+  const sourceMatches = Boolean(expectedSourceHash)
+    && verification?.certificate?.sourceHash === expectedSourceHash;
+  const staleOnly = failures.length > 0 && failures.every(item => ageFailures.has(item));
+  const ready = sourceMatches && (verification?.ok === true || staleOnly);
+  return {
+    ok: ready,
+    stale: Boolean(ready && staleOnly),
+    warning: ready && staleOnly
+      ? 'Release certificate evidence has aged; recertify the unchanged deployment without disrupting runtime readiness.'
+      : '',
+    failures: ready ? [] : (failures.length ? failures : ['Deployed release source cannot be verified against its certificate.'])
+  };
+}
+
 export function extractCasesFromRecoverySource(raw = {}) {
   const safeRaw = raw && typeof raw === 'object' ? raw : {};
   const root = safeRaw.state && typeof safeRaw.state === 'object' ? safeRaw.state : safeRaw;
