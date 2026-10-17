@@ -87,7 +87,8 @@ requirePattern('backend/src/server.js',/if \(c\.file && matches\(c\.file\)\) \{ 
 requirePattern('backend/src/services/storageRetentionService.js',/if \(numeric >= 1_000_000_000 && numeric < 100_000_000_000\) return numeric \* 1000/,'90-day retention must normalize plausible Unix-second timestamps.');
 requirePattern('backend/src/services/storageRetentionService.js',/if \(purpose === 'PAYMENT_RECEIPT' \|\| purpose === 'FINANCE' \|\| purpose === 'FINANCIAL' \|\| purpose === 'BANK_LEDGER' \|\| purpose === 'LEDGER'\) return true/,'Finance/payment/ledger file evidence must be permanently exempt from automatic retention.');
 requirePattern('backend/src/services/storageRetentionService.js',/visit\(Array\.isArray\(state\.payments\) \? state\.payments : \[\]\)/,'Payment references must participate in retention protection even with malformed legacy state shapes.');
-requirePattern('backend/src/services/storageRetentionService.js',/if \(!anchor\) return false; \/\/ fail closed: unknown-age files are retained/,'Unknown-age files must fail closed and remain retained.');
+requirePattern('backend/src/services/storageRetentionService.js',/if \(!associated\.size\) return \{eligible:false,reason:'UNASSOCIATED'\}/,'Files with unknown task ownership must remain protected.');
+requirePattern('backend/src/services/storageRetentionService.js',/if \(!end\) return \{eligible:false,reason:'ACTIVE_OR_UNVERIFIED_CASE'\}/,'Active or undated cases must retain their files.');
 
 // Expired/deleted/missing/quarantined rows may keep metadata but must not synthesize
 // actionable URLs. PDFs should open immediately while availability is checked in parallel.

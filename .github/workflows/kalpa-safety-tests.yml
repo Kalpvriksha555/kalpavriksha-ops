@@ -1,0 +1,97 @@
+name: Kalpvriksha safety regression gates
+on:
+  pull_request:
+    paths:
+      - 'backend/scripts/backup-*.mjs'
+      - 'tests/backend/backup-space-guard.test.mjs'
+      - 'backend/src/services/storageRetentionService.js'
+      - 'backend/src/services/releaseCertificationService.js'
+      - 'backend/src/services/operationalReliabilityService.js'
+      - 'tests/backend/backup-stale-readiness.test.mjs'
+      - 'backend/src/server.js'
+      - 'scripts/storage-governor.mjs'
+      - 'scripts/verify-release-manifest.mjs'
+      - 'RELEASE_FILE_MANIFEST.sha256'
+      - 'scripts/phase-14-file-upload-preview-retention-check.mjs'
+      - 'scripts/phase-8-release-certification-check.mjs'
+      - 'scripts/phase-7-reliability-check.mjs'
+      - 'scripts/phase-23-production-local-postgres-certification-check.mjs'
+      - 'scripts/phase-24-operator-safe-certify-deploy-check.mjs'
+      - 'tests/backend/storage-governor.test.mjs'
+      - 'docs/deployment/systemd/kalpavriksha-*governor*'
+      - 'tests/backend/*retention*.test.mjs'
+      - '.github/workflows/kalpa-safety-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  safety-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout proposed branch
+        uses: actions/checkout@v4
+      - name: Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install backend dependencies (CI only)
+        run: npm ci --prefix backend --no-audit --no-fund
+      - name: Check complete release manifest and file digests
+        run: |
+          node scripts/verify-release-manifest.mjs
+          sha256sum -c RELEASE_FILE_MANIFEST.sha256
+      - name: Validate JavaScript syntax
+        run: |
+          node --check backend/src/services/storageRetentionService.js
+          node --check backend/src/services/releaseCertificationService.js
+          node --check backend/src/services/operationalReliabilityService.js
+          node --check backend/src/server.js
+          node --check scripts/storage-governor.mjs
+          node --check backend/scripts/backup-create.mjs
+          node --check backend/scripts/backup-lib.mjs
+          node --check backend/scripts/backup-space-guard.mjs
+      - name: Existing Phase 8 release certificate runtime contract
+        run: node scripts/phase-8-release-certification-check.mjs
+      - name: Existing Phase 14 file lifecycle and retention verifier
+        run: node scripts/phase-14-file-upload-preview-retention-check.mjs
+      - name: Existing Phase 7 reliability and Phase 23/24 deployment contracts
+        run: |
+          node scripts/phase-7-reliability-check.mjs
+          node scripts/phase-23-production-local-postgres-certification-check.mjs
+          node scripts/phase-24-operator-safe-certify-deploy-check.mjs
+      - name: Retention and backup protection regression tests
+        run: node --test tests/backend/storage-retention-policy.test.mjs tests/backend/backup-retention-fail-closed.test.mjs tests/backend/release-certificate-runtime-policy.test.mjs tests/backend/storage-governor.test.mjs tests/backend/backup-space-guard.test.mjs tests/backend/backup-stale-readiness.test.mjs
+      - name: Full backend regression suite (isolated CI only)
+        run: node --test --test-concurrency=2 tests/backend/*.test.mjs
+
+  isolated-clean-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v4
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Verify candidate SHA256 manifest
+        run: |
+          node scripts/verify-release-manifest.mjs
+          sha256sum -c RELEASE_FILE_MANIFEST.sha256
+      - name: Independently install backend/frontend and build in temporary directory
+        env:
+          VITE_API_URL: https://api.kalpvriksha.co.in
+        run: node scripts/clean-install-verify.mjs
+      - name: Verify clean-install receipt is source-matched
+        run: |
+          node --input-type=module -e "
+            import fs from 'node:fs';
+            const r=JSON.parse(fs.readFileSync('.release/clean-install-report.json','utf8'));
+            if(r.status!=='PASS'||r.sourceMatch!==true||!r.sourceHash||r.copiedSourceHash!==r.sourceHash) process.exit(1);
+            console.log('CLEAN_INSTALL_MATCHED',r.sourceFileCount,r.sourceHash);
+          "

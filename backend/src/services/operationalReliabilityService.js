@@ -115,6 +115,33 @@ export function inspectBackupManifests(backupRoot, { maxAgeHours = 26 } = {}) {
   };
 }
 
+// A backup-age warning is not a reason to disconnect an otherwise healthy
+// application. Only an older full backup with verified-manifest evidence and
+// present size-matching component archives can support this exception.
+export function backupReadinessDecision(backups={}, {backupRoot=''}={}) {
+  if(backups.ok===true)return {ok:true,stale:false,warning:''};
+  if(backups.status!=='STALE' || !path.isAbsolute(String(backupRoot||'')))
+    return {ok:false,stale:false,warning:''};
+  const manifest=backups.latestVerified;
+  if(!manifest || manifest.status!=='VERIFIED' || manifest.ok!==true ||
+     manifest.verification?.ok!==true || manifest.backupType!=='FULL')
+    return {ok:false,stale:false,warning:''};
+  const components=manifest.components||{};
+  for(const field of ['database','files']){
+    const component=components[field];
+    const name=String(component?.file||'');
+    if(!name || name==='.' || name==='..' || name!==path.basename(name) || !component?.sha256)
+      return {ok:false,stale:false,warning:''};
+    try{
+      const fp=path.join(backupRoot,name),stat=fs.lstatSync(fp);
+      if(!stat.isFile() || stat.isSymbolicLink() || stat.size!==Number(component.sizeBytes))
+        return {ok:false,stale:false,warning:''};
+    }catch{return {ok:false,stale:false,warning:''};}
+  }
+  return {ok:true,stale:true,
+    warning:'Latest verified full backup exceeded the freshness window; create and verify a new offsite-protected recovery point.'};
+}
+
 function localJobFile(dataDir) {
   return path.join(path.resolve(dataDir), 'operational-jobs.json');
 }

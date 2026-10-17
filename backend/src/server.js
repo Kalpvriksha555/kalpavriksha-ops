@@ -17,17 +17,22 @@ import { ROLE_CAPABILITIES, authorizationActor, canAccessCase, canMutateCase, ca
 import { attachRequestId, createRateLimiter, rejectDangerousJson, requireJsonForBody, secureResponseHeaders } from './middleware/security.js';
 import { getRelationalHealth, loadRelationalState, normalizeEpochMilliseconds, persistRelationalState, reloadRelationalState, restoreRelationalRevision, runRelationalMigrations } from './repositories/postgresStateRepository.js';
 import { buildFileReconciliationReport, createFileStorage, FileValidationError } from './services/fileStorageService.js';
-import { createOperationalJobStore, filesystemUsage, inspectBackupManifests, recordOperationalEvent, requestLogMiddleware, structuredLog } from './services/operationalReliabilityService.js';
-import { readAndVerifyReleaseCertificate } from './services/releaseCertificationService.js';
+import { createOperationalJobStore, filesystemUsage, inspectBackupManifests, backupReadinessDecision, recordOperationalEvent, requestLogMiddleware, structuredLog } from './services/operationalReliabilityService.js';
+import { readAndVerifyReleaseCertificate, runtimeReleaseCertificateDecision, sourceTreeHash } from './services/releaseCertificationService.js';
 import { createCorsOriginPolicy, parseCorsOrigins } from './config/corsPolicy.js';
 import { classifyPersistenceFailure, isDeferredPersistenceOperation, mergeLatestPresenceIntoSnapshot, persistenceCommitEvidenceMatches, persistenceReadiness, preserveDirtyPresenceAfterReload, runtimeRecoveryCanRun } from './services/persistenceBackpressureService.js';
 import { getRequestStateSnapshot } from './services/requestStateService.js';
-import { applyFileRetentionToState, DEFAULT_FILE_RETENTION_DAYS } from './services/storageRetentionService.js';
+import { applyFileRetentionToState, DEFAULT_FILE_RETENTION_MONTHS } from './services/storageRetentionService.js';
 import { applyPresenceClientCommandMetadata, classifyPresenceClientCommand, computeAttendanceAccrual, normalizePresenceClientCommand, parseIndiaAttendanceClock } from './services/presenceProtocolService.js';
 import { normalizeClientDiagnostic, publicApiErrorPayload, sanitizeOperationalPath, serverErrorFingerprint } from './services/runtimeDiagnosticsService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+// Verify immutable deployed release source once per process. Never hash source on each health probe.
+const RUNTIME_RELEASE_SOURCE_HASH = (() => {
+  try { return sourceTreeHash(path.resolve(__dirname, '..', '..')).hash; }
+  catch { return ''; }
+})();
 
 function boundedNumber(value, fallback, minimum = Number.NEGATIVE_INFINITY, maximum = Number.POSITIVE_INFINITY) {
   const parsed = Number(value);
@@ -164,7 +169,9 @@ const MAX_UPLOAD_FILES = boundedEnvNumber('MAX_UPLOAD_FILES', 20, 1, 20);
 const MAX_INLINE_PREVIEW_MB = boundedEnvNumber('MAX_INLINE_PREVIEW_MB', 15, 1, 50);
 const MAX_INLINE_PREVIEW_BYTES = MAX_INLINE_PREVIEW_MB * 1024 * 1024;
 const FILE_STORAGE_GC_GRACE_MS = boundedEnvNumber('FILE_STORAGE_GC_GRACE_MS', 24 * 60 * 60 * 1000, 0, 30 * 24 * 60 * 60 * 1000);
-const FILE_RETENTION_DAYS = boundedEnvNumber('FILE_RETENTION_DAYS', DEFAULT_FILE_RETENTION_DAYS, 30, 3650);
+const FILE_RETENTION_MONTHS = boundedEnvNumber('FILE_RETENTION_MONTHS', DEFAULT_FILE_RETENTION_MONTHS, 2, 24);
+// Read-only by default until a dry-run review approves physical file deletion.
+const FILE_RETENTION_APPLY_ENABLED = String(process.env.FILE_RETENTION_APPLY || '').trim().toLowerCase() === 'true';
 const FILE_RETENTION_INTERVAL_MS = boundedEnvNumber('FILE_RETENTION_INTERVAL_MS', 24 * 60 * 60 * 1000, 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000);
 const FILE_RETENTION_START_DELAY_MS = boundedEnvNumber('FILE_RETENTION_START_DELAY_MS', 10 * 60 * 1000, 60_000, 60 * 60 * 1000);
 const fileStorage = createFileStorage({
@@ -1126,12 +1133,15 @@ async function buildReliabilityStatus({ detailed = false } = {}) {
   const storageDisk = filesystemUsage(FILE_STORAGE_ROOT);
   const backupDisk = filesystemUsage(BACKUP_ROOT);
   const backups = inspectBackupManifests(BACKUP_ROOT, { maxAgeHours:BACKUP_MAX_AGE_HOURS });
+  const backupReadiness = backupReadinessDecision(backups,{backupRoot:BACKUP_ROOT});
   const releaseCertificate = readAndVerifyReleaseCertificate(RELEASE_CERTIFICATE_PATH, {
     expectedBackendVersion: BACKEND_PACKAGE_VERSION,
+    expectedSourceHash: RUNTIME_RELEASE_SOURCE_HASH,
     maxAgeHours: RELEASE_CERTIFICATE_MAX_AGE_HOURS,
     requireCleanInstall: true,
     requireBackup: RELEASE_CERTIFICATE_REQUIRED && BACKUP_REQUIRED
   });
+  const certificateReadiness = runtimeReleaseCertificateDecision(releaseCertificate,{expectedSourceHash:RUNTIME_RELEASE_SOURCE_HASH});
   const diskCritical = [storageDisk,backupDisk].some(item => item.ok && item.usedPercent >= DISK_CRITICAL_PERCENT);
   const diskWarning = [storageDisk,backupDisk].some(item => item.ok && item.usedPercent >= DISK_WARNING_PERCENT);
   const persistenceHealthy = persistenceReadiness({ criticalFailure:lastCriticalPersistenceFailure });
@@ -1141,15 +1151,17 @@ async function buildReliabilityStatus({ detailed = false } = {}) {
     database:database.ok,
     privateStorage:!!storage.ok,
     diskSpace:!diskCritical,
-    backup:!BACKUP_REQUIRED || backups.ok,
-    releaseCertificate:!RELEASE_CERTIFICATE_REQUIRED || releaseCertificate.ok,
+    backup:!BACKUP_REQUIRED || backupReadiness.ok,
+    releaseCertificate:!RELEASE_CERTIFICATE_REQUIRED || certificateReadiness.ok,
     persistence:persistenceHealthy
   };
   const ok = Object.values(checks).every(Boolean);
   const reliabilityWarnings = [];
+  if (RELEASE_CERTIFICATE_REQUIRED && certificateReadiness.stale) reliabilityWarnings.push(certificateReadiness.warning);
   if (diskWarning && !diskCritical) reliabilityWarnings.push(`Disk usage is above ${DISK_WARNING_PERCENT}%.`);
   if (lastDeferredPersistenceFailure) reliabilityWarnings.push('Presence persistence is temporarily deferred; foreground operations remain available while it retries.');
   else if (lastPersistenceFailure?.recovered) reliabilityWarnings.push('The most recent failed write was rolled back and verified state was recovered safely.');
+  if (BACKUP_REQUIRED && backupReadiness.stale) reliabilityWarnings.push(backupReadiness.warning);
   if (backups.warning === 'LATEST_BACKUP_ATTEMPT_FAILED') reliabilityWarnings.push('The latest backup attempt failed, but a recent verified recovery point remains available.');
   const base = {
     ok,
@@ -1169,8 +1181,9 @@ async function buildReliabilityStatus({ detailed = false } = {}) {
     database,
     storage:{...storage,root:undefined,tempRoot:undefined},
     disk:{storage:storageDisk,backups:backupDisk,warningPercent:DISK_WARNING_PERCENT,criticalPercent:DISK_CRITICAL_PERCENT},
-    backups,
-    releaseCertificate:{ required:RELEASE_CERTIFICATE_REQUIRED, path:RELEASE_CERTIFICATE_PATH, ...releaseCertificate },
+    backups:{...backups,runtimeAccepted:backupReadiness.ok,staleWarning:backupReadiness.warning},
+    releaseCertificate:{required:RELEASE_CERTIFICATE_REQUIRED,path:RELEASE_CERTIFICATE_PATH,...releaseCertificate,
+      runtimeAccepted:certificateReadiness.ok,stale:certificateReadiness.stale,runtimeFailures:certificateReadiness.failures},
     persistence:{
       lastSuccess:lastPersistenceSuccess,
       lastFailure:lastPersistenceFailure,
@@ -4090,7 +4103,15 @@ async function collectFileStorageGarbage({ actor='system', graceMs=FILE_STORAGE_
 async function runAutomaticFileRetention({ actor='storage-retention' } = {}) {
   if (startupFailure || shuttingDown) return { ok:false, skipped:true, reason:startupFailure ? 'startup-maintenance' : 'shutting-down' };
   const snapshot=db();
-  const retention=applyFileRetentionToState(snapshot,{nowMs:Date.now(),retentionDays:FILE_RETENTION_DAYS,actor});
+  const retention=applyFileRetentionToState(snapshot,{nowMs:Date.now(),retentionMonths:FILE_RETENTION_MONTHS,actor,dryRun:!FILE_RETENTION_APPLY_ENABLED});
+  if (!FILE_RETENTION_APPLY_ENABLED) {
+    // Dry run: no save(), no garbage collection, no trash deletion.
+    const plan={ok:true,dryRun:true,completedAt:now(),retentionMonths:FILE_RETENTION_MONTHS,
+      eligibleRecords:retention.expiredIds.length,protectedRecords:retention.protectedIds.length,
+      retainedWithoutVerifiedCompletion:retention.unknownAgeIds.length,skippedByReason:retention.skippedByReason};
+    structuredLog('info','automatic_file_retention_dry_run',plan);
+    return plan;
+  }
   if (retention.expiredIds.length) {
     const collections=['files'];
     const collectionRowIds={files:retention.expiredIds};
@@ -4099,16 +4120,16 @@ async function runAutomaticFileRetention({ actor='storage-retention' } = {}) {
     await save(snapshot,{actor,reason:'automatic_file_retention',takeSnapshotOwnership:true,collections,collectionRowIds});
     for (const id of retention.expiredIds) {
       const doc=(snapshot.files || []).find(item=>String(item?.id || '')===String(id));
-      await recordFileStorageEvent({fileId:id,caseId:doc?.caseId || '',action:'FILE_EXPIRED',actor,storageKey:fileStorageKey(doc || {}),sha256:doc?.sha256 || '',details:{retentionDays:FILE_RETENTION_DAYS,financeProtected:false}}).catch(()=>{});
+      await recordFileStorageEvent({fileId:id,caseId:doc?.caseId || '',action:'FILE_EXPIRED',actor,storageKey:fileStorageKey(doc || {}),sha256:doc?.sha256 || '',details:{retentionMonths:FILE_RETENTION_MONTHS,financeProtected:false}}).catch(()=>{});
     }
   }
   // Once logical expiry has committed, objects with no remaining active references
   // can move to recoverable trash. Trash itself is permanently purged after its
   // own short safety window, so the disk is actually reclaimed rather than merely
   // moving bytes to another directory on the same filesystem.
-  const gc=await collectFileStorageGarbage({actor,graceMs:0});
+  const gc=await collectFileStorageGarbage({actor,graceMs:FILE_STORAGE_GC_GRACE_MS});
   const trash=fileStorage.pruneTrash(Date.now());
-  const result={ok:gc.ok,completedAt:now(),retentionDays:FILE_RETENTION_DAYS,expiredRecords:retention.expiredIds.length,protectedFinancialOrProfileRecords:retention.protectedIds.length,unknownAgeRetained:retention.unknownAgeIds.length,movedToTrash:gc.movedToTrash,trashFilesPurged:trash.deletedFiles,bytesFreedFromTrash:trash.freedBytes,errors:gc.errors};
+  const result={ok:gc.ok,completedAt:now(),retentionMonths:FILE_RETENTION_MONTHS,expiredRecords:retention.expiredIds.length,protectedFinancialOrProfileRecords:retention.protectedIds.length,unknownAgeRetained:retention.unknownAgeIds.length,movedToTrash:gc.movedToTrash,trashFilesPurged:trash.deletedFiles,bytesFreedFromTrash:trash.freedBytes,errors:gc.errors};
   structuredLog(result.ok ? 'info' : 'warn','automatic_file_retention_completed',result);
   await recordOperationalEvent(pool,USE_POSTGRES,{eventType:'STORAGE_RETENTION_COMPLETED',severity:result.ok ? 'INFO' : 'WARN',actor,details:result}).catch(()=>{});
   return result;
@@ -4120,14 +4141,14 @@ function scheduleAutomaticFileRetention() {
     storageRetentionInitialTimer=null;
     runAutomaticFileRetention().catch(error=>{
       structuredLog('error','automatic_file_retention_failed',{code:error?.code || '',error:error?.message || String(error)});
-      operationalJobs.recordFailure('STORAGE_RETENTION',error,{retentionDays:FILE_RETENTION_DAYS},{maxAttempts:1}).catch(()=>{});
+      operationalJobs.recordFailure('STORAGE_RETENTION',error,{retentionMonths:FILE_RETENTION_MONTHS},{maxAttempts:1}).catch(()=>{});
     });
   },FILE_RETENTION_START_DELAY_MS);
   storageRetentionInitialTimer.unref?.();
   storageRetentionTimer=setInterval(()=>{
     runAutomaticFileRetention().catch(error=>{
       structuredLog('error','automatic_file_retention_failed',{code:error?.code || '',error:error?.message || String(error)});
-      operationalJobs.recordFailure('STORAGE_RETENTION',error,{retentionDays:FILE_RETENTION_DAYS},{maxAttempts:1}).catch(()=>{});
+      operationalJobs.recordFailure('STORAGE_RETENTION',error,{retentionMonths:FILE_RETENTION_MONTHS},{maxAttempts:1}).catch(()=>{});
     });
   },FILE_RETENTION_INTERVAL_MS);
   storageRetentionTimer.unref?.();
@@ -4179,7 +4200,7 @@ function resolveAuthorizedFile(req, res, id) {
     return { d, doc:null, resolved:null, denied:true };
   }
   if (result.doc && unavailableStatus === 'EXPIRED') {
-    res.status(410).json({ok:false,code:'FILE_RETENTION_EXPIRED',error:`This file expired under the ${Number(result.doc.retentionDays || FILE_RETENTION_DAYS)}-day storage-retention policy.`});
+    res.status(410).json({ok:false,code:'FILE_RETENTION_EXPIRED',error:`This file expired under the ${Number(result.doc.retentionMonths || FILE_RETENTION_MONTHS)}-calendar-month post-case storage-retention policy.`});
     return { d, doc:null, resolved:null, denied:true };
   }
   if (result.doc && !canAccessFileDocument(req.auth?.user || {}, result.doc, d.cases || [])) {
@@ -5447,12 +5468,16 @@ app.get('/api/system/backups', requireAdminSession, async (_req,res)=>{
 app.get('/api/system/release-certification', requireAdminSession, async (_req,res)=>{
   const certification = readAndVerifyReleaseCertificate(RELEASE_CERTIFICATE_PATH, {
     expectedBackendVersion: BACKEND_PACKAGE_VERSION,
+    expectedSourceHash: RUNTIME_RELEASE_SOURCE_HASH,
     maxAgeHours: RELEASE_CERTIFICATE_MAX_AGE_HOURS,
     requireCleanInstall: true,
     requireBackup: RELEASE_CERTIFICATE_REQUIRED && BACKUP_REQUIRED
   });
-  const ok = !RELEASE_CERTIFICATE_REQUIRED || certification.ok;
-  res.status(ok ? 200 : 503).json({ ok, required:RELEASE_CERTIFICATE_REQUIRED, backendVersion:BACKEND_PACKAGE_VERSION, ...certification });
+  const decision=runtimeReleaseCertificateDecision(certification,{expectedSourceHash:RUNTIME_RELEASE_SOURCE_HASH});
+  const ok=!RELEASE_CERTIFICATE_REQUIRED || decision.ok;
+  res.status(ok ? 200 : 503).json({...certification,ok,required:RELEASE_CERTIFICATE_REQUIRED,
+    backendVersion:BACKEND_PACKAGE_VERSION,runtimeAccepted:decision.ok,stale:decision.stale,
+    runtimeWarning:decision.warning,runtimeFailures:decision.failures});
 });
 
 app.get('/api/system/jobs', requireAdminSession, async (req,res)=>{

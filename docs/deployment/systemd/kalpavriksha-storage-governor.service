@@ -1,0 +1,18 @@
+[Unit]
+Description=Kalpvriksha disk and backup pressure monitor (read-only)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+WorkingDirectory=/var/www/kalpavriksha-ops
+ExecStart=/usr/bin/node /var/www/kalpavriksha-ops/scripts/storage-governor.mjs check
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target
