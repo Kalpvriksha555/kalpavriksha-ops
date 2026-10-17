@@ -104,7 +104,7 @@ try{
     const verification=verifyManifest(manifestPath,{verifyContents:true});
     manifest.verification={ok:verification.ok,checks:verification.checks};manifest.ok=verification.ok;manifest.status=verification.ok?'VERIFIED':'FAILED';manifest.verifiedAt=new Date().toISOString();atomicJson(manifestPath,manifest);
     await recordBackupRun(databaseUrl,{id,backupType:manifest.backupType,status:manifest.status,manifestPath,databaseFile:manifest.components.database?.file||'',filesArchive:manifest.components.files?.file||'',databaseSha256:manifest.components.database?.sha256||'',filesSha256:manifest.components.files?.sha256||'',sizeBytes:Object.values(manifest.components).reduce((n,item)=>n+Number(item.sizeBytes||0),0),details:{verification:manifest.verification,fileSnapshotStrategy:databaseOnly?'none':'rsync-converged-snapshot'},startedAt,completedAt:manifest.completedAt,verifiedAt:manifest.verifiedAt});
-    const removed=pruneBackups(backupRoot,{retentionDays,retentionCount});
+    const removed=manifest.ok?pruneBackups(backupRoot,{retentionDays,retentionCount}):[];
     console.log(JSON.stringify({ok:manifest.ok,id,status:manifest.status,manifestPath,components:manifest.components,fileSnapshotStrategy:databaseOnly?'none':'rsync-converged-snapshot',removed},null,2));
     if(!manifest.ok)process.exitCode=2;
   }
