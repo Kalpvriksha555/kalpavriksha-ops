@@ -93,7 +93,8 @@ export function fileAgeAnchorMs(doc = {}) {
 }
 export function caseRetentionAnchorMs(record = {}) {
   const status = normalizeStatus(record.status || record.reviewStatus);
-  if (status.includes('REOPEN') || status.includes('REVISION') || status.includes('PROGRESS')) return 0;
+  if (status.includes('REOPEN') || status.includes('REVISION') || status.includes('PROGRESS') ||
+      (status && !TERMINAL_STATUSES.has(status))) return 0;
   const archived = record.archived === true || record.isArchived === true || status === 'ARCHIVED';
   const closed = TERMINAL_STATUSES.has(status) && status !== 'ARCHIVED';
   if (!archived && !closed) return 0;
