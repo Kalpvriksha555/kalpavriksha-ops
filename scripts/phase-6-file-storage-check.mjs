@@ -15,7 +15,7 @@ const check = (condition, message) => { if (!condition) throw new Error(message)
 for (const token of ['FILE_SIGNATURE_MISMATCH','OFFICE_CONTAINER_INVALID','MALWARE_DETECTED','sha256','quarantine','softDelete','acquireLease','hasActiveLease','local-private','buildFileReconciliationReport','pruneTrash']) {
   check(storageSource.includes(token), `File-storage service is missing ${token}.`);
 }
-for (const token of ['KALPA_FILE_STORAGE_ROOT','FILE_STORAGE_PERSISTENT','prepareSecureUploads','RECONCILE FILE STORAGE','COLLECT FILE STORAGE GARBAGE','FILE_STORAGE_GC_GRACE_MS','FILE_DELETED','FILE_RETENTION_DAYS','FILE_RETENTION_EXPIRED','automatic_file_retention']) {
+for (const token of ['KALPA_FILE_STORAGE_ROOT','FILE_STORAGE_PERSISTENT','prepareSecureUploads','RECONCILE FILE STORAGE','COLLECT FILE STORAGE GARBAGE','FILE_STORAGE_GC_GRACE_MS','FILE_DELETED','FILE_RETENTION_MONTHS','FILE_RETENTION_EXPIRED','automatic_file_retention']) {
   check(serverSource.includes(token), `Server file hardening is missing ${token}.`);
 }
 check(repositorySource.includes("migration('006.001'"), 'Phase 6 migration is missing.');
