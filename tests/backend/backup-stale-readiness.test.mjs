@@ -27,7 +27,7 @@ test('missing or mismatched backup components remain fatal',()=>{
   try{
     fs.rmSync(path.join(t.root,'one.files.tar.gz'));
     assert.equal(backupReadinessDecision(t.backups,{backupRoot:t.root}).ok,false);
-    fs.writeFileSync(path.join(t.root,'one.files.tar.gz'),'tiny');
+    fs.writeFileSync(path.join(t.root,'one.files.tar.gz'),'truncated-file');
     assert.equal(backupReadinessDecision(t.backups,{backupRoot:t.root}).ok,false);
   }finally{fs.rmSync(t.root,{recursive:true,force:true});}
 });
