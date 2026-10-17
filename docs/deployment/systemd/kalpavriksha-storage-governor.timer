@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly Kalpvriksha storage pressure monitoring
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+AccuracySec=2m
+RandomizedDelaySec=2m
+Unit=kalpavriksha-storage-governor.service
+
+[Install]
+WantedBy=timers.target
