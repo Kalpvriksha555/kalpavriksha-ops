@@ -10,6 +10,8 @@ on:
       - 'tests/backend/backup-stale-readiness.test.mjs'
       - 'backend/src/server.js'
       - 'scripts/storage-governor.mjs'
+      - 'scripts/verify-release-manifest.mjs'
+      - 'RELEASE_FILE_MANIFEST.sha256'
       - 'tests/backend/storage-governor.test.mjs'
       - 'docs/deployment/systemd/kalpavriksha-*governor*'
       - 'tests/backend/*retention*.test.mjs'
@@ -32,6 +34,10 @@ jobs:
           cache-dependency-path: backend/package-lock.json
       - name: Install backend dependencies (CI only)
         run: npm ci --prefix backend --no-audit --no-fund
+      - name: Check complete release manifest and file digests
+        run: |
+          node scripts/verify-release-manifest.mjs
+          sha256sum -c RELEASE_FILE_MANIFEST.sha256
       - name: Validate JavaScript syntax
         run: |
           node --check backend/src/services/storageRetentionService.js
