@@ -4,6 +4,7 @@ on:
     paths:
       - 'backend/scripts/backup-*.mjs'
       - 'backend/src/services/storageRetentionService.js'
+      - 'backend/src/services/releaseCertificationService.js'
       - 'backend/src/server.js'
       - 'tests/backend/*retention*.test.mjs'
       - '.github/workflows/kalpa-safety-tests.yml'
@@ -28,8 +29,9 @@ jobs:
       - name: Validate JavaScript syntax
         run: |
           node --check backend/src/services/storageRetentionService.js
+          node --check backend/src/services/releaseCertificationService.js
           node --check backend/src/server.js
           node --check backend/scripts/backup-create.mjs
           node --check backend/scripts/backup-lib.mjs
       - name: Retention and backup protection regression tests
-        run: node --test tests/backend/storage-retention-policy.test.mjs tests/backend/backup-retention-fail-closed.test.mjs
+        run: node --test tests/backend/storage-retention-policy.test.mjs tests/backend/backup-retention-fail-closed.test.mjs tests/backend/release-certificate-runtime-policy.test.mjs
