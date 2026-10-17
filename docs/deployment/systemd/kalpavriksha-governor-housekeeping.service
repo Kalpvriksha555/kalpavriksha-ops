@@ -1,0 +1,22 @@
+[Unit]
+Description=Kalpvriksha restricted scratch housekeeping (never uploads or backups)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+StateDirectory=kalpavriksha/governor/work
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/kalpavriksha/governor/work
+Environment=GOVERNOR_ALLOW_TEMP_CLEANUP=true
+WorkingDirectory=/var/www/kalpavriksha-ops
+ExecStart=/usr/bin/node /var/www/kalpavriksha-ops/scripts/storage-governor.mjs apply-temp
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
