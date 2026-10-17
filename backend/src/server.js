@@ -17,7 +17,7 @@ import { ROLE_CAPABILITIES, authorizationActor, canAccessCase, canMutateCase, ca
 import { attachRequestId, createRateLimiter, rejectDangerousJson, requireJsonForBody, secureResponseHeaders } from './middleware/security.js';
 import { getRelationalHealth, loadRelationalState, normalizeEpochMilliseconds, persistRelationalState, reloadRelationalState, restoreRelationalRevision, runRelationalMigrations } from './repositories/postgresStateRepository.js';
 import { buildFileReconciliationReport, createFileStorage, FileValidationError } from './services/fileStorageService.js';
-import { createOperationalJobStore, filesystemUsage, inspectBackupManifests, recordOperationalEvent, requestLogMiddleware, structuredLog } from './services/operationalReliabilityService.js';
+import { createOperationalJobStore, filesystemUsage, inspectBackupManifests, backupReadinessDecision, recordOperationalEvent, requestLogMiddleware, structuredLog } from './services/operationalReliabilityService.js';
 import { readAndVerifyReleaseCertificate, runtimeReleaseCertificateDecision, sourceTreeHash } from './services/releaseCertificationService.js';
 import { createCorsOriginPolicy, parseCorsOrigins } from './config/corsPolicy.js';
 import { classifyPersistenceFailure, isDeferredPersistenceOperation, mergeLatestPresenceIntoSnapshot, persistenceCommitEvidenceMatches, persistenceReadiness, preserveDirtyPresenceAfterReload, runtimeRecoveryCanRun } from './services/persistenceBackpressureService.js';
@@ -1133,6 +1133,7 @@ async function buildReliabilityStatus({ detailed = false } = {}) {
   const storageDisk = filesystemUsage(FILE_STORAGE_ROOT);
   const backupDisk = filesystemUsage(BACKUP_ROOT);
   const backups = inspectBackupManifests(BACKUP_ROOT, { maxAgeHours:BACKUP_MAX_AGE_HOURS });
+  const backupReadiness = backupReadinessDecision(backups,{backupRoot:BACKUP_ROOT});
   const releaseCertificate = readAndVerifyReleaseCertificate(RELEASE_CERTIFICATE_PATH, {
     expectedBackendVersion: BACKEND_PACKAGE_VERSION,
     expectedSourceHash: RUNTIME_RELEASE_SOURCE_HASH,
@@ -1150,7 +1151,7 @@ async function buildReliabilityStatus({ detailed = false } = {}) {
     database:database.ok,
     privateStorage:!!storage.ok,
     diskSpace:!diskCritical,
-    backup:!BACKUP_REQUIRED || backups.ok,
+    backup:!BACKUP_REQUIRED || backupReadiness.ok,
     releaseCertificate:!RELEASE_CERTIFICATE_REQUIRED || certificateReadiness.ok,
     persistence:persistenceHealthy
   };
@@ -1160,6 +1161,7 @@ async function buildReliabilityStatus({ detailed = false } = {}) {
   if (diskWarning && !diskCritical) reliabilityWarnings.push(`Disk usage is above ${DISK_WARNING_PERCENT}%.`);
   if (lastDeferredPersistenceFailure) reliabilityWarnings.push('Presence persistence is temporarily deferred; foreground operations remain available while it retries.');
   else if (lastPersistenceFailure?.recovered) reliabilityWarnings.push('The most recent failed write was rolled back and verified state was recovered safely.');
+  if (BACKUP_REQUIRED && backupReadiness.stale) reliabilityWarnings.push(backupReadiness.warning);
   if (backups.warning === 'LATEST_BACKUP_ATTEMPT_FAILED') reliabilityWarnings.push('The latest backup attempt failed, but a recent verified recovery point remains available.');
   const base = {
     ok,
@@ -1179,7 +1181,7 @@ async function buildReliabilityStatus({ detailed = false } = {}) {
     database,
     storage:{...storage,root:undefined,tempRoot:undefined},
     disk:{storage:storageDisk,backups:backupDisk,warningPercent:DISK_WARNING_PERCENT,criticalPercent:DISK_CRITICAL_PERCENT},
-    backups,
+    backups:{...backups,runtimeAccepted:backupReadiness.ok,staleWarning:backupReadiness.warning},
     releaseCertificate:{required:RELEASE_CERTIFICATE_REQUIRED,path:RELEASE_CERTIFICATE_PATH,...releaseCertificate,
       runtimeAccepted:certificateReadiness.ok,stale:certificateReadiness.stale,runtimeFailures:certificateReadiness.failures},
     persistence:{
