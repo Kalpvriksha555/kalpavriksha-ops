@@ -27,10 +27,6 @@ if(!databaseOnly&&!commandExists(tarBin))throw new Error('tar is not installed o
 if(!databaseOnly&&!commandExists(rsyncBin))throw new Error('rsync is required for deterministic private-file snapshots.');
 if(!databaseOnly&&within(backupRoot,storageRoot))throw new Error('KALPA_BACKUP_ROOT must not be inside KALPA_FILE_STORAGE_ROOT.');
 ensureDir(backupRoot);
-// Reject oversized backups before allocating snapshot, archive or database dump bytes.
-// Disk pressure must never trigger removal of previous recoverable backups.
-if (!dryRun) checkBackupHeadroom({backupRoot,storageRoot,databaseOnly,filesOnly,
-  reserveGiB:Number(process.env.BACKUP_MIN_FREE_GIB || 6)});
 const lockPath=path.join(backupRoot,'.backup.lock');
 const staleLockMs=Math.max(5 * 60 * 1000,Number(process.env.BACKUP_STALE_LOCK_MS || 2 * 60 * 60 * 1000));
 const processAlive=(pid)=>{try{process.kill(Number(pid),0);return true;}catch{return false;}};
@@ -87,6 +83,10 @@ function createStablePrivateFileSnapshot(){
 }
 
 try{
+  // Reserve disk after acquiring exclusive backup lock, before any backup allocation.
+  // Running inside try ensures a failed preflight releases the lock in finally.
+  if (!dryRun) checkBackupHeadroom({backupRoot,storageRoot,databaseOnly,filesOnly,
+    reserveGiB:Number(process.env.BACKUP_MIN_FREE_GIB || 6)});
   if(dryRun){console.log(JSON.stringify({ok:true,dryRun:true,id,backupRoot,database:!filesOnly,files:!databaseOnly,fileSnapshotStrategy:databaseOnly?'none':'rsync-converged-snapshot'},null,2));process.exitCode=0;}
   else{
     if(!filesOnly){
