@@ -18,7 +18,7 @@ import { attachRequestId, createRateLimiter, rejectDangerousJson, requireJsonFor
 import { getRelationalHealth, loadRelationalState, normalizeEpochMilliseconds, persistRelationalState, reloadRelationalState, restoreRelationalRevision, runRelationalMigrations } from './repositories/postgresStateRepository.js';
 import { buildFileReconciliationReport, createFileStorage, FileValidationError } from './services/fileStorageService.js';
 import { createOperationalJobStore, filesystemUsage, inspectBackupManifests, recordOperationalEvent, requestLogMiddleware, structuredLog } from './services/operationalReliabilityService.js';
-import { readAndVerifyReleaseCertificate } from './services/releaseCertificationService.js';
+import { readAndVerifyReleaseCertificate, runtimeReleaseCertificateDecision, sourceTreeHash } from './services/releaseCertificationService.js';
 import { createCorsOriginPolicy, parseCorsOrigins } from './config/corsPolicy.js';
 import { classifyPersistenceFailure, isDeferredPersistenceOperation, mergeLatestPresenceIntoSnapshot, persistenceCommitEvidenceMatches, persistenceReadiness, preserveDirtyPresenceAfterReload, runtimeRecoveryCanRun } from './services/persistenceBackpressureService.js';
 import { getRequestStateSnapshot } from './services/requestStateService.js';
@@ -28,6 +28,11 @@ import { normalizeClientDiagnostic, publicApiErrorPayload, sanitizeOperationalPa
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+// Verify immutable deployed release source once per process. Never hash source on each health probe.
+const RUNTIME_RELEASE_SOURCE_HASH = (() => {
+  try { return sourceTreeHash(path.resolve(__dirname, '..', '..')).hash; }
+  catch { return ''; }
+})();
 
 function boundedNumber(value, fallback, minimum = Number.NEGATIVE_INFINITY, maximum = Number.POSITIVE_INFINITY) {
   const parsed = Number(value);
@@ -1130,10 +1135,12 @@ async function buildReliabilityStatus({ detailed = false } = {}) {
   const backups = inspectBackupManifests(BACKUP_ROOT, { maxAgeHours:BACKUP_MAX_AGE_HOURS });
   const releaseCertificate = readAndVerifyReleaseCertificate(RELEASE_CERTIFICATE_PATH, {
     expectedBackendVersion: BACKEND_PACKAGE_VERSION,
+    expectedSourceHash: RUNTIME_RELEASE_SOURCE_HASH,
     maxAgeHours: RELEASE_CERTIFICATE_MAX_AGE_HOURS,
     requireCleanInstall: true,
     requireBackup: RELEASE_CERTIFICATE_REQUIRED && BACKUP_REQUIRED
   });
+  const certificateReadiness = runtimeReleaseCertificateDecision(releaseCertificate,{expectedSourceHash:RUNTIME_RELEASE_SOURCE_HASH});
   const diskCritical = [storageDisk,backupDisk].some(item => item.ok && item.usedPercent >= DISK_CRITICAL_PERCENT);
   const diskWarning = [storageDisk,backupDisk].some(item => item.ok && item.usedPercent >= DISK_WARNING_PERCENT);
   const persistenceHealthy = persistenceReadiness({ criticalFailure:lastCriticalPersistenceFailure });
@@ -1144,11 +1151,12 @@ async function buildReliabilityStatus({ detailed = false } = {}) {
     privateStorage:!!storage.ok,
     diskSpace:!diskCritical,
     backup:!BACKUP_REQUIRED || backups.ok,
-    releaseCertificate:!RELEASE_CERTIFICATE_REQUIRED || releaseCertificate.ok,
+    releaseCertificate:!RELEASE_CERTIFICATE_REQUIRED || certificateReadiness.ok,
     persistence:persistenceHealthy
   };
   const ok = Object.values(checks).every(Boolean);
   const reliabilityWarnings = [];
+  if (RELEASE_CERTIFICATE_REQUIRED && certificateReadiness.stale) reliabilityWarnings.push(certificateReadiness.warning);
   if (diskWarning && !diskCritical) reliabilityWarnings.push(`Disk usage is above ${DISK_WARNING_PERCENT}%.`);
   if (lastDeferredPersistenceFailure) reliabilityWarnings.push('Presence persistence is temporarily deferred; foreground operations remain available while it retries.');
   else if (lastPersistenceFailure?.recovered) reliabilityWarnings.push('The most recent failed write was rolled back and verified state was recovered safely.');
@@ -1172,7 +1180,8 @@ async function buildReliabilityStatus({ detailed = false } = {}) {
     storage:{...storage,root:undefined,tempRoot:undefined},
     disk:{storage:storageDisk,backups:backupDisk,warningPercent:DISK_WARNING_PERCENT,criticalPercent:DISK_CRITICAL_PERCENT},
     backups,
-    releaseCertificate:{ required:RELEASE_CERTIFICATE_REQUIRED, path:RELEASE_CERTIFICATE_PATH, ...releaseCertificate },
+    releaseCertificate:{required:RELEASE_CERTIFICATE_REQUIRED,path:RELEASE_CERTIFICATE_PATH,...releaseCertificate,
+      runtimeAccepted:certificateReadiness.ok,stale:certificateReadiness.stale,runtimeFailures:certificateReadiness.failures},
     persistence:{
       lastSuccess:lastPersistenceSuccess,
       lastFailure:lastPersistenceFailure,
@@ -5457,12 +5466,16 @@ app.get('/api/system/backups', requireAdminSession, async (_req,res)=>{
 app.get('/api/system/release-certification', requireAdminSession, async (_req,res)=>{
   const certification = readAndVerifyReleaseCertificate(RELEASE_CERTIFICATE_PATH, {
     expectedBackendVersion: BACKEND_PACKAGE_VERSION,
+    expectedSourceHash: RUNTIME_RELEASE_SOURCE_HASH,
     maxAgeHours: RELEASE_CERTIFICATE_MAX_AGE_HOURS,
     requireCleanInstall: true,
     requireBackup: RELEASE_CERTIFICATE_REQUIRED && BACKUP_REQUIRED
   });
-  const ok = !RELEASE_CERTIFICATE_REQUIRED || certification.ok;
-  res.status(ok ? 200 : 503).json({ ok, required:RELEASE_CERTIFICATE_REQUIRED, backendVersion:BACKEND_PACKAGE_VERSION, ...certification });
+  const decision=runtimeReleaseCertificateDecision(certification,{expectedSourceHash:RUNTIME_RELEASE_SOURCE_HASH});
+  const ok=!RELEASE_CERTIFICATE_REQUIRED || decision.ok;
+  res.status(ok ? 200 : 503).json({...certification,ok,required:RELEASE_CERTIFICATE_REQUIRED,
+    backendVersion:BACKEND_PACKAGE_VERSION,runtimeAccepted:decision.ok,stale:decision.stale,
+    runtimeWarning:decision.warning,runtimeFailures:decision.failures});
 });
 
 app.get('/api/system/jobs', requireAdminSession, async (req,res)=>{
