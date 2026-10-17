@@ -6,6 +6,9 @@ on:
       - 'backend/src/services/storageRetentionService.js'
       - 'backend/src/services/releaseCertificationService.js'
       - 'backend/src/server.js'
+      - 'scripts/storage-governor.mjs'
+      - 'tests/backend/storage-governor.test.mjs'
+      - 'docs/deployment/systemd/kalpavriksha-*governor*'
       - 'tests/backend/*retention*.test.mjs'
       - '.github/workflows/kalpa-safety-tests.yml'
   workflow_dispatch:
@@ -31,7 +34,8 @@ jobs:
           node --check backend/src/services/storageRetentionService.js
           node --check backend/src/services/releaseCertificationService.js
           node --check backend/src/server.js
+          node --check scripts/storage-governor.mjs
           node --check backend/scripts/backup-create.mjs
           node --check backend/scripts/backup-lib.mjs
       - name: Retention and backup protection regression tests
-        run: node --test tests/backend/storage-retention-policy.test.mjs tests/backend/backup-retention-fail-closed.test.mjs tests/backend/release-certificate-runtime-policy.test.mjs
+        run: node --test tests/backend/storage-retention-policy.test.mjs tests/backend/backup-retention-fail-closed.test.mjs tests/backend/release-certificate-runtime-policy.test.mjs tests/backend/storage-governor.test.mjs
