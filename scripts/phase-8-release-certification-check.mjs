@@ -126,17 +126,19 @@ fs.writeFileSync(path.join(backupRoot, 'phase8.manifest.json'), JSON.stringify({
   components:{ database:{ file:'phase8.dump',sizeBytes:fs.statSync(backupFile).size,sha256:backupSha } },verification:{ok:true,checks:[{component:'database',ok:true}]}
 }, null, 2));
 const runtimeCertificatePath = path.join(runtimeRoot, 'release-certification.json');
+const runtimeSourceHash=sourceTreeHash(root).hash;
 const runtimeCertificate = createReleaseCertificate({
   appVersion:packageJson.version,
   backendVersion:backendPackageJson.version,
-  sourceHash:'runtime-source',
-  sourceFileCount:1,
+  sourceHash:runtimeSourceHash,
+  sourceFileCount:sourceTreeHash(root).fileCount,
   checks:[{id:'runtime',status:'PASS'}],
-  cleanInstall:{status:'PASS',sourceHash:'runtime-source',sourceMatch:true},
+  cleanInstall:{status:'PASS',sourceHash:runtimeSourceHash,sourceMatch:true},
   backup:{status:'VERIFIED',ok:true},
   maxAgeHours:24
 });
 fs.writeFileSync(runtimeCertificatePath, JSON.stringify(runtimeCertificate, null, 2));
+const runtimeTestPassword='CI-'+crypto.randomBytes(24).toString('hex');
 const runtimePort = 28000 + (process.pid % 1000);
 const runtimeBase = `http://127.0.0.1:${runtimePort}`;
 let runtimeChild;
@@ -144,7 +146,7 @@ let runtimeOutput = '';
 const startRuntime = async () => {
   runtimeChild = spawn(process.execPath, ['backend/src/server.js'], {
     cwd:root,
-    env:{...process.env,NODE_ENV:'development',DATABASE_URL:'',DB_SSL:'false',ALLOW_JSON_FALLBACK:'true',BACKUP_REQUIRED:'true',RELEASE_CERTIFICATE_REQUIRED:'true',DISK_WARNING_PERCENT:'98',DISK_CRITICAL_PERCENT:'100',PORT:String(runtimePort),KALPA_DATA_DIR:runtimeData,KALPA_DB_FILE:path.join(runtimeData,'db.json'),KALPA_AUTH_FILE:path.join(runtimeData,'auth.json'),KALPA_FILE_STORAGE_ROOT:fileRoot,KALPA_BACKUP_ROOT:backupRoot,RELEASE_CERTIFICATE_PATH:runtimeCertificatePath,BOOTSTRAP_ADMIN_USERNAME:'phase8admin',BOOTSTRAP_ADMIN_PASSWORD:'StrongAdmin123',BOOTSTRAP_ADMIN_NAME:'Phase 8 Admin',API_WRITE_RATE_LIMIT:'1000'},
+    env:{...process.env,NODE_ENV:'development',DATABASE_URL:'',DB_SSL:'false',ALLOW_JSON_FALLBACK:'true',BACKUP_REQUIRED:'true',RELEASE_CERTIFICATE_REQUIRED:'true',DISK_WARNING_PERCENT:'98',DISK_CRITICAL_PERCENT:'100',PORT:String(runtimePort),KALPA_DATA_DIR:runtimeData,KALPA_DB_FILE:path.join(runtimeData,'db.json'),KALPA_AUTH_FILE:path.join(runtimeData,'auth.json'),KALPA_FILE_STORAGE_ROOT:fileRoot,KALPA_BACKUP_ROOT:backupRoot,RELEASE_CERTIFICATE_PATH:runtimeCertificatePath,BOOTSTRAP_ADMIN_USERNAME:'phase8admin',BOOTSTRAP_ADMIN_PASSWORD:runtimeTestPassword,BOOTSTRAP_ADMIN_NAME:'Phase 8 Admin',API_WRITE_RATE_LIMIT:'1000'},
     stdio:['ignore','pipe','pipe']
   });
   runtimeChild.stdout.on('data', (chunk) => { runtimeOutput += chunk.toString(); });
@@ -175,7 +177,7 @@ try {
   const ready = await runtimeRequest('/api/health/ready');
   assert.equal(ready.response.status, 200, JSON.stringify(ready.payload));
   assert.equal(ready.payload.checks.releaseCertificate, true);
-  const login = await runtimeRequest('/api/auth/login', { method:'POST',body:{username:'phase8admin',password:'StrongAdmin123'} });
+  const login = await runtimeRequest('/api/auth/login', { method:'POST',body:{username:'phase8admin',password:runtimeTestPassword} });
   assert.equal(login.response.ok, true, JSON.stringify(login.payload));
   const session = { cookie:login.cookie,csrf:login.payload.csrfToken };
   const status = await runtimeRequest('/api/system/release-certification', { session });
