@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { atomicJson, commandExists, ensureDir, fileMeta, isoStamp, pruneBackups, recordBackupRun, run, verifyManifest } from './backup-lib.mjs';
+import { checkBackupHeadroom } from './backup-space-guard.mjs';
 
 const args=new Set(process.argv.slice(2));
 const dryRun=args.has('--dry-run');
@@ -26,6 +27,10 @@ if(!databaseOnly&&!commandExists(tarBin))throw new Error('tar is not installed o
 if(!databaseOnly&&!commandExists(rsyncBin))throw new Error('rsync is required for deterministic private-file snapshots.');
 if(!databaseOnly&&within(backupRoot,storageRoot))throw new Error('KALPA_BACKUP_ROOT must not be inside KALPA_FILE_STORAGE_ROOT.');
 ensureDir(backupRoot);
+// Reject oversized backups before allocating snapshot, archive or database dump bytes.
+// Disk pressure must never trigger removal of previous recoverable backups.
+if (!dryRun) checkBackupHeadroom({backupRoot,storageRoot,databaseOnly,filesOnly,
+  reserveGiB:Number(process.env.BACKUP_MIN_FREE_GIB || 6)});
 const lockPath=path.join(backupRoot,'.backup.lock');
 const staleLockMs=Math.max(5 * 60 * 1000,Number(process.env.BACKUP_STALE_LOCK_MS || 2 * 60 * 60 * 1000));
 const processAlive=(pid)=>{try{process.kill(Number(pid),0);return true;}catch{return false;}};
