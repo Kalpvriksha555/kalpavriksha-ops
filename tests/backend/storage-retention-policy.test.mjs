@@ -44,6 +44,14 @@ test('active or reopened cases retain files regardless of upload age',()=>{
   }
 });
 
+
+test('archived marker cannot override an active or reopened status',()=>{
+  for(const status of ['IN_PROGRESS','ASSIGNED','REOPENED_FOR_REVISION']){
+    const state=stateFor({cases:[completedCase({status,archived:true,archivedAt:'2026-01-01T00:00:00Z'})]});
+    assert.equal(shouldExpireFile(state.files[0],{state,nowMs:NOW}),false,status);
+  }
+});
+
 test('completion/approval/archive without trustworthy timestamp does not expire',()=>{
   for(const record of [
     completedCase({completedAt:null}),completedCase({status:'APPROVED',completedAt:null,approvedAt:'2026-01-01T00:00:00Z'}),
