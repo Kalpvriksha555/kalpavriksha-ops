@@ -12,7 +12,7 @@ test('retains the latest three full backups and an offsite-pinned older one',()=
   const previous=process.env.KALPA_AUTO_BACKUP_ROTATION;
   try{
     process.env.KALPA_AUTO_BACKUP_ROTATION='true';
-    const now=Date.UTC(2026,9,18,12), ids=[];
+    const DAY=86400000, now=Date.UTC(2026,9,18,12), ids=[];
     for(let i=0;i<5;i++){
       const day=String(10+i).padStart(2,'0');
       const id='kv-202610'+day+'T100000Z-'+String(i+1).repeat(8);
