@@ -1,0 +1,35 @@
+name: Kalpvriksha safety regression gates
+on:
+  pull_request:
+    paths:
+      - 'backend/scripts/backup-*.mjs'
+      - 'backend/src/services/storageRetentionService.js'
+      - 'backend/src/server.js'
+      - 'tests/backend/*retention*.test.mjs'
+      - '.github/workflows/kalpa-safety-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  safety-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout proposed branch
+        uses: actions/checkout@v4
+      - name: Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install backend dependencies (CI only)
+        run: npm ci --prefix backend --no-audit --no-fund
+      - name: Validate JavaScript syntax
+        run: |
+          node --check backend/src/services/storageRetentionService.js
+          node --check backend/src/server.js
+          node --check backend/scripts/backup-create.mjs
+          node --check backend/scripts/backup-lib.mjs
+      - name: Retention and backup protection regression tests
+        run: node --test tests/backend/storage-retention-policy.test.mjs tests/backend/backup-retention-fail-closed.test.mjs
