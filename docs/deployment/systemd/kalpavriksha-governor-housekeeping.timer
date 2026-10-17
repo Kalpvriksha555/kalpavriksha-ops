@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily cleanup of Kalpvriksha Governor scratch files only
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+AccuracySec=15m
+Unit=kalpavriksha-governor-housekeeping.service
+
+[Install]
+WantedBy=timers.target
