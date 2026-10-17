@@ -100,10 +100,8 @@ export function caseRetentionAnchorMs(record = {}) {
   if (HOLDS.some(key => record[key] === true)) return 0;
   const disputeStatus = normalizeStatus(record.disputeStatus || record.legalStatus || '');
   if (['OPEN','PENDING','DISPUTED','UNDER_REVIEW','IN_PROGRESS','ON_HOLD'].includes(disputeStatus)) return 0;
-  const completedAt = closed ? Math.max(
-    timestampMs(record.completedAt),timestampMs(record.closedAt),
-    timestampMs(record.finalApprovedAt),timestampMs(record.approvedAt)
-  ) : 0;
+  // Approval by itself is not case completion; demand a dated completion/closure event.
+  const completedAt = closed ? Math.max(timestampMs(record.completedAt),timestampMs(record.closedAt)) : 0;
   const archivedAt = archived ? Math.max(
     timestampMs(record.archivedAt),timestampMs(record.archivedOn)
   ) : 0;
