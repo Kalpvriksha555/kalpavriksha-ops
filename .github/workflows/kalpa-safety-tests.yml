@@ -27,7 +27,7 @@ permissions:
 jobs:
   safety-regressions:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 30
     steps:
       - name: Checkout proposed branch
         uses: actions/checkout@v4
@@ -64,3 +64,5 @@ jobs:
           node scripts/phase-24-operator-safe-certify-deploy-check.mjs
       - name: Retention and backup protection regression tests
         run: node --test tests/backend/storage-retention-policy.test.mjs tests/backend/backup-retention-fail-closed.test.mjs tests/backend/release-certificate-runtime-policy.test.mjs tests/backend/storage-governor.test.mjs tests/backend/backup-space-guard.test.mjs tests/backend/backup-stale-readiness.test.mjs
+      - name: Full backend regression suite (isolated CI only)
+        run: node --test --test-concurrency=2 tests/backend/*.test.mjs
