@@ -66,3 +66,30 @@ jobs:
         run: node --test tests/backend/storage-retention-policy.test.mjs tests/backend/backup-retention-fail-closed.test.mjs tests/backend/release-certificate-runtime-policy.test.mjs tests/backend/storage-governor.test.mjs tests/backend/backup-space-guard.test.mjs tests/backend/backup-stale-readiness.test.mjs
       - name: Full backend regression suite (isolated CI only)
         run: node --test --test-concurrency=2 tests/backend/*.test.mjs
+
+  isolated-clean-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v4
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Verify candidate SHA256 manifest
+        run: |
+          node scripts/verify-release-manifest.mjs
+          sha256sum -c RELEASE_FILE_MANIFEST.sha256
+      - name: Independently install backend/frontend and build in temporary directory
+        run: node scripts/clean-install-verify.mjs
+      - name: Verify clean-install receipt is source-matched
+        run: |
+          node --input-type=module -e "
+            import fs from 'node:fs';
+            const r=JSON.parse(fs.readFileSync('.release/clean-install-report.json','utf8'));
+            if(r.status!=='PASS'||r.sourceMatch!==true||!r.sourceHash||r.copiedSourceHash!==r.sourceHash) process.exit(1);
+            console.log('CLEAN_INSTALL_MATCHED',r.sourceFileCount,r.sourceHash);
+          "
