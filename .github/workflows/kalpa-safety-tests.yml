@@ -43,4 +43,4 @@ jobs:
           node --check backend/scripts/backup-lib.mjs
           node --check backend/scripts/backup-space-guard.mjs
       - name: Retention and backup protection regression tests
-        run: node --test tests/backend/storage-retention-policy.test.mjs tests/backend/backup-retention-fail-closed.test.mjs tests/backend/release-certificate-runtime-policy.test.mjs tests/backend/storage-governor.test.mjs
+        run: node --test tests/backend/storage-retention-policy.test.mjs tests/backend/backup-retention-fail-closed.test.mjs tests/backend/release-certificate-runtime-policy.test.mjs tests/backend/storage-governor.test.mjs tests/backend/backup-space-guard.test.mjs tests/backend/backup-stale-readiness.test.mjs
