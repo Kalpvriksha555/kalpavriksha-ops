@@ -22,7 +22,7 @@ import { readAndVerifyReleaseCertificate } from './services/releaseCertification
 import { createCorsOriginPolicy, parseCorsOrigins } from './config/corsPolicy.js';
 import { classifyPersistenceFailure, isDeferredPersistenceOperation, mergeLatestPresenceIntoSnapshot, persistenceCommitEvidenceMatches, persistenceReadiness, preserveDirtyPresenceAfterReload, runtimeRecoveryCanRun } from './services/persistenceBackpressureService.js';
 import { getRequestStateSnapshot } from './services/requestStateService.js';
-import { applyFileRetentionToState, DEFAULT_FILE_RETENTION_DAYS } from './services/storageRetentionService.js';
+import { applyFileRetentionToState, DEFAULT_FILE_RETENTION_MONTHS } from './services/storageRetentionService.js';
 import { applyPresenceClientCommandMetadata, classifyPresenceClientCommand, computeAttendanceAccrual, normalizePresenceClientCommand, parseIndiaAttendanceClock } from './services/presenceProtocolService.js';
 import { normalizeClientDiagnostic, publicApiErrorPayload, sanitizeOperationalPath, serverErrorFingerprint } from './services/runtimeDiagnosticsService.js';
 
@@ -164,7 +164,9 @@ const MAX_UPLOAD_FILES = boundedEnvNumber('MAX_UPLOAD_FILES', 20, 1, 20);
 const MAX_INLINE_PREVIEW_MB = boundedEnvNumber('MAX_INLINE_PREVIEW_MB', 15, 1, 50);
 const MAX_INLINE_PREVIEW_BYTES = MAX_INLINE_PREVIEW_MB * 1024 * 1024;
 const FILE_STORAGE_GC_GRACE_MS = boundedEnvNumber('FILE_STORAGE_GC_GRACE_MS', 24 * 60 * 60 * 1000, 0, 30 * 24 * 60 * 60 * 1000);
-const FILE_RETENTION_DAYS = boundedEnvNumber('FILE_RETENTION_DAYS', DEFAULT_FILE_RETENTION_DAYS, 30, 3650);
+const FILE_RETENTION_MONTHS = boundedEnvNumber('FILE_RETENTION_MONTHS', DEFAULT_FILE_RETENTION_MONTHS, 2, 24);
+// Read-only by default until a dry-run review approves physical file deletion.
+const FILE_RETENTION_APPLY_ENABLED = String(process.env.FILE_RETENTION_APPLY || '').trim().toLowerCase() === 'true';
 const FILE_RETENTION_INTERVAL_MS = boundedEnvNumber('FILE_RETENTION_INTERVAL_MS', 24 * 60 * 60 * 1000, 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000);
 const FILE_RETENTION_START_DELAY_MS = boundedEnvNumber('FILE_RETENTION_START_DELAY_MS', 10 * 60 * 1000, 60_000, 60 * 60 * 1000);
 const fileStorage = createFileStorage({
@@ -4090,7 +4092,15 @@ async function collectFileStorageGarbage({ actor='system', graceMs=FILE_STORAGE_
 async function runAutomaticFileRetention({ actor='storage-retention' } = {}) {
   if (startupFailure || shuttingDown) return { ok:false, skipped:true, reason:startupFailure ? 'startup-maintenance' : 'shutting-down' };
   const snapshot=db();
-  const retention=applyFileRetentionToState(snapshot,{nowMs:Date.now(),retentionDays:FILE_RETENTION_DAYS,actor});
+  const retention=applyFileRetentionToState(snapshot,{nowMs:Date.now(),retentionMonths:FILE_RETENTION_MONTHS,actor,dryRun:!FILE_RETENTION_APPLY_ENABLED});
+  if (!FILE_RETENTION_APPLY_ENABLED) {
+    // Dry run: no save(), no garbage collection, no trash deletion.
+    const plan={ok:true,dryRun:true,completedAt:now(),retentionMonths:FILE_RETENTION_MONTHS,
+      eligibleRecords:retention.expiredIds.length,protectedRecords:retention.protectedIds.length,
+      retainedWithoutVerifiedCompletion:retention.unknownAgeIds.length,skippedByReason:retention.skippedByReason};
+    structuredLog('info','automatic_file_retention_dry_run',plan);
+    return plan;
+  }
   if (retention.expiredIds.length) {
     const collections=['files'];
     const collectionRowIds={files:retention.expiredIds};
@@ -4099,16 +4109,16 @@ async function runAutomaticFileRetention({ actor='storage-retention' } = {}) {
     await save(snapshot,{actor,reason:'automatic_file_retention',takeSnapshotOwnership:true,collections,collectionRowIds});
     for (const id of retention.expiredIds) {
       const doc=(snapshot.files || []).find(item=>String(item?.id || '')===String(id));
-      await recordFileStorageEvent({fileId:id,caseId:doc?.caseId || '',action:'FILE_EXPIRED',actor,storageKey:fileStorageKey(doc || {}),sha256:doc?.sha256 || '',details:{retentionDays:FILE_RETENTION_DAYS,financeProtected:false}}).catch(()=>{});
+      await recordFileStorageEvent({fileId:id,caseId:doc?.caseId || '',action:'FILE_EXPIRED',actor,storageKey:fileStorageKey(doc || {}),sha256:doc?.sha256 || '',details:{retentionMonths:FILE_RETENTION_MONTHS,financeProtected:false}}).catch(()=>{});
     }
   }
   // Once logical expiry has committed, objects with no remaining active references
   // can move to recoverable trash. Trash itself is permanently purged after its
   // own short safety window, so the disk is actually reclaimed rather than merely
   // moving bytes to another directory on the same filesystem.
-  const gc=await collectFileStorageGarbage({actor,graceMs:0});
+  const gc=await collectFileStorageGarbage({actor,graceMs:FILE_STORAGE_GC_GRACE_MS});
   const trash=fileStorage.pruneTrash(Date.now());
-  const result={ok:gc.ok,completedAt:now(),retentionDays:FILE_RETENTION_DAYS,expiredRecords:retention.expiredIds.length,protectedFinancialOrProfileRecords:retention.protectedIds.length,unknownAgeRetained:retention.unknownAgeIds.length,movedToTrash:gc.movedToTrash,trashFilesPurged:trash.deletedFiles,bytesFreedFromTrash:trash.freedBytes,errors:gc.errors};
+  const result={ok:gc.ok,completedAt:now(),retentionMonths:FILE_RETENTION_MONTHS,expiredRecords:retention.expiredIds.length,protectedFinancialOrProfileRecords:retention.protectedIds.length,unknownAgeRetained:retention.unknownAgeIds.length,movedToTrash:gc.movedToTrash,trashFilesPurged:trash.deletedFiles,bytesFreedFromTrash:trash.freedBytes,errors:gc.errors};
   structuredLog(result.ok ? 'info' : 'warn','automatic_file_retention_completed',result);
   await recordOperationalEvent(pool,USE_POSTGRES,{eventType:'STORAGE_RETENTION_COMPLETED',severity:result.ok ? 'INFO' : 'WARN',actor,details:result}).catch(()=>{});
   return result;
@@ -4120,14 +4130,14 @@ function scheduleAutomaticFileRetention() {
     storageRetentionInitialTimer=null;
     runAutomaticFileRetention().catch(error=>{
       structuredLog('error','automatic_file_retention_failed',{code:error?.code || '',error:error?.message || String(error)});
-      operationalJobs.recordFailure('STORAGE_RETENTION',error,{retentionDays:FILE_RETENTION_DAYS},{maxAttempts:1}).catch(()=>{});
+      operationalJobs.recordFailure('STORAGE_RETENTION',error,{retentionMonths:FILE_RETENTION_MONTHS},{maxAttempts:1}).catch(()=>{});
     });
   },FILE_RETENTION_START_DELAY_MS);
   storageRetentionInitialTimer.unref?.();
   storageRetentionTimer=setInterval(()=>{
     runAutomaticFileRetention().catch(error=>{
       structuredLog('error','automatic_file_retention_failed',{code:error?.code || '',error:error?.message || String(error)});
-      operationalJobs.recordFailure('STORAGE_RETENTION',error,{retentionDays:FILE_RETENTION_DAYS},{maxAttempts:1}).catch(()=>{});
+      operationalJobs.recordFailure('STORAGE_RETENTION',error,{retentionMonths:FILE_RETENTION_MONTHS},{maxAttempts:1}).catch(()=>{});
     });
   },FILE_RETENTION_INTERVAL_MS);
   storageRetentionTimer.unref?.();
@@ -4179,7 +4189,7 @@ function resolveAuthorizedFile(req, res, id) {
     return { d, doc:null, resolved:null, denied:true };
   }
   if (result.doc && unavailableStatus === 'EXPIRED') {
-    res.status(410).json({ok:false,code:'FILE_RETENTION_EXPIRED',error:`This file expired under the ${Number(result.doc.retentionDays || FILE_RETENTION_DAYS)}-day storage-retention policy.`});
+    res.status(410).json({ok:false,code:'FILE_RETENTION_EXPIRED',error:`This file expired under the ${Number(result.doc.retentionMonths || FILE_RETENTION_MONTHS)}-calendar-month post-case storage-retention policy.`});
     return { d, doc:null, resolved:null, denied:true };
   }
   if (result.doc && !canAccessFileDocument(req.auth?.user || {}, result.doc, d.cases || [])) {
