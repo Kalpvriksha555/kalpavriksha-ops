@@ -22,6 +22,7 @@ export function StorageAlertNavBadge() {
 export default function StorageSafetyPanel() {
   const [report,setReport]=useState(null),[error,setError]=useState(''),[notice,setNotice]=useState('');
   const [loading,setLoading]=useState(false),[busy,setBusy]=useState('');
+  const [pendingAction,setPendingAction]=useState(null);
   const refresh=useCallback(async()=>{
     setLoading(true);
     try{setReport(await getStorageSafetyApi());setError('');}
@@ -29,8 +30,9 @@ export default function StorageSafetyPanel() {
     finally{setLoading(false);}
   },[]);
   useEffect(()=>{refresh();const t=setInterval(refresh,90000);return()=>clearInterval(t);},[refresh]);
-  const request=async(action,label)=>{
-    if (!window.confirm('Request '+label+'? This starts a guarded background service; it does not restore or delete customer data.')) return;
+  const request=async(action)=>{
+    if (!report?.maintenance?.enabled || busy || loading) return;
+    setPendingAction(null);
     setBusy(action);setError('');setNotice('');
     try{const r=await requestStorageSafetyActionApi(action);setNotice(r.message||'Request accepted; completion is pending.');await refresh();}
     catch(e){setError(e.message||'Maintenance request failed.');}
@@ -69,10 +71,24 @@ export default function StorageSafetyPanel() {
         {!enabled&&<p role="status" className="text-sm text-amber-700">Maintenance requests are disabled until explicitly enabled on the VPS.</p>}
         <p className="text-xs text-slate-500">Actions are limited to existing systemd-managed backup and scratch housekeeping services. They do not mark a problem resolved until a fresh health check passes.</p>
         <div className="flex flex-wrap gap-2">
-          <button type="button" className={button+' bg-indigo-600 text-white'} disabled={!enabled||loading||!!busy} onClick={()=>request('FULL_BACKUP','a verified full backup')}>{busy==='FULL_BACKUP'?'Requesting…':'Request verified full backup'}</button>
-          <button type="button" className={button+' bg-slate-100 text-slate-700'} disabled={!enabled||loading||!!busy} onClick={()=>request('DATABASE_BACKUP','a database backup')}>Request database backup</button>
-          <button type="button" className={button+' bg-slate-100 text-slate-700'} disabled={!enabled||loading||!!busy} onClick={()=>request('SAFE_SCRATCH_CLEANUP','safe scratch housekeeping')}>Safe scratch housekeeping</button>
+          <button type="button" className={button+' bg-indigo-600 text-white'} disabled={!enabled||loading||!!busy} onClick={()=>setPendingAction({action:'FULL_BACKUP',label:'a verified full backup'})}>{busy==='FULL_BACKUP'?'Requesting…':'Request verified full backup'}</button>
+          <button type="button" className={button+' bg-slate-100 text-slate-700'} disabled={!enabled||loading||!!busy} onClick={()=>setPendingAction({action:'DATABASE_BACKUP',label:'a database backup'})}>Request database backup</button>
+          <button type="button" className={button+' bg-slate-100 text-slate-700'} disabled={!enabled||loading||!!busy} onClick={()=>setPendingAction({action:'SAFE_SCRATCH_CLEANUP',label:'safe scratch housekeeping'})}>Safe scratch housekeeping</button>
         </div>
+        {pendingAction && enabled && <div role="group" aria-label="Confirm maintenance request" aria-live="polite"
+          className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-3">
+          <p className="text-sm font-bold text-amber-900">
+            Confirm request for {pendingAction.label}? The server will check its safety guards before scheduling the service.
+            Starting a backup can use additional storage. No restoration or deletion of customer records is allowed.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={()=>setPendingAction(null)}
+              className={button+' bg-white border border-slate-200 text-slate-700'}>Cancel</button>
+            <button type="button" disabled={!!busy||loading||!enabled}
+              onClick={()=>request(pendingAction.action)}
+              className={button+' bg-amber-700 text-white'}>Confirm maintenance request</button>
+          </div>
+        </div>}
         <p className="text-xs text-slate-500">Browser-based database restoration, customer-file deletion and bulk backup deletion are prohibited.</p>
       </div>
       <div className="bg-white rounded-2xl p-5 border border-slate-100 text-sm text-slate-600 space-y-2">
