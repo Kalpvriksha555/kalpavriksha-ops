@@ -10,6 +10,8 @@ import QRCode from 'qrcode';
 import { fileURLToPath } from 'url';
 import pg from 'pg';
 import nodemailer from 'nodemailer';
+import {spawnSync} from 'node:child_process';
+import {inspectStorageSafety} from './services/storageSafetyCenterService.js';
 import { addCaseTimelineEvent, mergeTimelineEvents, normalizeCaseTimeline, normalizeTimelineEvent } from './services/timelineService.js';
 import { FINANCE_FIELDS, applyFreshestFinance, buildFinanceSnapshot, financeFreshness, financeMutationFingerprint, financeSnapshotHash, findFinanceMutationReceipt, mergePaymentRecords, rememberFinanceMutationReceipt } from './services/financeIntegrityService.js';
 import { hashPassword, verifyPassword, passwordPolicyErrors, randomOpaqueToken, tokenHash, randomOtp, normalizeUsername, normalizeAuthRole, normalizeAuthStatus, stripCredentialFields, publicSessionUser, reconcileLegacyCredential } from './services/authService.js';
@@ -5463,6 +5465,60 @@ app.get('/api/system/reliability', requireAdminSession, async (req,res)=>{
 app.get('/api/system/backups', requireAdminSession, async (_req,res)=>{
   const backups = inspectBackupManifests(BACKUP_ROOT,{maxAgeHours:BACKUP_MAX_AGE_HOURS});
   res.status(!BACKUP_REQUIRED || backups.ok ? 200 : 503).json({ok:!BACKUP_REQUIRED || backups.ok,required:BACKUP_REQUIRED,...backups});
+});
+
+// Storage Safety Centre: only fixed service names, never arbitrary commands or browser restores.
+const STORAGE_SAFE_UNITS = Object.freeze({
+  FULL_BACKUP: 'kalpavriksha-backup.service',
+  DATABASE_BACKUP: 'kalpavriksha-database-backup.service',
+  SAFE_SCRATCH_CLEANUP: 'kalpavriksha-governor-housekeeping.service'
+});
+const storageMaintenanceRequested = new Map();
+app.get('/api/system/storage-safety', requireAdminSession, async (req,res)=>{
+  try {
+    const report=inspectStorageSafety({root:BACKUP_ROOT});
+    res.setHeader('Cache-Control','no-store');
+    res.json({...report,maintenance:{enabled:isProduction()&&USE_POSTGRES&&process.env.KALPA_STORAGE_PORTAL_ACTIONS_ENABLED==='true'}});
+  } catch(e) { sendApiFailure(res,req,Object.assign(e,{code:'STORAGE_SAFETY_FAILED'}),'Storage safety could not be checked.'); }
+});
+app.post('/api/system/storage-safety/actions', requireAdminSession, async (req,res)=>{
+  const action=String(req.body?.action||'');
+  if (!Object.prototype.hasOwnProperty.call(STORAGE_SAFE_UNITS,action) ||
+      req.body?.confirmation!=='KALPA_SAFE_MAINTENANCE')
+    return res.status(400).json({ok:false,code:'INVALID_STORAGE_ACTION',error:'Unrecognized or unconfirmed maintenance request.'});
+  if (!isProduction()||!USE_POSTGRES||process.env.KALPA_STORAGE_PORTAL_ACTIONS_ENABLED!=='true')
+    return res.status(403).json({ok:false,code:'STORAGE_ACTION_DISABLED',error:'Maintenance actions require explicit production opt-in.'});
+  if (Date.now()-(storageMaintenanceRequested.get(action)||0)<15*60*1000)
+    return res.status(429).json({ok:false,code:'STORAGE_ACTION_COOLDOWN',error:'Recently requested; review its status before retrying.'});
+  try {
+    const unit=STORAGE_SAFE_UNITS[action];
+    const installed='/etc/systemd/system/'+unit;
+    const template=path.resolve(__dirname,'../../docs/deployment/systemd',unit);
+    const show=spawnSync('systemctl',['show',unit,'-p','FragmentPath','-p','DropInPaths'],{encoding:'utf8',timeout:5000});
+    if (show.status!==0 || !show.stdout.includes('FragmentPath='+installed) || !/^DropInPaths=$/m.test(show.stdout) ||
+        !fs.existsSync(installed) || !fs.existsSync(template) ||
+        !fs.readFileSync(installed).equals(fs.readFileSync(template)))
+      return res.status(409).json({ok:false,code:'STORAGE_SERVICE_UNVERIFIED',error:'Maintenance unit differs from reviewed source or has overrides.'});
+    const disk=fs.statfsSync('/');
+    if (action!=='SAFE_SCRATCH_CLEANUP' && disk.bavail*disk.bsize<12*1024**3)
+      return res.status(409).json({ok:false,code:'STORAGE_CAPACITY_GUARD',error:'Insufficient safe space for another backup.'});
+    if (fs.existsSync(path.join(BACKUP_ROOT,'.backup.lock')))
+      return res.status(409).json({ok:false,code:'STORAGE_BACKUP_BUSY',error:'Another backup has a lock; review its status.'});
+    for (const u of [STORAGE_SAFE_UNITS.FULL_BACKUP,STORAGE_SAFE_UNITS.DATABASE_BACKUP])
+      if (spawnSync('systemctl',['is-active','--quiet',u],{timeout:5000}).status===0)
+        return res.status(409).json({ok:false,code:'STORAGE_BACKUP_BUSY',error:'A backup is already active.'});
+    for (const lock of ['/run/lock/kalpavriksha-production-deploy.lock','/run/lock/kalpavriksha-final-certify-deploy.lock'])
+      if (spawnSync('flock',['-n',lock,'true'],{timeout:5000}).status!==0)
+        return res.status(409).json({ok:false,code:'STORAGE_DEPLOY_BUSY',error:'A deployment or certification may be running.'});
+    const started=spawnSync('systemctl',['start','--no-block',unit],{encoding:'utf8',timeout:10000});
+    if (started.status!==0)
+      return res.status(503).json({ok:false,code:'STORAGE_SERVICE_START_FAILED',error:'systemd did not accept the maintenance request.'});
+    storageMaintenanceRequested.set(action,Date.now());
+    await recordOperationalEvent(pool,USE_POSTGRES,{eventType:'STORAGE_SAFETY_ACTION_REQUESTED',severity:'INFO',actor:requestActor(req).name,requestId:req.requestId,details:{action}}).catch(()=>{});
+    res.status(202).json({ok:true,action,message:'Request accepted. Completion and backup verification are pending; check the portal before retrying.'});
+  } catch(e) {
+    res.status(503).json({ok:false,code:'STORAGE_ACTION_FAILED',error:'Unable to schedule the guarded maintenance request.'});
+  }
 });
 
 app.get('/api/system/release-certification', requireAdminSession, async (_req,res)=>{

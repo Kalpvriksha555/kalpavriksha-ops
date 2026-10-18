@@ -13,6 +13,7 @@ import { authFetch } from '../../services/authService';
 import { apiHttpError, readApiRecord } from '../../services/apiContractService.js';
 import { notifyUser } from '../../services/uiFeedback.js';
 import { getBackupStatusApi, getOperationalEventsApi, getOperationalJobsApi, getReliabilityStatusApi, retryOperationalJobApi } from '../../services/systemHealthService';
+import StorageSafetyPanel from './StorageSafetyPanel.jsx';
 
 const toMs = (value) => {
   if (!value) return 0;
@@ -1966,6 +1967,7 @@ export const SystemSettingsView = ({ projects = [], users = [], currentUser = nu
   const toolCards = [
     { key: 'qa', label: 'Production QA', title: 'System readiness', text: 'Run after updates, deployments or bug reports to confirm key workflows are healthy.' },
     { key: 'backup', label: 'Backup & Restore', title: 'Operational safety', text: 'See verified database and private-file backup freshness without allowing browser-based restoration.' },
+    { key: 'storage', label: 'Storage Alerts', title: 'Storage safety & recovery', text: 'Review backup and disk warnings, request safe maintenance, and see recovery evidence.' },
     { key: 'operations', label: 'Failed Jobs', title: 'Reliability queue', text: 'Review failed persistence and operational work, then retry only jobs that are safe to replay.' },
     { key: 'audit', label: 'Operational Events', title: 'Traceability', text: 'Review structured reliability events with request IDs, severity and actor information.' }
   ];
@@ -2026,6 +2028,7 @@ export const SystemSettingsView = ({ projects = [], users = [], currentUser = nu
       )}
 
       {activeTool === 'qa' && <ProductionQAView projects={projects} users={users} currentUser={currentUser} />}
+      {activeTool === 'storage' && <StorageSafetyPanel />}
       {activeTool === 'backup' && (
         <div className="space-y-4">
           <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm p-6"><h2 className="text-2xl font-black text-slate-800">Backup & Restore Readiness</h2><p className="text-slate-500 font-bold mt-2">Backups are created and verified from the VPS terminal. Browser restoration remains disabled to prevent accidental production data replacement.</p></div>

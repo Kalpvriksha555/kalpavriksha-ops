@@ -3,6 +3,7 @@ import React from 'react';
 import { AlertCircle, Archive, BarChart3, Bell, Briefcase, Calculator, Calendar, CheckCircle, ClipboardList, Flag, LayoutDashboard, LogOut, MessageSquare, MoreHorizontal, Search, Settings, User, Users, Video, X } from 'lucide-react';
 import { getProfilePhotoVersion, profilePhotoUrl } from '../utils/profileUtils';
 import { isNotificationReadByUser } from '../services/notificationService';
+import {StorageAlertNavBadge} from './command-centre/StorageSafetyPanel.jsx';
 
 export const LocalModeBanner = ({ onClose }) => (
   <div className="bg-amber-100 border-b border-amber-200 text-amber-800 p-2.5 text-center text-xs font-bold flex flex-wrap justify-center items-center gap-2 shadow-sm z-50 relative">
@@ -242,7 +243,7 @@ export const MainTabNavigation = ({ currentUser, ROLES, activeTab, setActiveTab 
     <button {...tabButtonProps('calculator')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'calculator' ? 'bg-blue-100 text-blue-800 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}>Tools</button>
     <button {...tabButtonProps('archive')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 pointer-events-auto ${activeTab === 'archive' ? 'bg-slate-800 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}>Archive</button>
     <button {...tabButtonProps('meeting')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 flex items-center pointer-events-auto ${activeTab === 'meeting' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-50'}`}><Video className="w-4 h-4 mr-1.5" /> Team Meeting</button>
-    {currentUser.role === ROLES.ADMIN && <button {...tabButtonProps('settings')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 flex items-center pointer-events-auto ${activeTab === 'settings' || activeTab === 'qa' ? 'bg-slate-100 text-slate-900 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}><Settings className="w-4 h-4 mr-1.5" /> Settings</button>}
+    {currentUser.role === ROLES.ADMIN && <button {...tabButtonProps('settings')} className={`shrink-0 px-4 sm:px-5 py-2.5 text-sm font-bold rounded-xl transition-all duration-200 active:scale-95 flex items-center pointer-events-auto ${activeTab === 'settings' || activeTab === 'qa' ? 'bg-slate-100 text-slate-900 shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}><Settings className="w-4 h-4 mr-1.5" /> Settings <StorageAlertNavBadge /></button>}
   </div>
   );
 };
