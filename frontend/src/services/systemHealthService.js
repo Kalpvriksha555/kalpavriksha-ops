@@ -34,3 +34,16 @@ export const getOperationalEventsApi = async ({ limit = 100 } = {}) => readPaylo
   await authFetch(`${API_BASE}/api/system/events?limit=${encodeURIComponent(String(limit))}`, { cache:'no-store' }),
   'Operational events could not be loaded.'
 );
+
+// Authenticated Admin portal health and allowlisted maintenance.
+export const getStorageSafetyApi = async () => readPayload(
+  await authFetch(API_BASE + '/api/system/storage-safety', {cache:'no-store'}),
+  'Storage safety status could not be loaded.'
+);
+export const requestStorageSafetyActionApi = async action => readPayload(
+  await authFetch(API_BASE + '/api/system/storage-safety/actions', {
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action,confirmation:'KALPA_SAFE_MAINTENANCE'})
+  }),
+  'Maintenance request could not be accepted.'
+);
