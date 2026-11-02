@@ -111,6 +111,10 @@ rollback(){
 }
 trap rollback EXIT
 
+# Mark the original config as rollback-owned before the atomic replace. A
+# signal between os.replace() and the next shell statement must still restore
+# the original file.
+CHANGED=1
 python3 - "$ENV" <<'PY'
 from pathlib import Path
 import os,sys
@@ -125,7 +129,6 @@ with tmp.open('x') as f:f.write('\n'.join(lines)+'\n')
 os.chmod(tmp,0o600)
 os.replace(tmp,p)
 PY
-CHANGED=1
 (
   set -a; source "$ENV"; set +a
   pm2 restart "$APP" --update-env >/dev/null
