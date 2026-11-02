@@ -89,8 +89,16 @@ export function rotateVerifiedBackups(root,{freshId,apply=false,now=Date.now(),
        !Number.isFinite(Date.parse(m.createdAt||''))||
        Date.parse(m.createdAt)<cutoff)continue;
     const parts=components(m),date=Date.parse(m.createdAt||'');
-    if(!parts||!Number.isFinite(date)||date>now)continue;
-    if(!parts.every(c=>{try{requireRegular(path.join(root,c.name),c.size);return true;}catch{return false;}}))continue;
+    // A new-policy VERIFIED manifest with a damaged or missing component
+    // is an error, not an invisible entry to filter out. Otherwise a
+    // corrupted newest backup can make an older one appear to be the
+    // third good backup, masking a broken recovery point.
+    if(!parts||!Number.isFinite(date)||date>now)
+      throw Error('Malformed new-policy full backup manifest: '+m.id);
+    for(const c of parts){
+      try{requireRegular(path.join(root,c.name),c.size);}
+      catch{throw Error('Incomplete or damaged new-policy full backup: '+m.id+' / '+c.name);}
+    }
     all.push({id:m.id,type:m.backupType,date,parts,manifest:fp});
   }
   const full=all.filter(x=>x.type==='FULL').sort((a,b)=>b.date-a.date);
