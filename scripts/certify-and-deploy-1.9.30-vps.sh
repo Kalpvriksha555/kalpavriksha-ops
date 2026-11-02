@@ -205,7 +205,7 @@ printf 'Production: provider=%s locale=%s collate=%s ctype=%s encoding=%s\nTempo
 
 VERIFY_DB="kv_locale_verify_${RANDOM}${RANDOM}"
 "$CREATEDB" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" "$VERIFY_DB"
-VERIFY_INFO="$("$PSQL" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d "$VERIFY_DB" -X -A -t -F '|' -v ON_ERROR_STOP=1 -c "SELECT d.datlocprovider,COALESCE(to_jsonb(d)->>'datlocale',to_jsonb(d)->>'daticulocale','') FROM pg_database d WHERE d.datname=current_database();")"
+VERIFY_INFO="$("$PSQL" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d "$VERIFY_DB" -X -A -t -F '|' -v ON_ERROR_STOP=1 -c "SELECT d.datlocprovider,COALESCE(to_jsonb(d)->>'datlocale',to_jsonb(d)->>'daticulocale',''),d.datcollate,d.datctype,pg_encoding_to_char(d.encoding) FROM pg_database d WHERE d.datname=current_database();")"
 IFS='|' read -r VERIFY_PROVIDER VERIFY_LOCALE VERIFY_COLLATE VERIFY_CTYPE VERIFY_ENCODING <<<"$VERIFY_INFO"
 "$DROPDB" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" --if-exists "$VERIFY_DB" >/dev/null
 [[ "$VERIFY_PROVIDER" == "$PROD_PROVIDER" && "$VERIFY_LOCALE" == "$PROD_LOCALE" &&
