@@ -20,10 +20,11 @@ export function inspectRetentionBackupGate({
   root=process.env.KALPA_BACKUP_ROOT,
   now=Date.now(),
   verify=verifyManifest,
-  verifyContents=true
+  verifyContents=true,
+  expectedRoot='/var/backups/kalpavriksha'
 }={}){
   const fail=reason=>({ok:false,reason,checked:0});
-  const canonical='/var/backups/kalpavriksha';
+  const canonical=path.resolve(expectedRoot);
   if(!root||path.resolve(root)!==canonical) return fail('CANONICAL_BACKUP_ROOT_REQUIRED');
   if(process.env.KALPA_BACKUP_RETENTION_POLICY!=='THREE_VERIFIED_DAILY_FULL')
     return fail('THREE_FULL_RETENTION_POLICY_REQUIRED');
