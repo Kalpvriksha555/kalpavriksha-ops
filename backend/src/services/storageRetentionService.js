@@ -123,6 +123,9 @@ export function caseRetentionAnchorMs(record = {}) {
   const archivedAt = archived ? Math.max(
     timestampMs(record.archivedAt),timestampMs(record.archivedOn)
   ) : 0;
+  // If a case has been archived, the archive timestamp is essential: falling
+  // back to an earlier completedAt could delete files too early.
+  if (archived && !archivedAt) return 0;
   // A status alone (or updatedAt) does not establish a trustworthy end date.
   return Math.max(completedAt, archivedAt);
 }
