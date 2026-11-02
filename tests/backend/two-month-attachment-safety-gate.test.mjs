@@ -114,4 +114,6 @@ test('reopened cases, legal holds, and archives with recent closure retain attac
   assert.equal(check({status:'ARCHIVED',archivedAt:'2026-07-01T00:00:00Z',legalHold:true}),false);
   assert.equal(check({status:'ARCHIVED',archivedAt:'2026-10-01T00:00:00Z'}),false);
   assert.equal(check({status:'ARCHIVED',archivedAt:'2026-08-01T00:00:00Z'}),true);
+  assert.equal(check({status:'COMPLETED',completedAt:'2026-02-01T00:00:00Z',
+    archived:true,archivedAt:null}),false);
 });
