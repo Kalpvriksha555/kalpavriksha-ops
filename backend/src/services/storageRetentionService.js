@@ -77,7 +77,7 @@ const PERMANENT_PURPOSES = new Set([
 export function isPermanentFileProtected(doc = {}, references) {
   const purposes = [doc.purpose,doc.type,doc.folder,doc.category,
     doc.documentType,doc.classification].map(value=>
-    String(value||'').trim().toUpperCase().replace(/[-\\s]+/g,'_'));
+    String(value||'').trim().toUpperCase().replace(/[-\s]+/g,'_'));
   if (purposes.some(purpose=>PERMANENT_PURPOSES.has(purpose)))return true;
   if (['true',true].includes(doc.permanentRetention) ||
       ['true',true].includes(doc.statutoryDocument) ||
