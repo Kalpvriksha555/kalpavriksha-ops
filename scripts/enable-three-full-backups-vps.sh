@@ -26,7 +26,20 @@ trap finish EXIT
 exec 9>/var/lock/kalpavriksha-three-backups.lock
 flock -n 9 || exit 1
 cd "$LIVE"
-test "$(git rev-parse HEAD)" = "$BASE" || { echo 'Different production source; refusing stale update'; exit 1; }
+# Git HEAD can differ from the actual deployed files after guarded cutovers.
+# Match the two live scripts against the exact audited source baseline instead.
+# This avoids both unnecessary re-deployment and patching unknown source code.
+for file in backend/scripts/backup-create.mjs backend/scripts/auto-storage-retention.mjs; do
+  git cat-file -e "$BASE:$file" || { echo "Baseline missing: $file"; exit 1; }
+  if ! git show "$BASE:$file" | cmp -s - "$LIVE/$file"; then
+    echo "SOURCE_MISMATCH=$file"
+    echo "Refusing to overwrite a locally modified backup script."
+    echo "LIVE_SHA256=$(sha256sum "$LIVE/$file" | awk '{print $1}')"
+    echo "BASE_SHA256=$(git show "$BASE:$file" | sha256sum | awk '{print $1}')"
+    exit 1
+  fi
+done
+echo 'BACKUP_SCRIPT_SOURCE_PARITY=PASS'
 PID=$(pm2 pid kalpvriksha-backend)
 [[ "$PID" =~ ^[0-9]+$ ]] && [ "$PID" -gt 0 ]
 tr '\0' '\n' < "/proc/$PID/environ" |
