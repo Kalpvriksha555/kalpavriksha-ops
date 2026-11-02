@@ -152,7 +152,9 @@ test('authorization verifier supplies finance context, task versions, and a life
   assert.match(verifier,/managerEchoEdit/);
   assert.match(verifier,/lastTaskMutationId !== managerRecentEdit\.payload\.project\.lastTaskMutationId/);
   assert.match(verifier,/status:'Assigned'/);
-  assert.match(verifier,/paymentTrackingStatus === 'Pending'/);
+  assert.match(verifier,/rejectedPartial.response.status === 409/);
+  assert.match(verifier,/expectedAmount:9000, amountIn:9000/);
+  assert.match(verifier,/paymentTrackingStatus === 'Paid'/);
   assert.match(verifier,/Deliberately omit expectedTaskVersion here/);
   assert.match(verifier,/spoofedOtherUpdate\.payload\?\.code === 'TASK_UPDATE_FORBIDDEN'/);
   assert.match(verifier,/spoofedBroadStateUpdate\.payload\?\.code === 'TASK_UPDATE_FORBIDDEN'/);
