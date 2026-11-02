@@ -25,6 +25,7 @@ import { createCorsOriginPolicy, parseCorsOrigins } from './config/corsPolicy.js
 import { classifyPersistenceFailure, isDeferredPersistenceOperation, mergeLatestPresenceIntoSnapshot, persistenceCommitEvidenceMatches, persistenceReadiness, preserveDirtyPresenceAfterReload, runtimeRecoveryCanRun } from './services/persistenceBackpressureService.js';
 import { getRequestStateSnapshot } from './services/requestStateService.js';
 import { applyFileRetentionToState, DEFAULT_FILE_RETENTION_MONTHS } from './services/storageRetentionService.js';
+import { checkAttachmentRetentionReadiness } from './services/fileRetentionBackupReadiness.js';
 import { applyPresenceClientCommandMetadata, classifyPresenceClientCommand, computeAttendanceAccrual, normalizePresenceClientCommand, parseIndiaAttendanceClock } from './services/presenceProtocolService.js';
 import { normalizeClientDiagnostic, publicApiErrorPayload, sanitizeOperationalPath, serverErrorFingerprint } from './services/runtimeDiagnosticsService.js';
 
@@ -4113,6 +4114,18 @@ async function collectFileStorageGarbage({ actor='system', graceMs=FILE_STORAGE_
 }
 async function runAutomaticFileRetention({ actor='storage-retention' } = {}) {
   if (startupFailure || shuttingDown) return { ok:false, skipped:true, reason:startupFailure ? 'startup-maintenance' : 'shutting-down' };
+  // Do not expire metadata, move objects to trash, or purge trash until three
+  // new independent full recovery points have passed archive verification.
+  // Hashing and archive checks happen in a child process, not the API loop.
+  if (FILE_RETENTION_APPLY_ENABLED) {
+    const safety=await checkAttachmentRetentionReadiness();
+    if (!safety.ok) {
+      const deferred={ok:true,skipped:true,dryRun:true,reason:'RECOVERY_GUARD_BLOCKED',
+        recoveryReason:safety.reason,completedAt:now()};
+      structuredLog('warn','automatic_file_retention_deferred',deferred);
+      return deferred;
+    }
+  }
   const snapshot=db();
   const retention=applyFileRetentionToState(snapshot,{nowMs:Date.now(),retentionMonths:FILE_RETENTION_MONTHS,actor,dryRun:!FILE_RETENTION_APPLY_ENABLED});
   if (!FILE_RETENTION_APPLY_ENABLED) {
