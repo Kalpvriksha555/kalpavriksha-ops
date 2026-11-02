@@ -17,8 +17,35 @@ systemctl is-active --quiet kalpavriksha-backup.timer
 systemctl is-enabled --quiet kalpavriksha-backup.timer
 PID=$(pm2 pid "$APP")
 [[ "$PID" =~ ^[0-9]+$ && "$PID" -gt 0 ]]
+# A previous interrupted PM2 --update-env restart can retain the old true flag
+# even after the on-disk env has been rolled back. Do not conceal that state.
+if tr '\0' '\n' < "/proc/$PID/environ" | grep -qx 'FILE_RETENTION_APPLY=true'; then
+  echo 'PREVIOUS_RETENTION_FLAG_STILL_ACTIVE: stop and inspect the live PM2 environment before retrying.' >&2
+  exit 12
+fi
 curl -fsS --max-time 15 http://127.0.0.1:8080/api/health/ready >/dev/null
 curl -fsS --max-time 15 https://api.kalpvriksha.co.in/api/health/ready >/dev/null
+
+# Startup verification is polling-based, not a fixed two-second check:
+# the backend can legitimately spend more time verifying PostgreSQL integrity.
+wait_for_api_readiness() {
+  local i
+  for i in $(seq 1 75); do
+    if curl -fsS --connect-timeout 2 --max-time 5 \
+      http://127.0.0.1:8080/api/health/ready >/dev/null 2>&1 \
+      && curl -fsS --connect-timeout 2 --max-time 5 \
+      https://api.kalpvriksha.co.in/api/health/ready >/dev/null 2>&1; then
+      echo "API_READINESS=PASS (attempt=$i)"
+      return 0
+    fi
+    if (( i % 10 == 0 )); then
+      echo "API_READINESS=PENDING (attempt=$i)"
+    fi
+    sleep 2
+  done
+  echo 'API_READINESS=FAILED after guarded startup checks.' >&2
+  return 1
+}
 
 # Source must match a certified deployed release. Never bypass this test.
 (
@@ -61,13 +88,33 @@ rollback(){
   trap - EXIT
   if [[ "$SUCCESS" != 1 && "$CHANGED" = 1 ]]; then
     cp -a "$ROLLBACK" "$ENV"
-    ( set -a; source "$ENV"; set +a; pm2 restart "$APP" --update-env >/dev/null ) || true
-    echo 'RESTORED_PRIOR_RETENTION_CONFIGURATION'
+    # PM2 merges --update-env into its previous process environment: forcing
+    # false prevents a stale true flag surviving an otherwise valid rollback.
+    if (
+      set -a
+      source "$ENV"
+      set +a
+      export FILE_RETENTION_APPLY=false
+      pm2 restart "$APP" --update-env >/dev/null
+    ); then
+      echo 'RESTORED_PRIOR_RETENTION_CONFIGURATION'
+      if wait_for_api_readiness; then
+        echo 'ROLLBACK_BACKEND_READINESS=PASS'
+      else
+        echo 'CRITICAL: rollback configuration was restored but backend readiness is not verified.' >&2
+      fi
+    else
+      echo 'CRITICAL: rollback configuration restored, but PM2 restart failed.' >&2
+    fi
   fi
   exit "$rc"
 }
 trap rollback EXIT
 
+# Mark the original config as rollback-owned before the atomic replace. A
+# signal between os.replace() and the next shell statement must still restore
+# the original file.
+CHANGED=1
 python3 - "$ENV" <<'PY'
 from pathlib import Path
 import os,sys
@@ -82,14 +129,11 @@ with tmp.open('x') as f:f.write('\n'.join(lines)+'\n')
 os.chmod(tmp,0o600)
 os.replace(tmp,p)
 PY
-CHANGED=1
 (
   set -a; source "$ENV"; set +a
   pm2 restart "$APP" --update-env >/dev/null
 )
-sleep 2
-curl -fsS --max-time 25 http://127.0.0.1:8080/api/health/ready >/dev/null
-curl -fsS --max-time 25 https://api.kalpvriksha.co.in/api/health/ready >/dev/null
+wait_for_api_readiness
 PID=$(pm2 pid "$APP")
 [[ "$PID" =~ ^[0-9]+$ && "$PID" -gt 0 ]]
 tr '\0' '\n' < "/proc/$PID/environ" | grep -qx 'FILE_RETENTION_APPLY=true'
