@@ -112,21 +112,29 @@ case "${PROD_HOST,,}" in
 esac
 printf 'Production DB host: %s\nProduction DB port: %s\nCredentials: hidden\n' "$PROD_HOST" "$PROD_PORT"
 PSQL_CLIENT="$(command -v psql 2>/dev/null || true)"; [[ -x "$PSQL_CLIENT" ]] || PSQL_CLIENT="$(find /usr/lib/postgresql -type f -path '*/bin/psql' 2>/dev/null | sort -V | tail -n1)"; [[ -x "$PSQL_CLIENT" ]] || fail "PostgreSQL client psql is missing."
-PROD_INFO="$(PGCONNECT_TIMEOUT=10 "$PSQL_CLIENT" "$PROD_DATABASE_URL" -X -A -t -F '|' -v ON_ERROR_STOP=1 -c "SELECT current_setting('server_version_num'),pg_database_size(current_database()),d.datlocprovider,COALESCE(to_jsonb(d)->>'datlocale',to_jsonb(d)->>'daticulocale',''),d.datcollate,d.datctype FROM pg_database d WHERE d.datname=current_database();")" || fail "Cannot read production PostgreSQL locale metadata."
-IFS='|' read -r PROD_VERSION_NUM PROD_DB_BYTES PROD_PROVIDER PROD_LOCALE PROD_COLLATE PROD_CTYPE <<<"$PROD_INFO"
+PROD_INFO="$(PGCONNECT_TIMEOUT=10 "$PSQL_CLIENT" "$PROD_DATABASE_URL" -X -A -t -F '|' -v ON_ERROR_STOP=1 -c "SELECT current_setting('server_version_num'),pg_database_size(current_database()),d.datlocprovider,COALESCE(to_jsonb(d)->>'datlocale',to_jsonb(d)->>'daticulocale',''),d.datcollate,d.datctype,pg_encoding_to_char(d.encoding) FROM pg_database d WHERE d.datname=current_database();")" || fail "Cannot read production PostgreSQL locale metadata."
+IFS='|' read -r PROD_VERSION_NUM PROD_DB_BYTES PROD_PROVIDER PROD_LOCALE PROD_COLLATE PROD_CTYPE PROD_ENCODING <<<"$PROD_INFO"
 [[ "$PROD_VERSION_NUM" =~ ^[0-9]+$ && "$PROD_DB_BYTES" =~ ^[0-9]+$ ]] || fail "Production PostgreSQL metadata is malformed."
 PROD_MAJOR="$(python3 - "$PROD_VERSION_NUM" <<'PY'
 import sys; print(int(sys.argv[1])//10000)
 PY
 )"
 printf 'Production PostgreSQL major: %s\n' "$PROD_MAJOR"
-printf 'Production locale provider: %s\nProduction ICU locale: %s\nProduction LC_COLLATE: %s\nProduction LC_CTYPE: %s\n' "$PROD_PROVIDER" "$PROD_LOCALE" "$PROD_COLLATE" "$PROD_CTYPE"
+printf 'Production locale provider: %s\nProduction provider-specific locale: %s\nProduction LC_COLLATE: %s\nProduction LC_CTYPE: %s\nProduction encoding: %s\n' "$PROD_PROVIDER" "$PROD_LOCALE" "$PROD_COLLATE" "$PROD_CTYPE" "$PROD_ENCODING"
 printf 'Production DB size: %.2f MiB\n' "$(python3 - "$PROD_DB_BYTES" <<'PY'
 import sys; print(int(sys.argv[1])/1024/1024)
 PY
 )"
-[[ "$PROD_PROVIDER" == "i" ]] || fail "Certification requires the same ICU provider as verified production; got provider=$PROD_PROVIDER."
-[[ -n "$PROD_LOCALE" ]] || fail "Production ICU locale is empty."
+# Both PostgreSQL libc (c) and ICU (i) are supported. The temporary
+# certification cluster must use the SAME provider, collation, ctype and
+# encoding as the real production database. Never alter the live cluster.
+[[ "$PROD_ENCODING" == "UTF8" ]] || fail "Production encoding must be UTF8 for this release: $PROD_ENCODING."
+[[ -n "$PROD_COLLATE" && -n "$PROD_CTYPE" ]] || fail "Production LC_COLLATE/LC_CTYPE metadata is missing."
+case "$PROD_PROVIDER" in
+  c) [[ -z "$PROD_LOCALE" ]] || fail "libc production database unexpectedly declares an ICU locale." ;;
+  i) [[ -n "$PROD_LOCALE" ]] || fail "ICU production database has no ICU locale." ;;
+  *) fail "Unsupported PostgreSQL production locale provider: $PROD_PROVIDER" ;;
+esac
 
 say "Checking disk and isolated ports"
 [[ "$LOCAL_PG_PORT" =~ ^[0-9]+$ && "$CERT_PORT" =~ ^[0-9]+$ ]] || fail "Certification ports must be numeric."
@@ -170,8 +178,13 @@ PGCONNECT_TIMEOUT=10 "$PG_DUMP" --schema-only --no-owner --no-privileges "$PROD_
 say "Starting private temporary PostgreSQL on 127.0.0.1:${LOCAL_PG_PORT}"
 mkdir -p "$PGDATA" "$PGSOCKET"; chown -R postgres:postgres "$PGROOT"; chmod 0700 "$PGDATA" "$PGSOCKET"
 "$INITDB" --help | grep -Fq -- '--locale-provider' || fail "Installed initdb does not support locale-provider selection."
-"$INITDB" --help | grep -Fq -- '--icu-locale' || fail "Installed initdb does not support ICU locale selection."
-runuser -u postgres -- "$INITDB" -D "$PGDATA" --encoding=UTF8 --locale-provider=icu --icu-locale="$PROD_LOCALE" --auth-local=trust --auth-host=scram-sha-256 >/dev/null
+INITDB_LOCALE_ARGS=(--locale-provider=libc --lc-collate="$PROD_COLLATE" --lc-ctype="$PROD_CTYPE")
+if [[ "$PROD_PROVIDER" == "i" ]]; then
+  "$INITDB" --help | grep -Fq -- '--icu-locale' || fail "Installed initdb does not support ICU locale selection."
+  INITDB_LOCALE_ARGS=(--locale-provider=icu --icu-locale="$PROD_LOCALE" --lc-collate="$PROD_COLLATE" --lc-ctype="$PROD_CTYPE")
+fi
+say "Initializing disposable PostgreSQL with verified production locale provider=$PROD_PROVIDER"
+runuser -u postgres -- "$INITDB" -D "$PGDATA" --encoding="$PROD_ENCODING" "${INITDB_LOCALE_ARGS[@]}" --auth-local=trust --auth-host=scram-sha-256 >/dev/null
 cat >>"$PGDATA/postgresql.conf" <<PGCONF
 listen_addresses = '127.0.0.1'
 port = ${LOCAL_PG_PORT}
@@ -183,18 +196,22 @@ chown postgres:postgres "$PGDATA/postgresql.conf"; runuser -u postgres -- "$PG_C
 "$PSQL" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d postgres -X -A -t -v ON_ERROR_STOP=1 -c 'SELECT 1;' | grep -qx '1' || fail "Temporary PostgreSQL socket check failed."
 
 say "Proving the temporary PostgreSQL locale matches production"
-TEMP_INFO="$("$PSQL" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d postgres -X -A -t -F '|' -v ON_ERROR_STOP=1 -c "SELECT d.datlocprovider,COALESCE(to_jsonb(d)->>'datlocale',to_jsonb(d)->>'daticulocale','') FROM pg_database d WHERE d.datname=current_database();")"
-IFS='|' read -r TEMP_PROVIDER TEMP_LOCALE <<<"$TEMP_INFO"
-printf 'Production: provider=%s locale=%s\nTemporary : provider=%s locale=%s\n' "$PROD_PROVIDER" "$PROD_LOCALE" "$TEMP_PROVIDER" "$TEMP_LOCALE"
-[[ "$TEMP_PROVIDER" == "$PROD_PROVIDER" && "$TEMP_LOCALE" == "$PROD_LOCALE" ]] || fail "Temporary PostgreSQL locale does not match production."
+TEMP_INFO="$("$PSQL" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d postgres -X -A -t -F '|' -v ON_ERROR_STOP=1 -c "SELECT d.datlocprovider,COALESCE(to_jsonb(d)->>'datlocale',to_jsonb(d)->>'daticulocale',''),d.datcollate,d.datctype,pg_encoding_to_char(d.encoding) FROM pg_database d WHERE d.datname=current_database();")"
+IFS='|' read -r TEMP_PROVIDER TEMP_LOCALE TEMP_COLLATE TEMP_CTYPE TEMP_ENCODING <<<"$TEMP_INFO"
+printf 'Production: provider=%s locale=%s collate=%s ctype=%s encoding=%s\nTemporary : provider=%s locale=%s collate=%s ctype=%s encoding=%s\n' "$PROD_PROVIDER" "$PROD_LOCALE" "$PROD_COLLATE" "$PROD_CTYPE" "$PROD_ENCODING" "$TEMP_PROVIDER" "$TEMP_LOCALE" "$TEMP_COLLATE" "$TEMP_CTYPE" "$TEMP_ENCODING"
+[[ "$TEMP_PROVIDER" == "$PROD_PROVIDER" && "$TEMP_LOCALE" == "$PROD_LOCALE" &&
+   "$TEMP_COLLATE" == "$PROD_COLLATE" && "$TEMP_CTYPE" == "$PROD_CTYPE" &&
+   "$TEMP_ENCODING" == "$PROD_ENCODING" ]] || fail "Temporary PostgreSQL locale does not match production."
 
 VERIFY_DB="kv_locale_verify_${RANDOM}${RANDOM}"
 "$CREATEDB" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" "$VERIFY_DB"
 VERIFY_INFO="$("$PSQL" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" -d "$VERIFY_DB" -X -A -t -F '|' -v ON_ERROR_STOP=1 -c "SELECT d.datlocprovider,COALESCE(to_jsonb(d)->>'datlocale',to_jsonb(d)->>'daticulocale','') FROM pg_database d WHERE d.datname=current_database();")"
-IFS='|' read -r VERIFY_PROVIDER VERIFY_LOCALE <<<"$VERIFY_INFO"
+IFS='|' read -r VERIFY_PROVIDER VERIFY_LOCALE VERIFY_COLLATE VERIFY_CTYPE VERIFY_ENCODING <<<"$VERIFY_INFO"
 "$DROPDB" -U postgres -h "$PGSOCKET" -p "$LOCAL_PG_PORT" --if-exists "$VERIFY_DB" >/dev/null
-[[ "$VERIFY_PROVIDER" == "$PROD_PROVIDER" && "$VERIFY_LOCALE" == "$PROD_LOCALE" ]] || fail "New disposable databases do not inherit the production ICU provider/locale."
-printf 'Disposable DB locale inheritance: PASS\n'
+[[ "$VERIFY_PROVIDER" == "$PROD_PROVIDER" && "$VERIFY_LOCALE" == "$PROD_LOCALE" &&
+   "$VERIFY_COLLATE" == "$PROD_COLLATE" && "$VERIFY_CTYPE" == "$PROD_CTYPE" &&
+   "$VERIFY_ENCODING" == "$PROD_ENCODING" ]] || fail "New disposable databases do not inherit the production locale and encoding."
+printf 'Disposable DB locale and encoding inheritance: PASS\n'
 
 say "Preflighting exact dump/restore and TCP password mechanics"
 PREFLIGHT_SUFFIX="${RANDOM}${RANDOM}"
