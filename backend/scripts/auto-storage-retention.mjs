@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
+import {verifyManifest} from './backup-lib.mjs';
 
 // Restricted post-verification rotation. No unverified, shared, orphan, partial,
 // protected-manual, customer or live-database files may be removed.
@@ -55,6 +56,19 @@ export function rotateVerifiedBackups(root,{freshId,apply=false,now=Date.now(),
     const lock=JSON.parse(fs.readFileSync(path.join(root,'.backup.lock'),'utf8'));
     if(Number(lock.pid)!==process.pid)throw Error('Exclusive backup owner lock missing');
   }
+  // Opt-in is independent of historical backup-rotation flags. Never allow
+  // previously created full backups, migration archives, or manual snapshots
+  // to enter the automatic-deletion candidate set.
+  if(process.env.KALPA_BACKUP_RETENTION_POLICY!=='THREE_VERIFIED_DAILY_FULL')
+    return {ok:true,skipped:'THREE_FULL_RETENTION_NOT_ENABLED',removed:0};
+  const cutoff=Date.parse(process.env.KALPA_BACKUP_RETENTION_START_AT||'');
+  if(!Number.isFinite(cutoff)||cutoff<=0)
+    return {ok:true,skipped:'VALID_RETENTION_START_REQUIRED',removed:0};
+  const dbIdentity=String(process.env.KALPA_BACKUP_RETENTION_DATABASE||'/kalpvriksha_cutover');
+  if(dbIdentity!=='/kalpvriksha_cutover')
+    return {ok:true,skipped:'PRODUCTION_DATABASE_IDENTITY_REQUIRED',removed:0};
+  if(process.env.KALPA_BACKUP_ROOT&&path.resolve(process.env.KALPA_BACKUP_ROOT)!==root)
+    throw Error('Backup root differs from the production backup root');
   const all=[],refs=new Map();
   for(const name of fs.readdirSync(root)){
     if(!name.endsWith('.manifest.json'))continue;
@@ -67,24 +81,49 @@ export function rotateVerifiedBackups(root,{freshId,apply=false,now=Date.now(),
     }
     if(!BACKUP_ID.test(m.id)||name!==m.id+'.manifest.json'||
        m.status!=='VERIFIED'||m.ok!==true||m.verification?.ok!==true)continue;
+    // Only post-activation backups that explicitly identify the local
+    // PostgreSQL production database are eligible. Historical migrations
+    // and earlier Supabase-era backups remain outside automated retirement.
+    if(m.backupType!=='FULL'||m.application?.backupPolicy!=='three-verified-full-v1'||
+       m.application?.databaseIdentity!==dbIdentity||
+       !Number.isFinite(Date.parse(m.createdAt||''))||
+       Date.parse(m.createdAt)<cutoff)continue;
     const parts=components(m),date=Date.parse(m.createdAt||'');
-    if(!parts||!Number.isFinite(date)||date>now)continue;
-    if(!parts.every(c=>{try{requireRegular(path.join(root,c.name),c.size);return true;}catch{return false;}}))continue;
+    // A new-policy VERIFIED manifest with a damaged or missing component
+    // is an error, not an invisible entry to filter out. Otherwise a
+    // corrupted newest backup can make an older one appear to be the
+    // third good backup, masking a broken recovery point.
+    if(!parts||!Number.isFinite(date)||date>now)
+      throw Error('Malformed new-policy full backup manifest: '+m.id);
+    for(const c of parts){
+      try{requireRegular(path.join(root,c.name),c.size);}
+      catch{throw Error('Incomplete or damaged new-policy full backup: '+m.id+' / '+c.name);}
+    }
     all.push({id:m.id,type:m.backupType,date,parts,manifest:fp});
   }
   const full=all.filter(x=>x.type==='FULL').sort((a,b)=>b.date-a.date);
   if(full.length<3)return {ok:true,skipped:'NEED_THREE_VERIFIED_FULL_BACKUPS',removed:0};
   if(full[0].id!==freshId||now-full[0].date>3600000)
     return {ok:true,skipped:'FRESH_VERIFIED_FULL_BACKUP_MISSING',removed:0};
-  if(pinnedId&&!full.some(x=>x.id===pinnedId))
-    return {ok:true,skipped:'OFFSITE_PIN_MISSING',removed:0};
+  // A pinned historical backup may intentionally live outside this policy's
+  // candidate set. Never require it to be retired or to count as one of three.
   const keep=new Set(full.slice(0,3).map(x=>x.id));
   if(pinnedId)keep.add(pinnedId);
-  for(const x of full.filter(x=>keep.has(x.id)))
+  // Verify ALL three replacement full restore points independently,
+  // including archive readability (pg_restore list + tar contents). Never
+  // delete an old copy if one of the retained full copies is incomplete.
+  for(const x of full.filter(x=>keep.has(x.id))){
+    const verified=verifyManifest(x.manifest,{verifyContents:true});
+    if(!verified.ok||verified.checks.length!==2||
+       !verified.checks.every(c=>c.ok&&c.contentReadable===true))
+      throw Error('Replacement full backup failed content verification: '+x.id);
     for(const c of x.parts)if(hashFile(path.join(root,c.name))!==c.sha)
       throw Error('Retained recovery checksum mismatch: '+x.id);
-  const eligible=all.filter(x=>!keep.has(x.id)&&now-x.date>=2*DAY&&
-    ['FULL','DATABASE'].includes(x.type)&&x.parts.every(c=>refs.get(c.name)===1));
+  }
+  // Only retire OLD full backups created by this policy. Database-only,
+  // migration, legacy, manual, and pre-activation backups are excluded.
+  const eligible=all.filter(x=>x.type==='FULL'&&!keep.has(x.id)&&
+    now-x.date>=2*DAY&&x.parts.every(c=>refs.get(c.name)===1));
   const result={ok:true,dryRun:!apply,kept:[...keep],eligible:eligible.length,
     expectedBytes:eligible.reduce((n,x)=>n+x.parts.reduce((v,c)=>v+c.size,0),0),
     removed:0,bytesFreed:0};
@@ -97,6 +136,8 @@ export function rotateVerifiedBackups(root,{freshId,apply=false,now=Date.now(),
   if(fs.statSync(root).ino!==rootStat.ino||fs.statSync(root).dev!==rootStat.dev)
     throw Error('Backup root changed');
   for(const x of eligible){
+    const oldVerified=verifyManifest(x.manifest,{verifyContents:true});
+    if(!oldVerified.ok||oldVerified.checks.length!==2)throw Error('Old full backup verification failed: '+x.id);
     auditedCopy(x.manifest,path.join(auditRoot,x.id+'.manifest.json'));
     for(const c of x.parts){
       requireRegular(path.join(root,c.name),c.size);

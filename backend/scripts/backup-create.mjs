@@ -12,6 +12,7 @@ const databaseOnly=args.has('--database-only');
 const filesOnly=args.has('--files-only');
 if(databaseOnly&&filesOnly)throw new Error('Choose only one of --database-only or --files-only.');
 const databaseUrl=String(process.env.DATABASE_URL||'').trim();
+const databaseIdentity=databaseUrl ? (()=>{ try { const u=new URL(databaseUrl); return u.hostname==='127.0.0.1'&&u.port==='5432'?u.pathname:''; }catch{return '';} })() : '';
 const storageRoot=path.resolve(process.env.KALPA_FILE_STORAGE_ROOT||'');
 const backupRoot=path.resolve(process.env.KALPA_BACKUP_ROOT||path.join(process.cwd(),'backups'));
 const retentionDays=Number(process.env.BACKUP_RETENTION_DAYS||30);
@@ -50,7 +51,7 @@ const id=`kv-${stamp}-${crypto.randomBytes(4).toString('hex')}`;
 const prefix=path.join(backupRoot,id);
 const manifestPath=`${prefix}.manifest.json`;
 const snapshotRoot=`${prefix}.files.snapshot`;
-const manifest={schemaVersion:2,id,backupType:databaseOnly?'DATABASE':filesOnly?'FILES':'FULL',status:'STARTED',ok:false,createdAt:startedAt,completedAt:null,verifiedAt:null,host:process.env.HOSTNAME||'',components:{},verification:{ok:false,checks:[]},application:{phase:7,state:'relational-production'},notes:'Created atomically from PostgreSQL plus a verified converged private-file snapshot by Kalpavriksha backup-create.mjs'};
+const manifest={schemaVersion:2,id,backupType:databaseOnly?'DATABASE':filesOnly?'FILES':'FULL',status:'STARTED',ok:false,createdAt:startedAt,completedAt:null,verifiedAt:null,host:process.env.HOSTNAME||'',components:{},verification:{ok:false,checks:[]},application:{phase:7,state:'relational-production',databaseIdentity,backupPolicy:'three-verified-full-v1'},notes:'Created atomically from PostgreSQL plus a verified converged private-file snapshot by Kalpavriksha backup-create.mjs'};
 
 function snapshotRsyncArgs({dry=false,itemize=false}={}){
   const source=`${storageRoot.replace(/\/$/,'')}/`;
@@ -114,7 +115,7 @@ try{
     // Only a newly VERIFIED full backup can rotate old archived sets. A failed
     // rotation cannot invalidate the completed backup or hide its proof.
     let automaticRotation={ok:true,skipped:'DISABLED'};
-    if(manifest.ok && manifest.backupType==='FULL' && process.env.KALPA_AUTO_BACKUP_ROTATION==='true'){
+    if(manifest.ok && manifest.backupType==='FULL' && process.env.KALPA_AUTO_BACKUP_ROTATION==='true' && process.env.KALPA_BACKUP_RETENTION_POLICY==='THREE_VERIFIED_DAILY_FULL'){
       try{
         automaticRotation=rotateVerifiedBackups(backupRoot,{freshId:id,apply:true,
           pinnedId:process.env.KALPA_BACKUP_PINNED_ID||''});

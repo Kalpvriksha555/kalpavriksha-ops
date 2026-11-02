@@ -1,0 +1,32 @@
+name: Three full backup safety tests
+on:
+  push:
+    branches:
+      - safety/three-verified-daily-full-backups-20261103
+  pull_request:
+    paths:
+      - 'backend/scripts/backup-create.mjs'
+      - 'backend/scripts/auto-storage-retention.mjs'
+      - 'tests/backend/backup-three-retention.test.mjs'
+      - '.github/workflows/three-full-backup-safety.yml'
+permissions:
+  contents: read
+jobs:
+  retention-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install backend dependencies
+        run: npm ci --prefix backend --no-audit --no-fund
+      - name: Validate changed scripts
+        run: |
+          node --check backend/scripts/backup-create.mjs
+          node --check backend/scripts/auto-storage-retention.mjs
+      - name: Run backup retention safety tests
+        run: node --test tests/backend/backup-three-retention.test.mjs

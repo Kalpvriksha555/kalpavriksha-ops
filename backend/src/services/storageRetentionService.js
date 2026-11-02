@@ -46,6 +46,12 @@ export function financialFileReferenceSets(state = {}) {
   // Payment rows and per-case ledger objects are financial records and are
   // permanently exempt from ordinary 90-day attachment retention.
   visit(Array.isArray(state.payments) ? state.payments : []);
+  // Financial supporting documents can also be referenced from independently
+  // persisted ledgers, audit histories and invoice/expense collections.
+  for (const field of ['financeHistory','financialRecords','invoices','expenses',
+    'transactions','bankTransactions','ledger','financeLedger']) {
+    visit(state[field] || null);
+  }
   for (const record of (Array.isArray(state.cases) ? state.cases : [])) {
     visit(record?.ledger || null);
     visit(record?.finance || null);
@@ -62,9 +68,20 @@ export function isFinancialRetentionProtected(doc = {}, references = { ids:new S
   return Boolean((id && references.ids?.has(id)) || (storageKey && references.storageKeys?.has(storageKey)));
 }
 
+const PERMANENT_PURPOSES = new Set([
+  'PROFILE','PROFILE_PHOTO','AVATAR','STATUTORY','LEGAL','LEGAL_EVIDENCE',
+  'COMPLIANCE','COMPLIANCE_EVIDENCE','AUDIT_EVIDENCE','GOVERNMENT_RECORD',
+  'TAX','TAX_RECORD','INVOICE','RECEIPT','BANK_STATEMENT','BANK_DOCUMENT',
+  'CONTRACT','AGREEMENT','TITLE_DEED','PROPERTY_DEED','IDENTITY_PROOF'
+]);
 export function isPermanentFileProtected(doc = {}, references) {
-  const purpose = filePurpose(doc);
-  if (purpose === 'PROFILE' || purpose === 'PROFILE_PHOTO' || purpose === 'AVATAR') return true;
+  const purposes = [doc.purpose,doc.type,doc.folder,doc.category,
+    doc.documentType,doc.classification].map(value=>
+    String(value||'').trim().toUpperCase().replace(/[-\s]+/g,'_'));
+  if (purposes.some(purpose=>PERMANENT_PURPOSES.has(purpose)))return true;
+  if (['true',true].includes(doc.permanentRetention) ||
+      ['true',true].includes(doc.statutoryDocument) ||
+      ['true',true].includes(doc.complianceDocument))return true;
   return isFinancialRetentionProtected(doc, references);
 }
 
@@ -106,6 +123,9 @@ export function caseRetentionAnchorMs(record = {}) {
   const archivedAt = archived ? Math.max(
     timestampMs(record.archivedAt),timestampMs(record.archivedOn)
   ) : 0;
+  // If a case has been archived, the archive timestamp is essential: falling
+  // back to an earlier completedAt could delete files too early.
+  if (archived && !archivedAt) return 0;
   // A status alone (or updatedAt) does not establish a trustworthy end date.
   return Math.max(completedAt, archivedAt);
 }
