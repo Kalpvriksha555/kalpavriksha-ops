@@ -69,6 +69,9 @@ test('a missing current files archive aborts retention readiness',t=>{
 });
 test('stale backup chains are not accepted',t=>{
   const x=fixture(t);
+  // Make the activation date older than the stale fixtures, so this tests
+  // recency rather than the separate pre-activation exclusion.
+  process.env.KALPA_BACKUP_RETENTION_START_AT='2026-10-01T00:00:00Z';
   x.put(day(2));x.put(day(3));x.put(day(4));
   assert.equal(x.check().reason,'LATEST_FULL_BACKUP_STALE');
 });
