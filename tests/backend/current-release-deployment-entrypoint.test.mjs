@@ -156,11 +156,14 @@ test('runtime state normalization preserves the verified physical shadow across 
   assert.doesNotMatch(repository, /const currentState = normalizeState\(currentPersistedState\)/);
 });
 
-test('integrated certification mirrors the production ICU locale instead of using C collation', () => {
+test('integrated certification mirrors production libc or ICU locale and encoding', () => {
   assert.match(orchestrator, /datlocprovider/);
+  assert.match(orchestrator, /--locale-provider=libc/);
   assert.match(orchestrator, /--locale-provider=icu/);
   assert.match(orchestrator, /--icu-locale="\$PROD_LOCALE"/);
+  assert.match(orchestrator, /--lc-collate="\$PROD_COLLATE"/);
+  assert.match(orchestrator, /--lc-ctype="\$PROD_CTYPE"/);
   assert.match(orchestrator, /Temporary PostgreSQL locale does not match production/);
-  assert.match(orchestrator, /Disposable DB locale inheritance: PASS/);
+  assert.match(orchestrator, /Disposable DB locale and encoding inheritance: PASS/);
   assert.doesNotMatch(orchestrator, /--no-locale/);
 });
