@@ -6,9 +6,15 @@ export const PAYMENT_TRACKING_OPTIONS = ['Not Updated', 'Pending', 'Paid'];
 const normalizePaymentValue = (value = '') => String(value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 
 export const getPaymentEstimateAmount = (project = {}) => {
-  const raw = project?.estimate ?? project?.estimateAmount ?? project?.amount ?? project?.totalAmount ?? project?.ledger?.expectedAmount ?? 0;
-  const cleaned = typeof raw === 'string' ? raw.replace(/[^0-9.-]/g, '') : raw;
-  return Math.max(0, Number(cleaned) || 0);
+  // Mirror getCaseEstimateAmount on the server: a zero-valued old alias
+  // must not mask a positive accounting estimate or create a false Paid label.
+  for (const raw of [project?.estimate, project?.estimateAmount, project?.totalAmount, project?.amount, project?.ledger?.expectedAmount]) {
+    if (raw === undefined || raw === null || raw === '') continue;
+    const cleaned = typeof raw === 'string' ? raw.replace(/[^0-9.-]/g, '') : raw;
+    const value = Number(cleaned);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return 0;
 };
 
 export const getPaymentReceivedAmount = (project = {}) => {

@@ -99,3 +99,18 @@ test('automatic finance saving flushes before navigation and only warns for an u
   assert.match(detail, /onClick=\{handleTaskBack\}/);
   assert.doesNotMatch(detail, /Payment details have unsaved changes\. Leave this task and discard them/);
 });
+
+test('an unconfirmed payment cannot be overwritten by an older pending snapshot', () => {
+  assert.doesNotMatch(updateProjectBlock, /source: 'finance-save-reverted'/);
+  assert.match(updateProjectBlock, /Payment change is safely queued but not yet confirmed/);
+  assert.match(updateProjectBlock, /requestFinanceOutboxFlush\(\)/);
+});
+
+test('finance uses fast bounded compact sync and rejects misleading Paid input', () => {
+  assert.match(app, /visibleIntervalMs: currentUser\?\.role === ROLES\.ADMIN[\s\S]{0,230}8_000 : 60_000/);
+  const start = app.indexOf('const handlePaymentStatusChange');
+  const stop = app.indexOf('const handleDeleteTask', start);
+  const handler = app.slice(start, stop);
+  assert.match(handler, /const defaultAmount = existingAmount \|\| ''/);
+  assert.match(handler, /estimateAmount > 0 && amount < estimateAmount/);
+});

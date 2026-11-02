@@ -3102,6 +3102,15 @@ function upsertInlinePaymentLedger(d, c, status, body = {}, mutation = {}) {
   if (status === 'Paid' && amount <= 0) {
     const err = new Error('Amount received is required before marking payment as Paid.');
     err.statusCode = 400;
+    err.code = 'PAYMENT_AMOUNT_REQUIRED';
+    throw err;
+  }
+  // Do not accept a fully Paid intent and silently persist Pending:
+  // that looks like a data rollback and is misleading to Finance users.
+  if (status === 'Paid' && estimate > 0 && amount < estimate) {
+    const err = new Error('Received amount is below the estimate. Record a partial payment in the Finance Ledger instead.');
+    err.statusCode = 409;
+    err.code = 'PARTIAL_PAYMENT_NOT_PAID';
     throw err;
   }
 

@@ -61,3 +61,10 @@ test('finance hot path clones only selected rows and returns a compact finance p
   assert.match(repository, /decomposeOnlyCollections/);
   assert.match(repository, /fastSelectedWrite: true/);
 });
+
+test('an underfunded Paid request is rejected before mutating finance state', () => {
+  const guard = upsert.indexOf("err.code = 'PARTIAL_PAYMENT_NOT_PAID'");
+  const versionWrite = upsert.indexOf('c.financeVersion =');
+  assert.ok(guard > 0 && guard < versionWrite);
+  assert.match(upsert, /status === 'Paid' && estimate > 0 && amount < estimate/);
+});
