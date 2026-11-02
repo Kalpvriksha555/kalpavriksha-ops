@@ -140,8 +140,10 @@ try {
   const taskOne = await makeTask('AUTHZ-TASK-1', designerOneUser);
   const taskTwo = await makeTask('AUTHZ-TASK-2', designerTwoUser);
 
-  const finance = await request('/api/state/projects/AUTHZ-TASK-1/payment-status', { method:'POST', session:admin, body:{ paymentTrackingStatus:'Paid', expectedFinanceVersion:0, expectedAmount:9000, amountIn:5000, paymentDate:'2026-07-30', mode:'UPI', transactionId:'AUTHZ-FIN-1', by:'Spoofed Actor' } });
-  assert(finance.response.ok && finance.payload.project?.paymentAmountIn === 5000 && finance.payload.project?.paymentTrackingStatus === 'Pending', `Partial finance update failed: ${finance.response.status} ${JSON.stringify(finance.payload)}`);
+  const rejectedPartial = await request('/api/state/projects/AUTHZ-TASK-1/payment-status', { method:'POST', session:admin, body:{ paymentTrackingStatus:'Paid', expectedFinanceVersion:0, expectedAmount:9000, amountIn:5000, paymentDate:'2026-07-30', mode:'UPI', transactionId:'AUTHZ-FIN-1', by:'Spoofed Actor' } });
+  assert(rejectedPartial.response.status === 409 && rejectedPartial.payload?.code === 'PARTIAL_PAYMENT_NOT_PAID', `Underpaid Paid request was not rejected: ${rejectedPartial.response.status} ${JSON.stringify(rejectedPartial.payload)}`);
+  const finance = await request('/api/state/projects/AUTHZ-TASK-1/payment-status', { method:'POST', session:admin, body:{ paymentTrackingStatus:'Paid', expectedFinanceVersion:0, expectedAmount:9000, amountIn:9000, paymentDate:'2026-07-30', mode:'UPI', transactionId:'AUTHZ-FIN-1', by:'Spoofed Actor' } });
+  assert(finance.response.ok && finance.payload.project?.paymentAmountIn === 9000 && finance.payload.project?.paymentTrackingStatus === 'Paid', `Full finance update failed: ${finance.response.status} ${JSON.stringify(finance.payload)}`);
   assert(finance.payload.project.paymentTrackingUpdatedBy === 'Phase 4 Admin', 'Finance actor was accepted from the client instead of the session.');
 
   const d1State = await request('/api/state', { session:designerOne });
@@ -297,7 +299,7 @@ try {
 
   const adminState = await request('/api/state', { session:admin });
   const savedTask = (adminState.payload.projects || []).find(task => task.id === 'AUTHZ-TASK-1');
-  assert(savedTask?.paymentAmountIn === 5000 && savedTask?.paymentTrackingStatus === 'Pending' && savedTask?.ledger?.mode === 'UPI', `Operational role changes rolled back protected finance data: ${JSON.stringify(savedTask)}`);
+  assert(savedTask?.paymentAmountIn === 9000 && savedTask?.paymentTrackingStatus === 'Paid' && savedTask?.ledger?.mode === 'UPI', `Operational role changes rolled back protected finance data: ${JSON.stringify(savedTask)}`);
 
   console.log('Phase 4 authorization and API protection verification passed.');
   console.log('Verified: role scoping, anti-spoofing, task/finance/file/chat/notification permissions, private direct messages, CSRF, request IDs, payload validation and finance preservation.');
