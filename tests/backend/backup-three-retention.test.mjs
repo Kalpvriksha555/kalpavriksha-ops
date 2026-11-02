@@ -57,6 +57,18 @@ test('old and foreign database manifests are never counted or retired',t=>{
   const a=make(-10,{createdAt:'2026-10-20T00:00:00Z'});
   const b=make(0,{application:{backupPolicy:'three-verified-full-v1',databaseIdentity:'/other'}});
   const c=make(1);
+  // A new-policy backup must contain both independently checkable components.
+  // The earlier empty fixture was correctly rejected as malformed.
+  const complete=JSON.parse(fs.readFileSync(c.file,'utf8'));
+  complete.components={};
+  for(const [key,suffix] of [['database','.postgres.dump'],['files','.files.tar.gz']]){
+    const filename=c.id+suffix;
+    const bytes=Buffer.from('test complete '+c.id+' '+key);
+    fs.writeFileSync(path.join(root,filename),bytes);
+    complete.components[key]={file:filename,sizeBytes:bytes.length,
+      sha256:crypto.createHash('sha256').update(bytes).digest('hex')};
+  }
+  fs.writeFileSync(c.file,JSON.stringify(complete));
   assert.equal(rotateVerifiedBackups(root,{freshId:c.id,now:Date.UTC(2026,10,4,0,0,0)}).skipped,'NEED_THREE_VERIFIED_FULL_BACKUPS');
   assert.ok(fs.existsSync(a.file));
   assert.ok(fs.existsSync(b.file));
