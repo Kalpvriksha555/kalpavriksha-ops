@@ -5714,7 +5714,8 @@ function AppShell() {
   useAdaptiveWorkspaceSync({
     enabled: Boolean(USE_BACKEND_STATE && backendStateReady && currentUser),
     refresh: refreshWorkspaceSnapshot,
-    visibleIntervalMs: 60_000,
+    // Finance and Operations use compact revision-aware refreshes more frequently.
+    visibleIntervalMs: currentUser?.role === ROLES.ADMIN && (activeTab === 'finance' || activeTab === 'operations' || Boolean(selectedProject)) ? 8_000 : 60_000,
     hiddenIntervalMs: 5 * 60_000,
   });
 
@@ -6417,15 +6418,20 @@ function AppShell() {
         markFinanceOutboxError(queuedFinanceRecord.key, queuedFinanceRecord.mutationId, error, { retryable: String(error?.code || '') !== 'FINANCE_VERSION_CONFLICT' });
         const message = error?.code === 'FINANCE_VERSION_CONFLICT'
           ? 'Finance changed on another screen. Your entry was not overwritten. Refresh this task and save again.'
-          : (error?.message || 'Finance could not be saved to the server. No local finance change was accepted.');
+          : ('Payment change is safely queued but not yet confirmed by the server. ' + (error?.message || 'An automatic retry will follow.'));
         notifyUser(message);
-        if (previousProject) {
-          applyProjectSnapshot([previousProject], { source: 'finance-save-reverted' });
-          setSelectedProject(previousProject);
-        }
+        // The request may already have committed; its mutation remains in
+        // durable recovery storage. Never repaint an older Pending task over
+        // a newer payment on timeout or an ambiguous network error.
+        if (error?.code === 'FINANCE_VERSION_CONFLICT') void refreshWorkspaceSnapshot();
         return null;
       } finally {
         financeSaveInFlightRef.current.delete(financeTaskKey);
+        // If another edit arrived during this request, drain it immediately.
+        // Keep exact mutation IDs for safe retry after response loss.
+        if (getFinanceOutboxRecord(financeTaskKey, financeActorKey(currentUser))?.retryable !== false) {
+          requestFinanceOutboxFlush();
+        }
       }
     } else if (financeOnly) {
       if (financeChanged) notifyUser('Finance cannot be saved until the production database connection is ready.');
@@ -6592,12 +6598,17 @@ function AppShell() {
     if (normalizedStatus === 'Paid') {
       const estimateAmount = getPaymentEstimateAmount(project);
       const existingAmount = getPaymentReceivedAmount(project);
-      const defaultAmount = existingAmount || estimateAmount || '';
+      // Never suggest an estimate as though the customer has already paid it.
+      const defaultAmount = existingAmount || '';
       const amountInput = await requestInput(`Enter amount received for ${project.id}${estimateAmount ? ` (estimate ₹${Number(estimateAmount).toLocaleString('en-IN')})` : ''}:`, { title: 'Record payment amount', inputType: 'number', defaultValue: defaultAmount ? String(defaultAmount) : '', placeholder: 'Amount received' });
       if (amountInput === null || String(amountInput).trim() === '') return;
       const amount = Number(String(amountInput).replace(/[^0-9.-]/g, ''));
       if (!Number.isFinite(amount) || amount <= 0) {
         notifyUser('Please enter a valid received amount before marking payment as Paid.');
+        return;
+      }
+      if (estimateAmount > 0 && amount < estimateAmount) {
+        notifyUser('The received amount is below the estimate. Record this as a partial payment in the Finance Ledger; the task cannot be marked fully Paid until the received amount covers the estimate.');
         return;
       }
       const today = getIndiaDateKey();
