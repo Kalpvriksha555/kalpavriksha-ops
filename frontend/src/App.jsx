@@ -5416,7 +5416,7 @@ function AppShell() {
         if (project.status !== 'Completed' || isRevisionForMe) return true;
         if (!rangeIsActive && !shouldShowOnOperationsDate(project, selectedBoardDate)) return false;
       } else if (activeTab === 'board' && !rangeIsActive && !shouldShowOnOperationsDate(project, selectedBoardDate)) return false;
-      if (rangeIsActive && !matchesDateRange(project.createdAt || getTaskDateTimestamp(project), operationDateRange.dateFrom, operationDateRange.dateTo)) return false;
+      if (rangeIsActive && !matchesDateRange(project.createdAt || project.receivedAt || project.taskDate, operationDateRange.dateFrom, operationDateRange.dateTo)) return false;
       if (normalizedGlobalSearch) {
         const haystack = [project.id, project.client, project.bankName, project.branchName, project.customerName, project.location, project.assignedTo, project.type, project.status, project.description]
           .filter(Boolean).join(' ').toLowerCase();
