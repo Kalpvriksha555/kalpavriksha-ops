@@ -5082,8 +5082,10 @@ function AppShell() {
 
   const [activeTab, setActiveTab] = useState('command');
   const [selectedProject, setSelectedProject] = useState(null);
-  const [archiveViewState, setArchiveViewState] = useState({ filterMonth: 'All', filterDate: '', selectedBanks: [], selectedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0 });
-  const [financeViewState, setFinanceViewState] = useState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
+  const [archiveViewState, setArchiveViewState] = useState({ filterMonth: 'All', filterDate: '', dateFrom:'', dateTo:'', selectedBanks: [], selectedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0 });
+  const [financeViewState, setFinanceViewState] = useState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), dateFrom:'', dateTo:'', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
+  const [operationDateRange, setOperationDateRange] = useState({dateFrom:'',dateTo:''});
+  const [viewVisitKey, setViewVisitKey] = useState(0);
   const [taskDetailReturnTab, setTaskDetailReturnTab] = useState('board');
   const taskDetailReturnPositionRef = useRef({ windowY: 0, tab: 'board' });
   const previousTabRef = useRef('command');
@@ -5119,6 +5121,20 @@ function AppShell() {
   }, [activeTab, selectedProject]);
   const [boardViewMode, setBoardViewMode] = useState('list'); // 'list' or 'kanban'
   const [selectedBoardDate, setSelectedBoardDate] = useState(formatDateKey());
+  // No transient filter is persisted in localStorage/sessionStorage. A new
+  // visit starts clean, and browser back-forward cache restores are reset too.
+  useEffect(() => {
+    const resetOnReturn = (event) => {
+      if (!event.persisted) return;
+      setArchiveViewState({filterMonth:'All',filterDate:'',dateFrom:'',dateTo:'',selectedBanks:[],selectedLocations:[],searchText:'',sortOrder:'newest',scrollTop:0});
+      setFinanceViewState({activeTab:'transactions',selectedMonth:getCurrentAccountingMonthKey(),dateFrom:'',dateTo:'',selectedLocations:[],selectedClients:[],selectedPaymentStatuses:[]});
+      setOperationDateRange({dateFrom:'',dateTo:''});
+      setSelectedBoardDate(formatDateKey());
+      setViewVisitKey(value=>value+1);
+    };
+    window.addEventListener('pageshow',resetOnReturn);
+    return () => window.removeEventListener('pageshow',resetOnReturn);
+  }, []);
   const [showNotifs, setShowNotifs] = useState(false);
   const [showProfilePanel, setShowProfilePanel] = useState(false);
   const [showNewLead, setShowNewLead] = useState(false);
@@ -5264,8 +5280,10 @@ function AppShell() {
     setActiveTab('command');
     previousTabRef.current = 'command';
     setSelectedBoardDate(formatDateKey());
-    setArchiveViewState({ filterMonth: 'All', filterDate: '', selectedBanks: [], selectedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0 });
-    setFinanceViewState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
+    setOperationDateRange({dateFrom:'',dateTo:''});
+    setViewVisitKey(value=>value+1);
+    setArchiveViewState({ filterMonth: 'All', filterDate: '', dateFrom:'', dateTo:'', selectedBanks: [], selectedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0 });
+    setFinanceViewState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), dateFrom:'', dateTo:'', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
     setTaskDetailReturnTab('board');
     taskDetailReturnPositionRef.current = { windowY: 0, tab: 'board' };
     setNewTaskCategory(TASK_CATEGORIES[0]);
@@ -5382,6 +5400,7 @@ function AppShell() {
     .slice(0, 8), [chatMessages, normalizedGlobalSearch]);
   const displayedProjects = useMemo(() => {
     if (activeTab !== 'board' && activeTab !== 'my_tasks') return [];
+    const rangeIsActive = Boolean(operationDateRange.dateFrom || operationDateRange.dateTo);
     return asArray(projects)
     .filter(project => {
       if (activeTab === 'my_tasks') {
@@ -5389,8 +5408,9 @@ function AppShell() {
         const statusValue = normalizeWorkStatusForRevision(project.status || project.reviewStatus || '');
         const isRevisionForMe = project.showInMyTasks || isRevisionWorkItem(project) || statusValue.includes('REVISION') || hasActiveRevision(project);
         if (project.status !== 'Completed' || isRevisionForMe) return true;
-        if (!shouldShowOnOperationsDate(project, selectedBoardDate)) return false;
-      } else if (activeTab === 'board' && !shouldShowOnOperationsDate(project, selectedBoardDate)) return false;
+        if (!rangeIsActive && !shouldShowOnOperationsDate(project, selectedBoardDate)) return false;
+      } else if (activeTab === 'board' && !rangeIsActive && !shouldShowOnOperationsDate(project, selectedBoardDate)) return false;
+      if (rangeIsActive && !matchesDateRange(project.createdAt || getTaskDateTimestamp(project), operationDateRange.dateFrom, operationDateRange.dateTo)) return false;
       if (normalizedGlobalSearch) {
         const haystack = [project.id, project.client, project.bankName, project.branchName, project.customerName, project.location, project.assignedTo, project.type, project.status, project.description]
           .filter(Boolean).join(' ').toLowerCase();
@@ -5399,7 +5419,7 @@ function AppShell() {
       return true;
     })
     .sort((left, right) => (right.createdAt || 0) - (left.createdAt || 0));
-  }, [projects, activeTab, currentUser?.name, selectedBoardDate, normalizedGlobalSearch]);
+  }, [projects, activeTab, currentUser?.name, selectedBoardDate, operationDateRange.dateFrom, operationDateRange.dateTo, normalizedGlobalSearch]);
   const assignmentRecommendations = useMemo(
     () => showNewLead ? getAssignmentRecommendations(activeUsers, projects) : [],
     [showNewLead, activeUsers, projects]
@@ -7376,14 +7396,14 @@ function AppShell() {
           <MainTabNavigation currentUser={currentUser} ROLES={ROLES} activeTab={activeTab} setActiveTab={setActiveTab} />
         )}
 
-        <AppErrorBoundary key={`workspace:${activeTab}:${selectedProject?.id || selectedProject?.caseId || 'none'}`}>
+        <AppErrorBoundary key={`workspace:${viewVisitKey}:${activeTab}:${selectedProject?.id || selectedProject?.caseId || 'none'}`}>
         <React.Suspense fallback={<PageLoadingScreen title="Loading workspace" subtitle="Preparing this section…" />}>
         {selectedProject ? (
           <TaskDetailView project={selectedProject} user={currentUser} onBack={closeTaskDetail} onUpdateProject={handleUpdateProject} onServerProjectConfirmed={(confirmedProject) => applyProjectSnapshot([confirmedProject], { source:'task-detail-server-confirmed' })} onPrepareProjectForUpload={prepareProjectForUpload} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} />
         ) : activeTab === 'command' ? (
           <CommandCentreView projects={projects} users={activeUsers} attendanceLogs={attendanceLogs} currentUser={currentUser} onOpenPerformance={() => setActiveTab('productivity')} onSelectProject={(p) => openTaskDetail(p, 'command')} onNavigate={(target) => { if (target === 'newCase') { setShowNewLead(true); return; } if (target === 'notifications') { setShowNotifs(true); return; } setActiveTab(target); }} />
         ) : activeTab === 'productivity' ? (
-          <ProductivityDashboard users={activeUsers} projects={projects} performanceRecords={performanceRecords} performanceSummary={performanceSummary} />
+          <ProductivityDashboard users={activeUsers} projects={projects} currentUser={currentUser} performanceRecords={performanceRecords} performanceSummary={performanceSummary} />
         ) : activeTab === 'closing' && currentUser.role === ROLES.ADMIN ? (
           <DailyClosingReport projects={projects} currentUser={currentUser} />
         ) : activeTab === 'reports' && currentUser.role === ROLES.ADMIN ? (
@@ -7420,6 +7440,8 @@ function AppShell() {
             canManage={canManage}
             selectedBoardDate={selectedBoardDate}
             setSelectedBoardDate={setSelectedBoardDate}
+            operationDateRange={operationDateRange}
+            setOperationDateRange={setOperationDateRange}
             boardViewMode={boardViewMode}
             setBoardViewMode={setBoardViewMode}
             setLeadFiles={setLeadFiles}
