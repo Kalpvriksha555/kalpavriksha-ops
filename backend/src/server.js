@@ -4365,10 +4365,25 @@ function performanceRangeMs(value = 'month') {
   return 30 * 86400000;
 }
 
+function validPerformanceDateKey(value) {
+  const key=String(value||'').trim();
+  if (!/^\d{4}-(0[1-9]|1[0-2])-([0-2]\d|3[01])$/.test(key)) return '';
+  const day=new Date(key+'T00:00:00+05:30');
+  return Number.isFinite(day.getTime()) && serverTodayKey(day.getTime())===key ? key : '';
+}
+
 function performanceScopeConfig(input = {}) {
   const source = typeof input === 'string' ? { range:input } : (input || {});
   const scope = String(source.scope || '').trim().toLowerCase();
   if (scope === 'overall') return { scope:'overall', month:'', range:'', key:'overall' };
+  if (scope === 'custom') {
+    const from=validPerformanceDateKey(source.from);
+    const to=validPerformanceDateKey(source.to);
+    if (!from || !to || from>to) throw new Error('Invalid custom performance date range.');
+    const start=Date.parse(from+'T00:00:00+05:30');
+    const end=Date.parse(to+'T00:00:00+05:30')+86400000;
+    return {scope:'custom',month:'',range:'',from,to,start,end,key:'custom:'+from+':'+to};
+  }
   if (scope === 'month') {
     const month = normalizePerformanceMonthKey(source.month);
     return { scope:'month', month, range:'', key:`month:${month}` };
@@ -4399,6 +4414,7 @@ function performanceEventMatchesScope(eventAt = 0, config = performanceScopeConf
   const timestamp = parseDateMs(eventAt);
   if (!timestamp || (baselineAt && timestamp < baselineAt)) return false;
   if (config.scope === 'overall') return true;
+  if (config.scope === 'custom') return timestamp >= config.start && timestamp < config.end;
   if (config.scope === 'month') return serverMonthKey(timestamp) === config.month;
   return timestamp >= nowMs - performanceRangeMs(config.range);
 }
@@ -5381,10 +5397,13 @@ app.get('/api/performance/diagnostics', requireCapability('performance:read'), a
 });
 
 app.get('/api/performance/leaderboard', requireCapability('performance:read'), async (req, res) => {
-  const scope = ['month','overall'].includes(String(req.query.scope || '').toLowerCase()) ? String(req.query.scope).toLowerCase() : '';
+  const scope = ['month','overall','custom'].includes(String(req.query.scope || '').toLowerCase()) ? String(req.query.scope).toLowerCase() : '';
   const range = ['week','month','quarter'].includes(String(req.query.range || '').toLowerCase()) ? String(req.query.range).toLowerCase() : '';
   const month = normalizePerformanceMonthKey(req.query.month);
-  res.json({ ok:true, leaderboard:buildTeamLeaderboard(readDb(), { scope, month, range }) });
+  const from=String(req.query.from||'').trim(),to=String(req.query.to||'').trim();
+  if (scope === 'custom' && (!validPerformanceDateKey(from)||!validPerformanceDateKey(to)||from>to))
+    return res.status(400).json({ok:false,code:'PERFORMANCE_DATE_RANGE_INVALID',error:'Select a valid From date on or before To date.'});
+  res.json({ ok:true, leaderboard:buildTeamLeaderboard(readDb(), { scope, month, range, from, to }) });
 });
 
 app.patch('/api/performance/baseline/:id', requireAdminSession, async (req, res) => {
@@ -5439,6 +5458,49 @@ app.patch('/api/performance/baseline/:id', requireAdminSession, async (req, res)
     res.json({ ok:true, enabled, baselineMonth:enabled ? baselineMonth : '', baselineAt, user:stripCredentialFields(nextUser), persistence });
   } catch (error) {
     sendApiFailure(res, req, error, 'Performance baseline could not be updated.');
+  }
+});
+
+// Reset ONLY the derived score/SLA reporting window. Underlying completion
+// records, case histories, attendance, payments, files and audit are immutable.
+app.post('/api/performance/baselines/reset', requireAdminSession, async (req, res) => {
+  try {
+    if (req.body?.confirmation !== 'RESET ANALYTICS BASELINE')
+      return res.status(400).json({ok:false,code:'RESET_CONFIRMATION_REQUIRED',error:'Confirm the non-destructive analytics baseline reset.'});
+    const scope = String(req.body?.scope || '').trim();
+    const targetId = String(req.body?.userId || '').trim();
+    if (!['all','member'].includes(scope) || (scope === 'member' && !targetId))
+      return res.status(400).json({ok:false,code:'RESET_SCOPE_INVALID',error:'Choose all team members or a specific designer/manager.'});
+    const approved = (readDb().users || []).filter(user =>
+      normalizeStatus(user.status) === 'APPROVED' && ['Manager','Designer'].includes(normalizeRole(user.role)));
+    const targets = scope === 'all' ? approved : approved.filter(user => String(user.id || '') === targetId);
+    if (!targets.length) return res.status(404).json({ok:false,code:'RESET_TARGET_NOT_FOUND',error:'No eligible, approved team member found.'});
+    const targetIds = targets.map(user => String(user.id));
+    const d = selectiveDb({collections:['users','audit'],collectionRowIds:{users:targetIds}});
+    const stamp = now();
+    const month = serverMonthKey(Date.parse(stamp));
+    const actor = requestActor(req);
+    const resetIds = new Set(targetIds);
+    let count = 0;
+    d.users = (d.users || []).map(user => {
+      if (!resetIds.has(String(user.id || ''))) return user;
+      count += 1;
+      const profile = {...(user.performanceProfile || {}),scoreBaselineEnabled:true,
+        scoreBaselineMonth:month,scoreBaselineAt:stamp,
+        scoreBaselineUpdatedAt:stamp,scoreBaselineUpdatedBy:actor.name};
+      return {...user,performanceProfile:profile,profileUpdatedAt:Date.parse(stamp)};
+    });
+    if (count !== targetIds.length) throw new Error('Performance baseline target changed before save.');
+    const auditEntry = addAudit(d,actor.name,
+      'Non-destructive SLA and productivity score baseline reset',
+      scope === 'all' ? `All eligible team members (${count})` : String(targets[0].name || targetId));
+    const persistence = await save(d,{actor:actor.name,reason:'performance_baseline_reset',
+      collections:['users','audit'],collectionRowIds:{users:targetIds,audit:[String(auditEntry.id)]},
+      skipRevisionSnapshot:true,periodicRevisionSnapshot:true});
+    res.json({ok:true,scope,resetCount:count,baselineAt:stamp,baselineMonth:month,
+      preserved:['cases','performanceRecords','attendance','payments','finance','files','audit'],persistence});
+  } catch (error) {
+    sendApiFailure(res,req,error,'Analytics baseline could not be reset.');
   }
 });
 

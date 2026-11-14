@@ -2,6 +2,8 @@ import { asArray, asRecord, firstArray, parseJsonArray, parseJsonRecord } from '
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, BarChart3, Bell, CheckCircle, Clock, Coffee, Download, FileText, ShieldCheck, Star, User, Users, XCircle } from 'lucide-react';
 import { Badge, MiniEmptyState } from '../shared';
+import { DateRangeFilter } from '../ui/DateRangeFilter.jsx';
+import { dateFilterKey, matchesDateRange, validDateRange } from '../../utils/dateRangeFilters.js';
 import { ONLINE_STALE_MS } from '../../config/appConfig';
 import { absoluteApiUrl } from '../../services/fileService';
 import { getStatusColor } from '../../services/taskService';
@@ -11,7 +13,7 @@ import { formatTaskId, getEstimateDetails, getLatestCompletedFileName, getTaskDe
 import { getTaskBusySince, getUserActiveTasks, getUserBusySince, getUserFreeSince, getUserLastCompletedAt, getUserDraftingTask, getDraftingElapsedMs } from '../../utils/presenceAttendanceUtils';
 import { authFetch } from '../../services/authService';
 import { apiHttpError, readApiRecord } from '../../services/apiContractService.js';
-import { notifyUser } from '../../services/uiFeedback.js';
+import { notifyUser, requestConfirmation } from '../../services/uiFeedback.js';
 import { getBackupStatusApi, getOperationalEventsApi, getOperationalJobsApi, getReliabilityStatusApi, retryOperationalJobApi } from '../../services/systemHealthService';
 import StorageSafetyPanel from './StorageSafetyPanel.jsx';
 
@@ -1254,9 +1256,30 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
   );
 };
 
-export const ProductivityDashboard = ({ users = [], projects = [], performanceRecords: externalPerformanceRecords = [], performanceSummary = null }) => {
-  const [range, setRange] = useState('month');
-  const [selectedMember, setSelectedMember] = useState('all');
+export const ProductivityDashboard = ({ users = [], projects = [], currentUser = null, performanceRecords: externalPerformanceRecords = [], performanceSummary = null, performanceViewState = null, setPerformanceViewState = null }) => {
+  const [localRange,setLocalRange] = useState('month');
+  const [localDateRange,setLocalDateRange] = useState({dateFrom:'',dateTo:''});
+  const [localSelectedMember,setLocalSelectedMember] = useState('all');
+  const range = performanceViewState?.range || localRange;
+  const selectedMember = performanceViewState?.selectedMember || localSelectedMember;
+  const dateRange = performanceViewState?.dateRange || localDateRange;
+  const setRange = value => typeof setPerformanceViewState === 'function'
+    ? setPerformanceViewState(previous=>({...previous,range:value}))
+    : setLocalRange(value);
+  const setSelectedMember = value => typeof setPerformanceViewState === 'function'
+    ? setPerformanceViewState(previous=>({...previous,selectedMember:value}))
+    : setLocalSelectedMember(value);
+  const setDateRange = updater => typeof setPerformanceViewState === 'function'
+    ? setPerformanceViewState(previous=>({
+        ...previous,
+        dateRange:typeof updater==='function' ? updater(previous?.dateRange || {dateFrom:'',dateTo:''}) : updater
+      }))
+    : setLocalDateRange(updater);
+  const [resettingBaseline,setResettingBaseline] = useState(false);
+  const [baselineRefreshPending,setBaselineRefreshPending] = useState(false);
+  const customRange = range === 'custom';
+  const customReady = customRange && Boolean(dateRange.dateFrom && dateRange.dateTo) && validDateRange(dateRange.dateFrom,dateRange.dateTo);
+  const resetPerformanceFilters = () => {setRange('month');setSelectedMember('all');setDateRange({dateFrom:'',dateTo:''});};
   const [engineSummary, setEngineSummary] = useState(null);
   const [engineBusy, setEngineBusy] = useState(false);
   const [leaderboard, setLeaderboard] = useState(null);
@@ -1266,7 +1289,11 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
   const todayKey = formatDateKey();
   const rangeMs = range === 'week' ? 7 * 86400000 : range === 'quarter' ? 90 * 86400000 : 30 * 86400000;
   const allProjects = Array.isArray(projects) ? projects.filter(Boolean) : [];
-  const scopedProjects = useMemo(() => allProjects.filter(p => (toMs(p.createdAt) || now) >= now - rangeMs || (toMs(p.completedAt) || 0) >= now - rangeMs), [projects, range]);
+  const scopedProjects = useMemo(() => allProjects.filter(p => customRange
+    ? (customReady && (matchesDateRange(p.createdAt,dateRange.dateFrom,dateRange.dateTo)
+      || matchesDateRange(p.completedAt,dateRange.dateFrom,dateRange.dateTo)))
+    : (toMs(p.createdAt) || now) >= now-rangeMs || (toMs(p.completedAt) || 0) >= now-rangeMs
+  ), [projects, range, dateRange.dateFrom, dateRange.dateTo, customReady]);
   const leaderboardMembers = Array.isArray(leaderboard?.members) ? leaderboard.members : [];
   const team = useMemo(() => {
     const byName = new Map();
@@ -1280,7 +1307,10 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
   const activeTeam = selectedMember === 'all' ? team : team.filter(u => normalizePersonName(u.name) === normalizePersonName(selectedMember));
   const generatedPerformanceRecords = useMemo(() => buildPerformanceRecords(allProjects), [projects]);
   const performanceRecords = useMemo(() => mergePerformanceRecordSets(externalPerformanceRecords, generatedPerformanceRecords), [externalPerformanceRecords, generatedPerformanceRecords]);
-  const effectivePerformanceSummary = engineSummary || (leaderboard ? { ...leaderboard, users:leaderboardMembers.map(member => ({ ...member, userName:member.name, completedCount:member.completedHistoryCount })) } : performanceSummary) || null;
+  const backendLeaderboardReady = Array.isArray(leaderboard?.members);
+  const effectivePerformanceSummary = backendLeaderboardReady
+    ? { ...leaderboard, users:leaderboardMembers.map(member => ({...member,userName:member.name,completedCount:member.completedHistoryCount})) }
+    : (engineSummary || performanceSummary || null);
   const summaryUsers = Array.isArray(effectivePerformanceSummary?.users) ? effectivePerformanceSummary.users : [];
   const summaryByName = useMemo(() => new Map(summaryUsers.map(row => [normalizePersonName(row.userName || row.name), row])), [summaryUsers]);
   const leaderboardByName = useMemo(() => new Map(leaderboardMembers.map(row => [normalizePersonName(row.name), row])), [leaderboardMembers]);
@@ -1318,7 +1348,15 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
   useEffect(() => {
     let active = true;
     setLeaderboardError('');
-    authFetch(absoluteApiUrl(`/api/performance/leaderboard?range=${encodeURIComponent(range)}`), { cache:'no-store', timeoutMs:30_000 })
+    if (customRange && !customReady) {
+      setLeaderboard(null);
+      setLeaderboardError('Choose a valid From and To date to compare this period.');
+      return () => {active=false;};
+    }
+    const query = customRange
+      ? `scope=custom&from=${encodeURIComponent(dateRange.dateFrom)}&to=${encodeURIComponent(dateRange.dateTo)}`
+      : `range=${encodeURIComponent(range)}`;
+    authFetch(absoluteApiUrl(`/api/performance/leaderboard?${query}`), { cache:'no-store', timeoutMs:30_000 })
       .then(async res => {
         const data = await readApiRecord(res, { operation:'Performance leaderboard', requireOk:true, requiredFields:['leaderboard'] });
         if (!res.ok) throw apiHttpError(res, data, 'Leaderboard failed');
@@ -1327,10 +1365,11 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
       .then(data => {
         if (!active) return;
         setLeaderboard(Object.keys(asRecord(data.leaderboard)).length ? asRecord(data.leaderboard) : null);
+        if (Array.isArray(data.leaderboard?.members)) setBaselineRefreshPending(false);
       })
       .catch(error => { if (active) setLeaderboardError(error?.message || 'Team comparison could not be loaded.'); });
     return () => { active = false; };
-  }, [range, leaderboardRefreshKey]);
+  }, [range, dateRange.dateFrom, dateRange.dateTo, leaderboardRefreshKey]);
 
 
   const rebuildPerformanceEngine = async () => {
@@ -1347,31 +1386,67 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
       setEngineBusy(false);
     }
   };
+  const resetScoreBaseline = async () => {
+    if (String(currentUser?.role || '').toUpperCase() !== 'ADMIN' || resettingBaseline) return;
+    const member=selectedMember==='all' ? null : team.find(u=>normalizePersonName(u.name)===normalizePersonName(selectedMember));
+    if (selectedMember!=='all' && !member?.id) return notifyUser('Choose an approved team member first.',{tone:'error'});
+    const target=member?.name || 'all eligible designers and managers';
+    const accepted=await requestConfirmation(
+      `Start new SLA and performance scores for ${target} from this moment? Old cases, attendance, payments, uploads, and performance history will remain untouched.`,
+      {title:'Reset analytics baseline only',confirmLabel:'Start fresh scores',cancelLabel:'Cancel'}
+    );
+    if (!accepted) return;
+    setResettingBaseline(true);
+    try {
+      const response=await authFetch(absoluteApiUrl('/api/performance/baselines/reset'),{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({scope:member?'member':'all',userId:member?.id||'',
+          confirmation:'RESET ANALYTICS BASELINE'})
+      });
+      const data=await readApiRecord(response,{operation:'Reset analytics baseline',requireOk:true});
+      if (!response.ok) throw apiHttpError(response,data,'Reset analytics baseline failed');
+      setBaselineRefreshPending(true);
+      setLeaderboard(null);
+      setEngineSummary(null);
+      setLeaderboardRefreshKey(key=>key+1);
+      notifyUser(`Fresh SLA and productivity baseline started for ${data.resetCount} team member(s). Historical data is preserved.`,{tone:'success'});
+    } catch(error){
+      notifyUser(error?.message || 'Analytics baseline could not be reset.',{tone:'error'});
+    } finally { setResettingBaseline(false); }
+  };
   const getMemberProjects = (name) => scopedProjectsByOwner.get(normalizePersonName(name)) || [];
   const getMemberRecords = (name) => performanceRecordsByOwner.get(normalizePersonName(name)) || [];
   const memberRows = useMemo(() => activeTeam.map(u => {
     const summaryRow = summaryByName.get(normalizePersonName(u.name)) || {};
     const leaderboardRow = leaderboardByName.get(normalizePersonName(u.name)) || {};
-    const assigned = getMemberProjects(u.name);
+    const baselineAt=toMs(u.performanceProfile?.scoreBaselineAt);
+    const currentScope=ts=>customRange
+      ? (customReady && matchesDateRange(ts,dateRange.dateFrom,dateRange.dateTo))
+      : Boolean(toMs(ts) && toMs(ts)>=now-rangeMs);
+    const assigned = getMemberProjects(u.name).filter(p=>!baselineAt || toMs(p.createdAt)>=baselineAt);
     const completed = assigned.filter(isProjectCompleted);
-    const allAssigned = allProjectsByOwner.get(normalizePersonName(u.name)) || [];
+    const allAssigned = (allProjectsByOwner.get(normalizePersonName(u.name)) || [])
+      .filter(p=>(!baselineAt || toMs(p.createdAt)>=baselineAt) &&
+        currentScope(p.completedAt || p.createdAt));
     const analyticsCompleted = allAssigned.filter(isAnalyticsCompletedProject);
-    const completedRecords = getMemberRecords(u.name);
+    const completedRecords = getMemberRecords(u.name).filter(rec=>
+      (!baselineAt || toMs(rec.completedAt || rec.completionEventAt || rec.finishedAt)>=baselineAt) &&
+      currentScope(rec.completedAt || rec.completionEventAt || rec.finishedAt));
     const completedToday = Number(leaderboardRow.completedToday ?? completed.filter(p => formatDateKey(p.completedAt || p.updatedAt || p.createdAt) === todayKey).length) || 0;
     const active = assigned.filter(isIncompleteProject);
     const revisions = assigned.filter(p => getProjectRevisionTotal(p) > 0);
     const profileAverage = Number(u.performanceProfile?.averageCompletionMinutes || u.averageCompletionMinutes || 0) || 0;
     const summaryAvgCompletion = Number(summaryRow.avgCompletionMinutes || summaryRow.averageCompletionMinutes || 0) || 0;
     const summaryAvgReview = Number(summaryRow.avgReviewMinutes || summaryRow.averageReviewMinutes || 0) || 0;
-    const avgMins = summaryAvgCompletion || averageMinutes(completedRecords, r => r.totalCompletionMinutes) || averageMinutes(analyticsCompleted, p => getActiveCompletionMinutes(p)) || averageMinutes(completed, p => getActiveCompletionMinutes(p)) || profileAverage;
-    const avgReviewMins = summaryAvgReview || averageMinutes(completedRecords, r => r.reviewMinutes) || averageMinutes(analyticsCompleted, p => getReviewDurationMinutes(p)) || averageMinutes(completed, p => getReviewDurationMinutes(p));
+    const avgMins = backendLeaderboardReady ? summaryAvgCompletion : summaryAvgCompletion || averageMinutes(completedRecords, r => r.totalCompletionMinutes) || averageMinutes(analyticsCompleted, p => getActiveCompletionMinutes(p)) || averageMinutes(completed, p => getActiveCompletionMinutes(p)) || profileAverage;
+    const avgReviewMins = backendLeaderboardReady ? summaryAvgReview : summaryAvgReview || averageMinutes(completedRecords, r => r.reviewMinutes) || averageMinutes(analyticsCompleted, p => getReviewDurationMinutes(p)) || averageMinutes(completed, p => getReviewDurationMinutes(p));
     const liveTasks = active.length ? active : (Number(leaderboardRow.activeCount || 0) > 0 ? [{ id:'Active task' }] : []);
     const live = getLiveStatus(u, liveTasks);
     const breakMinutes = getTodayBreakMinutes(u);
     const summarySla = summaryRow.slaPct ?? summaryRow.slaPercentage;
     const slaPct = summarySla !== undefined && summarySla !== null ? Number(summarySla) || 0 : getSlaCompliancePct(assigned);
-    const revisionTotal = Number(summaryRow.revisionCount || 0) || assigned.reduce((sum, p) => sum + getProjectRevisionTotal(p), 0);
-    const revisionRate = Number(summaryRow.revisionRate || 0) || (analyticsCompleted.length ? Number((revisionTotal / analyticsCompleted.length).toFixed(1)) : (completed.length ? Number((revisionTotal / completed.length).toFixed(1)) : 0));
+    const revisionTotal = backendLeaderboardReady ? Number(summaryRow.revisionCount || 0) : Number(summaryRow.revisionCount || 0) || assigned.reduce((sum, p) => sum + getProjectRevisionTotal(p), 0);
+    const revisionRate = backendLeaderboardReady ? Number(summaryRow.revisionRate || 0) : Number(summaryRow.revisionRate || 0) || (analyticsCompleted.length ? Number((revisionTotal / analyticsCompleted.length).toFixed(1)) : (completed.length ? Number((revisionTotal / completed.length).toFixed(1)) : 0));
     const revisionPct = assigned.length ? Math.round((revisions.length / assigned.length) * 100) : 0;
     // Score completion speed against realistic drafting targets instead of punishing every task above 60 minutes.
     // <= 90m is excellent, 4h is still workable, and very slow work gradually falls toward attention-needed.
@@ -1379,10 +1454,20 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
     const revisionScore = Math.max(0, Math.round(100 - revisionRate * 25));
     const qualityScore = Math.max(0, Math.min(100, Number(summaryRow.scoreBreakdown?.qualityScore || 0) || revisionScore));
     const productivityScore = summaryRow.productivityScore !== undefined && summaryRow.productivityScore !== null ? Number(summaryRow.productivityScore) || 0 : Math.round((speedScore * 0.3) + (slaPct * 0.3) + (qualityScore * 0.2) + (revisionScore * 0.15) + (completedToday > 0 ? 5 : 0));
-    const rolling10CompletionMinutes = Number(summaryRow.rolling10CompletionMinutes || 0) || avgMins;
-    const rolling30CompletionMinutes = Number(summaryRow.rolling30CompletionMinutes || 0) || avgMins;
+    const rolling10CompletionMinutes = backendLeaderboardReady ? Number(summaryRow.rolling10CompletionMinutes || 0) : Number(summaryRow.rolling10CompletionMinutes || 0) || avgMins;
+    const rolling30CompletionMinutes = backendLeaderboardReady ? Number(summaryRow.rolling30CompletionMinutes || 0) : Number(summaryRow.rolling30CompletionMinutes || 0) || avgMins;
     const rawScoreBreakdown = summaryRow.scoreBreakdown || {};
-    const scoreBreakdown = {
+    // A server-reported score of zero is authoritative after a baseline reset.
+    // Never reconstitute positive sub-scores from old case totals when there is
+    // no new completion history.
+    const scoreBreakdown = backendLeaderboardReady ? {
+      speedScore:Number(rawScoreBreakdown.speedScore ?? 0),
+      qualityScore:Number(rawScoreBreakdown.qualityScore ?? 0),
+      slaScore:Number(rawScoreBreakdown.slaScore ?? 0),
+      revisionScore:Number(rawScoreBreakdown.revisionScore ?? 0),
+      attendanceScore:Number(rawScoreBreakdown.attendanceScore ?? 0),
+      productivityScore
+    } : {
       speedScore: Number(rawScoreBreakdown.speedScore || 0) > 0 ? Number(rawScoreBreakdown.speedScore) : speedScore,
       qualityScore: Number(rawScoreBreakdown.qualityScore || 0) > 0 ? Number(rawScoreBreakdown.qualityScore) : qualityScore,
       slaScore: Number(rawScoreBreakdown.slaScore || 0) > 0 ? Number(rawScoreBreakdown.slaScore) : slaPct,
@@ -1390,7 +1475,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
       attendanceScore: Number(rawScoreBreakdown.attendanceScore || 90),
       productivityScore
     };
-    const rawCaseTypeStats = Array.isArray(summaryRow.caseTypeStats) && summaryRow.caseTypeStats.length ? summaryRow.caseTypeStats : getCaseTypeStats(completedRecords.length ? completedRecords : (analyticsCompleted.length ? analyticsCompleted : completed));
+    const rawCaseTypeStats = backendLeaderboardReady ? asArray(summaryRow.caseTypeStats) : Array.isArray(summaryRow.caseTypeStats) && summaryRow.caseTypeStats.length ? summaryRow.caseTypeStats : getCaseTypeStats(completedRecords.length ? completedRecords : (analyticsCompleted.length ? analyticsCompleted : completed));
     const caseTypeStats = rawCaseTypeStats.map(stat => ({ ...stat, avg: Number(stat.avg || stat.avgCompletionMinutes || stat.averageMinutes || 0) || 0 })).filter(stat => stat.count || stat.avg);
     const midpoint = now - Math.round(rangeMs / 2);
     const trendSource = completedRecords.length ? completedRecords : (analyticsCompleted.length ? analyticsCompleted : completed).map(p => ({ completedAt: getLatestTaskTimestamp(p) || toMs(p.completedAt || p.updatedAt || p.createdAt), totalCompletionMinutes: getActiveCompletionMinutes(p) }));
@@ -1407,8 +1492,8 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
     const completedCount = Number(leaderboardRow.completedCount ?? completed.length) || 0;
     const activeCount = Number(leaderboardRow.activeCount ?? active.length) || 0;
     const revisionsCount = Number(leaderboardRow.revisionCases ?? revisions.length) || 0;
-    return { user: u, assigned, completed, active, revisions, assignedCount, completedCount, activeCount, revisionsCount, completedToday, avgMins, avgReviewMins, rolling10CompletionMinutes, rolling30CompletionMinutes, scoreBreakdown, live, breakMinutes, slaPct, revisionPct, revisionRate, productivityScore, caseTypeStats, trend, trendLabel, timingSource: summaryRow.timingSource || (summaryRow.completedCount ? 'Backend History' : completedRecords.length ? 'Performance Records' : analyticsCompleted.length ? 'Task History' : 'No history yet'), historyCompletedCount: Number(summaryRow.completedCount || leaderboardRow.completedHistoryCount || completedRecords.length || analyticsCompleted.length || completed.length || 0) };
-  }).sort((a, b) => b.productivityScore - a.productivityScore || b.completedCount - a.completedCount || b.assignedCount - a.assignedCount), [activeTeam, summaryByName, leaderboardByName, scopedProjectsByOwner, allProjectsByOwner, performanceRecordsByOwner, todayKey, now, rangeMs]);
+    return { user: u, assigned, completed, active, revisions, assignedCount, completedCount, activeCount, revisionsCount, completedToday, avgMins, avgReviewMins, rolling10CompletionMinutes, rolling30CompletionMinutes, scoreBreakdown, live, breakMinutes, slaPct, revisionPct, revisionRate, productivityScore, caseTypeStats, trend, trendLabel, timingSource: summaryRow.timingSource || (summaryRow.completedCount ? 'Backend History' : completedRecords.length ? 'Performance Records' : analyticsCompleted.length ? 'Task History' : 'No history yet'), historyCompletedCount: backendLeaderboardReady ? Number(summaryRow.completedCount ?? leaderboardRow.completedHistoryCount ?? 0) : Number(summaryRow.completedCount || leaderboardRow.completedHistoryCount || completedRecords.length || analyticsCompleted.length || completed.length || 0) };
+  }).sort((a, b) => b.productivityScore - a.productivityScore || b.completedCount - a.completedCount || b.assignedCount - a.assignedCount), [activeTeam, summaryByName, leaderboardByName, scopedProjectsByOwner, allProjectsByOwner, performanceRecordsByOwner, todayKey, now, rangeMs, backendLeaderboardReady, dateRange.dateFrom, dateRange.dateTo, customRange, customReady]);
   const totals = memberRows.reduce((acc, row) => {
     acc.assigned += row.assignedCount;
     acc.completed += row.completedCount;
@@ -1419,9 +1504,9 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
     return acc;
   }, { assigned: 0, completed: 0, active: 0, revisions: 0, today: 0, avgTotal: 0, avgCount: 0 });
   const summaryTeamAvg = Number(effectivePerformanceSummary?.avgCompletionMinutes || effectivePerformanceSummary?.averageCompletionMinutes || 0) || 0;
-  const teamAvgMins = summaryTeamAvg || (totals.avgCount ? Math.round(totals.avgTotal / totals.avgCount) : 0);
-  const teamRolling10 = Number(effectivePerformanceSummary?.rolling10CompletionMinutes || 0) || teamAvgMins;
-  const teamRolling30 = Number(effectivePerformanceSummary?.rolling30CompletionMinutes || 0) || teamAvgMins;
+  const teamAvgMins = backendLeaderboardReady ? summaryTeamAvg : summaryTeamAvg || (totals.avgCount ? Math.round(totals.avgTotal / totals.avgCount) : 0);
+  const teamRolling10 = backendLeaderboardReady ? Number(effectivePerformanceSummary?.rolling10CompletionMinutes || 0) : Number(effectivePerformanceSummary?.rolling10CompletionMinutes || 0) || teamAvgMins;
+  const teamRolling30 = backendLeaderboardReady ? Number(effectivePerformanceSummary?.rolling30CompletionMinutes || 0) : Number(effectivePerformanceSummary?.rolling30CompletionMinutes || 0) || teamAvgMins;
   const teamTrend = effectivePerformanceSummary?.trend || { pct: 0, label: 'Stable' };
   const avgSla = memberRows.length ? Math.round(memberRows.reduce((sum, row) => sum + row.slaPct, 0) / memberRows.length) : 100;
   const exportPerformance = () => exportToCSV(
@@ -1530,6 +1615,21 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
     const weakest = options.sort((a, b) => a.score - b.score)[0];
     return weakest?.text || 'Keep performance stable and avoid late task buildup.';
   };
+  // A successful baseline reset must never briefly display old scores from
+  // the in-memory snapshot while awaiting the authoritative scoped leaderboard.
+  if (baselineRefreshPending) return (
+    <div className="kalpa-production-polish bg-white rounded-3xl border border-slate-100 p-6 space-y-4">
+      <h1 className="text-2xl font-black text-slate-800">Performance Analytics</h1>
+      <p role="status" className="text-sm font-bold text-indigo-700">
+        Analytics baseline saved. Updating the scorecards from the verified server state; historical records remain preserved.
+      </p>
+      {leaderboardError && <p className="text-sm font-bold text-amber-700">{leaderboardError}</p>}
+      <button type="button" onClick={()=>setLeaderboardRefreshKey(key=>key+1)}
+        className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-bold text-sm">
+        Retry score refresh
+      </button>
+    </div>
+  );
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in duration-200">
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
@@ -1539,13 +1639,31 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
           <p className="text-slate-500 font-medium mt-2 max-w-4xl">Productivity, average completion, review speed, case-type timing, revisions, and SLA quality.</p>
         </div>
         <div className="flex flex-wrap gap-3">
-          <select value={range} onChange={e => setRange(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none">
-            <option value="week">Last 7 days</option><option value="month">Last 30 days</option><option value="quarter">Last 90 days</option>
+          <select value={range} onChange={e => {
+            const next=e.target.value;
+            setRange(next);
+            if(next==='custom') setDateRange(previous=>({
+              dateFrom:previous.dateFrom||dateFilterKey(Date.now()-30*86400000),
+              dateTo:previous.dateTo||dateFilterKey(Date.now())
+            }));
+          }} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none" aria-label="Performance period">
+            <option value="week">Last 7 days</option><option value="month">Last 30 days</option><option value="quarter">Last 90 days</option><option value="custom">Custom date range</option>
           </select>
+          {customRange && <DateRangeFilter from={dateRange.dateFrom} to={dateRange.dateTo}
+            label="Performance date range" onChange={patch=>setDateRange(prev=>({...prev,...patch}))} />}
+          <button type="button" onClick={resetPerformanceFilters}
+            className="bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl px-4 py-2.5 text-xs font-black">Reset filters</button>
           <select value={selectedMember} onChange={e => setSelectedMember(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none">
             <option value="all">All team members</option>{team.map(u => <option key={u.id} value={u.name}>{u.name}</option>)}
           </select>
           <button type="button" onClick={exportPerformance} className="bg-indigo-600 text-white font-bold px-4 py-2.5 rounded-xl shadow-sm"><Download className="w-4 h-4 inline mr-2"/>Export</button>
+          {String(currentUser?.role||'').toUpperCase()==='ADMIN' && (
+            <button type="button" onClick={resetScoreBaseline} disabled={resettingBaseline}
+              className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl px-4 py-2.5 text-xs font-black disabled:opacity-50"
+              title="Restart only displayed productivity/SLA scoring, preserving all business data">
+              {resettingBaseline?'Resetting scores…':selectedMember==='all'?'Reset team SLA + scores':'Reset selected member SLA + scores'}
+            </button>
+          )}
         </div>
       </div>
       <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-4">
@@ -1728,8 +1846,21 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
   );
 };
 
-export const ReportsAnalyticsView = ({ projects = [], users = [], currentUser = null }) => {
-  const [selectedMonth, setSelectedMonth] = useState(getCurrentAccountingMonthKey());
+export const ReportsAnalyticsView = ({ projects = [], users = [], currentUser = null, reportsViewState = null, setReportsViewState = null }) => {
+  const [localSelectedMonth,setLocalSelectedMonth] = useState(getCurrentAccountingMonthKey());
+  const [localReportDateRange,setLocalReportDateRange] = useState({dateFrom:'',dateTo:''});
+  const selectedMonth=reportsViewState?.selectedMonth || localSelectedMonth;
+  const reportDateRange=reportsViewState?.dateRange || localReportDateRange;
+  const setSelectedMonth=value=>typeof setReportsViewState==='function'
+    ? setReportsViewState(previous=>({...previous,selectedMonth:value}))
+    : setLocalSelectedMonth(value);
+  const setReportDateRange=updater=>typeof setReportsViewState==='function'
+    ? setReportsViewState(previous=>({
+        ...previous,
+        dateRange:typeof updater==='function'?updater(previous?.dateRange || {dateFrom:'',dateTo:''}):updater
+      }))
+    : setLocalReportDateRange(updater);
+  const {dateFrom,dateTo}=reportDateRange;
   const accountingMonth = normalizeAccountingMonthKey(selectedMonth, getCurrentAccountingMonthKey());
   const accountingMonthLabel = formatAccountingMonthLabel(accountingMonth);
   const projectList = useMemo(() => Array.isArray(projects) ? projects.filter(Boolean) : [], [projects]);
@@ -1737,11 +1868,11 @@ export const ReportsAnalyticsView = ({ projects = [], users = [], currentUser = 
   // Reports use exact calendar-month event buckets instead of rolling 30/90-day
   // windows. A case created last month and completed this month contributes only
   // to this month's completion metric, never to this month's new workload.
-  const createdScoped = useMemo(() => projectList.filter(project => getProjectCreatedMonthKey(project) === accountingMonth), [projectList, accountingMonth]);
-  const completed = useMemo(() => projectList.filter(project => isProjectCompleted(project) && getProjectCompletedMonthKey(project) === accountingMonth), [projectList, accountingMonth]);
+  const createdScoped = useMemo(() => projectList.filter(project => getProjectCreatedMonthKey(project) === accountingMonth && matchesDateRange(project.createdAt || project.receivedAt || project.taskDate, dateFrom, dateTo)), [projectList, accountingMonth, dateFrom, dateTo]);
+  const completed = useMemo(() => projectList.filter(project => isProjectCompleted(project) && getProjectCompletedMonthKey(project) === accountingMonth && matchesDateRange(project.completedAt || project.finalApprovedAt || project.draftingCompletedAt, dateFrom, dateTo)), [projectList, accountingMonth, dateFrom, dateTo]);
   const pending = useMemo(() => createdScoped.filter(isIncompleteProject), [createdScoped]);
-  const revisions = useMemo(() => projectList.filter(project => hasRevisionInAccountingMonth(project, accountingMonth)), [projectList, accountingMonth]);
-  const financeEntries = useMemo(() => projectList.map(project => ({ project, entry:buildProjectMonthlyFinanceEntry(project, accountingMonth) })).filter(item => item.entry.hasActivity), [projectList, accountingMonth]);
+  const revisions = useMemo(() => projectList.filter(project => hasRevisionInAccountingMonth(project, accountingMonth) && matchesDateRange(project.lastRevisionAt || project.revisionUpdatedAt || project.revisionRequestedAt || project.revertedAt, dateFrom, dateTo)), [projectList, accountingMonth, dateFrom, dateTo]);
+  const financeEntries = useMemo(() => projectList.map(project => ({ project, entry:buildProjectMonthlyFinanceEntry(project, accountingMonth) })).filter(item => item.entry.hasActivity && matchesDateRange(item.entry.activityAt, dateFrom, dateTo)), [projectList, accountingMonth, dateFrom, dateTo]);
   const paymentPending = financeEntries.filter(({ entry }) => ['Pending', 'Partially Paid'].includes(entry.statusAtClose));
   const paymentReceived = financeEntries.filter(({ entry }) => entry.received !== 0);
   const reportAsOfMs = Math.min(Date.now(), getAccountingMonthEndTimestamp(accountingMonth) || Date.now());
@@ -1794,11 +1925,13 @@ export const ReportsAnalyticsView = ({ projects = [], users = [], currentUser = 
         <div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Reports</h1><p className="text-slate-500 font-medium mt-2 max-w-4xl">Every report is isolated to one exact calendar month. New workload, completions, revisions and finance events are bucketed by their own dates so previous-month data is never mixed into {accountingMonthLabel}.</p></div>
         <div className="flex flex-wrap items-end gap-3">
           <label className="bg-white border-2 border-indigo-100 rounded-xl px-3 py-2 shadow-sm"><span className="block text-[10px] font-black uppercase tracking-widest text-indigo-500 mb-1">Report Month</span><input type="month" value={accountingMonth} max={getCurrentAccountingMonthKey()} onChange={event => setSelectedMonth(event.target.value)} className="font-black text-slate-800 outline-none bg-transparent" aria-label="Reports accounting month" /></label>
+          <DateRangeFilter from={dateFrom} to={dateTo} label="Report event date range" onChange={patch=>setReportDateRange(prev=>({...prev,...patch}))} />
+          <button type="button" onClick={()=>setReportDateRange({dateFrom:'',dateTo:''})} className="min-h-10 px-3 rounded-xl bg-slate-100 text-slate-700 text-xs font-black">Reset filters</button>
           <button type="button" onClick={exportSummary} className="bg-emerald-100 text-emerald-700 font-bold px-4 py-2.5 rounded-xl"><Download className="w-4 h-4 inline mr-2"/>Export Summary</button>
           <button type="button" onClick={exportWorkload} className="bg-indigo-100 text-indigo-700 font-bold px-4 py-2.5 rounded-xl"><Download className="w-4 h-4 inline mr-2"/>Export Reports</button>
         </div>
       </div>
-      <div className="bg-indigo-50 border-2 border-indigo-100 rounded-2xl px-5 py-4"><p className="font-black text-indigo-800">Active reporting period: {accountingMonthLabel}</p><p className="text-sm font-bold text-indigo-600 mt-1">No rolling 30-day or 90-day window is used. Changing the month replaces the complete report period.</p></div>
+      <div className="bg-indigo-50 border-2 border-indigo-100 rounded-2xl px-5 py-4"><p className="font-black text-indigo-800">Active reporting period: {accountingMonthLabel}</p><p className="text-sm font-bold text-indigo-600 mt-1">No rolling 30-day or 90-day window is used. Changing the month retains the date-range filter. Finance values remain exact selected-month totals for cases whose last finance activity matches the range; they are not day-level transaction totals.</p></div>
       <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-4"><StatCard label="New Workload" value={createdScoped.length} hint="created this month"/><StatCard label="Completed" value={completed.length} hint="completed this month"/><StatCard label="Pending" value={pending.length} hint="this month's new cases"/><StatCard label="Revisions" value={revisions.length} hint="activity this month"/><StatCard label="Pending Pay" value={paymentPending.length} hint={`₹${pendingAmount.toLocaleString()}`}/><StatCard label="Received" value={`₹${receivedAmount.toLocaleString()}`} hint="this month only"/><StatCard label="Net" value={`₹${netAmount.toLocaleString()}`} hint="after expense/refund"/><StatCard label="SLA" value={`${slaPct}%`} hint="selected-month cohort"/></div>
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-5"><SimpleTable title="Bank Report" columns={['Bank', 'New Cases']} rows={bankRows} empty={`No new bank cases in ${accountingMonthLabel}.`}/><SimpleTable title="Branch Report" columns={['Branch', 'New Cases']} rows={branchRows} empty={`No new branch cases in ${accountingMonthLabel}.`}/><SimpleTable title="Case Type Report" columns={['Case Type', 'New Cases']} rows={caseTypeRows} empty={`No new case types in ${accountingMonthLabel}.`}/><SimpleTable title="Payment Aging Report" columns={['Age', 'Pending Cases']} rows={topRowsFromCount(paymentAging, 10)} empty={`No selected-month pending payments in ${accountingMonthLabel}.`}/></div>
     </div>

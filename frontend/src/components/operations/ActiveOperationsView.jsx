@@ -2,6 +2,7 @@ import { asArray } from '../../utils/runtimeShapeUtils.js';
 import React, { useEffect, useState } from 'react';
 import { Calendar, List, KanbanSquare, Plus, Flag, Users, Clock, MessageSquare } from 'lucide-react';
 import { Badge } from '../shared';
+import { DateRangeFilter } from '../ui/DateRangeFilter.jsx';
 import { formatDateKey, formatDateTime, formatLastSeenDateTime, formatDuration, formatMinutes } from '../../utils/date';
 import { formatTaskId, getTaskDescription, getEstimateDetails, getLatestCompletedFileName } from '../../utils/taskDisplayUtils';
 import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass } from '../../utils/paymentStatusUtils';
@@ -285,6 +286,8 @@ export const ActiveOperationsView = ({
   canManage,
   selectedBoardDate,
   setSelectedBoardDate,
+  operationDateRange = {dateFrom:'',dateTo:''},
+  setOperationDateRange,
   boardViewMode,
   setBoardViewMode,
   setLeadFiles,
@@ -335,9 +338,20 @@ export const ActiveOperationsView = ({
       <div className="flex flex-wrap gap-3">
         {(activeTab === 'board' || activeTab === 'my_tasks') && (
           <div className="bg-white border-2 border-slate-100 rounded-xl px-3 py-1.5 flex items-center gap-2 shadow-sm">
+            <span className="text-[10px] font-black text-slate-500">{operationDateRange.dateFrom||operationDateRange.dateTo ? 'Day view (range overrides)' : 'Day view'}</span>
             <Calendar className="w-4 h-4 text-indigo-500" />
             <input type="date" value={selectedBoardDate} onChange={(e) => setSelectedBoardDate(e.target.value)} className="text-xs font-bold text-slate-700 bg-transparent outline-none" />
           </div>
+        )}
+        {(activeTab === 'board' || activeTab === 'my_tasks') && (
+          <DateRangeFilter from={operationDateRange.dateFrom||''} to={operationDateRange.dateTo||''}
+            label="Case creation date range" onChange={patch=>setOperationDateRange?.(prev=>({...prev,...patch}))} />
+        )}
+        {(activeTab === 'board' || activeTab === 'my_tasks') && (
+          <button type="button" onClick={()=>{ setOperationDateRange?.({dateFrom:'',dateTo:''}); setSelectedBoardDate(formatDateKey()); }}
+            className="bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl px-3 py-2 text-xs font-black">
+            Reset filters
+          </button>
         )}
         {(activeTab === 'board' || activeTab === 'my_tasks') && (
           <div className="bg-slate-100 p-1 rounded-xl flex items-center shadow-inner">

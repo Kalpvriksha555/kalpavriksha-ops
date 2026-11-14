@@ -1,6 +1,8 @@
 import { asArray, asRecord, firstArray, parseJsonArray, parseJsonRecord, toArray } from './utils/runtimeShapeUtils.js';
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { FeedbackHost } from './components/ui/FeedbackHost.jsx';
+import { DateRangeFilter } from './components/ui/DateRangeFilter.jsx';
+import { matchesDateRange, monthOverlapsDateRange } from './utils/dateRangeFilters.js';
 import { notifyUser, requestConfirmation, requestInput } from './services/uiFeedback.js';
 import { CLIENT_API_CONTRACT_DIAGNOSTIC_EVENT, CLIENT_RUNTIME_DIAGNOSTIC_EVENT, recordApiDiagnosticEvent, recordRuntimeDiagnostic, setRuntimeDiagnosticContextProvider } from './services/runtimeDiagnosticsService.js';
 import { useAdaptiveWorkspaceSync } from './hooks/useAdaptiveWorkspaceSync.js';
@@ -2117,9 +2119,21 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, onCreateUser, onUp
   );
 };
 
-const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
-  const [filterDate, setFilterDate] = useState(getIndiaDateKey());
-  const [monthKey, setMonthKey] = useState(getIndiaDateKey().slice(0, 7));
+const AttendanceView = ({ attendanceLogs = [], users = [], projects = [], attendanceViewState = null, setAttendanceViewState = null }) => {
+  const [localAttendanceState,setLocalAttendanceState] = useState({
+    filterDate:getIndiaDateKey(),monthKey:getIndiaDateKey().slice(0,7),dateFrom:'',dateTo:''
+  });
+  const state=attendanceViewState || localAttendanceState;
+  const change=(patch)=>typeof setAttendanceViewState==='function'
+    ? setAttendanceViewState(previous=>({...previous,...patch}))
+    : setLocalAttendanceState(previous=>({...previous,...patch}));
+  const filterDate=state.filterDate || getIndiaDateKey();
+  const monthKey=state.monthKey || getIndiaDateKey().slice(0,7);
+  const dateFrom=String(state.dateFrom||'');
+  const dateTo=String(state.dateTo||'');
+  const setFilterDate=value=>change({filterDate:value});
+  const setMonthKey=value=>change({monthKey:value});
+  const resetAttendanceFilters=()=>change({filterDate:getIndiaDateKey(),monthKey:getIndiaDateKey().slice(0,7),dateFrom:'',dateTo:''});
   const nowMs = Date.now();
   const teamMembers = getOperationalUsers(users && users.length ? users : INITIAL_USERS, { includeAdmins: false });
   const attendanceEngine = buildAttendanceEngineV3({ attendanceLogs, users: teamMembers, projects, dateKey: filterDate, now: nowMs });
@@ -2131,7 +2145,7 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
     const [year, month] = monthKey.split('-').map(Number);
     const count = new Date(year, month, 0).getDate();
     return Array.from({ length: count }, (_, i) => `${monthKey}-${String(i + 1).padStart(2, '0')}`);
-  })();
+  })().filter(day => matchesDateRange(day, dateFrom, dateTo));
   const monthlyRowFor = (user, date) => buildAttendanceEngineV3({ attendanceLogs: safeLogs, users: [user], projects, dateKey: date, now: nowMs }).rows[0] || null;
   const getMonthlyAttendanceCell = (user, date) => {
     const matchingLogs = safeLogs.filter(log => log && log.date === date && (String(log.userId || '') === String(user.id || '') || String(log.name || '').trim().toLowerCase() === String(user.name || '').trim().toLowerCase()));
@@ -2179,7 +2193,10 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <input type="date" value={filterDate} onChange={(e) => setFilterDate(e.target.value)} className="border-2 border-slate-200 rounded-xl p-2.5 font-bold text-slate-700 outline-none" />
-          <input type="month" value={monthKey} onChange={(e) => setMonthKey(e.target.value)} className="border-2 border-slate-200 rounded-xl p-2.5 font-bold text-slate-700 outline-none" />
+          <input type="month" value={monthKey} onChange={(e) => setMonthKey(e.target.value)} className="border-2 border-slate-200 rounded-xl p-2.5 font-bold text-slate-700 outline-none" aria-label="Attendance sheet month" />
+          <DateRangeFilter from={dateFrom} to={dateTo} label="Attendance sheet date range" onChange={change} />
+          <button type="button" onClick={resetAttendanceFilters}
+            className="min-h-10 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-black">Reset filters</button>
           <button onClick={handleExport} className="flex items-center px-4 py-2.5 bg-emerald-100 text-emerald-700 font-bold rounded-xl hover:bg-emerald-200 transition-colors"><Download className="w-4 h-4 mr-2" /> Export</button>
         </div>
       </div>
@@ -2257,7 +2274,7 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
       </div>
 
       <div className="bg-white rounded-3xl border border-slate-100 shadow-sm p-5">
-        <div className="flex items-center justify-between mb-4"><div><h3 className="font-black text-slate-800 text-lg">Monthly Attendance Sheet</h3><p className="text-xs font-semibold text-slate-400">Green = present, red = past absent/no login record, grey = upcoming future date.</p></div><span className="text-xs font-black bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1.5 rounded-xl">{monthKey}</span></div>
+        <div className="flex items-center justify-between mb-4"><div><h3 className="font-black text-slate-800 text-lg">Monthly Attendance Sheet</h3><p className="text-xs font-semibold text-slate-400">Green = present, red = past absent/no login record, grey = upcoming future date. Date range narrows the selected month sheet; the daily view remains on its selected date.</p></div><span className="text-xs font-black bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1.5 rounded-xl">{monthKey}</span></div>
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs whitespace-nowrap">
             <thead>
@@ -2296,21 +2313,24 @@ const finiteLedgerAmount = (value) => {
 };
 
 const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceViewState }) => {
-  const [localFinanceViewState, setLocalFinanceViewState] = useState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
+  const [localFinanceViewState, setLocalFinanceViewState] = useState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), dateFrom:'', dateTo:'', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
   const effectiveFinanceViewState = financeViewState || localFinanceViewState;
   const updateFinanceViewState = (patch) => {
-    const update = (previous = {}) => ({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [], ...previous, ...patch });
+    const update = (previous = {}) => ({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), dateFrom:'', dateTo:'', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [], ...previous, ...patch });
     if (typeof setFinanceViewState === 'function') setFinanceViewState(update);
     else setLocalFinanceViewState(update);
   };
   const activeTab = effectiveFinanceViewState.activeTab || 'transactions';
   const selectedMonth = normalizeAccountingMonthKey(effectiveFinanceViewState.selectedMonth, getCurrentAccountingMonthKey());
   const selectedMonthLabel = formatAccountingMonthLabel(selectedMonth);
+  const dateFrom = String(effectiveFinanceViewState.dateFrom || '');
+  const dateTo = String(effectiveFinanceViewState.dateTo || '');
   const selectedLocations = Array.isArray(effectiveFinanceViewState.selectedLocations) ? effectiveFinanceViewState.selectedLocations : [];
   const selectedClients = Array.isArray(effectiveFinanceViewState.selectedClients) ? effectiveFinanceViewState.selectedClients : [];
   const selectedPaymentStatuses = Array.isArray(effectiveFinanceViewState.selectedPaymentStatuses) ? effectiveFinanceViewState.selectedPaymentStatuses : [];
   const setActiveTab = (value) => updateFinanceViewState({ activeTab: value });
-  const setSelectedMonth = (value) => updateFinanceViewState({ selectedMonth: normalizeAccountingMonthKey(value, selectedMonth), selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
+  const setSelectedMonth = (value) => updateFinanceViewState({ selectedMonth: normalizeAccountingMonthKey(value, selectedMonth) });
+  const resetLedgerFilters = () => updateFinanceViewState({ dateFrom:'', dateTo:'', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
   const setSelectedLocations = (value) => updateFinanceViewState({ selectedLocations: value });
   const setSelectedClients = (value) => updateFinanceViewState({ selectedClients: value });
   const setSelectedPaymentStatuses = (value) => updateFinanceViewState({ selectedPaymentStatuses: value });
@@ -2366,7 +2386,12 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
   const periodEntryFor = useCallback((project = {}) => periodEntryById.get(String(project?.id || project?.caseId))
     || entryForMonth(project, selectedMonth), [periodEntryById, entryForMonth, selectedMonth]);
 
-  const periodBaseProjects = useMemo(() => baseLedgerProjects.filter(project => periodEntryFor(project).hasActivity), [baseLedgerProjects, periodEntryFor]);
+  const periodBaseProjects = useMemo(() => baseLedgerProjects.filter(project => {
+    const entry=periodEntryFor(project);
+    // Date range selects activity rows. Monetary amounts remain exact full-month
+    // ledger entries; never fabricate daily allocations from monthly totals.
+    return entry.hasActivity && matchesDateRange(entry.activityAt, dateFrom, dateTo);
+  }), [baseLedgerProjects, periodEntryFor, dateFrom, dateTo]);
   const allLocations = useMemo(() => [...new Set(periodBaseProjects.map(project => getCanonicalLocationName(project.location || project.city)).filter(Boolean))].sort(), [periodBaseProjects]);
   const availableClients = useMemo(() => [...new Set(periodBaseProjects.map(project => getCanonicalBankName(project.client || project.bankName || project.bank)).filter(Boolean))].sort(), [periodBaseProjects]);
   const selectedLocationsKey = selectedLocations.join('|');
@@ -2438,9 +2463,10 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
           note:event.note || ''
         }));
       const datedEvents = [...explicitAudit, ...ledgerAudit, ...historyAudit]
-        .filter(event => getFinanceEventMonthKey(event, project) === selectedMonth);
+        .filter(event => getFinanceEventMonthKey(event, project) === selectedMonth && matchesDateRange(event.at || event.time || event.createdAt, dateFrom, dateTo));
       const entry = periodEntryFor(project);
       const synthesized = datedEvents.length === 0 && getProjectFinanceMonthKey(project) === selectedMonth
+        && matchesDateRange(project.ledger?.updatedAt || project.paymentTrackingUpdatedAt || project.ledger?.date || project.paymentDate, dateFrom, dateTo)
         && (project.ledger?.updatedAt || project.paymentTrackingUpdatedAt || project.ledger?.date || project.paymentDate) ? [{
           id:`${project.id || project.caseId}-current-payment-state-${selectedMonth}`,
           at:project.ledger?.updatedAt || project.paymentTrackingUpdatedAt || project.ledger?.date || project.paymentDate,
@@ -2458,7 +2484,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
       }));
     }).filter(event => selectedPaymentStatuses.length === 0 || selectedPaymentStatuses.includes(String(event.status || 'Not Updated')))
       .sort((left, right) => (new Date(right.at || 0).getTime() || 0) - (new Date(left.at || 0).getTime() || 0));
-  }, [activeTab, baseLedgerProjects, matchesLocationAndClient, selectedMonth, selectedMonthLabel, selectedPaymentStatusesKey, periodEntryFor]);
+  }, [activeTab, baseLedgerProjects, matchesLocationAndClient, selectedMonth, selectedMonthLabel, selectedPaymentStatusesKey, periodEntryFor, dateFrom, dateTo]);
 
   const availableMonthKeys = useMemo(() => activeTab === 'monthly'
     ? getAvailableFinanceMonthKeys(baseLedgerProjects, selectedMonth)
@@ -2467,10 +2493,11 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
     if (activeTab !== 'monthly') return {};
     const stats = {};
     for (const monthKey of availableMonthKeys) {
+      if (!monthOverlapsDateRange(monthKey, dateFrom, dateTo)) continue;
       for (const project of baseLedgerProjects) {
         if (!matchesLocationAndClient(project)) continue;
         const entry = entryForMonth(project, monthKey);
-        if (!entry.hasActivity) continue;
+        if (!entry.hasActivity || !matchesDateRange(entry.activityAt, dateFrom, dateTo)) continue;
         if (selectedPaymentStatuses.length > 0 && !selectedPaymentStatuses.includes(entry.statusAtClose)) continue;
         if (!stats[monthKey]) stats[monthKey] = { revenue:0, cost:0, expense:0, refund:0, count:0 };
         stats[monthKey].revenue += entry.received;
@@ -2481,7 +2508,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
       }
     }
     return stats;
-  }, [activeTab, availableMonthKeys, baseLedgerProjects, matchesLocationAndClient, selectedPaymentStatusesKey, entryForMonth]);
+  }, [activeTab, availableMonthKeys, baseLedgerProjects, matchesLocationAndClient, selectedPaymentStatusesKey, entryForMonth, dateFrom, dateTo]);
 
   const clientStats = useMemo(() => {
     if (activeTab !== 'clients') return {};
@@ -2518,7 +2545,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
   const paginatedLength = activeTab === 'audit' ? paymentAuditEvents.length
     : (['transactions', 'pending', 'report'].includes(activeTab) ? visibleLedgerProjects.length : 0);
   const ledgerPageCount = Math.max(1, Math.ceil(paginatedLength / ledgerPageSize));
-  useEffect(() => { setLedgerPage(1); }, [activeTab, selectedMonth, selectedLocationsKey, selectedClientsKey, selectedPaymentStatusesKey]);
+  useEffect(() => { setLedgerPage(1); }, [activeTab, selectedMonth, selectedLocationsKey, selectedClientsKey, selectedPaymentStatusesKey, dateFrom, dateTo]);
   useEffect(() => { if (ledgerPage > ledgerPageCount) setLedgerPage(ledgerPageCount); }, [ledgerPage, ledgerPageCount]);
 
   const handleExport = () => {
@@ -2538,15 +2565,17 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
       <div className="flex flex-col xl:flex-row justify-between xl:items-end gap-4">
         <div>
            <h2 className="text-3xl font-extrabold text-slate-800 tracking-tight">Financial Ledger</h2>
-           <p className="mt-2 text-sm font-bold text-slate-500">Every total, table and export is isolated to one accounting month. Previous months never merge into {selectedMonthLabel}.</p>
+           <p className="mt-2 text-sm font-bold text-slate-500">Every total, table and export is isolated to one accounting month. Previous months never merge into {selectedMonthLabel}. Date range narrows cases by their last financial activity; amounts remain the full selected-month totals for those cases, not individual-day transactions.</p>
            <div className="flex flex-wrap items-end gap-3 mt-4">
               <label className="bg-white border-2 border-indigo-100 rounded-xl px-3 py-2 shadow-sm">
                 <span className="block text-[10px] font-black uppercase tracking-widest text-indigo-500 mb-1">Accounting Month</span>
                 <input type="month" value={selectedMonth} max={getCurrentAccountingMonthKey()} onChange={(event) => setSelectedMonth(event.target.value)} className="font-black text-slate-800 outline-none bg-transparent" aria-label="Finance accounting month" />
               </label>
+              <DateRangeFilter from={dateFrom} to={dateTo} onChange={updateFinanceViewState} label="Ledger activity date range" />
               <MultiSelectCheckbox label="Filter by Area/City" options={allLocations} selectedValues={selectedLocations} onChange={setSelectedLocations} allLabel="All Areas" />
               <MultiSelectCheckbox label="Filter by Bank" options={availableClients} selectedValues={selectedClients} onChange={setSelectedClients} allLabel="All Banks" />
               <MultiSelectCheckbox label="Payment Status" options={financePaymentStatuses} selectedValues={selectedPaymentStatuses} onChange={setSelectedPaymentStatuses} allLabel={'All Statuses (' + statusCounts.All + ')'} />
+              <button type="button" onClick={resetLedgerFilters} className="min-h-11 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-black">Reset filters</button>
            </div>
         </div>
         <div className="flex flex-wrap gap-3 mt-4 xl:mt-0">
@@ -5068,8 +5097,13 @@ function AppShell() {
 
   const [activeTab, setActiveTab] = useState('command');
   const [selectedProject, setSelectedProject] = useState(null);
-  const [archiveViewState, setArchiveViewState] = useState({ filterMonth: 'All', filterDate: '', selectedBanks: [], selectedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0 });
-  const [financeViewState, setFinanceViewState] = useState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
+  const [archiveViewState, setArchiveViewState] = useState({ filterMonth: 'All', filterDate: '', dateFrom:'', dateTo:'', selectedBanks: [], selectedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0 });
+  const [financeViewState, setFinanceViewState] = useState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), dateFrom:'', dateTo:'', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
+  const [operationDateRange, setOperationDateRange] = useState({dateFrom:'',dateTo:''});
+  const [performanceViewState,setPerformanceViewState] = useState({range:'month',selectedMember:'all',dateRange:{dateFrom:'',dateTo:''}});
+  const [reportsViewState,setReportsViewState] = useState({selectedMonth:getCurrentAccountingMonthKey(),dateRange:{dateFrom:'',dateTo:''}});
+  const [attendanceViewState,setAttendanceViewState] = useState({filterDate:getIndiaDateKey(),monthKey:getIndiaDateKey().slice(0,7),dateFrom:'',dateTo:''});
+  const [viewVisitKey, setViewVisitKey] = useState(0);
   const [taskDetailReturnTab, setTaskDetailReturnTab] = useState('board');
   const taskDetailReturnPositionRef = useRef({ windowY: 0, tab: 'board' });
   const previousTabRef = useRef('command');
@@ -5105,6 +5139,23 @@ function AppShell() {
   }, [activeTab, selectedProject]);
   const [boardViewMode, setBoardViewMode] = useState('list'); // 'list' or 'kanban'
   const [selectedBoardDate, setSelectedBoardDate] = useState(formatDateKey());
+  // No transient filter is persisted in localStorage/sessionStorage. A new
+  // visit starts clean, and browser back-forward cache restores are reset too.
+  useEffect(() => {
+    const resetOnReturn = (event) => {
+      if (!event.persisted) return;
+      setArchiveViewState({filterMonth:'All',filterDate:'',dateFrom:'',dateTo:'',selectedBanks:[],selectedLocations:[],searchText:'',sortOrder:'newest',scrollTop:0});
+      setFinanceViewState({activeTab:'transactions',selectedMonth:getCurrentAccountingMonthKey(),dateFrom:'',dateTo:'',selectedLocations:[],selectedClients:[],selectedPaymentStatuses:[]});
+      setOperationDateRange({dateFrom:'',dateTo:''});
+      setPerformanceViewState({range:'month',selectedMember:'all',dateRange:{dateFrom:'',dateTo:''}});
+      setReportsViewState({selectedMonth:getCurrentAccountingMonthKey(),dateRange:{dateFrom:'',dateTo:''}});
+      setAttendanceViewState({filterDate:getIndiaDateKey(),monthKey:getIndiaDateKey().slice(0,7),dateFrom:'',dateTo:''});
+      setSelectedBoardDate(formatDateKey());
+      setViewVisitKey(value=>value+1);
+    };
+    window.addEventListener('pageshow',resetOnReturn);
+    return () => window.removeEventListener('pageshow',resetOnReturn);
+  }, []);
   const [showNotifs, setShowNotifs] = useState(false);
   const [showProfilePanel, setShowProfilePanel] = useState(false);
   const [showNewLead, setShowNewLead] = useState(false);
@@ -5250,8 +5301,13 @@ function AppShell() {
     setActiveTab('command');
     previousTabRef.current = 'command';
     setSelectedBoardDate(formatDateKey());
-    setArchiveViewState({ filterMonth: 'All', filterDate: '', selectedBanks: [], selectedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0 });
-    setFinanceViewState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
+    setOperationDateRange({dateFrom:'',dateTo:''});
+    setPerformanceViewState({range:'month',selectedMember:'all',dateRange:{dateFrom:'',dateTo:''}});
+    setReportsViewState({selectedMonth:getCurrentAccountingMonthKey(),dateRange:{dateFrom:'',dateTo:''}});
+    setAttendanceViewState({filterDate:getIndiaDateKey(),monthKey:getIndiaDateKey().slice(0,7),dateFrom:'',dateTo:''});
+    setViewVisitKey(value=>value+1);
+    setArchiveViewState({ filterMonth: 'All', filterDate: '', dateFrom:'', dateTo:'', selectedBanks: [], selectedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0 });
+    setFinanceViewState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), dateFrom:'', dateTo:'', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
     setTaskDetailReturnTab('board');
     taskDetailReturnPositionRef.current = { windowY: 0, tab: 'board' };
     setNewTaskCategory(TASK_CATEGORIES[0]);
@@ -5368,6 +5424,7 @@ function AppShell() {
     .slice(0, 8), [chatMessages, normalizedGlobalSearch]);
   const displayedProjects = useMemo(() => {
     if (activeTab !== 'board' && activeTab !== 'my_tasks') return [];
+    const rangeIsActive = Boolean(operationDateRange.dateFrom || operationDateRange.dateTo);
     return asArray(projects)
     .filter(project => {
       if (activeTab === 'my_tasks') {
@@ -5375,8 +5432,9 @@ function AppShell() {
         const statusValue = normalizeWorkStatusForRevision(project.status || project.reviewStatus || '');
         const isRevisionForMe = project.showInMyTasks || isRevisionWorkItem(project) || statusValue.includes('REVISION') || hasActiveRevision(project);
         if (project.status !== 'Completed' || isRevisionForMe) return true;
-        if (!shouldShowOnOperationsDate(project, selectedBoardDate)) return false;
-      } else if (activeTab === 'board' && !shouldShowOnOperationsDate(project, selectedBoardDate)) return false;
+        if (!rangeIsActive && !shouldShowOnOperationsDate(project, selectedBoardDate)) return false;
+      } else if (activeTab === 'board' && !rangeIsActive && !shouldShowOnOperationsDate(project, selectedBoardDate)) return false;
+      if (rangeIsActive && !matchesDateRange(project.createdAt || project.receivedAt || project.taskDate, operationDateRange.dateFrom, operationDateRange.dateTo)) return false;
       if (normalizedGlobalSearch) {
         const haystack = [project.id, project.client, project.bankName, project.branchName, project.customerName, project.location, project.assignedTo, project.type, project.status, project.description]
           .filter(Boolean).join(' ').toLowerCase();
@@ -5385,7 +5443,7 @@ function AppShell() {
       return true;
     })
     .sort((left, right) => (right.createdAt || 0) - (left.createdAt || 0));
-  }, [projects, activeTab, currentUser?.name, selectedBoardDate, normalizedGlobalSearch]);
+  }, [projects, activeTab, currentUser?.name, selectedBoardDate, operationDateRange.dateFrom, operationDateRange.dateTo, normalizedGlobalSearch]);
   const assignmentRecommendations = useMemo(
     () => showNewLead ? getAssignmentRecommendations(activeUsers, projects) : [],
     [showNewLead, activeUsers, projects]
@@ -7362,18 +7420,18 @@ function AppShell() {
           <MainTabNavigation currentUser={currentUser} ROLES={ROLES} activeTab={activeTab} setActiveTab={setActiveTab} />
         )}
 
-        <AppErrorBoundary key={`workspace:${activeTab}:${selectedProject?.id || selectedProject?.caseId || 'none'}`}>
+        <AppErrorBoundary key={`workspace:${viewVisitKey}:${activeTab}:${selectedProject?.id || selectedProject?.caseId || 'none'}`}>
         <React.Suspense fallback={<PageLoadingScreen title="Loading workspace" subtitle="Preparing this section…" />}>
         {selectedProject ? (
           <TaskDetailView project={selectedProject} user={currentUser} onBack={closeTaskDetail} onUpdateProject={handleUpdateProject} onServerProjectConfirmed={(confirmedProject) => applyProjectSnapshot([confirmedProject], { source:'task-detail-server-confirmed' })} onPrepareProjectForUpload={prepareProjectForUpload} users={activeUsers} projects={projects} onDeleteTask={handleDeleteTask} />
         ) : activeTab === 'command' ? (
           <CommandCentreView projects={projects} users={activeUsers} attendanceLogs={attendanceLogs} currentUser={currentUser} onOpenPerformance={() => setActiveTab('productivity')} onSelectProject={(p) => openTaskDetail(p, 'command')} onNavigate={(target) => { if (target === 'newCase') { setShowNewLead(true); return; } if (target === 'notifications') { setShowNotifs(true); return; } setActiveTab(target); }} />
         ) : activeTab === 'productivity' ? (
-          <ProductivityDashboard users={activeUsers} projects={projects} performanceRecords={performanceRecords} performanceSummary={performanceSummary} />
+          <ProductivityDashboard users={activeUsers} projects={projects} currentUser={currentUser} performanceRecords={performanceRecords} performanceSummary={performanceSummary} performanceViewState={performanceViewState} setPerformanceViewState={setPerformanceViewState} />
         ) : activeTab === 'closing' && currentUser.role === ROLES.ADMIN ? (
           <DailyClosingReport projects={projects} currentUser={currentUser} />
         ) : activeTab === 'reports' && currentUser.role === ROLES.ADMIN ? (
-          <ReportsAnalyticsView projects={projects} users={activeUsers} currentUser={currentUser} />
+          <ReportsAnalyticsView projects={projects} users={activeUsers} currentUser={currentUser} reportsViewState={reportsViewState} setReportsViewState={setReportsViewState} />
         ) : (activeTab === 'settings' || activeTab === 'qa') && currentUser.role === ROLES.ADMIN ? (
           <SystemSettingsView projects={projects} users={activeUsers} currentUser={currentUser} />
         ) : activeTab === 'ledger' && currentUser.role === ROLES.ADMIN ? (
@@ -7393,7 +7451,7 @@ function AppShell() {
             onSelectProject={(p) => openTaskDetail(p, 'team')}
           />
         ) : activeTab === 'attendance' ? (
-          <AttendanceView attendanceLogs={attendanceLogs} users={activeUsers} projects={projects} />
+          <AttendanceView attendanceLogs={attendanceLogs} users={activeUsers} projects={projects} attendanceViewState={attendanceViewState} setAttendanceViewState={setAttendanceViewState} />
         ) : activeTab === 'profile' ? (
           <ProfileView currentUser={currentUser} onUpdateUser={handleSaveOwnProfile} setCurrentUser={setCurrentUser} sendRealOtp={sendRealOtp} verifyRealOtp={verifyRealOtp} onChangePassword={handleChangePassword} />
         ) : activeTab === 'calculator' ? (
@@ -7406,6 +7464,8 @@ function AppShell() {
             canManage={canManage}
             selectedBoardDate={selectedBoardDate}
             setSelectedBoardDate={setSelectedBoardDate}
+            operationDateRange={operationDateRange}
+            setOperationDateRange={setOperationDateRange}
             boardViewMode={boardViewMode}
             setBoardViewMode={setBoardViewMode}
             setLeadFiles={setLeadFiles}
