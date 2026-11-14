@@ -5085,6 +5085,8 @@ function AppShell() {
   const [archiveViewState, setArchiveViewState] = useState({ filterMonth: 'All', filterDate: '', dateFrom:'', dateTo:'', selectedBanks: [], selectedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0 });
   const [financeViewState, setFinanceViewState] = useState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), dateFrom:'', dateTo:'', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
   const [operationDateRange, setOperationDateRange] = useState({dateFrom:'',dateTo:''});
+  const [performanceViewState,setPerformanceViewState] = useState({range:'month',selectedMember:'all',dateRange:{dateFrom:'',dateTo:''}});
+  const [reportsViewState,setReportsViewState] = useState({selectedMonth:getCurrentAccountingMonthKey(),dateRange:{dateFrom:'',dateTo:''}});
   const [viewVisitKey, setViewVisitKey] = useState(0);
   const [taskDetailReturnTab, setTaskDetailReturnTab] = useState('board');
   const taskDetailReturnPositionRef = useRef({ windowY: 0, tab: 'board' });
@@ -5129,6 +5131,8 @@ function AppShell() {
       setArchiveViewState({filterMonth:'All',filterDate:'',dateFrom:'',dateTo:'',selectedBanks:[],selectedLocations:[],searchText:'',sortOrder:'newest',scrollTop:0});
       setFinanceViewState({activeTab:'transactions',selectedMonth:getCurrentAccountingMonthKey(),dateFrom:'',dateTo:'',selectedLocations:[],selectedClients:[],selectedPaymentStatuses:[]});
       setOperationDateRange({dateFrom:'',dateTo:''});
+      setPerformanceViewState({range:'month',selectedMember:'all',dateRange:{dateFrom:'',dateTo:''}});
+      setReportsViewState({selectedMonth:getCurrentAccountingMonthKey(),dateRange:{dateFrom:'',dateTo:''}});
       setSelectedBoardDate(formatDateKey());
       setViewVisitKey(value=>value+1);
     };
@@ -5281,6 +5285,8 @@ function AppShell() {
     previousTabRef.current = 'command';
     setSelectedBoardDate(formatDateKey());
     setOperationDateRange({dateFrom:'',dateTo:''});
+    setPerformanceViewState({range:'month',selectedMember:'all',dateRange:{dateFrom:'',dateTo:''}});
+    setReportsViewState({selectedMonth:getCurrentAccountingMonthKey(),dateRange:{dateFrom:'',dateTo:''}});
     setViewVisitKey(value=>value+1);
     setArchiveViewState({ filterMonth: 'All', filterDate: '', dateFrom:'', dateTo:'', selectedBanks: [], selectedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0 });
     setFinanceViewState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), dateFrom:'', dateTo:'', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
@@ -7403,11 +7409,11 @@ function AppShell() {
         ) : activeTab === 'command' ? (
           <CommandCentreView projects={projects} users={activeUsers} attendanceLogs={attendanceLogs} currentUser={currentUser} onOpenPerformance={() => setActiveTab('productivity')} onSelectProject={(p) => openTaskDetail(p, 'command')} onNavigate={(target) => { if (target === 'newCase') { setShowNewLead(true); return; } if (target === 'notifications') { setShowNotifs(true); return; } setActiveTab(target); }} />
         ) : activeTab === 'productivity' ? (
-          <ProductivityDashboard users={activeUsers} projects={projects} currentUser={currentUser} performanceRecords={performanceRecords} performanceSummary={performanceSummary} />
+          <ProductivityDashboard users={activeUsers} projects={projects} currentUser={currentUser} performanceRecords={performanceRecords} performanceSummary={performanceSummary} performanceViewState={performanceViewState} setPerformanceViewState={setPerformanceViewState} />
         ) : activeTab === 'closing' && currentUser.role === ROLES.ADMIN ? (
           <DailyClosingReport projects={projects} currentUser={currentUser} />
         ) : activeTab === 'reports' && currentUser.role === ROLES.ADMIN ? (
-          <ReportsAnalyticsView projects={projects} users={activeUsers} currentUser={currentUser} />
+          <ReportsAnalyticsView projects={projects} users={activeUsers} currentUser={currentUser} reportsViewState={reportsViewState} setReportsViewState={setReportsViewState} />
         ) : (activeTab === 'settings' || activeTab === 'qa') && currentUser.role === ROLES.ADMIN ? (
           <SystemSettingsView projects={projects} users={activeUsers} currentUser={currentUser} />
         ) : activeTab === 'ledger' && currentUser.role === ROLES.ADMIN ? (
