@@ -1276,6 +1276,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], currentUser =
       }))
     : setLocalDateRange(updater);
   const [resettingBaseline,setResettingBaseline] = useState(false);
+  const [baselineRefreshPending,setBaselineRefreshPending] = useState(false);
   const customRange = range === 'custom';
   const customReady = customRange && Boolean(dateRange.dateFrom && dateRange.dateTo) && validDateRange(dateRange.dateFrom,dateRange.dateTo);
   const resetPerformanceFilters = () => {setRange('month');setSelectedMember('all');setDateRange({dateFrom:'',dateTo:''});};
@@ -1364,6 +1365,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], currentUser =
       .then(data => {
         if (!active) return;
         setLeaderboard(Object.keys(asRecord(data.leaderboard)).length ? asRecord(data.leaderboard) : null);
+        if (Array.isArray(data.leaderboard?.members)) setBaselineRefreshPending(false);
       })
       .catch(error => { if (active) setLeaderboardError(error?.message || 'Team comparison could not be loaded.'); });
     return () => { active = false; };
@@ -1403,6 +1405,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], currentUser =
       });
       const data=await readApiRecord(response,{operation:'Reset analytics baseline',requireOk:true});
       if (!response.ok) throw apiHttpError(response,data,'Reset analytics baseline failed');
+      setBaselineRefreshPending(true);
       setLeaderboard(null);
       setEngineSummary(null);
       setLeaderboardRefreshKey(key=>key+1);
@@ -1602,6 +1605,21 @@ export const ProductivityDashboard = ({ users = [], projects = [], currentUser =
     const weakest = options.sort((a, b) => a.score - b.score)[0];
     return weakest?.text || 'Keep performance stable and avoid late task buildup.';
   };
+  // A successful baseline reset must never briefly display old scores from
+  // the in-memory snapshot while awaiting the authoritative scoped leaderboard.
+  if (baselineRefreshPending) return (
+    <div className="kalpa-production-polish bg-white rounded-3xl border border-slate-100 p-6 space-y-4">
+      <h1 className="text-2xl font-black text-slate-800">Performance Analytics</h1>
+      <p role="status" className="text-sm font-bold text-indigo-700">
+        Analytics baseline saved. Updating the scorecards from the verified server state; historical records remain preserved.
+      </p>
+      {leaderboardError && <p className="text-sm font-bold text-amber-700">{leaderboardError}</p>}
+      <button type="button" onClick={()=>setLeaderboardRefreshKey(key=>key+1)}
+        className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-bold text-sm">
+        Retry score refresh
+      </button>
+    </div>
+  );
   return (
     <div className="kalpa-production-polish space-y-5 sm:space-y-6 animate-in fade-in duration-200">
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
