@@ -13,7 +13,7 @@ import { formatTaskId, getEstimateDetails, getLatestCompletedFileName, getTaskDe
 import { getTaskBusySince, getUserActiveTasks, getUserBusySince, getUserFreeSince, getUserLastCompletedAt, getUserDraftingTask, getDraftingElapsedMs } from '../../utils/presenceAttendanceUtils';
 import { authFetch } from '../../services/authService';
 import { apiHttpError, readApiRecord } from '../../services/apiContractService.js';
-import { notifyUser } from '../../services/uiFeedback.js';
+import { notifyUser, requestConfirmation } from '../../services/uiFeedback.js';
 import { getBackupStatusApi, getOperationalEventsApi, getOperationalJobsApi, getReliabilityStatusApi, retryOperationalJobApi } from '../../services/systemHealthService';
 import StorageSafetyPanel from './StorageSafetyPanel.jsx';
 
@@ -1256,9 +1256,14 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
   );
 };
 
-export const ProductivityDashboard = ({ users = [], projects = [], performanceRecords: externalPerformanceRecords = [], performanceSummary = null }) => {
+export const ProductivityDashboard = ({ users = [], projects = [], currentUser = null, performanceRecords: externalPerformanceRecords = [], performanceSummary = null }) => {
   const [range, setRange] = useState('month');
+  const [dateRange,setDateRange] = useState({dateFrom:'',dateTo:''});
   const [selectedMember, setSelectedMember] = useState('all');
+  const [resettingBaseline,setResettingBaseline] = useState(false);
+  const customRange = range === 'custom';
+  const customReady = customRange && Boolean(dateRange.dateFrom && dateRange.dateTo) && validDateRange(dateRange.dateFrom,dateRange.dateTo);
+  const resetPerformanceFilters = () => {setRange('month');setSelectedMember('all');setDateRange({dateFrom:'',dateTo:''});};
   const [engineSummary, setEngineSummary] = useState(null);
   const [engineBusy, setEngineBusy] = useState(false);
   const [leaderboard, setLeaderboard] = useState(null);
@@ -1268,7 +1273,11 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
   const todayKey = formatDateKey();
   const rangeMs = range === 'week' ? 7 * 86400000 : range === 'quarter' ? 90 * 86400000 : 30 * 86400000;
   const allProjects = Array.isArray(projects) ? projects.filter(Boolean) : [];
-  const scopedProjects = useMemo(() => allProjects.filter(p => (toMs(p.createdAt) || now) >= now - rangeMs || (toMs(p.completedAt) || 0) >= now - rangeMs), [projects, range]);
+  const scopedProjects = useMemo(() => allProjects.filter(p => customRange
+    ? (customReady && (matchesDateRange(p.createdAt,dateRange.dateFrom,dateRange.dateTo)
+      || matchesDateRange(p.completedAt,dateRange.dateFrom,dateRange.dateTo)))
+    : (toMs(p.createdAt) || now) >= now-rangeMs || (toMs(p.completedAt) || 0) >= now-rangeMs
+  ), [projects, range, dateRange.dateFrom, dateRange.dateTo, customReady]);
   const leaderboardMembers = Array.isArray(leaderboard?.members) ? leaderboard.members : [];
   const team = useMemo(() => {
     const byName = new Map();
@@ -1282,7 +1291,10 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
   const activeTeam = selectedMember === 'all' ? team : team.filter(u => normalizePersonName(u.name) === normalizePersonName(selectedMember));
   const generatedPerformanceRecords = useMemo(() => buildPerformanceRecords(allProjects), [projects]);
   const performanceRecords = useMemo(() => mergePerformanceRecordSets(externalPerformanceRecords, generatedPerformanceRecords), [externalPerformanceRecords, generatedPerformanceRecords]);
-  const effectivePerformanceSummary = engineSummary || (leaderboard ? { ...leaderboard, users:leaderboardMembers.map(member => ({ ...member, userName:member.name, completedCount:member.completedHistoryCount })) } : performanceSummary) || null;
+  const backendLeaderboardReady = Array.isArray(leaderboard?.members);
+  const effectivePerformanceSummary = backendLeaderboardReady
+    ? { ...leaderboard, users:leaderboardMembers.map(member => ({...member,userName:member.name,completedCount:member.completedHistoryCount})) }
+    : (engineSummary || performanceSummary || null);
   const summaryUsers = Array.isArray(effectivePerformanceSummary?.users) ? effectivePerformanceSummary.users : [];
   const summaryByName = useMemo(() => new Map(summaryUsers.map(row => [normalizePersonName(row.userName || row.name), row])), [summaryUsers]);
   const leaderboardByName = useMemo(() => new Map(leaderboardMembers.map(row => [normalizePersonName(row.name), row])), [leaderboardMembers]);
@@ -1320,7 +1332,15 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
   useEffect(() => {
     let active = true;
     setLeaderboardError('');
-    authFetch(absoluteApiUrl(`/api/performance/leaderboard?range=${encodeURIComponent(range)}`), { cache:'no-store', timeoutMs:30_000 })
+    if (customRange && !customReady) {
+      setLeaderboard(null);
+      setLeaderboardError('Choose a valid From and To date to compare this period.');
+      return () => {active=false;};
+    }
+    const query = customRange
+      ? `scope=custom&from=${encodeURIComponent(dateRange.dateFrom)}&to=${encodeURIComponent(dateRange.dateTo)}`
+      : `range=${encodeURIComponent(range)}`;
+    authFetch(absoluteApiUrl(`/api/performance/leaderboard?${query}`), { cache:'no-store', timeoutMs:30_000 })
       .then(async res => {
         const data = await readApiRecord(res, { operation:'Performance leaderboard', requireOk:true, requiredFields:['leaderboard'] });
         if (!res.ok) throw apiHttpError(res, data, 'Leaderboard failed');
@@ -1332,7 +1352,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
       })
       .catch(error => { if (active) setLeaderboardError(error?.message || 'Team comparison could not be loaded.'); });
     return () => { active = false; };
-  }, [range, leaderboardRefreshKey]);
+  }, [range, dateRange.dateFrom, dateRange.dateTo, leaderboardRefreshKey]);
 
 
   const rebuildPerformanceEngine = async () => {
@@ -1354,26 +1374,34 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
   const memberRows = useMemo(() => activeTeam.map(u => {
     const summaryRow = summaryByName.get(normalizePersonName(u.name)) || {};
     const leaderboardRow = leaderboardByName.get(normalizePersonName(u.name)) || {};
-    const assigned = getMemberProjects(u.name);
+    const baselineAt=toMs(u.performanceProfile?.scoreBaselineAt);
+    const currentScope=ts=>customRange
+      ? (customReady && matchesDateRange(ts,dateRange.dateFrom,dateRange.dateTo))
+      : Boolean(toMs(ts) && toMs(ts)>=now-rangeMs);
+    const assigned = getMemberProjects(u.name).filter(p=>!baselineAt || toMs(p.createdAt)>=baselineAt);
     const completed = assigned.filter(isProjectCompleted);
-    const allAssigned = allProjectsByOwner.get(normalizePersonName(u.name)) || [];
+    const allAssigned = (allProjectsByOwner.get(normalizePersonName(u.name)) || [])
+      .filter(p=>(!baselineAt || toMs(p.createdAt)>=baselineAt) &&
+        currentScope(p.completedAt || p.createdAt));
     const analyticsCompleted = allAssigned.filter(isAnalyticsCompletedProject);
-    const completedRecords = getMemberRecords(u.name);
+    const completedRecords = getMemberRecords(u.name).filter(rec=>
+      (!baselineAt || toMs(rec.completedAt || rec.completionEventAt || rec.finishedAt)>=baselineAt) &&
+      currentScope(rec.completedAt || rec.completionEventAt || rec.finishedAt));
     const completedToday = Number(leaderboardRow.completedToday ?? completed.filter(p => formatDateKey(p.completedAt || p.updatedAt || p.createdAt) === todayKey).length) || 0;
     const active = assigned.filter(isIncompleteProject);
     const revisions = assigned.filter(p => getProjectRevisionTotal(p) > 0);
     const profileAverage = Number(u.performanceProfile?.averageCompletionMinutes || u.averageCompletionMinutes || 0) || 0;
     const summaryAvgCompletion = Number(summaryRow.avgCompletionMinutes || summaryRow.averageCompletionMinutes || 0) || 0;
     const summaryAvgReview = Number(summaryRow.avgReviewMinutes || summaryRow.averageReviewMinutes || 0) || 0;
-    const avgMins = summaryAvgCompletion || averageMinutes(completedRecords, r => r.totalCompletionMinutes) || averageMinutes(analyticsCompleted, p => getActiveCompletionMinutes(p)) || averageMinutes(completed, p => getActiveCompletionMinutes(p)) || profileAverage;
-    const avgReviewMins = summaryAvgReview || averageMinutes(completedRecords, r => r.reviewMinutes) || averageMinutes(analyticsCompleted, p => getReviewDurationMinutes(p)) || averageMinutes(completed, p => getReviewDurationMinutes(p));
+    const avgMins = backendLeaderboardReady ? summaryAvgCompletion : summaryAvgCompletion || averageMinutes(completedRecords, r => r.totalCompletionMinutes) || averageMinutes(analyticsCompleted, p => getActiveCompletionMinutes(p)) || averageMinutes(completed, p => getActiveCompletionMinutes(p)) || profileAverage;
+    const avgReviewMins = backendLeaderboardReady ? summaryAvgReview : summaryAvgReview || averageMinutes(completedRecords, r => r.reviewMinutes) || averageMinutes(analyticsCompleted, p => getReviewDurationMinutes(p)) || averageMinutes(completed, p => getReviewDurationMinutes(p));
     const liveTasks = active.length ? active : (Number(leaderboardRow.activeCount || 0) > 0 ? [{ id:'Active task' }] : []);
     const live = getLiveStatus(u, liveTasks);
     const breakMinutes = getTodayBreakMinutes(u);
     const summarySla = summaryRow.slaPct ?? summaryRow.slaPercentage;
     const slaPct = summarySla !== undefined && summarySla !== null ? Number(summarySla) || 0 : getSlaCompliancePct(assigned);
-    const revisionTotal = Number(summaryRow.revisionCount || 0) || assigned.reduce((sum, p) => sum + getProjectRevisionTotal(p), 0);
-    const revisionRate = Number(summaryRow.revisionRate || 0) || (analyticsCompleted.length ? Number((revisionTotal / analyticsCompleted.length).toFixed(1)) : (completed.length ? Number((revisionTotal / completed.length).toFixed(1)) : 0));
+    const revisionTotal = backendLeaderboardReady ? Number(summaryRow.revisionCount || 0) : Number(summaryRow.revisionCount || 0) || assigned.reduce((sum, p) => sum + getProjectRevisionTotal(p), 0);
+    const revisionRate = backendLeaderboardReady ? Number(summaryRow.revisionRate || 0) : Number(summaryRow.revisionRate || 0) || (analyticsCompleted.length ? Number((revisionTotal / analyticsCompleted.length).toFixed(1)) : (completed.length ? Number((revisionTotal / completed.length).toFixed(1)) : 0));
     const revisionPct = assigned.length ? Math.round((revisions.length / assigned.length) * 100) : 0;
     // Score completion speed against realistic drafting targets instead of punishing every task above 60 minutes.
     // <= 90m is excellent, 4h is still workable, and very slow work gradually falls toward attention-needed.
@@ -1381,8 +1409,8 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
     const revisionScore = Math.max(0, Math.round(100 - revisionRate * 25));
     const qualityScore = Math.max(0, Math.min(100, Number(summaryRow.scoreBreakdown?.qualityScore || 0) || revisionScore));
     const productivityScore = summaryRow.productivityScore !== undefined && summaryRow.productivityScore !== null ? Number(summaryRow.productivityScore) || 0 : Math.round((speedScore * 0.3) + (slaPct * 0.3) + (qualityScore * 0.2) + (revisionScore * 0.15) + (completedToday > 0 ? 5 : 0));
-    const rolling10CompletionMinutes = Number(summaryRow.rolling10CompletionMinutes || 0) || avgMins;
-    const rolling30CompletionMinutes = Number(summaryRow.rolling30CompletionMinutes || 0) || avgMins;
+    const rolling10CompletionMinutes = backendLeaderboardReady ? Number(summaryRow.rolling10CompletionMinutes || 0) : Number(summaryRow.rolling10CompletionMinutes || 0) || avgMins;
+    const rolling30CompletionMinutes = backendLeaderboardReady ? Number(summaryRow.rolling30CompletionMinutes || 0) : Number(summaryRow.rolling30CompletionMinutes || 0) || avgMins;
     const rawScoreBreakdown = summaryRow.scoreBreakdown || {};
     const scoreBreakdown = {
       speedScore: Number(rawScoreBreakdown.speedScore || 0) > 0 ? Number(rawScoreBreakdown.speedScore) : speedScore,
@@ -1392,7 +1420,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
       attendanceScore: Number(rawScoreBreakdown.attendanceScore || 90),
       productivityScore
     };
-    const rawCaseTypeStats = Array.isArray(summaryRow.caseTypeStats) && summaryRow.caseTypeStats.length ? summaryRow.caseTypeStats : getCaseTypeStats(completedRecords.length ? completedRecords : (analyticsCompleted.length ? analyticsCompleted : completed));
+    const rawCaseTypeStats = backendLeaderboardReady ? asArray(summaryRow.caseTypeStats) : Array.isArray(summaryRow.caseTypeStats) && summaryRow.caseTypeStats.length ? summaryRow.caseTypeStats : getCaseTypeStats(completedRecords.length ? completedRecords : (analyticsCompleted.length ? analyticsCompleted : completed));
     const caseTypeStats = rawCaseTypeStats.map(stat => ({ ...stat, avg: Number(stat.avg || stat.avgCompletionMinutes || stat.averageMinutes || 0) || 0 })).filter(stat => stat.count || stat.avg);
     const midpoint = now - Math.round(rangeMs / 2);
     const trendSource = completedRecords.length ? completedRecords : (analyticsCompleted.length ? analyticsCompleted : completed).map(p => ({ completedAt: getLatestTaskTimestamp(p) || toMs(p.completedAt || p.updatedAt || p.createdAt), totalCompletionMinutes: getActiveCompletionMinutes(p) }));
@@ -1409,8 +1437,8 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
     const completedCount = Number(leaderboardRow.completedCount ?? completed.length) || 0;
     const activeCount = Number(leaderboardRow.activeCount ?? active.length) || 0;
     const revisionsCount = Number(leaderboardRow.revisionCases ?? revisions.length) || 0;
-    return { user: u, assigned, completed, active, revisions, assignedCount, completedCount, activeCount, revisionsCount, completedToday, avgMins, avgReviewMins, rolling10CompletionMinutes, rolling30CompletionMinutes, scoreBreakdown, live, breakMinutes, slaPct, revisionPct, revisionRate, productivityScore, caseTypeStats, trend, trendLabel, timingSource: summaryRow.timingSource || (summaryRow.completedCount ? 'Backend History' : completedRecords.length ? 'Performance Records' : analyticsCompleted.length ? 'Task History' : 'No history yet'), historyCompletedCount: Number(summaryRow.completedCount || leaderboardRow.completedHistoryCount || completedRecords.length || analyticsCompleted.length || completed.length || 0) };
-  }).sort((a, b) => b.productivityScore - a.productivityScore || b.completedCount - a.completedCount || b.assignedCount - a.assignedCount), [activeTeam, summaryByName, leaderboardByName, scopedProjectsByOwner, allProjectsByOwner, performanceRecordsByOwner, todayKey, now, rangeMs]);
+    return { user: u, assigned, completed, active, revisions, assignedCount, completedCount, activeCount, revisionsCount, completedToday, avgMins, avgReviewMins, rolling10CompletionMinutes, rolling30CompletionMinutes, scoreBreakdown, live, breakMinutes, slaPct, revisionPct, revisionRate, productivityScore, caseTypeStats, trend, trendLabel, timingSource: summaryRow.timingSource || (summaryRow.completedCount ? 'Backend History' : completedRecords.length ? 'Performance Records' : analyticsCompleted.length ? 'Task History' : 'No history yet'), historyCompletedCount: backendLeaderboardReady ? Number(summaryRow.completedCount ?? leaderboardRow.completedHistoryCount ?? 0) : Number(summaryRow.completedCount || leaderboardRow.completedHistoryCount || completedRecords.length || analyticsCompleted.length || completed.length || 0) };
+  }).sort((a, b) => b.productivityScore - a.productivityScore || b.completedCount - a.completedCount || b.assignedCount - a.assignedCount), [activeTeam, summaryByName, leaderboardByName, scopedProjectsByOwner, allProjectsByOwner, performanceRecordsByOwner, todayKey, now, rangeMs, backendLeaderboardReady, dateRange.dateFrom, dateRange.dateTo, customRange, customReady]);
   const totals = memberRows.reduce((acc, row) => {
     acc.assigned += row.assignedCount;
     acc.completed += row.completedCount;
@@ -1421,9 +1449,9 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
     return acc;
   }, { assigned: 0, completed: 0, active: 0, revisions: 0, today: 0, avgTotal: 0, avgCount: 0 });
   const summaryTeamAvg = Number(effectivePerformanceSummary?.avgCompletionMinutes || effectivePerformanceSummary?.averageCompletionMinutes || 0) || 0;
-  const teamAvgMins = summaryTeamAvg || (totals.avgCount ? Math.round(totals.avgTotal / totals.avgCount) : 0);
-  const teamRolling10 = Number(effectivePerformanceSummary?.rolling10CompletionMinutes || 0) || teamAvgMins;
-  const teamRolling30 = Number(effectivePerformanceSummary?.rolling30CompletionMinutes || 0) || teamAvgMins;
+  const teamAvgMins = backendLeaderboardReady ? summaryTeamAvg : summaryTeamAvg || (totals.avgCount ? Math.round(totals.avgTotal / totals.avgCount) : 0);
+  const teamRolling10 = backendLeaderboardReady ? Number(effectivePerformanceSummary?.rolling10CompletionMinutes || 0) : Number(effectivePerformanceSummary?.rolling10CompletionMinutes || 0) || teamAvgMins;
+  const teamRolling30 = backendLeaderboardReady ? Number(effectivePerformanceSummary?.rolling30CompletionMinutes || 0) : Number(effectivePerformanceSummary?.rolling30CompletionMinutes || 0) || teamAvgMins;
   const teamTrend = effectivePerformanceSummary?.trend || { pct: 0, label: 'Stable' };
   const avgSla = memberRows.length ? Math.round(memberRows.reduce((sum, row) => sum + row.slaPct, 0) / memberRows.length) : 100;
   const exportPerformance = () => exportToCSV(
