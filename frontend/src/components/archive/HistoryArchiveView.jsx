@@ -6,6 +6,8 @@ import { formatTaskId, getEstimateDetails, getLatestCompletedFileName, getTaskDe
 import { PAYMENT_TRACKING_OPTIONS, getPaymentTrackingStatus, getPaymentStatusBadgeClass } from '../../utils/paymentStatusUtils';
 import { getArchiveBank, getArchiveLocation, getCompletedDateKey, groupArchivedByLocation, matchesArchiveSearch } from '../../utils/archiveUtils.js';
 import { MultiSelectCheckbox } from '../shared';
+import { DateRangeFilter } from '../ui/DateRangeFilter.jsx';
+import { matchesDateRange } from '../../utils/dateRangeFilters.js';
 
 const getCustomerDisplayName = (project = {}) => project?.customerName || 'Customer not added';
 const isAdminUser = (user = {}) => String(user?.role || '').trim().toUpperCase() === 'ADMIN';
@@ -69,11 +71,12 @@ const ArchiveFilters = ({ state, months, banks, locations, onChange, onClear }) 
       <span className="text-[10px] font-black uppercase text-slate-400 mb-1 tracking-widest">Search archive</span>
       <span className="flex items-center gap-2 px-3 min-h-11 border-2 border-slate-200 rounded-xl"><Search className="w-4 h-4 text-indigo-400" /><input value={state.searchText} onChange={(event) => onChange({ searchText: event.target.value, scrollTop: 0 })} placeholder="Task, customer, bank, designer…" className="bg-transparent text-sm font-bold text-slate-700 outline-none w-full" /></span>
     </label>
-    <label className="flex flex-col min-w-[165px]"><span className="text-[10px] font-black uppercase text-slate-400 mb-1 tracking-widest">Completed month</span><span className="flex items-center gap-2 px-3 min-h-11 border-2 border-slate-200 rounded-xl"><Calendar className="w-4 h-4 text-indigo-400" /><select value={state.filterMonth} onChange={(event) => onChange({ filterMonth: event.target.value, filterDate: '', scrollTop: 0 })} className="bg-transparent text-sm font-bold text-slate-700 outline-none w-full"><option value="All">All Months</option>{months.map((month) => <option key={month}>{month}</option>)}</select></span></label>
-    <label className="flex flex-col min-w-[165px]"><span className="text-[10px] font-black uppercase text-slate-400 mb-1 tracking-widest">Exact date</span><span className="flex items-center gap-2 px-3 min-h-11 border-2 border-slate-200 rounded-xl"><Filter className="w-4 h-4 text-indigo-400" /><input type="date" value={state.filterDate} onChange={(event) => onChange({ filterDate: event.target.value, filterMonth: 'All', scrollTop: 0 })} className="bg-transparent text-sm font-bold text-slate-700 outline-none w-full" /></span></label>
+    <label className="flex flex-col min-w-[165px]"><span className="text-[10px] font-black uppercase text-slate-400 mb-1 tracking-widest">Completed month</span><span className="flex items-center gap-2 px-3 min-h-11 border-2 border-slate-200 rounded-xl"><Calendar className="w-4 h-4 text-indigo-400" /><select value={state.filterMonth} onChange={(event) => onChange({ filterMonth: event.target.value, scrollTop: 0 })} className="bg-transparent text-sm font-bold text-slate-700 outline-none w-full"><option value="All">All Months</option>{months.map((month) => <option key={month}>{month}</option>)}</select></span></label>
+    <label className="flex flex-col min-w-[165px]"><span className="text-[10px] font-black uppercase text-slate-400 mb-1 tracking-widest">Exact date</span><span className="flex items-center gap-2 px-3 min-h-11 border-2 border-slate-200 rounded-xl"><Filter className="w-4 h-4 text-indigo-400" /><input type="date" value={state.filterDate} onChange={(event) => onChange({ filterDate: event.target.value, scrollTop: 0 })} className="bg-transparent text-sm font-bold text-slate-700 outline-none w-full" /></span></label>
+    <DateRangeFilter from={state.dateFrom} to={state.dateTo} label="Archive completion date range" onChange={patch=>onChange({...patch,scrollTop:0})} />
     <MultiSelectCheckbox label="Banks" options={banks} selectedValues={state.selectedBanks} onChange={(values) => onChange({ selectedBanks: values, scrollTop: 0 })} allLabel="All Banks" />
     <MultiSelectCheckbox label="Locations" options={locations} selectedValues={state.selectedLocations} onChange={(values) => onChange({ selectedLocations: values, scrollTop: 0 })} allLabel="All Locations" />
-    <button type="button" onClick={onClear} className="min-h-11 text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-xl">Clear all</button>
+    <button type="button" onClick={onClear} className="min-h-11 text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-xl">Reset filters</button>
   </div>
 );
 
@@ -82,6 +85,8 @@ export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, arc
   const rawState = archiveViewState && typeof archiveViewState === 'object' ? archiveViewState : localState;
   const state = {
     filterMonth: String(rawState?.filterMonth || 'All'),
+    dateFrom: String(rawState?.dateFrom || ''),
+    dateTo: String(rawState?.dateTo || ''),
     filterDate: String(rawState?.filterDate || ''),
     selectedBanks: Array.isArray(rawState?.selectedBanks) ? rawState.selectedBanks : [],
     selectedLocations: Array.isArray(rawState?.selectedLocations) ? rawState.selectedLocations : [],
@@ -91,7 +96,7 @@ export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, arc
   };
   const viewportRef = useRef(null);
   const update = (patch) => {
-    const updater = (previous = {}) => ({ filterMonth: 'All', filterDate: '', selectedBanks: [], selectedLocations: [], searchText: '', openLocations: [], scrollTop: 0, ...previous, ...patch });
+    const updater = (previous = {}) => ({ filterMonth: 'All', filterDate: '', dateFrom: '', dateTo: '', selectedBanks: [], selectedLocations: [], searchText: '', openLocations: [], scrollTop: 0, ...previous, ...patch });
     if (setArchiveViewState) setArchiveViewState(updater); else setLocalState(updater);
   };
 
@@ -102,11 +107,12 @@ export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, arc
   const filtered = useMemo(() => archived.filter((project) => {
     if (!project.completedAt || !matchesArchiveSearch(project, state.searchText, getArchiveSearchExtras(project))) return false;
     if (state.filterDate && getCompletedDateKey(project.completedAt) !== state.filterDate) return false;
+    if (!matchesDateRange(getCompletedDateKey(project.completedAt), state.dateFrom, state.dateTo)) return false;
     if (state.filterMonth !== 'All' && formatMonthLabel(project.completedAt) !== state.filterMonth) return false;
     if (state.selectedBanks.length && !state.selectedBanks.includes(getArchiveBank(project))) return false;
     if (state.selectedLocations.length && !state.selectedLocations.includes(getArchiveLocation(project))) return false;
     return true;
-  }), [archived, state.filterDate, state.filterMonth, state.searchText, state.selectedBanks.join('|'), state.selectedLocations.join('|')]);
+  }), [archived, state.filterDate, state.dateFrom, state.dateTo, state.filterMonth, state.searchText, state.selectedBanks.join('|'), state.selectedLocations.join('|')]);
 
   const groups = useMemo(() => groupArchivedByLocation(filtered), [filtered]);
 
@@ -129,7 +135,7 @@ export const HistoryArchiveView = ({ projects, onSelectProject, currentUser, arc
           <div><h2 id="archive-title" className="text-3xl font-extrabold text-slate-800 flex items-center tracking-tight"><Archive className="w-8 h-8 mr-3 text-indigo-500" /> Task History Catalog</h2><p className="text-slate-500 mt-2 font-medium">{filtered.length} completed tasks across {groups.length} location groups.</p></div>
           <div className="flex gap-2"><button type="button" onClick={() => update({ openLocations: groups.map((group) => group.location) })} className="px-3 py-2 rounded-xl bg-indigo-50 text-indigo-700 text-xs font-black">Expand all</button><button type="button" onClick={() => update({ openLocations: [] })} className="px-3 py-2 rounded-xl bg-slate-100 text-slate-600 text-xs font-black">Collapse all</button></div>
         </div>
-        <ArchiveFilters state={state} months={months} banks={banks} locations={locations} onChange={update} onClear={() => update({ filterMonth: 'All', filterDate: '', selectedBanks: [], selectedLocations: [], searchText: '', scrollTop: 0 })} />
+        <ArchiveFilters state={state} months={months} banks={banks} locations={locations} onChange={update} onClear={() => update({ filterMonth: 'All', filterDate: '', dateFrom: '', dateTo: '', selectedBanks: [], selectedLocations: [], searchText: '', scrollTop: 0 })} />
       </div>
 
       <div ref={viewportRef} onScroll={(event) => update({ scrollTop: event.currentTarget.scrollTop })} className="kalpa-archive-groups max-h-[72vh] overflow-y-auto overscroll-contain pr-1" aria-live="polite">
