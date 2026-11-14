@@ -2119,9 +2119,21 @@ const TeamPerformanceView = ({ users, projects, onUpdateUser, onCreateUser, onUp
   );
 };
 
-const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
-  const [filterDate, setFilterDate] = useState(getIndiaDateKey());
-  const [monthKey, setMonthKey] = useState(getIndiaDateKey().slice(0, 7));
+const AttendanceView = ({ attendanceLogs = [], users = [], projects = [], attendanceViewState = null, setAttendanceViewState = null }) => {
+  const [localAttendanceState,setLocalAttendanceState] = useState({
+    filterDate:getIndiaDateKey(),monthKey:getIndiaDateKey().slice(0,7),dateFrom:'',dateTo:''
+  });
+  const state=attendanceViewState || localAttendanceState;
+  const change=(patch)=>typeof setAttendanceViewState==='function'
+    ? setAttendanceViewState(previous=>({...previous,...patch}))
+    : setLocalAttendanceState(previous=>({...previous,...patch}));
+  const filterDate=state.filterDate || getIndiaDateKey();
+  const monthKey=state.monthKey || getIndiaDateKey().slice(0,7);
+  const dateFrom=String(state.dateFrom||'');
+  const dateTo=String(state.dateTo||'');
+  const setFilterDate=value=>change({filterDate:value});
+  const setMonthKey=value=>change({monthKey:value});
+  const resetAttendanceFilters=()=>change({filterDate:getIndiaDateKey(),monthKey:getIndiaDateKey().slice(0,7),dateFrom:'',dateTo:''});
   const nowMs = Date.now();
   const teamMembers = getOperationalUsers(users && users.length ? users : INITIAL_USERS, { includeAdmins: false });
   const attendanceEngine = buildAttendanceEngineV3({ attendanceLogs, users: teamMembers, projects, dateKey: filterDate, now: nowMs });
@@ -2133,7 +2145,7 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
     const [year, month] = monthKey.split('-').map(Number);
     const count = new Date(year, month, 0).getDate();
     return Array.from({ length: count }, (_, i) => `${monthKey}-${String(i + 1).padStart(2, '0')}`);
-  })();
+  })().filter(day => matchesDateRange(day, dateFrom, dateTo));
   const monthlyRowFor = (user, date) => buildAttendanceEngineV3({ attendanceLogs: safeLogs, users: [user], projects, dateKey: date, now: nowMs }).rows[0] || null;
   const getMonthlyAttendanceCell = (user, date) => {
     const matchingLogs = safeLogs.filter(log => log && log.date === date && (String(log.userId || '') === String(user.id || '') || String(log.name || '').trim().toLowerCase() === String(user.name || '').trim().toLowerCase()));
@@ -2181,7 +2193,10 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <input type="date" value={filterDate} onChange={(e) => setFilterDate(e.target.value)} className="border-2 border-slate-200 rounded-xl p-2.5 font-bold text-slate-700 outline-none" />
-          <input type="month" value={monthKey} onChange={(e) => setMonthKey(e.target.value)} className="border-2 border-slate-200 rounded-xl p-2.5 font-bold text-slate-700 outline-none" />
+          <input type="month" value={monthKey} onChange={(e) => setMonthKey(e.target.value)} className="border-2 border-slate-200 rounded-xl p-2.5 font-bold text-slate-700 outline-none" aria-label="Attendance sheet month" />
+          <DateRangeFilter from={dateFrom} to={dateTo} label="Attendance sheet date range" onChange={change} />
+          <button type="button" onClick={resetAttendanceFilters}
+            className="min-h-10 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-black">Reset filters</button>
           <button onClick={handleExport} className="flex items-center px-4 py-2.5 bg-emerald-100 text-emerald-700 font-bold rounded-xl hover:bg-emerald-200 transition-colors"><Download className="w-4 h-4 mr-2" /> Export</button>
         </div>
       </div>
@@ -2259,7 +2274,7 @@ const AttendanceView = ({ attendanceLogs = [], users = [], projects = [] }) => {
       </div>
 
       <div className="bg-white rounded-3xl border border-slate-100 shadow-sm p-5">
-        <div className="flex items-center justify-between mb-4"><div><h3 className="font-black text-slate-800 text-lg">Monthly Attendance Sheet</h3><p className="text-xs font-semibold text-slate-400">Green = present, red = past absent/no login record, grey = upcoming future date.</p></div><span className="text-xs font-black bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1.5 rounded-xl">{monthKey}</span></div>
+        <div className="flex items-center justify-between mb-4"><div><h3 className="font-black text-slate-800 text-lg">Monthly Attendance Sheet</h3><p className="text-xs font-semibold text-slate-400">Green = present, red = past absent/no login record, grey = upcoming future date. Date range narrows the selected month sheet; the daily view remains on its selected date.</p></div><span className="text-xs font-black bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1.5 rounded-xl">{monthKey}</span></div>
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs whitespace-nowrap">
             <thead>
@@ -5087,6 +5102,7 @@ function AppShell() {
   const [operationDateRange, setOperationDateRange] = useState({dateFrom:'',dateTo:''});
   const [performanceViewState,setPerformanceViewState] = useState({range:'month',selectedMember:'all',dateRange:{dateFrom:'',dateTo:''}});
   const [reportsViewState,setReportsViewState] = useState({selectedMonth:getCurrentAccountingMonthKey(),dateRange:{dateFrom:'',dateTo:''}});
+  const [attendanceViewState,setAttendanceViewState] = useState({filterDate:getIndiaDateKey(),monthKey:getIndiaDateKey().slice(0,7),dateFrom:'',dateTo:''});
   const [viewVisitKey, setViewVisitKey] = useState(0);
   const [taskDetailReturnTab, setTaskDetailReturnTab] = useState('board');
   const taskDetailReturnPositionRef = useRef({ windowY: 0, tab: 'board' });
@@ -5133,6 +5149,7 @@ function AppShell() {
       setOperationDateRange({dateFrom:'',dateTo:''});
       setPerformanceViewState({range:'month',selectedMember:'all',dateRange:{dateFrom:'',dateTo:''}});
       setReportsViewState({selectedMonth:getCurrentAccountingMonthKey(),dateRange:{dateFrom:'',dateTo:''}});
+      setAttendanceViewState({filterDate:getIndiaDateKey(),monthKey:getIndiaDateKey().slice(0,7),dateFrom:'',dateTo:''});
       setSelectedBoardDate(formatDateKey());
       setViewVisitKey(value=>value+1);
     };
@@ -5287,6 +5304,7 @@ function AppShell() {
     setOperationDateRange({dateFrom:'',dateTo:''});
     setPerformanceViewState({range:'month',selectedMember:'all',dateRange:{dateFrom:'',dateTo:''}});
     setReportsViewState({selectedMonth:getCurrentAccountingMonthKey(),dateRange:{dateFrom:'',dateTo:''}});
+    setAttendanceViewState({filterDate:getIndiaDateKey(),monthKey:getIndiaDateKey().slice(0,7),dateFrom:'',dateTo:''});
     setViewVisitKey(value=>value+1);
     setArchiveViewState({ filterMonth: 'All', filterDate: '', dateFrom:'', dateTo:'', selectedBanks: [], selectedLocations: [], searchText: '', sortOrder: 'newest', scrollTop: 0 });
     setFinanceViewState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), dateFrom:'', dateTo:'', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
@@ -7433,7 +7451,7 @@ function AppShell() {
             onSelectProject={(p) => openTaskDetail(p, 'team')}
           />
         ) : activeTab === 'attendance' ? (
-          <AttendanceView attendanceLogs={attendanceLogs} users={activeUsers} projects={projects} />
+          <AttendanceView attendanceLogs={attendanceLogs} users={activeUsers} projects={projects} attendanceViewState={attendanceViewState} setAttendanceViewState={setAttendanceViewState} />
         ) : activeTab === 'profile' ? (
           <ProfileView currentUser={currentUser} onUpdateUser={handleSaveOwnProfile} setCurrentUser={setCurrentUser} sendRealOtp={sendRealOtp} verifyRealOtp={verifyRealOtp} onChangePassword={handleChangePassword} />
         ) : activeTab === 'calculator' ? (
