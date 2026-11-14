@@ -1457,7 +1457,17 @@ export const ProductivityDashboard = ({ users = [], projects = [], currentUser =
     const rolling10CompletionMinutes = backendLeaderboardReady ? Number(summaryRow.rolling10CompletionMinutes || 0) : Number(summaryRow.rolling10CompletionMinutes || 0) || avgMins;
     const rolling30CompletionMinutes = backendLeaderboardReady ? Number(summaryRow.rolling30CompletionMinutes || 0) : Number(summaryRow.rolling30CompletionMinutes || 0) || avgMins;
     const rawScoreBreakdown = summaryRow.scoreBreakdown || {};
-    const scoreBreakdown = {
+    // A server-reported score of zero is authoritative after a baseline reset.
+    // Never reconstitute positive sub-scores from old case totals when there is
+    // no new completion history.
+    const scoreBreakdown = backendLeaderboardReady ? {
+      speedScore:Number(rawScoreBreakdown.speedScore ?? 0),
+      qualityScore:Number(rawScoreBreakdown.qualityScore ?? 0),
+      slaScore:Number(rawScoreBreakdown.slaScore ?? 0),
+      revisionScore:Number(rawScoreBreakdown.revisionScore ?? 0),
+      attendanceScore:Number(rawScoreBreakdown.attendanceScore ?? 0),
+      productivityScore
+    } : {
       speedScore: Number(rawScoreBreakdown.speedScore || 0) > 0 ? Number(rawScoreBreakdown.speedScore) : speedScore,
       qualityScore: Number(rawScoreBreakdown.qualityScore || 0) > 0 ? Number(rawScoreBreakdown.qualityScore) : qualityScore,
       slaScore: Number(rawScoreBreakdown.slaScore || 0) > 0 ? Number(rawScoreBreakdown.slaScore) : slaPct,
