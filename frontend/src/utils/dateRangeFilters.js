@@ -12,8 +12,11 @@ export function dateFilterKey(value) {
   if (value == null || value === '') return '';
   const date = new Date(typeof value === 'number' && value > 0 && value < 1e11 ? value*1000 : value);
   if (!Number.isFinite(date.getTime())) return '';
+  // Match the rest of the workspace's Asia/Kolkata calendar even for staff
+  // viewing the site from a device in a different timezone.
+  const india = new Date(date.getTime()+330*60*1000);
   const p = (v) => String(v).padStart(2,'0');
-  return [date.getFullYear(),p(date.getMonth()+1),p(date.getDate())].join('-');
+  return [india.getUTCFullYear(),p(india.getUTCMonth()+1),p(india.getUTCDate())].join('-');
 }
 export function validDateRange(from = '', to = '') {
   if (from && !validDateKey(from)) return false;
