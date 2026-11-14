@@ -74,4 +74,6 @@ test('performance scoreboard does not refill a reset zero with old local history
   assert.match(command,/requestConfirmation/);
   assert.match(command,/setLeaderboardRefreshKey\(key=>key\+1\)/);
   assert.match(command,/if \(baselineRefreshPending\) return/);
+  assert.match(command,/const scoreBreakdown = backendLeaderboardReady \?/);
+  assert.match(command,/speedScore:Number\(rawScoreBreakdown\.speedScore \?\? 0\)/);
 });
