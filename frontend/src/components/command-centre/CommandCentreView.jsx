@@ -1256,10 +1256,25 @@ export const CommandCentreView = ({ projects = [], users = [], attendanceLogs = 
   );
 };
 
-export const ProductivityDashboard = ({ users = [], projects = [], currentUser = null, performanceRecords: externalPerformanceRecords = [], performanceSummary = null }) => {
-  const [range, setRange] = useState('month');
-  const [dateRange,setDateRange] = useState({dateFrom:'',dateTo:''});
-  const [selectedMember, setSelectedMember] = useState('all');
+export const ProductivityDashboard = ({ users = [], projects = [], currentUser = null, performanceRecords: externalPerformanceRecords = [], performanceSummary = null, performanceViewState = null, setPerformanceViewState = null }) => {
+  const [localRange,setLocalRange] = useState('month');
+  const [localDateRange,setLocalDateRange] = useState({dateFrom:'',dateTo:''});
+  const [localSelectedMember,setLocalSelectedMember] = useState('all');
+  const range = performanceViewState?.range || localRange;
+  const selectedMember = performanceViewState?.selectedMember || localSelectedMember;
+  const dateRange = performanceViewState?.dateRange || localDateRange;
+  const setRange = value => typeof setPerformanceViewState === 'function'
+    ? setPerformanceViewState(previous=>({...previous,range:value}))
+    : setLocalRange(value);
+  const setSelectedMember = value => typeof setPerformanceViewState === 'function'
+    ? setPerformanceViewState(previous=>({...previous,selectedMember:value}))
+    : setLocalSelectedMember(value);
+  const setDateRange = updater => typeof setPerformanceViewState === 'function'
+    ? setPerformanceViewState(previous=>({
+        ...previous,
+        dateRange:typeof updater==='function' ? updater(previous?.dateRange || {dateFrom:'',dateTo:''}) : updater
+      }))
+    : setLocalDateRange(updater);
   const [resettingBaseline,setResettingBaseline] = useState(false);
   const customRange = range === 'custom';
   const customReady = customRange && Boolean(dateRange.dateFrom && dateRange.dateTo) && validDateRange(dateRange.dateFrom,dateRange.dateTo);
@@ -1803,9 +1818,20 @@ export const ProductivityDashboard = ({ users = [], projects = [], currentUser =
   );
 };
 
-export const ReportsAnalyticsView = ({ projects = [], users = [], currentUser = null }) => {
-  const [selectedMonth, setSelectedMonth] = useState(getCurrentAccountingMonthKey());
-  const [reportDateRange,setReportDateRange] = useState({dateFrom:'',dateTo:''});
+export const ReportsAnalyticsView = ({ projects = [], users = [], currentUser = null, reportsViewState = null, setReportsViewState = null }) => {
+  const [localSelectedMonth,setLocalSelectedMonth] = useState(getCurrentAccountingMonthKey());
+  const [localReportDateRange,setLocalReportDateRange] = useState({dateFrom:'',dateTo:''});
+  const selectedMonth=reportsViewState?.selectedMonth || localSelectedMonth;
+  const reportDateRange=reportsViewState?.dateRange || localReportDateRange;
+  const setSelectedMonth=value=>typeof setReportsViewState==='function'
+    ? setReportsViewState(previous=>({...previous,selectedMonth:value}))
+    : setLocalSelectedMonth(value);
+  const setReportDateRange=updater=>typeof setReportsViewState==='function'
+    ? setReportsViewState(previous=>({
+        ...previous,
+        dateRange:typeof updater==='function'?updater(previous?.dateRange || {dateFrom:'',dateTo:''}):updater
+      }))
+    : setLocalReportDateRange(updater);
   const {dateFrom,dateTo}=reportDateRange;
   const accountingMonth = normalizeAccountingMonthKey(selectedMonth, getCurrentAccountingMonthKey());
   const accountingMonthLabel = formatAccountingMonthLabel(accountingMonth);
