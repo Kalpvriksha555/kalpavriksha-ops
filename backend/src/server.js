@@ -4365,10 +4365,25 @@ function performanceRangeMs(value = 'month') {
   return 30 * 86400000;
 }
 
+function validPerformanceDateKey(value) {
+  const key=String(value||'').trim();
+  if (!/^\\d{4}-(0[1-9]|1[0-2])-([0-2]\\d|3[01])$/.test(key)) return '';
+  const day=new Date(key+'T00:00:00+05:30');
+  return Number.isFinite(day.getTime()) && serverTodayKey(day.getTime())===key ? key : '';
+}
+
 function performanceScopeConfig(input = {}) {
   const source = typeof input === 'string' ? { range:input } : (input || {});
   const scope = String(source.scope || '').trim().toLowerCase();
   if (scope === 'overall') return { scope:'overall', month:'', range:'', key:'overall' };
+  if (scope === 'custom') {
+    const from=validPerformanceDateKey(source.from);
+    const to=validPerformanceDateKey(source.to);
+    if (!from || !to || from>to) throw new Error('Invalid custom performance date range.');
+    const start=Date.parse(from+'T00:00:00+05:30');
+    const end=Date.parse(to+'T00:00:00+05:30')+86400000;
+    return {scope:'custom',month:'',range:'',from,to,start,end,key:'custom:'+from+':'+to};
+  }
   if (scope === 'month') {
     const month = normalizePerformanceMonthKey(source.month);
     return { scope:'month', month, range:'', key:`month:${month}` };
@@ -4399,6 +4414,7 @@ function performanceEventMatchesScope(eventAt = 0, config = performanceScopeConf
   const timestamp = parseDateMs(eventAt);
   if (!timestamp || (baselineAt && timestamp < baselineAt)) return false;
   if (config.scope === 'overall') return true;
+  if (config.scope === 'custom') return timestamp >= config.start && timestamp < config.end;
   if (config.scope === 'month') return serverMonthKey(timestamp) === config.month;
   return timestamp >= nowMs - performanceRangeMs(config.range);
 }
@@ -5381,10 +5397,13 @@ app.get('/api/performance/diagnostics', requireCapability('performance:read'), a
 });
 
 app.get('/api/performance/leaderboard', requireCapability('performance:read'), async (req, res) => {
-  const scope = ['month','overall'].includes(String(req.query.scope || '').toLowerCase()) ? String(req.query.scope).toLowerCase() : '';
+  const scope = ['month','overall','custom'].includes(String(req.query.scope || '').toLowerCase()) ? String(req.query.scope).toLowerCase() : '';
   const range = ['week','month','quarter'].includes(String(req.query.range || '').toLowerCase()) ? String(req.query.range).toLowerCase() : '';
   const month = normalizePerformanceMonthKey(req.query.month);
-  res.json({ ok:true, leaderboard:buildTeamLeaderboard(readDb(), { scope, month, range }) });
+  const from=String(req.query.from||'').trim(),to=String(req.query.to||'').trim();
+  if (scope === 'custom' && (!validPerformanceDateKey(from)||!validPerformanceDateKey(to)||from>to))
+    return res.status(400).json({ok:false,code:'PERFORMANCE_DATE_RANGE_INVALID',error:'Select a valid From date on or before To date.'});
+  res.json({ ok:true, leaderboard:buildTeamLeaderboard(readDb(), { scope, month, range, from, to }) });
 });
 
 app.patch('/api/performance/baseline/:id', requireAdminSession, async (req, res) => {
