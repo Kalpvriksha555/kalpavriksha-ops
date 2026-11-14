@@ -2,6 +2,8 @@ import { asArray, asRecord, firstArray, parseJsonArray, parseJsonRecord } from '
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, BarChart3, Bell, CheckCircle, Clock, Coffee, Download, FileText, ShieldCheck, Star, User, Users, XCircle } from 'lucide-react';
 import { Badge, MiniEmptyState } from '../shared';
+import { DateRangeFilter } from '../ui/DateRangeFilter.jsx';
+import { dateFilterKey, matchesDateRange, validDateRange } from '../../utils/dateRangeFilters.js';
 import { ONLINE_STALE_MS } from '../../config/appConfig';
 import { absoluteApiUrl } from '../../services/fileService';
 import { getStatusColor } from '../../services/taskService';
@@ -1730,6 +1732,8 @@ export const ProductivityDashboard = ({ users = [], projects = [], performanceRe
 
 export const ReportsAnalyticsView = ({ projects = [], users = [], currentUser = null }) => {
   const [selectedMonth, setSelectedMonth] = useState(getCurrentAccountingMonthKey());
+  const [reportDateRange,setReportDateRange] = useState({dateFrom:'',dateTo:''});
+  const {dateFrom,dateTo}=reportDateRange;
   const accountingMonth = normalizeAccountingMonthKey(selectedMonth, getCurrentAccountingMonthKey());
   const accountingMonthLabel = formatAccountingMonthLabel(accountingMonth);
   const projectList = useMemo(() => Array.isArray(projects) ? projects.filter(Boolean) : [], [projects]);
@@ -1737,11 +1741,11 @@ export const ReportsAnalyticsView = ({ projects = [], users = [], currentUser = 
   // Reports use exact calendar-month event buckets instead of rolling 30/90-day
   // windows. A case created last month and completed this month contributes only
   // to this month's completion metric, never to this month's new workload.
-  const createdScoped = useMemo(() => projectList.filter(project => getProjectCreatedMonthKey(project) === accountingMonth), [projectList, accountingMonth]);
-  const completed = useMemo(() => projectList.filter(project => isProjectCompleted(project) && getProjectCompletedMonthKey(project) === accountingMonth), [projectList, accountingMonth]);
+  const createdScoped = useMemo(() => projectList.filter(project => getProjectCreatedMonthKey(project) === accountingMonth && matchesDateRange(project.createdAt || project.receivedAt || project.taskDate, dateFrom, dateTo)), [projectList, accountingMonth, dateFrom, dateTo]);
+  const completed = useMemo(() => projectList.filter(project => isProjectCompleted(project) && getProjectCompletedMonthKey(project) === accountingMonth && matchesDateRange(project.completedAt || project.finalApprovedAt || project.draftingCompletedAt, dateFrom, dateTo)), [projectList, accountingMonth, dateFrom, dateTo]);
   const pending = useMemo(() => createdScoped.filter(isIncompleteProject), [createdScoped]);
-  const revisions = useMemo(() => projectList.filter(project => hasRevisionInAccountingMonth(project, accountingMonth)), [projectList, accountingMonth]);
-  const financeEntries = useMemo(() => projectList.map(project => ({ project, entry:buildProjectMonthlyFinanceEntry(project, accountingMonth) })).filter(item => item.entry.hasActivity), [projectList, accountingMonth]);
+  const revisions = useMemo(() => projectList.filter(project => hasRevisionInAccountingMonth(project, accountingMonth) && matchesDateRange(project.lastRevisionAt || project.revisionUpdatedAt || project.revisionRequestedAt || project.revertedAt, dateFrom, dateTo)), [projectList, accountingMonth, dateFrom, dateTo]);
+  const financeEntries = useMemo(() => projectList.map(project => ({ project, entry:buildProjectMonthlyFinanceEntry(project, accountingMonth) })).filter(item => item.entry.hasActivity && matchesDateRange(item.entry.activityAt, dateFrom, dateTo)), [projectList, accountingMonth, dateFrom, dateTo]);
   const paymentPending = financeEntries.filter(({ entry }) => ['Pending', 'Partially Paid'].includes(entry.statusAtClose));
   const paymentReceived = financeEntries.filter(({ entry }) => entry.received !== 0);
   const reportAsOfMs = Math.min(Date.now(), getAccountingMonthEndTimestamp(accountingMonth) || Date.now());
@@ -1794,11 +1798,13 @@ export const ReportsAnalyticsView = ({ projects = [], users = [], currentUser = 
         <div><h1 className="text-3xl font-extrabold text-slate-800 tracking-tight">Reports</h1><p className="text-slate-500 font-medium mt-2 max-w-4xl">Every report is isolated to one exact calendar month. New workload, completions, revisions and finance events are bucketed by their own dates so previous-month data is never mixed into {accountingMonthLabel}.</p></div>
         <div className="flex flex-wrap items-end gap-3">
           <label className="bg-white border-2 border-indigo-100 rounded-xl px-3 py-2 shadow-sm"><span className="block text-[10px] font-black uppercase tracking-widest text-indigo-500 mb-1">Report Month</span><input type="month" value={accountingMonth} max={getCurrentAccountingMonthKey()} onChange={event => setSelectedMonth(event.target.value)} className="font-black text-slate-800 outline-none bg-transparent" aria-label="Reports accounting month" /></label>
+          <DateRangeFilter from={dateFrom} to={dateTo} label="Report event date range" onChange={patch=>setReportDateRange(prev=>({...prev,...patch}))} />
+          <button type="button" onClick={()=>setReportDateRange({dateFrom:'',dateTo:''})} className="min-h-10 px-3 rounded-xl bg-slate-100 text-slate-700 text-xs font-black">Reset filters</button>
           <button type="button" onClick={exportSummary} className="bg-emerald-100 text-emerald-700 font-bold px-4 py-2.5 rounded-xl"><Download className="w-4 h-4 inline mr-2"/>Export Summary</button>
           <button type="button" onClick={exportWorkload} className="bg-indigo-100 text-indigo-700 font-bold px-4 py-2.5 rounded-xl"><Download className="w-4 h-4 inline mr-2"/>Export Reports</button>
         </div>
       </div>
-      <div className="bg-indigo-50 border-2 border-indigo-100 rounded-2xl px-5 py-4"><p className="font-black text-indigo-800">Active reporting period: {accountingMonthLabel}</p><p className="text-sm font-bold text-indigo-600 mt-1">No rolling 30-day or 90-day window is used. Changing the month replaces the complete report period.</p></div>
+      <div className="bg-indigo-50 border-2 border-indigo-100 rounded-2xl px-5 py-4"><p className="font-black text-indigo-800">Active reporting period: {accountingMonthLabel}</p><p className="text-sm font-bold text-indigo-600 mt-1">No rolling 30-day or 90-day window is used. Changing the month retains the date-range filter. Finance values remain exact selected-month totals for cases whose last finance activity matches the range; they are not day-level transaction totals.</p></div>
       <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-4"><StatCard label="New Workload" value={createdScoped.length} hint="created this month"/><StatCard label="Completed" value={completed.length} hint="completed this month"/><StatCard label="Pending" value={pending.length} hint="this month's new cases"/><StatCard label="Revisions" value={revisions.length} hint="activity this month"/><StatCard label="Pending Pay" value={paymentPending.length} hint={`₹${pendingAmount.toLocaleString()}`}/><StatCard label="Received" value={`₹${receivedAmount.toLocaleString()}`} hint="this month only"/><StatCard label="Net" value={`₹${netAmount.toLocaleString()}`} hint="after expense/refund"/><StatCard label="SLA" value={`${slaPct}%`} hint="selected-month cohort"/></div>
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-5"><SimpleTable title="Bank Report" columns={['Bank', 'New Cases']} rows={bankRows} empty={`No new bank cases in ${accountingMonthLabel}.`}/><SimpleTable title="Branch Report" columns={['Branch', 'New Cases']} rows={branchRows} empty={`No new branch cases in ${accountingMonthLabel}.`}/><SimpleTable title="Case Type Report" columns={['Case Type', 'New Cases']} rows={caseTypeRows} empty={`No new case types in ${accountingMonthLabel}.`}/><SimpleTable title="Payment Aging Report" columns={['Age', 'Pending Cases']} rows={topRowsFromCount(paymentAging, 10)} empty={`No selected-month pending payments in ${accountingMonthLabel}.`}/></div>
     </div>
