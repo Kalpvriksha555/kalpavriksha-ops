@@ -18,17 +18,22 @@ test('inclusive date range includes the last chosen day and accepts reversed/emp
   assert.equal(matchesDateRange('2026-11-15','2026-11-01','2026-11-14'),false);
   assert.equal(matchesDateRange('2026-11-01','2026-11-14','2026-11-01'),false);
   assert.equal(matchesDateRange(null,'2026-11-01','2026-11-14'),false);
-  assert.equal(matchesDateRange(null),'true'==='true');
+  assert.equal(matchesDateRange(null),true);
   assert.equal(monthOverlapsDateRange('2026-11','2026-10-15','2026-11-01'),true);
   assert.equal(monthOverlapsDateRange('2026-10','2026-11-01','2026-11-30'),false);
   assert.equal(dateFilterKey('2026-11-14'),'2026-11-14');
+  // A UTC-hosted browser must still use the app's India-local calendar day.
+  assert.equal(dateFilterKey('2026-11-14T23:59:59+05:30'),'2026-11-14');
+  assert.equal(dateFilterKey('2026-11-15T00:00:00+05:30'),'2026-11-15');
+  assert.equal(matchesDateRange('2026-11-14T23:59:59+05:30','2026-11-14','2026-11-14'),true);
+  assert.equal(matchesDateRange('2026-11-15T00:00:00+05:30','2026-11-14','2026-11-14'),false);
 });
 
 test('month changes preserve finance bank/location/status and archive selectors',()=>{
   assert.match(app,/const setSelectedMonth = \(value\) => updateFinanceViewState\(\{ selectedMonth: normalizeAccountingMonthKey\(value, selectedMonth\) \}\);/);
   assert.match(app,/const resetLedgerFilters = \(\) => updateFinanceViewState/);
   assert.match(app,/matchesDateRange\(entry\.activityAt, dateFrom, dateTo\)/);
-  assert.match(app,/Month Summary|Month Summary|Month Summary/);
+  assert.match(app,/Month Summary/);
   assert.match(archive,/onChange\(\{ filterMonth: event\.target\.value, scrollTop: 0 \}\)/);
   assert.match(archive,/onChange\(\{ filterDate: event\.target\.value, scrollTop: 0 \}\)/);
   assert.match(archive,/getCompletedDateKey\(project\.completedAt\), state\.dateFrom, state\.dateTo/);
@@ -38,6 +43,7 @@ test('month changes preserve finance bank/location/status and archive selectors'
 test('all requested views expose date range and an explicit reset action',()=>{
   assert.match(operations,/Case creation date range/);
   assert.match(operations,/Reset filters/);
+  assert.match(operations,/setSelectedBoardDate\(formatDateKey\(\)\)/);
   assert.match(app,/operationDateRange\.dateFrom/);
   assert.match(command,/Performance date range/);
   assert.match(command,/Report event date range/);
@@ -50,6 +56,8 @@ test('temporary filters are in-memory only and clear on restored browser visit',
   assert.match(app,/if \(!event\.persisted\) return/);
   assert.match(app,/setViewVisitKey\(value=>value\+1\)/);
   assert.match(app,/workspace:\$\{viewVisitKey\}/);
+  assert.match(app,/performanceViewState=\{performanceViewState\}/);
+  assert.match(app,/reportsViewState=\{reportsViewState\}/);
   assert.doesNotMatch(app,/localStorage\.(?:getItem|setItem)\(['"](?:kalpa_finance_filters|kalpa_archive_filters|kalpa_operation_range)/);
 });
 
