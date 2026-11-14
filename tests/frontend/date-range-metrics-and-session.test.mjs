@@ -47,6 +47,8 @@ test('all requested views expose date range and an explicit reset action',()=>{
   assert.match(app,/operationDateRange\.dateFrom/);
   assert.match(command,/Performance date range/);
   assert.match(command,/Report event date range/);
+  assert.match(app,/Attendance sheet date range/);
+  assert.match(app,/resetAttendanceFilters/);
   assert.match(command,/resetPerformanceFilters/);
   assert.match(command,/setReportDateRange\(\{dateFrom:'',dateTo:''\}\)/);
 });
@@ -58,6 +60,7 @@ test('temporary filters are in-memory only and clear on restored browser visit',
   assert.match(app,/workspace:\$\{viewVisitKey\}/);
   assert.match(app,/performanceViewState=\{performanceViewState\}/);
   assert.match(app,/reportsViewState=\{reportsViewState\}/);
+  assert.match(app,/attendanceViewState=\{attendanceViewState\}/);
   assert.doesNotMatch(app,/localStorage\.(?:getItem|setItem)\(['"](?:kalpa_finance_filters|kalpa_archive_filters|kalpa_operation_range)/);
 });
 
@@ -70,4 +73,5 @@ test('performance scoreboard does not refill a reset zero with old local history
   assert.match(command,/RESET ANALYTICS BASELINE/);
   assert.match(command,/requestConfirmation/);
   assert.match(command,/setLeaderboardRefreshKey\(key=>key\+1\)/);
+  assert.match(command,/if \(baselineRefreshPending\) return/);
 });
