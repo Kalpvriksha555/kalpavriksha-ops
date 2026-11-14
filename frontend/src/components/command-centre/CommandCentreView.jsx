@@ -1369,6 +1369,33 @@ export const ProductivityDashboard = ({ users = [], projects = [], currentUser =
       setEngineBusy(false);
     }
   };
+  const resetScoreBaseline = async () => {
+    if (String(currentUser?.role || '').toUpperCase() !== 'ADMIN' || resettingBaseline) return;
+    const member=selectedMember==='all' ? null : team.find(u=>normalizePersonName(u.name)===normalizePersonName(selectedMember));
+    if (selectedMember!=='all' && !member?.id) return notifyUser('Choose an approved team member first.',{tone:'error'});
+    const target=member?.name || 'all eligible designers and managers';
+    const accepted=await requestConfirmation(
+      `Start new SLA and performance scores for ${target} from this moment? Old cases, attendance, payments, uploads, and performance history will remain untouched.`,
+      {title:'Reset analytics baseline only',confirmLabel:'Start fresh scores',cancelLabel:'Cancel'}
+    );
+    if (!accepted) return;
+    setResettingBaseline(true);
+    try {
+      const response=await authFetch(absoluteApiUrl('/api/performance/baselines/reset'),{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({scope:member?'member':'all',userId:member?.id||'',
+          confirmation:'RESET ANALYTICS BASELINE'})
+      });
+      const data=await readApiRecord(response,{operation:'Reset analytics baseline',requireOk:true});
+      if (!response.ok) throw apiHttpError(response,data,'Reset analytics baseline failed');
+      setLeaderboard(null);
+      setEngineSummary(null);
+      setLeaderboardRefreshKey(key=>key+1);
+      notifyUser(`Fresh SLA and productivity baseline started for ${data.resetCount} team member(s). Historical data is preserved.`,{tone:'success'});
+    } catch(error){
+      notifyUser(error?.message || 'Analytics baseline could not be reset.',{tone:'error'});
+    } finally { setResettingBaseline(false); }
+  };
   const getMemberProjects = (name) => scopedProjectsByOwner.get(normalizePersonName(name)) || [];
   const getMemberRecords = (name) => performanceRecordsByOwner.get(normalizePersonName(name)) || [];
   const memberRows = useMemo(() => activeTeam.map(u => {
@@ -1569,13 +1596,31 @@ export const ProductivityDashboard = ({ users = [], projects = [], currentUser =
           <p className="text-slate-500 font-medium mt-2 max-w-4xl">Productivity, average completion, review speed, case-type timing, revisions, and SLA quality.</p>
         </div>
         <div className="flex flex-wrap gap-3">
-          <select value={range} onChange={e => setRange(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none">
-            <option value="week">Last 7 days</option><option value="month">Last 30 days</option><option value="quarter">Last 90 days</option>
+          <select value={range} onChange={e => {
+            const next=e.target.value;
+            setRange(next);
+            if(next==='custom') setDateRange(previous=>({
+              dateFrom:previous.dateFrom||dateFilterKey(Date.now()-30*86400000),
+              dateTo:previous.dateTo||dateFilterKey(Date.now())
+            }));
+          }} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none" aria-label="Performance period">
+            <option value="week">Last 7 days</option><option value="month">Last 30 days</option><option value="quarter">Last 90 days</option><option value="custom">Custom date range</option>
           </select>
+          {customRange && <DateRangeFilter from={dateRange.dateFrom} to={dateRange.dateTo}
+            label="Performance date range" onChange={patch=>setDateRange(prev=>({...prev,...patch}))} />}
+          <button type="button" onClick={resetPerformanceFilters}
+            className="bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl px-4 py-2.5 text-xs font-black">Reset filters</button>
           <select value={selectedMember} onChange={e => setSelectedMember(e.target.value)} className="bg-white border-2 border-slate-100 rounded-xl px-4 py-2.5 font-bold text-slate-700 outline-none">
             <option value="all">All team members</option>{team.map(u => <option key={u.id} value={u.name}>{u.name}</option>)}
           </select>
           <button type="button" onClick={exportPerformance} className="bg-indigo-600 text-white font-bold px-4 py-2.5 rounded-xl shadow-sm"><Download className="w-4 h-4 inline mr-2"/>Export</button>
+          {String(currentUser?.role||'').toUpperCase()==='ADMIN' && (
+            <button type="button" onClick={resetScoreBaseline} disabled={resettingBaseline}
+              className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl px-4 py-2.5 text-xs font-black disabled:opacity-50"
+              title="Restart only displayed productivity/SLA scoring, preserving all business data">
+              {resettingBaseline?'Resetting scores…':selectedMember==='all'?'Reset team SLA + scores':'Reset selected member SLA + scores'}
+            </button>
+          )}
         </div>
       </div>
       <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-4">
