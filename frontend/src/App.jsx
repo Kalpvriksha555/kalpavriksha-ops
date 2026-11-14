@@ -1,6 +1,8 @@
 import { asArray, asRecord, firstArray, parseJsonArray, parseJsonRecord, toArray } from './utils/runtimeShapeUtils.js';
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { FeedbackHost } from './components/ui/FeedbackHost.jsx';
+import { DateRangeFilter } from './components/ui/DateRangeFilter.jsx';
+import { matchesDateRange, monthOverlapsDateRange } from './utils/dateRangeFilters.js';
 import { notifyUser, requestConfirmation, requestInput } from './services/uiFeedback.js';
 import { CLIENT_API_CONTRACT_DIAGNOSTIC_EVENT, CLIENT_RUNTIME_DIAGNOSTIC_EVENT, recordApiDiagnosticEvent, recordRuntimeDiagnostic, setRuntimeDiagnosticContextProvider } from './services/runtimeDiagnosticsService.js';
 import { useAdaptiveWorkspaceSync } from './hooks/useAdaptiveWorkspaceSync.js';
@@ -2296,21 +2298,24 @@ const finiteLedgerAmount = (value) => {
 };
 
 const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceViewState }) => {
-  const [localFinanceViewState, setLocalFinanceViewState] = useState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
+  const [localFinanceViewState, setLocalFinanceViewState] = useState({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), dateFrom:'', dateTo:'', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
   const effectiveFinanceViewState = financeViewState || localFinanceViewState;
   const updateFinanceViewState = (patch) => {
-    const update = (previous = {}) => ({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [], ...previous, ...patch });
+    const update = (previous = {}) => ({ activeTab: 'transactions', selectedMonth: getCurrentAccountingMonthKey(), dateFrom:'', dateTo:'', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [], ...previous, ...patch });
     if (typeof setFinanceViewState === 'function') setFinanceViewState(update);
     else setLocalFinanceViewState(update);
   };
   const activeTab = effectiveFinanceViewState.activeTab || 'transactions';
   const selectedMonth = normalizeAccountingMonthKey(effectiveFinanceViewState.selectedMonth, getCurrentAccountingMonthKey());
   const selectedMonthLabel = formatAccountingMonthLabel(selectedMonth);
+  const dateFrom = String(effectiveFinanceViewState.dateFrom || '');
+  const dateTo = String(effectiveFinanceViewState.dateTo || '');
   const selectedLocations = Array.isArray(effectiveFinanceViewState.selectedLocations) ? effectiveFinanceViewState.selectedLocations : [];
   const selectedClients = Array.isArray(effectiveFinanceViewState.selectedClients) ? effectiveFinanceViewState.selectedClients : [];
   const selectedPaymentStatuses = Array.isArray(effectiveFinanceViewState.selectedPaymentStatuses) ? effectiveFinanceViewState.selectedPaymentStatuses : [];
   const setActiveTab = (value) => updateFinanceViewState({ activeTab: value });
-  const setSelectedMonth = (value) => updateFinanceViewState({ selectedMonth: normalizeAccountingMonthKey(value, selectedMonth), selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
+  const setSelectedMonth = (value) => updateFinanceViewState({ selectedMonth: normalizeAccountingMonthKey(value, selectedMonth) });
+  const resetLedgerFilters = () => updateFinanceViewState({ dateFrom:'', dateTo:'', selectedLocations: [], selectedClients: [], selectedPaymentStatuses: [] });
   const setSelectedLocations = (value) => updateFinanceViewState({ selectedLocations: value });
   const setSelectedClients = (value) => updateFinanceViewState({ selectedClients: value });
   const setSelectedPaymentStatuses = (value) => updateFinanceViewState({ selectedPaymentStatuses: value });
@@ -2366,7 +2371,12 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
   const periodEntryFor = useCallback((project = {}) => periodEntryById.get(String(project?.id || project?.caseId))
     || entryForMonth(project, selectedMonth), [periodEntryById, entryForMonth, selectedMonth]);
 
-  const periodBaseProjects = useMemo(() => baseLedgerProjects.filter(project => periodEntryFor(project).hasActivity), [baseLedgerProjects, periodEntryFor]);
+  const periodBaseProjects = useMemo(() => baseLedgerProjects.filter(project => {
+    const entry=periodEntryFor(project);
+    // Date range selects activity rows. Monetary amounts remain exact full-month
+    // ledger entries; never fabricate daily allocations from monthly totals.
+    return entry.hasActivity && matchesDateRange(entry.activityAt, dateFrom, dateTo);
+  }), [baseLedgerProjects, periodEntryFor, dateFrom, dateTo]);
   const allLocations = useMemo(() => [...new Set(periodBaseProjects.map(project => getCanonicalLocationName(project.location || project.city)).filter(Boolean))].sort(), [periodBaseProjects]);
   const availableClients = useMemo(() => [...new Set(periodBaseProjects.map(project => getCanonicalBankName(project.client || project.bankName || project.bank)).filter(Boolean))].sort(), [periodBaseProjects]);
   const selectedLocationsKey = selectedLocations.join('|');
@@ -2438,9 +2448,10 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
           note:event.note || ''
         }));
       const datedEvents = [...explicitAudit, ...ledgerAudit, ...historyAudit]
-        .filter(event => getFinanceEventMonthKey(event, project) === selectedMonth);
+        .filter(event => getFinanceEventMonthKey(event, project) === selectedMonth && matchesDateRange(event.at || event.time || event.createdAt, dateFrom, dateTo));
       const entry = periodEntryFor(project);
       const synthesized = datedEvents.length === 0 && getProjectFinanceMonthKey(project) === selectedMonth
+        && matchesDateRange(project.ledger?.updatedAt || project.paymentTrackingUpdatedAt || project.ledger?.date || project.paymentDate, dateFrom, dateTo)
         && (project.ledger?.updatedAt || project.paymentTrackingUpdatedAt || project.ledger?.date || project.paymentDate) ? [{
           id:`${project.id || project.caseId}-current-payment-state-${selectedMonth}`,
           at:project.ledger?.updatedAt || project.paymentTrackingUpdatedAt || project.ledger?.date || project.paymentDate,
@@ -2458,7 +2469,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
       }));
     }).filter(event => selectedPaymentStatuses.length === 0 || selectedPaymentStatuses.includes(String(event.status || 'Not Updated')))
       .sort((left, right) => (new Date(right.at || 0).getTime() || 0) - (new Date(left.at || 0).getTime() || 0));
-  }, [activeTab, baseLedgerProjects, matchesLocationAndClient, selectedMonth, selectedMonthLabel, selectedPaymentStatusesKey, periodEntryFor]);
+  }, [activeTab, baseLedgerProjects, matchesLocationAndClient, selectedMonth, selectedMonthLabel, selectedPaymentStatusesKey, periodEntryFor, dateFrom, dateTo]);
 
   const availableMonthKeys = useMemo(() => activeTab === 'monthly'
     ? getAvailableFinanceMonthKeys(baseLedgerProjects, selectedMonth)
@@ -2467,6 +2478,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
     if (activeTab !== 'monthly') return {};
     const stats = {};
     for (const monthKey of availableMonthKeys) {
+      if (!monthOverlapsDateRange(monthKey, dateFrom, dateTo)) continue;
       for (const project of baseLedgerProjects) {
         if (!matchesLocationAndClient(project)) continue;
         const entry = entryForMonth(project, monthKey);
@@ -2481,7 +2493,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
       }
     }
     return stats;
-  }, [activeTab, availableMonthKeys, baseLedgerProjects, matchesLocationAndClient, selectedPaymentStatusesKey, entryForMonth]);
+  }, [activeTab, availableMonthKeys, baseLedgerProjects, matchesLocationAndClient, selectedPaymentStatusesKey, entryForMonth, dateFrom, dateTo]);
 
   const clientStats = useMemo(() => {
     if (activeTab !== 'clients') return {};
@@ -2518,7 +2530,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
   const paginatedLength = activeTab === 'audit' ? paymentAuditEvents.length
     : (['transactions', 'pending', 'report'].includes(activeTab) ? visibleLedgerProjects.length : 0);
   const ledgerPageCount = Math.max(1, Math.ceil(paginatedLength / ledgerPageSize));
-  useEffect(() => { setLedgerPage(1); }, [activeTab, selectedMonth, selectedLocationsKey, selectedClientsKey, selectedPaymentStatusesKey]);
+  useEffect(() => { setLedgerPage(1); }, [activeTab, selectedMonth, selectedLocationsKey, selectedClientsKey, selectedPaymentStatusesKey, dateFrom, dateTo]);
   useEffect(() => { if (ledgerPage > ledgerPageCount) setLedgerPage(ledgerPageCount); }, [ledgerPage, ledgerPageCount]);
 
   const handleExport = () => {
@@ -2538,15 +2550,17 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
       <div className="flex flex-col xl:flex-row justify-between xl:items-end gap-4">
         <div>
            <h2 className="text-3xl font-extrabold text-slate-800 tracking-tight">Financial Ledger</h2>
-           <p className="mt-2 text-sm font-bold text-slate-500">Every total, table and export is isolated to one accounting month. Previous months never merge into {selectedMonthLabel}.</p>
+           <p className="mt-2 text-sm font-bold text-slate-500">Every total, table and export is isolated to one accounting month. Previous months never merge into {selectedMonthLabel}. Date range narrows cases by their last financial activity; amounts remain the full selected-month totals for those cases, not individual-day transactions.</p>
            <div className="flex flex-wrap items-end gap-3 mt-4">
               <label className="bg-white border-2 border-indigo-100 rounded-xl px-3 py-2 shadow-sm">
                 <span className="block text-[10px] font-black uppercase tracking-widest text-indigo-500 mb-1">Accounting Month</span>
                 <input type="month" value={selectedMonth} max={getCurrentAccountingMonthKey()} onChange={(event) => setSelectedMonth(event.target.value)} className="font-black text-slate-800 outline-none bg-transparent" aria-label="Finance accounting month" />
               </label>
+              <DateRangeFilter from={dateFrom} to={dateTo} onChange={updateFinanceViewState} label="Ledger activity date range" />
               <MultiSelectCheckbox label="Filter by Area/City" options={allLocations} selectedValues={selectedLocations} onChange={setSelectedLocations} allLabel="All Areas" />
               <MultiSelectCheckbox label="Filter by Bank" options={availableClients} selectedValues={selectedClients} onChange={setSelectedClients} allLabel="All Banks" />
               <MultiSelectCheckbox label="Payment Status" options={financePaymentStatuses} selectedValues={selectedPaymentStatuses} onChange={setSelectedPaymentStatuses} allLabel={'All Statuses (' + statusCounts.All + ')'} />
+              <button type="button" onClick={resetLedgerFilters} className="min-h-11 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-black">Reset filters</button>
            </div>
         </div>
         <div className="flex flex-wrap gap-3 mt-4 xl:mt-0">
