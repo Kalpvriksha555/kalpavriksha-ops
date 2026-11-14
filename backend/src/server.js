@@ -4367,7 +4367,7 @@ function performanceRangeMs(value = 'month') {
 
 function validPerformanceDateKey(value) {
   const key=String(value||'').trim();
-  if (!/^\\d{4}-(0[1-9]|1[0-2])-([0-2]\\d|3[01])$/.test(key)) return '';
+  if (!/^\d{4}-(0[1-9]|1[0-2])-([0-2]\d|3[01])$/.test(key)) return '';
   const day=new Date(key+'T00:00:00+05:30');
   return Number.isFinite(day.getTime()) && serverTodayKey(day.getTime())===key ? key : '';
 }
