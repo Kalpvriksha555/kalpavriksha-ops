@@ -2482,7 +2482,7 @@ const LedgerView = ({ projects, onSelectProject, financeViewState, setFinanceVie
       for (const project of baseLedgerProjects) {
         if (!matchesLocationAndClient(project)) continue;
         const entry = entryForMonth(project, monthKey);
-        if (!entry.hasActivity) continue;
+        if (!entry.hasActivity || !matchesDateRange(entry.activityAt, dateFrom, dateTo)) continue;
         if (selectedPaymentStatuses.length > 0 && !selectedPaymentStatuses.includes(entry.statusAtClose)) continue;
         if (!stats[monthKey]) stats[monthKey] = { revenue:0, cost:0, expense:0, refund:0, count:0 };
         stats[monthKey].revenue += entry.received;
