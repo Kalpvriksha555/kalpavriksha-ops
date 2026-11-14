@@ -5442,6 +5442,49 @@ app.patch('/api/performance/baseline/:id', requireAdminSession, async (req, res)
   }
 });
 
+// Reset ONLY the derived score/SLA reporting window. Underlying completion
+// records, case histories, attendance, payments, files and audit are immutable.
+app.post('/api/performance/baselines/reset', requireAdminSession, async (req, res) => {
+  try {
+    if (req.body?.confirmation !== 'RESET ANALYTICS BASELINE')
+      return res.status(400).json({ok:false,code:'RESET_CONFIRMATION_REQUIRED',error:'Confirm the non-destructive analytics baseline reset.'});
+    const scope = String(req.body?.scope || '').trim();
+    const targetId = String(req.body?.userId || '').trim();
+    if (!['all','member'].includes(scope) || (scope === 'member' && !targetId))
+      return res.status(400).json({ok:false,code:'RESET_SCOPE_INVALID',error:'Choose all team members or a specific designer/manager.'});
+    const approved = (readDb().users || []).filter(user =>
+      normalizeStatus(user.status) === 'APPROVED' && ['Manager','Designer'].includes(normalizeRole(user.role)));
+    const targets = scope === 'all' ? approved : approved.filter(user => String(user.id || '') === targetId);
+    if (!targets.length) return res.status(404).json({ok:false,code:'RESET_TARGET_NOT_FOUND',error:'No eligible, approved team member found.'});
+    const targetIds = targets.map(user => String(user.id));
+    const d = selectiveDb({collections:['users','audit'],collectionRowIds:{users:targetIds}});
+    const stamp = now();
+    const month = serverMonthKey(Date.parse(stamp));
+    const actor = requestActor(req);
+    const resetIds = new Set(targetIds);
+    let count = 0;
+    d.users = (d.users || []).map(user => {
+      if (!resetIds.has(String(user.id || ''))) return user;
+      count += 1;
+      const profile = {...(user.performanceProfile || {}),scoreBaselineEnabled:true,
+        scoreBaselineMonth:month,scoreBaselineAt:stamp,
+        scoreBaselineUpdatedAt:stamp,scoreBaselineUpdatedBy:actor.name};
+      return {...user,performanceProfile:profile,profileUpdatedAt:Date.parse(stamp)};
+    });
+    if (count !== targetIds.length) throw new Error('Performance baseline target changed before save.');
+    const auditEntry = addAudit(d,actor.name,
+      'Non-destructive SLA and productivity score baseline reset',
+      scope === 'all' ? `All eligible team members (${count})` : String(targets[0].name || targetId));
+    const persistence = await save(d,{actor:actor.name,reason:'performance_baseline_reset',
+      collections:['users','audit'],collectionRowIds:{users:targetIds,audit:[String(auditEntry.id)]},
+      skipRevisionSnapshot:true,periodicRevisionSnapshot:true});
+    res.json({ok:true,scope,resetCount:count,baselineAt:stamp,baselineMonth:month,
+      preserved:['cases','performanceRecords','attendance','payments','finance','files','audit'],persistence});
+  } catch (error) {
+    sendApiFailure(res,req,error,'Analytics baseline could not be reset.');
+  }
+});
+
 app.post('/api/performance/rebuild', requireCapability('performance:rebuild'), async (req, res) => {
   const d = selectiveDb({ collections:['performanceRecords'] });
   const generated = buildPerformanceRecordsFromCases(d.cases || []);
