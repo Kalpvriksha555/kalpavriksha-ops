@@ -348,7 +348,7 @@ export const ActiveOperationsView = ({
             label="Case creation date range" onChange={patch=>setOperationDateRange?.(prev=>({...prev,...patch}))} />
         )}
         {(activeTab === 'board' || activeTab === 'my_tasks') && (
-          <button type="button" onClick={()=>setOperationDateRange?.({dateFrom:'',dateTo:''})}
+          <button type="button" onClick={()=>{ setOperationDateRange?.({dateFrom:'',dateTo:''}); setSelectedBoardDate(formatDateKey()); }}
             className="bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl px-3 py-2 text-xs font-black">
             Reset filters
           </button>
