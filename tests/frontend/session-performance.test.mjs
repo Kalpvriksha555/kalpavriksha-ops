@@ -20,7 +20,9 @@ test('workspace hydration stays lightweight and performance loads only on the an
   assert.match(tasks, /performance: includePerformance \? '1' : '0'/);
   assert.doesNotMatch(app, /includePerformance:true, compact:true/);
   assert.match(app, /includePerformance:false, compact:true/);
-  assert.match(dashboard, /\/api\/performance\/leaderboard\?range=/);
+  assert.match(dashboard, /\/api\/performance\/leaderboard\?\$\{query\}/);
+  assert.match(dashboard, /scope=custom&from=\$\{encodeURIComponent\(dateRange\.dateFrom\)\}&to=\$\{encodeURIComponent\(dateRange\.dateTo\)\}/);
+  assert.match(dashboard, /range=\$\{encodeURIComponent\(range\)\}/);
 });
 
 test('adaptive sync uses data and presence revisions to avoid full unchanged workspace downloads', () => {
@@ -51,7 +53,7 @@ test('global live clock pauses on non-operational screens', () => {
 
 test('manual performance rebuild refreshes the range-specific team leaderboard', () => {
   assert.match(dashboard, /leaderboardRefreshKey/);
-  assert.match(dashboard, /\[range, leaderboardRefreshKey\]/);
+  assert.match(dashboard, /\[range, dateRange\.dateFrom, dateRange\.dateTo, leaderboardRefreshKey\]/);
   assert.match(dashboard, /setLeaderboardRefreshKey\(value => value \+ 1\)/);
 });
 
