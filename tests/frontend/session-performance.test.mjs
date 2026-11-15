@@ -63,3 +63,12 @@ test('adaptive sync carries collection revisions so chat-only changes avoid full
   assert.match(app, /workspaceCollectionRevisionsRef/);
   assert.match(app, /sinceCollections:workspaceCollectionRevisionsRef\.current/);
 });
+
+
+test('unavailable or stale server leaderboard cannot restore pre-reset scorecards', () => {
+  assert.match(dashboard, /resolvedLeaderboardQuery === leaderboardQueryKey/);
+  assert.match(dashboard, /setResolvedLeaderboardQuery\(leaderboardQueryKey\)/);
+  assert.match(dashboard, /setLeaderboard\(null\);\s*setResolvedLeaderboardQuery\(''\);/);
+  assert.match(dashboard, /if \(!backendLeaderboardReady\) return \(/);
+  assert.match(dashboard, /Loading verified scores and average completion times for this period/);
+});
