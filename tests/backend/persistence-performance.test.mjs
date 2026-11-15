@@ -125,3 +125,18 @@ test('backend request timeout is aligned with supported large-file upload durati
   assert.match(server, /httpServer\.requestTimeout = requestTimeoutMs/);
   assert.match(server, /httpServer\.headersTimeout = headersTimeoutMs/);
 });
+
+// The latency diagnostic must not replace physical row or integrity checks.
+test('slow case writes report preparation and persistence separately without bypassing save', () => {
+  const start=server.indexOf("app.post('/api/state/projects'");
+  const end=server.indexOf("app.delete('/api/state/projects/:id'",start);
+  assert.ok(start>0 && end>start);
+  const route=server.slice(start,end);
+  assert.match(route,/createTraceStartedAt = performance\.now\(\)/);
+  assert.match(route,/createTraceSnapshotAt = performance\.now\(\)/);
+  assert.match(route,/createTracePersistenceAt = performance\.now\(\)/);
+  assert.match(route,/const persistence = await save\(d,/);
+  assert.match(route,/task_write_latency_breakdown/);
+  assert.match(route,/persistenceMs:Math\.round/);
+  assert.match(route,/totalMs:Math\.round/);
+});
