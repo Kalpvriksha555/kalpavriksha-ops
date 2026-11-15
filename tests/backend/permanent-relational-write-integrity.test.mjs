@@ -157,3 +157,22 @@ test('historical persistence failures become succeeded after a healthy commit', 
     fs.rmSync(tempRoot, { recursive:true, force:true });
   }
 });
+
+
+test('administrative presence writes never select nonexistent daily attendance rows', () => {
+  assert.match(server, /const tracksAttendance = normalizeRole\(stateUser\.role\) !== 'Admin'/);
+  assert.match(server, /collections:tracksAttendance \? \['users','attendanceLogs'\] : \['users'\]/);
+  assert.match(server, /\(attendanceLog\?\.id \? \{ attendanceLogs:\[String\(attendanceLog\.id\)\] \} : \{\}\)/);
+  assert.match(server, /collections:attendanceLog\?\.id \? \['users','attendanceLogs'\] : \['users'\]/);
+  const base = baseState({ users:[{ id:'3',role:'Admin',isOnline:false }] });
+  const incoming = baseState({ users:[{ id:'3',role:'Admin',isOnline:true }] });
+  const prepared = prepareFastSelectedRelationalWrite({
+    persistedBaseState:base,
+    incomingState:incoming,
+    selectedCollections:['users'],
+    collectionRowIds:{ users:['3'] }
+  });
+  assert.deepEqual([...prepared.rowSelections.keys()], ['users']);
+  assert.equal(prepared.writeParts.users.length, 1);
+  assert.equal(prepared.writeParts.attendanceLogs, undefined);
+});
