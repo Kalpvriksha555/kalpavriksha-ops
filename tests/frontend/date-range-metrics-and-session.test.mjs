@@ -65,7 +65,8 @@ test('temporary filters are in-memory only and clear on restored browser visit',
 });
 
 test('performance scoreboard does not refill a reset zero with old local history',()=>{
-  assert.match(command,/const backendLeaderboardReady = Array\.isArray\(leaderboard\?\.members\)/);
+  assert.match(command,/const backendLeaderboardReady = resolvedLeaderboardQuery === leaderboardQueryKey && Array\.isArray\(leaderboard\?\.members\)/);
+  assert.match(command,/if \(!backendLeaderboardReady\) return \(/);
   assert.match(command,/const avgMins = backendLeaderboardReady \? summaryAvgCompletion/);
   assert.match(command,/const teamAvgMins = backendLeaderboardReady \? summaryTeamAvg/);
   assert.match(command,/historyCompletedCount: backendLeaderboardReady \?/);
