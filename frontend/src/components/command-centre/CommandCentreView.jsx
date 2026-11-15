@@ -1350,17 +1350,18 @@ export const ProductivityDashboard = ({ users = [], projects = [], currentUser =
 
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
     setLeaderboardError('');
     setResolvedLeaderboardQuery('');
     if (customRange && !customReady) {
       setLeaderboard(null);
       setLeaderboardError('Choose a valid From and To date to compare this period.');
-      return () => {active=false;};
+      return () => { active=false; controller.abort(); };
     }
     const query = customRange
       ? `scope=custom&from=${encodeURIComponent(dateRange.dateFrom)}&to=${encodeURIComponent(dateRange.dateTo)}`
       : `range=${encodeURIComponent(range)}`;
-    authFetch(absoluteApiUrl(`/api/performance/leaderboard?${query}`), { cache:'no-store', timeoutMs:30_000 })
+    authFetch(absoluteApiUrl(`/api/performance/leaderboard?${query}`), { cache:'no-store', timeoutMs:30_000, signal:controller.signal })
       .then(async res => {
         const data = await readApiRecord(res, { operation:'Performance leaderboard', requireOk:true, requiredFields:['leaderboard'] });
         if (!res.ok) throw apiHttpError(res, data, 'Leaderboard failed');
@@ -1382,7 +1383,9 @@ export const ProductivityDashboard = ({ users = [], projects = [], currentUser =
         setResolvedLeaderboardQuery('');
         setLeaderboardError(error?.message || 'Team comparison could not be loaded.');
       });
-    return () => { active = false; };
+    // Changing period, retrying or leaving the page must cancel stale reads.
+    // Never permit a late response to replace the current verified scorecard.
+    return () => { active = false; controller.abort(); };
   }, [range, dateRange.dateFrom, dateRange.dateTo, leaderboardRefreshKey]);
 
 
