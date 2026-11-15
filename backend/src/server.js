@@ -5693,6 +5693,7 @@ app.post('/api/client-diagnostics', clientDiagnosticRateLimiter, async (req,res)
 
 
 app.post('/api/state/projects', async (req, res) => {
+  const createTraceStartedAt = performance.now();
   try {
     const actor = requestActor(req);
     const incoming = req.body?.project || req.body?.case || req.body;
@@ -5701,6 +5702,7 @@ app.post('/api/state/projects', async (req, res) => {
     }
     const projectId = textValue(incoming.id || incoming.caseId, 'Project id', 200, { required:true });
     const taskSnapshot=taskDb(projectId,{audit:true,notifications:true});
+    const createTraceSnapshotAt = performance.now();
     const d=taskSnapshot.snapshot;
     const mutationId = taskMutationId(req.body || {}, incoming);
     // Older clients already prefix new-task mutation IDs with "create-". Keep
@@ -5811,6 +5813,7 @@ app.post('/api/state/projects', async (req, res) => {
       collections.push('notifications');
       collectionRowIds.notifications=notificationEntries.map(entry=>String(entry.id));
     }
+    const createTracePersistenceAt = performance.now();
     const persistence = await save(d, {
       actor:actor.name,
       reason:existing ? 'task_update' : 'task_create',
@@ -5819,6 +5822,15 @@ app.post('/api/state/projects', async (req, res) => {
       takeSnapshotOwnership:true,
       collections,
       collectionRowIds
+    });
+    const createTraceFinishedAt = performance.now();
+    if (createTraceFinishedAt - createTraceStartedAt >= 1200) structuredLog('warn', 'task_write_latency_breakdown', {
+      operation:existing ? 'update' : 'create',
+      snapshotMs:Math.round(createTraceSnapshotAt - createTraceStartedAt),
+      preparationMs:Math.round(createTracePersistenceAt - createTraceSnapshotAt),
+      persistenceMs:Math.round(createTraceFinishedAt - createTracePersistenceAt),
+      totalMs:Math.round(createTraceFinishedAt - createTraceStartedAt),
+      collections
     });
     const visible = sanitizeCasesForRole([saved], actor.role)[0] || saved;
     res.json({ ok:true, project:visible, case:visible, requestedProjectId:projectId, taskIdAllocated:createIdentityCollision, notifications:notificationEntries, deletedProjectIds:d.deletedProjectIds || [], counts:{ cases:(d.cases || []).length }, persistence });
