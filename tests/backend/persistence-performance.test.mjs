@@ -15,7 +15,10 @@ test('presence heartbeat is coalesced and does not clone or persist the complete
   const end = route.indexOf('snapshotPresenceGenerations.set', start);
   assert.ok(start > 0 && end > start);
   const branch = route.slice(start, end);
-  assert.match(route, /selectiveDb\(\{[\s\S]*collections:\['users','attendanceLogs'\][\s\S]*collectionRowIds/);
+  assert.match(route, /collections:tracksAttendance\s*\?\s*\['users','attendanceLogs'\]\s*:\s*\['users'\]/);
+  assert.match(route, /collectionRowIds:tracksAttendance/);
+  assert.match(route, /collections:attendanceLog\?\.id\s*\?\s*\['users','attendanceLogs'\]\s*:\s*\['users'\]/);
+  assert.match(route, /collectionRowIds:rowIds/);
   assert.match(route, /replacePresenceSliceInMemory\(presenceState\)/);
   assert.match(branch, /schedulePresenceFlush\(\)/);
   assert.doesNotMatch(branch, /db\(\)/);
