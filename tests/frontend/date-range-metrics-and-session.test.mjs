@@ -78,3 +78,10 @@ test('performance scoreboard does not refill a reset zero with old local history
   assert.match(command,/const scoreBreakdown = backendLeaderboardReady \?/);
   assert.match(command,/speedScore:Number\(rawScoreBreakdown\.speedScore \?\? 0\)/);
 });
+
+test('performance requests cancel obsolete leaderboard reads rather than overwriting newer scores',()=>{
+  assert.match(command,/const controller = new AbortController\(\)/);
+  assert.match(command,/timeoutMs:30_000, signal:controller\.signal/);
+  assert.match(command,/active = false; controller\.abort\(\)/);
+  assert.match(command,/if \(!active\) return;\s*setLeaderboard\(/);
+});
