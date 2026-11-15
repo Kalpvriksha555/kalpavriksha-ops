@@ -5908,9 +5908,15 @@ app.post('/api/presence', requireCapability('presence:self'), async (req, res) =
     const dateKey = serverTodayKey();
     const attendanceIndex = findAttendanceLogIndex(memoryState?.attendanceLogs || [], stateUser, dateKey);
     const attendanceId = String((memoryState?.attendanceLogs || [])[attendanceIndex]?.id || `${actor.id || actor.username || actor.name}_${dateKey}`);
+    // Administrators have presence, but intentionally do not have daily
+    // attendance rows. Never select a phantom attendance row for write-back:
+    // selected-row verification correctly rejects a missing expected row.
+    const tracksAttendance = normalizeRole(stateUser.role) !== 'Admin';
     const presenceState = selectiveDb({
-      collections:['users','attendanceLogs'],
-      collectionRowIds:{ users:[String(actor.id || actor.username)], attendanceLogs:[attendanceId] }
+      collections:tracksAttendance ? ['users','attendanceLogs'] : ['users'],
+      collectionRowIds:tracksAttendance
+        ? { users:[String(actor.id || actor.username)], attendanceLogs:[attendanceId] }
+        : { users:[String(actor.id || actor.username)] }
     });
     const { user, attendanceLog } = applyPresenceUpdate(presenceState, userPatch, safeAction, presenceCommand);
     replacePresenceSliceInMemory(presenceState);
@@ -5933,7 +5939,7 @@ app.post('/api/presence', requireCapability('presence:self'), async (req, res) =
     snapshotPresenceGenerations.set(presenceState, presenceMutationGeneration);
     const rowIds={
       users:[String(user.id || user.username || actor.id)].filter(Boolean),
-      attendanceLogs:[String(attendanceLog?.id || attendanceId)].filter(Boolean)
+      ...(attendanceLog?.id ? { attendanceLogs:[String(attendanceLog.id)] } : {})
     };
     let persistence;
     try {
@@ -5941,7 +5947,7 @@ app.post('/api/presence', requireCapability('presence:self'), async (req, res) =
         actor:actor.name,
         reason:`presence_${safeAction}`,
         skipRevisionSnapshot:true,
-        collections:['users','attendanceLogs'],
+        collections:attendanceLog?.id ? ['users','attendanceLogs'] : ['users'],
         collectionRowIds:rowIds
       });
     } catch (error) {
