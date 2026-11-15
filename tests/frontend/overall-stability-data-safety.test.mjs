@@ -22,7 +22,7 @@ test('file response-loss retries reuse one upload mutation id and clear it only 
 });
 
 test('a single feature render failure is isolated from the navigation shell', () => {
-  assert.match(app, /<AppErrorBoundary key=\{`workspace:\$\{activeTab\}:\$\{selectedProject\?\.id/);
+  assert.match(app, /<AppErrorBoundary key=\{`workspace:\$\{viewVisitKey\}:\$\{activeTab\}:\$\{selectedProject\?\.id/);
   assert.match(app, /<React\.Suspense fallback=\{<PageLoadingScreen/);
   assert.match(app, /<\/React\.Suspense>\s*<\/AppErrorBoundary>/);
 });
