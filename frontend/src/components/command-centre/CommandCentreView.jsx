@@ -1285,6 +1285,9 @@ export const ProductivityDashboard = ({ users = [], projects = [], currentUser =
   const [leaderboard, setLeaderboard] = useState(null);
   const [leaderboardError, setLeaderboardError] = useState('');
   const [leaderboardRefreshKey, setLeaderboardRefreshKey] = useState(0);
+  // Only the authoritative server leaderboard may populate performance scores.
+  const [resolvedLeaderboardQuery, setResolvedLeaderboardQuery] = useState('');
+  const leaderboardQueryKey = JSON.stringify([range, dateRange.dateFrom, dateRange.dateTo, leaderboardRefreshKey]);
   const now = Date.now();
   const todayKey = formatDateKey();
   const rangeMs = range === 'week' ? 7 * 86400000 : range === 'quarter' ? 90 * 86400000 : 30 * 86400000;
@@ -1307,7 +1310,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], currentUser =
   const activeTeam = selectedMember === 'all' ? team : team.filter(u => normalizePersonName(u.name) === normalizePersonName(selectedMember));
   const generatedPerformanceRecords = useMemo(() => buildPerformanceRecords(allProjects), [projects]);
   const performanceRecords = useMemo(() => mergePerformanceRecordSets(externalPerformanceRecords, generatedPerformanceRecords), [externalPerformanceRecords, generatedPerformanceRecords]);
-  const backendLeaderboardReady = Array.isArray(leaderboard?.members);
+  const backendLeaderboardReady = resolvedLeaderboardQuery === leaderboardQueryKey && Array.isArray(leaderboard?.members);
   const effectivePerformanceSummary = backendLeaderboardReady
     ? { ...leaderboard, users:leaderboardMembers.map(member => ({...member,userName:member.name,completedCount:member.completedHistoryCount})) }
     : (engineSummary || performanceSummary || null);
@@ -1348,6 +1351,7 @@ export const ProductivityDashboard = ({ users = [], projects = [], currentUser =
   useEffect(() => {
     let active = true;
     setLeaderboardError('');
+    setResolvedLeaderboardQuery('');
     if (customRange && !customReady) {
       setLeaderboard(null);
       setLeaderboardError('Choose a valid From and To date to compare this period.');
@@ -1365,9 +1369,19 @@ export const ProductivityDashboard = ({ users = [], projects = [], currentUser =
       .then(data => {
         if (!active) return;
         setLeaderboard(Object.keys(asRecord(data.leaderboard)).length ? asRecord(data.leaderboard) : null);
-        if (Array.isArray(data.leaderboard?.members)) setBaselineRefreshPending(false);
+        if (Array.isArray(data.leaderboard?.members)) {
+          setResolvedLeaderboardQuery(leaderboardQueryKey);
+          setBaselineRefreshPending(false);
+        } else {
+          setLeaderboardError('The server did not return a verified performance leaderboard.');
+        }
       })
-      .catch(error => { if (active) setLeaderboardError(error?.message || 'Team comparison could not be loaded.'); });
+      .catch(error => {
+        if (!active) return;
+        setLeaderboard(null);
+        setResolvedLeaderboardQuery('');
+        setLeaderboardError(error?.message || 'Team comparison could not be loaded.');
+      });
     return () => { active = false; };
   }, [range, dateRange.dateFrom, dateRange.dateTo, leaderboardRefreshKey]);
 
@@ -1627,6 +1641,20 @@ export const ProductivityDashboard = ({ users = [], projects = [], currentUser =
       <button type="button" onClick={()=>setLeaderboardRefreshKey(key=>key+1)}
         className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-bold text-sm">
         Retry score refresh
+      </button>
+    </div>
+  );
+  // If the server scorecard is missing or stale, fail closed rather than
+  // resurrecting historical values from client snapshots and cached profiles.
+  if (!backendLeaderboardReady) return (
+    <div className="kalpa-production-polish bg-white rounded-3xl border border-slate-100 p-6 space-y-4">
+      <h1 className="text-2xl font-black text-slate-800">Performance Analytics</h1>
+      <p role="status" className="text-sm font-bold text-amber-700">
+        {leaderboardError || 'Loading verified scores and average completion times for this period.'}
+      </p>
+      <button type="button" onClick={()=>setLeaderboardRefreshKey(key=>key+1)}
+        className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-bold text-sm">
+        Retry verified scores
       </button>
     </div>
   );
